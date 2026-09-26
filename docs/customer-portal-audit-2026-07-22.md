@@ -1,7 +1,5 @@
 # Customer-Facing Portal Audit — 2026-07-22
 
-> **Historical snapshot.** Everything below describes the code at `59ab2fd` (2026-07-22). Several findings have since been fixed, some behind feature gates that are still off in production. Only the dated **Update** notes describe later code, and they are not exhaustive — check the code before acting on any Where/Repro/Fix sketch.
-
 **Scope:** every surface a paying or prospective customer touches — estimate portal, self-scheduling (`/book`), multi-service booking, Stripe checkout + WaveGuard recurring billing, post-service reports, lawn assessment output, notification-recipient management and SMS opt-in, account/billing self-service. Admin, dispatch, internal tooling, and the agent fleet are out of scope and not reported on.
 
 **Method:** read-only code audit of the repo at `59ab2fd`. Every finding cites `file:line` from code opened during this audit; anything not confirmable in code is in UNVERIFIED. No fixes were applied. Audience lens throughout: SWFL homeowners (Manatee/Sarasota/Charlotte), retirement-age skew, arriving cold on a 390×844 phone from GBP/Ads/spoke-site/SMS links.
@@ -86,7 +84,7 @@ The cold visitor's entry is the texted/emailed `/estimate/:token` link. Estimate
 ### B. Multi-service selection in one booking
 
 - **On the estimate** — fully supported: multi-service estimates render per-service sections with independent cadence combos where the server provides them (3770-3807), mirrored non-axis sections locked so the customer can't pick a cadence accept would ignore (4874-4880), plan-wide credit itemization (PlanTotalSummary, 1998-2122), and one accept books the whole plan. Add-a-service upsell files a bundle inquiry (412-495, 4703-4736).
-- **On `/book`** — impossible. One `service` per booking, fixed by URL param, and **no service picker exists in the UI** (finding S3-1). **Update 2026-09-26:** addressed — a flag-gated multi-service picker (pick up to 3) now exists (`client/src/pages/PublicBookingPage.jsx:168, 189, 1017-1040`), behind `GATE_MULTI_SERVICE_BOOKING`.
+- **On `/book`** — impossible. One `service` per booking, fixed by URL param, and **no service picker exists in the UI** (finding S3-1).
 
 ### C. Returning customer → post-service report / lawn assessment
 
@@ -113,7 +111,7 @@ Failure handling on save is good (optimistic revert + alert). The consent archit
 ### F. Failed payment → recovery
 
 - **Server:** retry ladder Day 1/3/5 (`RETRY_DELAYS_DAYS=[2,2]`, billing-cron.js:27, 437, 1176-1178) with SMS carrying an update-card URL at each rung (465-475, 1196-1206); third strike pauses service + notifies owner and customer (1124-1165). Ambiguous Stripe outcomes are parked, never blind-retried (stripe.js:1957-1968, 2039-2086).
-- **Portal:** red banner + failed history row offer **only "Update Payment Method"** (PortalPage.jsx:5279) — no retry-now/pay-now control; with Auto Pay off and a balance due, the only affordance is "enable Auto Pay and wait for the cron" (4617-4621), while the dashboard tile labeled "Pay now" (1769) routes to a Billing tab with no pay button. **This is the S2 dead end (finding S2-1). Update 2026-09-26: fixed behind `GATE_PORTAL_PAY_NOW`** (off in production unless set) — with the gate on, pay-now links render in the billing header and the failed-payment banner (`PortalPage.jsx:6798-6799, 6900-6903`).
+- **Portal:** red banner + failed history row offer **only "Update Payment Method"** (PortalPage.jsx:5279) — no retry-now/pay-now control; with Auto Pay off and a balance due, the only affordance is "enable Auto Pay and wait for the cron" (4617-4621), while the dashboard tile labeled "Pay now" (1769) routes to a Billing tab with no pay button. **This is the S2 dead end (finding S2-1).**
 - **Tokenized invoice links** (`/pay/:token`) recover fine: declined cards re-try in place, 3DS handled, ACH-processing and saved-card-pending states are honest (PayPageV2.jsx:1789-1808), receipt redirect after settle.
 - **SCA edge:** off-session card charge landing `requires_action` gets no retry and the only customer nudge is an SMS from a template keyed `bank_verification_incomplete` (billing-cron.js:388; stripe-webhook.js:3806) — mislabeled for a card-3DS situation (finding S3-16).
 
@@ -261,10 +259,10 @@ After the code-only pass, a live render pass was run at 390×844 (Chromium, iPho
 ## PHASE 7 — COMPLIANCE
 
 **SMS / A2P 10DLC / TCPA**
-- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and the HELP template (opt-out-detector.js:46-49). **Update 2026-09-26:** HELP is now answered for compliance-eligible senders (`server/routes/twilio-webhook.js`), not yet for a first-contact number. The portal property-contacts UI now requires an explicit consent checkbox (automated texts, message frequency, data rates, STOP and HELP) before it saves a phone contact (`PortalPage.jsx`, `handlePropertyContactSave`); `/book` and referral capture still show no disclosure, so message-frequency and "Msg & data rates may apply" language is still missing at those two capture points. (S1-3)
-- **No per-recipient consent ledger** — no per-recipient timestamp/source/language capture for web/portal SMS consent (2026-09-26: the portal contacts save now stamps an account-level attestation, and a per-recipient `recipient_optin` ledger is built dark behind `GATE_RECIPIENT_DOUBLE_OPTIN`; see S1-2); `messaging_audit_log` stores caller-asserted basis per send, not the opt-in event (audit.js:65-67). Call-originated consent IS durably evidenced (verbatim `sms_consent_quote` inside call-extraction blobs — call-recording-processor.js:4588-4590, schema :368-384) but isn't indexed per recipient. The codebase itself proves the team knows how to do this right: payment consent snapshots verbatim text + version + IP + UA (payment-method-consents.js:41-50). SMS never got that rigor as a ledger. (S1-2)
+- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and an **unwired** HELP template (opt-out-detector.js:46-49, exported but never imported by the webhook — twilio-webhook.js:9). Message frequency and "Msg & data rates may apply" appear nowhere a customer opts in. (S1-3)
+- **No per-recipient consent ledger; web captures record nothing** — no timestamp/source/language capture for web/portal SMS consent; `messaging_audit_log` stores caller-asserted basis per send, not the opt-in event (audit.js:65-67). Call-originated consent IS durably evidenced (verbatim `sms_consent_quote` inside call-extraction blobs — call-recording-processor.js:4588-4590, schema :368-384) but isn't indexed per recipient. The codebase itself proves the team knows how to do this right: payment consent snapshots verbatim text + version + IP + UA (payment-method-consents.js:41-50). SMS never got that rigor as a ledger. (S1-2)
 - **STOP enforcement is real but architectural only at the wrapper layer** — `TwilioService.sendSMS` itself never checks suppression (twilio.js:320-535, provider call at 488); one live customer path bypasses the wrapper today (estimate-public.js:17013) and any future direct caller silently will too. (S2-4)
-- **No TCPA calling-window floor (8am-9pm local)** — quiet hours exist only when a customer personally set them, and only on the dispatcher path (notification-dispatcher.js:65-83); the canonical wrapper has no time-of-day validator (send-customer-message.js:153-164). Exposure in practice depends on cron timing, but no code prevents a night send. (2026-09-26: `checkSendWindow` (`server/services/messaging/validators/send-window.js`), an 8:00 AM–8:00 PM ET window in the `send-customer-message.js` validator chain, dark behind `GATE_SMS_SEND_WINDOW`; nothing blocks a night send until that gate is on.) (S1-3)
+- **No TCPA calling-window floor (8am-9pm local)** — quiet hours exist only when a customer personally set them, and only on the dispatcher path (notification-dispatcher.js:65-83); the canonical wrapper has no time-of-day validator (send-customer-message.js:153-164). Exposure in practice depends on cron timing, but no code prevents a night send. (S1-3)
 - **Third-party enrollment**: referral invites and on-location contacts text numbers whose owners never consented to anything; the referral send self-asserts `consentBasis: {status:'transactional_allowed', source:'referral_invite_form'}` (referrals-v2.js:243-255) — an assertion, not a capture; referral invites are promotional in nature. Mitigations that do exist: sends route through the suppression-checking wrapper, 24h per-number cooldown (218-229), honest `sms_failed` states in the UI. (S1-4)
 
 **Recurring-billing disclosure before first charge** — strong. Verbatim, versioned consent text behind an explicit checkbox before any card is saved for Auto Pay (EstimateViewPage.jsx:2638-2647; SaveCardConsent on `/pay`); enrollment server-side requires a v8+ scoped consent row (payment-method-consents.js MIN_ENROLLMENT_CONSENT_MAJOR); first-charge timing stated per mode (Phase 4). ACH variant covers NACHA/Reg-E revocation timing (paymentMethodConsentText.js:18-29).
@@ -289,9 +287,6 @@ Blast radius: every review request sent; legal/policy exposure (Google review-ga
 Fix sketch: offer the public-review option to all scores (keep the AI writer as an 8+ perk if desired), or route everyone through a neutral "share feedback" step that always includes the Google link. Owner/counsel decision.
 
 **[S1-2] No per-recipient SMS consent ledger; web/portal captures write no consent record at all**
-
-**Update 2026-09-26:** a consented portal contacts save now persists `service_contacts_consent_at`, `service_contacts_consent_source: 'portal_account_holder'` and `service_contacts_consent_text_version` (`serviceContactConsentUpdates`, `server/routes/notifications.js`). That is an account-level attestation record. A per-recipient ledger is built but dark: `recipient_optin` (migration `20260723000004_recipient_optin.js`) stores one row per customer and phone with `requested_by`, `template_version`, `requested_at` and `confirmed_at`, updated on YES/STOP by `markRecipientOptin`, behind `GATE_RECIPIENT_DOUBLE_OPTIN` plus an inactive template. It covers portal service contacts only; the remaining gap is rollout and coverage of the other capture paths.
-
 Where: `server/services/messaging/audit.js:65-67`; `server/models/migrations/20260401000001_initial_schema.js:169`; contrast `server/services/payment-method-consents.js:41-50`
 Repro: 1. Become a customer via a web/portal path. 2. `notification_prefs` row is created with `sms_enabled` defaulting true; no opted_in_at/consent_source/consent_text column exists in any migration. 3. Carrier/plaintiff asks "prove this person opted in, when, and to what language" — for web-originated customers there is nothing to produce; for any recipient there is no queryable per-recipient ledger.
 Expected / Actual: a per-recipient consent capture like the payment-consent snapshot / only per-send, caller-asserted `consentBasis` on the audit log.
@@ -300,37 +295,20 @@ Blast radius: the SMS program's A2P 10DLC audit and TCPA defense posture — str
 Fix sketch: add an `sms_consents` table (phone, customer_id, captured_at, source, verbatim disclosure, version — mirror `payment_method_consents`), write it at every capture point, backfill call-originated rows from the existing extraction blobs, and pass it as the wrapper's consentBasis.
 
 **[S1-3] No TCPA quiet-hours floor; HELP keyword unwired; no in-repo opt-in disclosure**
-
-**Update 2026-09-26:** the HELP-keyword part of this finding is partly fixed — `detectHelp` →
-`HELP_RESPONSE_TEMPLATE` is now wired into the inbound webhook, but only for senders it treats
-as compliance-eligible (the AI number, a known caller, a number with outbound history,
-recruiting evidence, or a failed lookup; `server/routes/twilio-webhook.js`). A first-contact
-unknown number texting HELP to an ordinary location number still gets no compliance reply.
-A send-window floor is now built: `checkSendWindow` (`server/services/messaging/validators/send-window.js`), an 8:00 AM–8:00 PM ET window in the `send-customer-message.js` validator chain, dark behind `GATE_SMS_SEND_WINDOW` (owner ruling 2026-08-07, with customer-action exceptions from 2026-08-29); the remaining quiet-hours work is the gate rollout. The in-repo opt-in disclosure gap below remains open.
-
-Where: `server/services/notification-dispatcher.js:65-83` (only quiet-hours check, customer-set only); `server/services/messaging/send-customer-message.js:153-164` (validator chain has no time-of-day gate); `server/services/messaging/opt-out-detector.js:46-49,143-152` (HELP template defined; now imported and answered by `twilio-webhook.js:693-704`); `client/src/pages/PortalPage.jsx:4009` + `client/src/pages/PublicBookingPage.jsx` (no Msg&data-rates / frequency / STOP-HELP copy at any in-repo capture point)
-Repro: 1. (Historical; still true while `GATE_SMS_SEND_WINDOW` is off.) Any cron/wrapper send fires outside 8am-9pm — nothing blocks it. 2. Text "HELP" from a first-contact number to a Waves location number — no compliance auto-reply is generated (known senders now get one). 3. Open `/book` or the referral form — no consent or data-rate disclosure at the point of capture (the portal contacts UI now has one).
-Expected / Actual: CTIA/10DLC baseline (time window, HELP response, disclosure at capture) / present for STOP, and for HELP only from compliance-eligible senders; quiet-hours floor built but gated off; capture-point disclosure still absent on `/book` and referrals.
+Where: `server/services/notification-dispatcher.js:65-83` (only quiet-hours check, customer-set only); `server/services/messaging/send-customer-message.js:153-164` (validator chain has no time-of-day gate); `server/services/messaging/opt-out-detector.js:46-49,143-152` (HELP template defined, never imported — `twilio-webhook.js:9`); `client/src/pages/PortalPage.jsx:4009` + `client/src/pages/PublicBookingPage.jsx` (no Msg&data-rates / frequency / STOP-HELP copy at any in-repo capture point)
+Repro: 1. Any cron/wrapper send fires outside 8am-9pm — nothing blocks it. 2. Text "HELP" to the Waves number — no compliance auto-reply is generated by this codebase. 3. Search client for "Msg & data rates" — zero hits.
+Expected / Actual: CTIA/10DLC baseline (time window, HELP response, disclosure at capture) / present only for STOP.
 Blast radius: carrier registration risk for the sending number (suspension would silence every reminder/confirmation flow), plus statutory TCPA exposure for any night send.
-Fix sketch: the ET send-window validator is built (see update) — verify it and flip `GATE_SMS_SEND_WINDOW`; extend the HELP reply to first-contact senders; add the standard disclosure line wherever a number is captured (still needed for `/book` and referrals). Verify whether Twilio Advanced Opt-Out already covers HELP at the account level before wiring (see UNVERIFIED).
+Fix sketch: add a default ET 8am-9pm validator to the wrapper's chain (with a transactional-override list if desired); wire `detectHelp` → `HELP_RESPONSE_TEMPLATE` in the inbound webhook; add the standard disclosure line wherever a number is captured. Verify whether Twilio Advanced Opt-Out already covers HELP at the account level before wiring (see UNVERIFIED).
 
 **[S1-4] Third-party numbers enrolled for SMS with no recipient consent capture**
-
-**Update 2026-09-26:** the on-location contacts flow now requires the account holder to confirm a consent attestation (with frequency, data-rate, STOP and HELP language) before a phone contact saves (`PortalPage.jsx`, `handlePropertyContactSave`). That is an attestation, not recipient-side capture, and the referral "Text a friend" flow still has neither. Recipient-side confirmation is built but dark: behind `GATE_RECIPIENT_DOUBLE_OPTIN` (plus its inactive-by-default template, migration `20260723000004_recipient_optin.js`), `claimRecipientOptins` in `server/services/recipient-optin.js` sends a one-time "Reply YES" request with STOP, HELP, frequency and data-rate language, and appointment texts hold until the contact confirms.
-
 Where: `client/src/pages/PortalPage.jsx:10175-10177,10527` (referral "Text a friend"); `client/src/pages/PortalPage.jsx:3972-4016` (on-location contacts); `server/routes/referrals-v2.js:243-255` (send self-asserts `consentBasis {status:'transactional_allowed', source:'referral_invite_form'}`)
-Repro: 1. Portal → Refer → enter any name + phone → submit: Waves texts that number a promotional referral invite. 2. (Historical — before the 2026-09-26 update above.) Visits → On-location contacts → add any phone → Save: that number receives recurring appointment texts. The contacts flow now requires the account-holder attestation; the referral flow still shows no consent language, attestation, or recipient opt-in. The contacts recipient confirmation exists only behind `GATE_RECIPIENT_DOUBLE_OPTIN` (see update).
+Repro: 1. Portal → Refer → enter any name + phone → submit: Waves texts that number a promotional referral invite. 2. Visits → On-location contacts → add any phone → Save: that number now receives recurring appointment texts. Neither flow shows consent language, an attestation, or a confirmation opt-in to the recipient.
 Expected / Actual: recipient-consent capture (or at minimum an attestation + first-message opt-out instructions) / consent is asserted on the recipient's behalf by the account holder.
 Blast radius: every referral invite and every added property contact; referral invites are promotional — the highest-risk TCPA category. Mitigations already present: sends route through the suppression wrapper (a prior STOP blocks them), 24h cooldown per number, honest `sms_failed` UI.
-Fix sketch: the contacts attestation has shipped and the recipient confirmation (with STOP/HELP) is built dark (see update); remaining for contacts is the gate + template rollout. For referral invites, consider a compliance review — recipient-initiated claim links (customer shares the link themselves) carry far less risk than Waves-originated texts.
+Fix sketch: add "I confirm they've agreed to receive this text" attestation + STOP line in the first message for contacts; for referral invites, consider a compliance review — recipient-initiated claim links (customer shares the link themselves) carry far less risk than Waves-originated texts.
 
 **[S2-1] Portal has no way to pay a balance; failed-payment recovery has no pay/retry action**
-
-**Update 2026-09-26:** fixed behind `GATE_PORTAL_PAY_NOW` (off in production unless
-set): with the gate on, `server/routes/billing-v2.js` returns `openInvoices` and pay-now
-links render in the billing header and the failed-payment banner
-(`client/src/pages/PortalPage.jsx:6798-6799, 6900-6903`).
-
 Where: `client/src/pages/PortalPage.jsx:1769` ("Pay now" quick action → Billing tab), `:4617-4621` (Auto-Pay-off banner: "Add or enable Auto Pay below to run future charges automatically"), `:5279` (failed row → "Update Payment Method" only); BillingTab render read in full (4775-5460) — no pay control exists
 Repro: 1. Have a balance due with Auto Pay off. 2. Home tile says "Pay now" → lands on Billing. 3. Find: add/remove card, enable Auto Pay — no button that moves money today. 4. After a failed payment, the red "avoid service interruption" banner offers only the add-card modal; the re-charge is an invisible server retry.
 Expected / Actual: a "Pay $X now" that opens the existing `/pay/:token` checkout for the open invoice / enable-autopay-and-wait, or dig the invoice SMS back out of message history.
@@ -359,12 +337,6 @@ Blast radius: narrow today (customer-initiated, in-session, deduped) but it is a
 Fix sketch: route this send through `sendCustomerMessage`; add a lint/contract check (or a suppression check inside `TwilioService.sendSMS` itself) so customer-numbered direct sends fail loudly.
 
 **[S3-1] `/book` has no service picker — service is a URL parameter**
-
-**Update 2026-09-26:** addressed — a flag-gated multi-service picker (pick up to 3, one visit,
-one arrival window) now renders on step 1 (`client/src/pages/PublicBookingPage.jsx:168, 189, 1017-1040`),
-behind `GATE_MULTI_SERVICE_BOOKING` (server confirms via `/booking/config`). The remaining
-work is the gate rollout; the Where/Repro/Fix sketch below are historical (pre-picker).
-
 Where: `client/src/pages/PublicBookingPage.jsx:93,100` (service from `?service=`, default `pest_control`); `SERVICES` catalog (15-23) never rendered as UI; step 1 is address-only (668-750); no `setService` call exists
 Repro: 1. Open bare `/book` (GBP button, typed URL). 2. You are booking Pest Control; nothing on any step lets you choose lawn/mosquito/termite/rodent. 3. Multi-service booking in one pass is impossible.
 Expected / Actual: pick what you're booking / silently pre-decided.
@@ -376,7 +348,7 @@ Where: `client/src/pages/PublicBookingPage.jsx` — full flow; step-3 recap show
 Repro: 1. Complete a booking. 2. At no point is a dollar figure, range, or "from $X" shown; there's no link to pricing.
 Expected / Actual: price or honest range before the contact-info commitment / zero price disclosure; first price contact is the invoice or the tech.
 Blast radius: conversion (price-anxious visitors abandon at the contact step) and trust (price-surprised customers cancel/complain later). This funnel is where ad spend lands.
-Fix sketch: show the estimate-engine's "from $X per application" (or a range) per service on the picker and in the step-3 recap; where address-priced quoting exists (`estimate_token` handoff already prices visits), reuse it.
+Fix sketch: show the estimate-engine's "from $X/visit" (or a range) per service on the picker and in the step-3 recap; where address-priced quoting exists (`estimate_token` handoff already prices visits), reuse it.
 
 **[S3-3] `/book` accepts out-of-service-area addresses**
 Where: `server/routes/booking.js:545-548` (detour drives messaging only), `server/services/scheduling/find-time.js:227-265` (no max distance), `booking.js:1226-1290` (`createSelfBooking` gates dates/blackouts/units — not geography); client shows only the soft banner (PublicBookingPage.jsx:597-604)
@@ -560,15 +532,15 @@ Fix sketch: increase the header surface's opacity (or add a solid scrim band) so
 
 ## TOP 10 (severity, then revenue impact)
 
-1. **S1-4** Third-party SMS enrollment without recipient consent (referrals; on-location contacts now require an account-holder attestation — 2026-09-26)
+1. **S1-4** Third-party SMS enrollment without recipient consent (referrals + on-location contacts)
 2. **S1-2** No durable SMS consent record anywhere
-3. **S1-3** Quiet-hours floor built but gated off (`GATE_SMS_SEND_WINDOW`) / HELP not answered for first-contact senders / no opt-in disclosure on `/book` or referrals (2026-09-26 scope)
+3. **S1-3** No quiet-hours floor / HELP unwired / no in-repo opt-in disclosure
 4. **S1-1** Review-funnel score gating (legal/policy call for owner + counsel)
-5. **S2-1** Portal cannot pay a balance; failed-payment recovery has no action — direct collections impact (2026-09-26: Billing-header and failed-banner pay links shipped behind `GATE_PORTAL_PAY_NOW`; remaining: gate rollout, dashboard tile, retry after card update)
+5. **S2-1** Portal cannot pay a balance; failed-payment recovery has no action — direct collections impact
 6. **S2-4** Post-STOP send path bypassing suppression (estimate details packet)
 7. **S2-3** Login dead-end for phones not on file — locks customers out of all self-service
 8. **S2-2** Service-outline dead-end with raw HTTP status — prospect-facing lost-sale path
-9. **S3-2 + S3-1** `/book` shows no price and offers no service choice — the paid-traffic funnel's conversion ceiling (2026-09-26: the S3-1 picker now exists behind `GATE_MULTI_SERVICE_BOOKING`; S3-1 remaining work is the gate rollout)
+9. **S3-2 + S3-1** `/book` shows no price and offers no service choice — the paid-traffic funnel's conversion ceiling
 10. **S3-16 + S3-15** Recurring-billing edge recovery (SCA mislabel; lost-webhook reconciliation) — small counts, but each is a paying member drifting toward pause/dunning
 
 ## UNVERIFIED
@@ -588,8 +560,8 @@ Fix sketch: increase the header surface's opacity (or add a solid scrim band) so
 
 ## THREE FIXES THAT MOVE BOOKED REVENUE MOST IN ONE DAY
 
-1. **Put "Pay now" links where balances are (S2-1).** (2026-09-26: the Billing-header and failed-payment-banner links shipped behind `GATE_PORTAL_PAY_NOW`; see the S2-1 update.) Remaining: roll out the gate, point the dashboard tile at the same `/pay/:token` checkout, and return a retry action after card update. Everything needed already exists server-side; this converts every in-app balance-due session and failed-payment recovery into same-day collections instead of a wait for the cron or a phone call.
-2. **Give `/book` a service picker with "from $X per application" pricing (S3-1 + S3-2).** (2026-09-26: the picker has since shipped behind `GATE_MULTI_SERVICE_BOOKING`; the price line is still open.) At audit time the SERVICES catalog with descriptions was already written but never rendered; per-visit engine pricing already exists. One screen + one price line removes the two biggest silent bounces in the paid-traffic funnel — booking the wrong-service default, and handing over a phone number for an unpriced visit.
+1. **Put "Pay now" links where balances are (S2-1).** Wire the existing `/pay/:token` checkout into the dashboard tile, Billing header, and failed-payment banner, and return a retry action after card update. Everything needed already exists server-side; this converts every in-app balance-due session and failed-payment recovery into same-day collections instead of a wait for the cron or a phone call.
+2. **Give `/book` a service picker with "from $X/visit" pricing (S3-1 + S3-2).** The SERVICES catalog with descriptions is already written and never rendered; per-visit engine pricing already exists. One screen + one price line removes the two biggest silent bounces in the paid-traffic funnel — booking the wrong-service default, and handing over a phone number for an unpriced visit.
 3. **Un-dead-end the two prospect-facing terminal states (S2-2 + S2-3).** Phone + retry on the service-outline error card, and "that number may not be on file — call us" after repeated failed logins. Both are copy-plus-one-conditional changes that recover sessions currently ending in a technical wall — the cheapest lost-sale patches in this report.
 
 ---
