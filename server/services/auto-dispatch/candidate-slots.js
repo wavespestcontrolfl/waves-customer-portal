@@ -214,7 +214,11 @@ async function resolveCurrentDayTech(db, service) {
 // unit mover's anchor when the tapped row is windowless). ONE `openMembers`
 // read (the accessor the unit mover itself uses) and, only when there ARE
 // siblings, one read of those rows and one of the visit. An unreadable group
-// degrades to a standalone visit.
+// FAILS CLOSED (Codex r3 P1): a visit_id row whose members cannot be read may
+// well be grouped, and scoring it as standalone would probe and place only
+// the tapped row — so the evaluation is abandoned (GROUP_CONTEXT_UNAVAILABLE,
+// which the orchestrator records as a no-change skip).
+const GROUP_CONTEXT_UNAVAILABLE = 'GROUP_CONTEXT_UNAVAILABLE';
 async function loadGroupContext(db, service) {
   const selfId = String(service.id);
   const standalone = { excludeIds: new Set([selfId]), siblings: [], visitWindowStart: null };
@@ -232,8 +236,8 @@ async function loadGroupContext(db, service) {
       db('service_visits').where({ id: service.visit_id }).first('window_start'),
     ]);
     return { excludeIds, siblings, visitWindowStart: (visit && visit.window_start) || null };
-  } catch {
-    return standalone;
+  } catch (err) {
+    throw Object.assign(new Error('Visit group could not be read'), { code: GROUP_CONTEXT_UNAVAILABLE, cause: err });
   }
 }
 
@@ -697,6 +701,7 @@ async function findValidCandidateSlots(service, prefs, ctx) {
 
 module.exports = {
   SCORE_CAP,
+  GROUP_CONTEXT_UNAVAILABLE,
   findValidCandidateSlots,
   computeCurrentPlacement,
   inBlackout,

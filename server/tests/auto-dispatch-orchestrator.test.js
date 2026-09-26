@@ -13,7 +13,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
     blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
   })),
 }));
-jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
+jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn(), GROUP_CONTEXT_UNAVAILABLE: 'GROUP_CONTEXT_UNAVAILABLE' }));
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({
@@ -580,6 +580,30 @@ describe('shared-model apply path (Codex r1)', () => {
     } finally {
       process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
     }
+  });
+
+  // Codex r3 P1 (PRRT_kwDOR3YQi86mQlqy): an unreadable visit group is a
+  // no-change skip with an ids-only reason — never a move, never an ERROR row.
+  test('an unreadable visit group skips the visit: no move, GROUP_CONTEXT_UNAVAILABLE in the audit', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockRejectedValue(Object.assign(new Error('Visit group could not be read'), { code: 'GROUP_CONTEXT_UNAVAILABLE' }));
+      const result = await _internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20');
+      expect(result).toMatchObject({ kind: 'no_change', reason_code: 'GROUP_CONTEXT_UNAVAILABLE' });
+
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 0, failed: 0 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      expect(lastDecision('no_change').reason_code).toBe('GROUP_CONTEXT_UNAVAILABLE');
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  test('any other slot-finder error still fails the visit as before', async () => {
+    candidateSlots.findValidCandidateSlots.mockRejectedValueOnce(new Error('db down'));
+    await expect(_internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20')).rejects.toThrow('db down');
   });
 
   test('a failure whose error names no attempted candidate (gate off) keeps the fresh placement audit', async () => {

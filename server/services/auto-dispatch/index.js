@@ -17,7 +17,7 @@ const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
-const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
+const { findValidCandidateSlots, SCORE_CAP, GROUP_CONTEXT_UNAVAILABLE } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
 const { toDateStr, shiftDateStr } = require('./dates');
@@ -202,21 +202,42 @@ function buildPlacementAudit({
  * `current`/`currentScore` let a caller re-audit a different (fallback)
  * candidate later with buildPlacementAudit.
  */
+// findValidCandidateSlots, failing closed on an unreadable visit group
+// (GATE_AUTO_DISPATCH_SHARED_MODEL, Codex r3 P1): the visit is not evaluated
+// at all — `skipped` carries the reason code — rather than scored as if it
+// stood alone. Any other error propagates as before.
+async function findSlotsOrSkip(service, prefs, ctx) {
+  try {
+    return await findValidCandidateSlots(service, prefs, ctx);
+  } catch (err) {
+    if (err && err.code && err.code === GROUP_CONTEXT_UNAVAILABLE) return { current: null, candidates: [], drops: null, skipped: err.code };
+    throw err;
+  }
+}
+
+// Why no candidate survived. When an explicit portal preference is the
+// reason, say so — a HARD preferred-day/time filter dropping every feasible
+// slot is the override working as designed, not a failure to optimize.
+function noSlotReason(drops, skipped) {
+  if (skipped) return { code: skipped, description: 'Visit group could not be read — not evaluated' };
+  const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
+  return prefDropped
+    ? { code: 'NO_SLOT_MATCHING_PREFERENCE', description: 'No candidate slot honored the customer\'s explicit day/time preference' }
+    : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
+}
+
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
-  const { current, candidates, drops } = await findValidCandidateSlots(service, prefs, ctx);
+  const {
+    current, candidates, drops, skipped,
+  } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
 
   if (!current || candidates.length === 0) {
-    // When an explicit portal preference is the reason nothing survived, say so —
-    // a HARD preferred-day/time filter dropping every feasible slot is the
-    // override working as designed, not a failure to optimize.
-    const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
+    const reason = noSlotReason(drops, skipped);
     return {
       kind: 'no_change',
-      reason_code: prefDropped ? 'NO_SLOT_MATCHING_PREFERENCE' : 'NO_VALID_SLOT',
-      reason_description: prefDropped
-        ? 'No candidate slot honored the customer\'s explicit day/time preference'
-        : 'No valid candidate slot found',
+      reason_code: reason.code,
+      reason_description: reason.description,
       audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
     };
   }

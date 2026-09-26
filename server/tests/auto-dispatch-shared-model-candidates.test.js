@@ -536,11 +536,33 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
     expect(result.visitWindowStart).toBe('09:00');
   });
 
-  test('loadGroupContext: an unreadable group degrades to standalone (fail-safe)', async () => {
+  // Codex r3 P1 (PRRT_kwDOR3YQi86mQlqy): a visit_id row whose group cannot
+  // be read may be grouped — fail closed, never score it as standalone.
+  test('loadGroupContext: an unreadable group FAILS CLOSED (GROUP_CONTEXT_UNAVAILABLE), for the member read and the follow-ups alike', async () => {
     openMembers.mockRejectedValueOnce(new Error('boom'));
-    const result = await loadGroupContext(jest.fn(), { id: 's1', visit_id: 'v1' });
-    expect(result.excludeIds).toEqual(new Set(['s1']));
-    expect(result.siblings).toEqual([]);
+    await expect(loadGroupContext(jest.fn(), { id: 's1', visit_id: 'v1' }))
+      .rejects.toMatchObject({ code: 'GROUP_CONTEXT_UNAVAILABLE' });
+
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
+    const failingSiblings = (table) => {
+      const c = {};
+      ['where', 'whereIn'].forEach((m) => { c[m] = () => c; });
+      c.select = async () => { throw new Error('boom'); };
+      c.first = async () => ({ window_start: '09:00' });
+      return table === 'service_visits' ? c : c;
+    };
+    await expect(loadGroupContext(failingSiblings, { id: 's1', visit_id: 'v1' }))
+      .rejects.toMatchObject({ code: 'GROUP_CONTEXT_UNAVAILABLE' });
+  });
+
+  test('gate on: a visit whose group cannot be read gets no candidates and no current placement (propagates to the orchestrator)', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    findAvailableSlots.mockResolvedValue({
+      slots: [{ date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 5, stops_that_day: 0, score: 1 }],
+    });
+    openMembers.mockRejectedValueOnce(new Error('boom'));
+    await expect(findValidCandidateSlots({ ...SERVICE, visit_id: 'v1' }, prefs, { ...ctxBase(), db: emptyDb() }))
+      .rejects.toMatchObject({ code: 'GROUP_CONTEXT_UNAVAILABLE' });
   });
 
   test('filterAndScoreSharedModelCandidates: excludes group siblings from loadDayStops (never a stationary "other stop") and from the occupancy probe\'s excludeServiceIds', async () => {

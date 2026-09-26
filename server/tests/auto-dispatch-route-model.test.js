@@ -177,6 +177,26 @@ describe('routeCost', () => {
   });
 });
 
+// Codex r3 (PRRT_kwDOR3YQi86mQlqz): a stationary visit group is ONE drive
+// stop (arrival-route.js groupRouteStops' rule), its members' minutes summed.
+describe('routeCost: a visit group is one physical drive stop', () => {
+  test('A -> B -> A (a group split around another stop) drives to the group once, at its earliest start', () => {
+    const groupA1 = { geo: FAR, startMin: 480, visit_id: 'vA', estimated_duration_minutes: 30 };
+    const stopB = { geo: NEAR_HQ, startMin: 540, estimated_duration_minutes: 30 };
+    const groupA2 = { geo: FAR, startMin: 600, visit_id: 'vA', estimated_duration_minutes: 30 };
+    const cost = routeCost([groupA1, stopB, groupA2], null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR, NEAR_HQ]), 5); // not FAR, NEAR_HQ, FAR
+    expect(cost.routeTimeWithoutMinutes).toBeCloseTo(cost.driveWithoutMinutes + 90, 5); // every member's work still charged
+  });
+
+  test('ungrouped stops at the same point are still separate stops', () => {
+    const a = { geo: FAR, startMin: 480, estimated_duration_minutes: 30 };
+    const b = { geo: NEAR_HQ, startMin: 540, estimated_duration_minutes: 30 };
+    const c = { geo: FAR, startMin: 600, estimated_duration_minutes: 30 };
+    expect(routeCost([a, b, c], null).driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR, NEAR_HQ, FAR]), 5);
+  });
+});
+
 describe('clusterShare', () => {
   test('empty day (no other stops) scores 0 — nothing to cluster with', () => {
     expect(clusterShare([], NEAR_HQ)).toBe(0);
@@ -203,6 +223,13 @@ describe('clusterShare', () => {
 
   // Codex pre-push P1 (this round): a visit-group's members share one
   // physical address but are separate rows — must collapse to ONE stop.
+  // Codex r3 (PRRT_kwDOR3YQi86mQlq2): a stop with no known location is still
+  // a distinct physical stop — counted, as not nearby.
+  test('coordless stops stay in the denominator as not-near: one near located stop among coordless ones is not a clustered day', () => {
+    const others = [{ geo: NEAR_HQ }, { geo: null }, { geo: null }, { geo: null }];
+    expect(clusterShare(others, NEAR_HQ)).toBeCloseTo(0.25, 5);
+  });
+
   describe('collapses visit-group members to one physical stop (Codex pre-push P1)', () => {
     test('a 3-member group at the SAME location scores the SAME as a single stop there, not triple credit', () => {
       const grouped = [
