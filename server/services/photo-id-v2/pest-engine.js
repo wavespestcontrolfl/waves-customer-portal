@@ -795,6 +795,19 @@ function mapToV1(built) {
  * `identifyPestV2` to keep that function's own sequencing readable (lint:
  * complexity) — this piece is pure given its three inputs.
  */
+// Codex round-0 P1 (round 9): an escalation (OpenAI) candidate item gets
+// NO less scrutiny than a Gemini verify record before it's allowed to
+// count as a real answer — a record naming only a slug (no confidence, or
+// a catalog candidate with no trait arrays) must not lift the pretty_sure
+// cap or "agree" its way into bumping Gemini's own unverified confidence.
+function isValidEscalationCandidate(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  if (typeof raw.confidence !== 'number' || raw.confidence < 0 || raw.confidence > 1) return false;
+  const hasSlug = typeof raw.slug === 'string' && raw.slug.trim().length > 0;
+  if (hasSlug && (!Array.isArray(raw.traits_visible) || !Array.isArray(raw.traits_not_visible))) return false;
+  return true;
+}
+
 function combineEscalation(geminiCandidates, escalationResult) {
   // Codex round-0 P1 (round 4): `dispatch()` does not locally validate a
   // provider's JSON against the requested schema — an `ok:true` response
@@ -807,7 +820,9 @@ function combineEscalation(geminiCandidates, escalationResult) {
     // `buildAnswer`.
     return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false };
   }
-  const openaiCandidates = dedupeCandidates(sanitizedCandidatesOf(escalationResult.json).map(resolveCandidate));
+  const openaiCandidates = dedupeCandidates(
+    sanitizedCandidatesOf(escalationResult.json).filter(isValidEscalationCandidate).map(resolveCandidate),
+  );
   const openaiTop = openaiCandidates[0] || null;
   const geminiTop = geminiCandidates[0] || null;
   // Codex round-0 P1 (round 2): the provider answered (HTTP ok, valid

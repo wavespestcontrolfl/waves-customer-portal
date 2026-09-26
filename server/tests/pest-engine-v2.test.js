@@ -496,7 +496,13 @@ describe('identifyPestV2 — escalation triggers', () => {
   test('Gemini missed entirely (candidates call fails) escalates, and skips the verify call', async () => {
     dispatch
       .mockResolvedValueOnce({ ok: false, reason: 'gemini_500' }) // candidates
-      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [{ slug: 'fire-ant', confidence: 0.9 }] } }); // escalation
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      }); // escalation
 
     const result = await identifyPestV2([PHOTO]);
     expect(result.ok).toBe(true);
@@ -511,7 +517,13 @@ describe('identifyPestV2 — escalation triggers', () => {
     dispatch
       .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }])) // candidates
       .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [1], traits_not_visible: [] }] } }) // verify
-      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [{ slug: 'fire-ant', confidence: 0.85 }] } }); // escalation
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      }); // escalation
 
     const result = await identifyPestV2([PHOTO]);
     expect(dispatch).toHaveBeenCalledTimes(3);
@@ -616,6 +628,21 @@ describe('identifyPestV2 — escalation triggers', () => {
   });
 });
 
+describe('identifyPestV2 — escalation records get the SAME field validation as verify records (Codex round-0 P1, round 9)', () => {
+  test('an escalation candidate naming only a slug (no confidence, no trait arrays) does not count as OpenAI confirmation', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.40, traits_visible: [], traits_not_visible: [1, 2, 3] }] } }) // verify tanks it
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [{ slug: 'fire-ant' }] } }); // no confidence/traits at all
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.models.escalation.ok).toBe(true); // the HTTP/parse call itself succeeded
+    // The invalid escalation record must not lift the cap or bump Gemini's
+    // own (tanked) confidence back up.
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+});
+
 describe('identifyPestV2 — malformed provider responses never throw (Codex round-0 P1, round 4)', () => {
   test('a candidates response with a non-array `candidates` field is treated as gemini_missed, not a crash', async () => {
     dispatch
@@ -662,7 +689,10 @@ describe('identifyPestV2 — a null element in an otherwise-valid candidates arr
       .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
       .mockResolvedValueOnce({
         ok: true,
-        json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [null, { slug: 'fire-ant', confidence: 0.9 }] },
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [null, { slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
       });
 
     const result = await identifyPestV2([PHOTO]);
@@ -695,7 +725,7 @@ describe('identifyPestV2 — combined photo quality (Codex round-0 P1, round 3)'
         ok: true,
         json: {
           quality: { usable: false, issue: 'multiple_subjects' }, shows: 'organism',
-          candidates: [{ slug: 'fire-ant', confidence: 0.90 }],
+          candidates: [{ slug: 'fire-ant', confidence: 0.90, traits_visible: [1, 2], traits_not_visible: [] }],
         },
       });
 
@@ -710,7 +740,13 @@ describe('identifyPestV2 — Gemini/OpenAI disagreement', () => {
     dispatch
       .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
       .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
-      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [{ slug: 'ghost-ant', confidence: 0.9 }] } });
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'ghost-ant', confidence: 0.9, traits_visible: [1], traits_not_visible: [] }],
+        },
+      });
 
     const result = await identifyPestV2([PHOTO]);
     expect(result.internal.disagreed).toBe(true);
