@@ -1,7 +1,19 @@
+// Keep the real ledgerCall (GATE_LLM_CALL_LEDGER is unset in tests, so it's
+// already a real no-DB no-op) but spy on ledgerCallRejected so the malformed-
+// relevance tests below can assert the ledger row gets flipped.
+jest.mock('../services/llm-dispatch-metrics', () => {
+  const actual = jest.requireActual('../services/llm-dispatch-metrics');
+  return { ...actual, ledgerCallRejected: jest.fn() };
+});
+
 const scorer = require('../services/seo/prospect-scorer');
+const { ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 const KEY = process.env.ANTHROPIC_API_KEY;
-beforeEach(() => { delete process.env.ANTHROPIC_API_KEY; }); // force deterministic heuristic path
+beforeEach(() => {
+  delete process.env.ANTHROPIC_API_KEY; // force deterministic heuristic path
+  ledgerCallRejected.mockClear();
+});
 afterEach(() => { if (KEY === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = KEY; });
 
 describe('heuristicClassify', () => {
@@ -147,5 +159,67 @@ describe('classifyBatch LLM path', () => {
     const [c] = await scorer.classifyBatch([{ domain: 'helpareporter.com' }], { anthropic: boom });
     expect(c.reason).toBe('heuristic');
     expect(c.is_haro_platform).toBe(true);
+  });
+
+  // Codex r8 on #4884: isClassifiedEntry used Number.isFinite(Number(x)), and
+  // Number() coerces false/''/'   '/[] all to 0 (finite) — so a non-answer
+  // for relevance_0_100 read as a real classification and was never sent to
+  // the heuristic fallback or counted against the ledger.
+  describe('relevance_0_100 must be an actual number, not anything Number() coerces to one (Codex r8 on #4884)', () => {
+    const respondWith = (relevance) => ({
+      messages: {
+        create: async () => ({
+          content: [{ text: JSON.stringify([{ i: 0, domain: 'x.com', intent_class: 'resource', relevance_0_100: relevance }]) }],
+        }),
+      },
+    });
+
+    test.each([
+      ['false', false],
+      ['empty string', ''],
+      ['whitespace string', '   '],
+      ['an array', []],
+      ['null', null],
+      ['non-numeric string', 'high'],
+    ])('%s is rejected as not-a-real-number → heuristic fallback', async (_label, relevance) => {
+      const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: respondWith(relevance) });
+      expect(c.reason).toBe('heuristic');
+    });
+
+    test.each([
+      ['a plain number', 85],
+      ['zero (falsy but a real number)', 0],
+      ['a numeric string', '42'],
+      ['a numeric string with surrounding whitespace', '  42.5 '],
+    ])('%s is accepted as a real classification', async (_label, relevance) => {
+      const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: respondWith(relevance) });
+      expect(c.reason).not.toBe('heuristic');
+      expect(c.relevance_0_100).toBe(Math.max(0, Math.min(100, Number(relevance))));
+    });
+
+    test('a chunk where every entry is a non-answer is recorded as a ledger failure', async () => {
+      const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: respondWith('') });
+      expect(c.reason).toBe('heuristic');
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('a chunk with at least one real hit is NOT flagged, even alongside junk entries', async () => {
+      const fake = {
+        messages: {
+          create: async () => ({
+            content: [{
+              text: JSON.stringify([
+                { i: 0, domain: 'x.com', intent_class: 'resource', relevance_0_100: '' },
+                { i: 1, domain: 'y.com', intent_class: 'editorial', relevance_0_100: 70 },
+              ]),
+            }],
+          }),
+        },
+      };
+      const [a, b] = await scorer.classifyBatch([{ domain: 'x.com' }, { domain: 'y.com' }], { anthropic: fake });
+      expect(a.reason).toBe('heuristic');
+      expect(b.reason).not.toBe('heuristic');
+      expect(ledgerCallRejected).not.toHaveBeenCalled();
+    });
   });
 });

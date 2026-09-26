@@ -22,8 +22,16 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 jest.mock('../models/db', () => jest.fn());
+// Keep the real ledgerCall (GATE_LLM_CALL_LEDGER is unset in tests, so it's
+// already a real no-DB no-op) but spy on ledgerCallRejected so the "answered
+// nothing usable" tests below can assert the ledger row gets flipped.
+jest.mock('../services/llm-dispatch-metrics', () => {
+  const actual = jest.requireActual('../services/llm-dispatch-metrics');
+  return { ...actual, ledgerCallRejected: jest.fn() };
+});
 
 const { extractEventsWithClaude } = require('../services/event-ingestion');
+const { ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 const SOURCE = { id: 'src-1', name: 'Manatee Chamber — Upcoming Events', coverage_geo: ['bradenton'] };
 const OPTS = { mode: 'articles', maxEvents: 15 };
@@ -85,5 +93,48 @@ describe('event extraction: thinking-block tolerance', () => {
     });
 
     await expect(extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS)).resolves.toEqual([]);
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  // Codex r8 on #4884: {"events":[{}]} used to pass as a successful ledger
+  // call even though upsertExtractedEvents (event-ingestion.js ~705) drops
+  // every entry that fails normalizeExtractedEvent — a nonempty batch that
+  // answers nothing usable must record a failure, not a success.
+  describe('nonempty-but-unusable batches (Codex r8 on #4884)', () => {
+    test('a batch of bare objects normalizes to nothing and is flagged as a failure', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{},{}]}' }] });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      // Behavior for the caller is unchanged — upsertExtractedEvents still
+      // gets the raw (unusable) entries and drops them itself.
+      expect(events).toEqual([{}, {}]);
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('a batch with at least one usable entry is NOT flagged, even if others are junk', async () => {
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: '{"events":[{},{"title":"Sunset Market"}]}' }],
+      });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      expect(events).toHaveLength(2);
+      expect(ledgerCallRejected).not.toHaveBeenCalled();
+    });
+
+    test('requireStart (news-RSS contract): a title-only entry with no date is unusable under that contract', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{"title":"Some Article"}]}' }] });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', { ...OPTS, requireStart: true });
+      expect(events).toHaveLength(1); // still returned — the caller's upsertExtractedEvents drops it
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('requireStart: the SAME title-only entry is usable in page mode (no requireStart)', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{"title":"Some Article"}]}' }] });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', { mode: 'page', maxEvents: 15 });
+      expect(events).toHaveLength(1);
+      expect(ledgerCallRejected).not.toHaveBeenCalled();
+    });
   });
 });

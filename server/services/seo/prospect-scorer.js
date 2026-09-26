@@ -145,10 +145,21 @@ function parseJsonArray(text) {
   try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { return null; }
 }
 
+// A strictly-numeric value: an actual finite number, or a numeric string with
+// no other characters. Number(x) on false/''/'   '/[] all coerce to 0 (finite),
+// which let those non-answers pass isClassifiedEntry below as a real
+// relevance_0_100 (Codex r8 on #4884) — this rejects everything that isn't
+// actually a number written down.
+function isFiniteNumeric(x) {
+  if (typeof x === 'number') return Number.isFinite(x);
+  if (typeof x === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(x)) return Number.isFinite(Number(x));
+  return false;
+}
+
 // The classification fields the mapper reads; an entry without them has not classified anything.
 function isClassifiedEntry(o) {
   return typeof o.intent_class === 'string' && o.intent_class.trim() !== ''
-    && o.relevance_0_100 != null && Number.isFinite(Number(o.relevance_0_100));
+    && isFiniteNumeric(o.relevance_0_100);
 }
 
 async function classifyChunk(chunk, { anthropic }) {

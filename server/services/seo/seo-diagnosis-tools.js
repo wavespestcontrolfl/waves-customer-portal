@@ -282,16 +282,32 @@ async function classifyQueryIntent({ queries = [] } = {}) {
   // with a thinking block (no .text) on larger inputs, which made a blind
   // content[0] read return '' — see event-ingestion.js for the incident.
     const text = stripThinkingBlocks(msg).content?.[0]?.text || '';
-    const parsed = text.split('\n').map((line) => {
+    const parsedLines = text.split('\n').map((line) => {
       const m = line.trim().match(/^(.+?)\t(transactional|informational|commercial-investigation)\t(\d+(?:\.\d+)?)/);
       if (!m) return null;
       return { query: m[1].trim(), intent: m[2], confidence: Math.min(1, Number(m[3])) };
     }).filter(Boolean);
-    if (!parsed.length && batch.length) ledgerCallRejected(msg, 'invalid_output');
+    // Map lines back to the batch by exact query text — defensive against a
+    // response that drops, reorders, or duplicates lines. A query with no
+    // matching line gets the SAME deterministic keyword fallback the
+    // no-key/exception paths use below, so every input always comes back
+    // classified; but an incomplete batch answered fewer classifications
+    // than it was asked for, so it's a ledger failure, not a success
+    // (previously only a WHOLLY empty parse was flagged — Codex r8 on #4884).
+    const byQuery = new Map();
+    for (const p of parsedLines) if (!byQuery.has(p.query)) byQuery.set(p.query, p);
+    let missing = 0;
+    const classifications = batch.map((q) => {
+      const hit = byQuery.get(String(q).trim());
+      if (hit) return hit;
+      missing += 1;
+      return { query: q, intent: keywordClassify(q), confidence: 0.5 };
+    });
+    if (missing > 0) ledgerCallRejected(msg, 'invalid_output');
     return {
       implemented: true,
       tool: 'classify_query_intent',
-      classifications: parsed,
+      classifications,
     };
   } catch (e) {
     logger.warn(`[seo-diagnosis] classify_query_intent Claude failed, falling back to keywords: ${e.message}`);

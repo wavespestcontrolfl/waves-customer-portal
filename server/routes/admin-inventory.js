@@ -3532,6 +3532,19 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
+// The fields the approval-queue loop below (and procurement-tools.js's own
+// copy of it) actually reads off a web-search result — an object missing
+// them (e.g. {}) matches the "is it shaped like a result" schema check but
+// contributes nothing: `!vendor || !result.price` already skips it in the
+// loop, but a batch of nothing-but-those must not read as a successful
+// ledger call, and approvalsCreated must count real inserts, not raw
+// entries (Codex r8 on #4884).
+function isUsablePriceResult(r) {
+  return !!r && typeof r === 'object'
+    && typeof r.vendor === 'string' && r.vendor.trim() !== ''
+    && typeof r.price === 'number' && Number.isFinite(r.price) && r.price > 0;
+}
+
 // =========================================================================
 // POST /ai-price-lookup — AI agent: search vendor prices for a product
 // =========================================================================
@@ -3638,16 +3651,23 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       return res.json({ success: true, raw: responseText, results: [], summary: 'AI returned non-JSON response. See raw field.' });
     }
 
+    // A nonempty results array with no usable entry (e.g. [{}]) is a schema
+    // shape that answered nothing — the loop below would skip every one of
+    // them, so it must not read as a successful call (Codex r8 on #4884).
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)
-      || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))) ledgerCallRejected(currentMsg, 'schema_invalid');
+      || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))
+      || (parsed.results.length > 0 && !parsed.results.some(isUsablePriceResult))) {
+      ledgerCallRejected(currentMsg, 'schema_invalid');
+    }
 
     // If we have a productId, create approval queue entries for found prices
+    let approvalsCreated = 0;
     if (productId && parsed.results && parsed.results.length > 0) {
       for (const result of parsed.results) {
-        if (!result || typeof result !== 'object') continue;
+        if (!isUsablePriceResult(result)) continue;
         // Find vendor by name
         const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
-        if (!vendor || !result.price) continue;
+        if (!vendor) continue;
 
         // Check existing price
         const existing = await db('vendor_pricing')
@@ -3668,6 +3688,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
             status: 'pending',
             notes: `AI agent lookup — ${result.notes || ''}`,
           });
+          approvalsCreated += 1;
         } catch (e) {
           logger.warn(`[AI Price Lookup] Failed to create approval for ${result.vendor}: ${e.message}`);
         }
@@ -3680,7 +3701,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       results: parsed.results || [],
       cheapest: parsed.cheapest || null,
       summary: parsed.summary || '',
-      approvalsCreated: parsed.results?.length || 0,
+      approvalsCreated,
     });
   } catch (err) {
     logger.error(`[AI Price Lookup] Error: ${err.message}`);
@@ -3740,5 +3761,8 @@ router.vendorRowPricePerOz = vendorRowPricePerOz;
 router.scoreVendorRows = scoreVendorRows;
 router.storedUnitCostPerOz = storedUnitCostPerOz;
 router.quantityToOz = quantityToOz;
+// Shared web-search-result usability check (Codex r8 on #4884) —
+// procurement-tools.js's own price lookup applies the same validation.
+router.isUsablePriceResult = isUsablePriceResult;
 
 module.exports = router;

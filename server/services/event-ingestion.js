@@ -563,7 +563,7 @@ function recoverEventObjectsFromTruncatedJson(text) {
   return events.length ? events : null;
 }
 
-async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
+async function extractEventsWithClaude(source, content, { mode, maxEvents, requireStart = false }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
   }
@@ -619,8 +619,22 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     );
     parsed = { events: recovered };
   }
-  if (!Array.isArray(parsed.events)) ledgerCallRejected(response, 'schema_invalid');
-  return Array.isArray(parsed.events) ? parsed.events.slice(0, maxEvents) : [];
+  if (!Array.isArray(parsed.events)) {
+    ledgerCallRejected(response, 'schema_invalid');
+    return [];
+  }
+  const events = parsed.events.slice(0, maxEvents);
+  // A nonempty batch where every entry fails normalizeExtractedEvent answered
+  // nothing usable — {"events":[{}]} would otherwise read as a successful
+  // call even though upsertExtractedEvents silently drops every one of its
+  // entries (~line 705). An intentionally empty array ({"events":[]}, a
+  // genuinely event-less page/feed) stays a success (Codex r8 on #4884).
+  if (events.length) {
+    const nowMs = Date.now();
+    const anyUsable = events.some((ev) => normalizeExtractedEvent(source, ev, nowMs, { requireStart }) !== null);
+    if (!anyUsable) ledgerCallRejected(response, 'schema_invalid');
+  }
+  return events;
 }
 
 /**
@@ -738,9 +752,10 @@ async function pullNewsRssItems(source, items) {
   const { text, bundled } = buildArticleBundle(items);
   if (!text.trim()) return { upserted: 0, dropped: 0, total: 0 };
 
-  const claudeEvents = await extractEventsWithClaude(source, text, { mode: 'articles', maxEvents });
   // requireStart: the articles contract is "no stated event date → no
-  // event" — enforce it even when the model ignores the prompt rule.
+  // event" — enforce it even when the model ignores the prompt rule (also
+  // forwarded into extractEventsWithClaude's own usability check above).
+  const claudeEvents = await extractEventsWithClaude(source, text, { mode: 'articles', maxEvents, requireStart: true });
   const { upserted, dropped } = await upsertExtractedEvents(source, claudeEvents, { requireStart: true });
   return { upserted, dropped, total: claudeEvents.length, articlesBundled: bundled };
 }
