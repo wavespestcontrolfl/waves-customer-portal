@@ -1,5 +1,5 @@
 jest.mock('../models/db', () => ({}));
-const { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops, getRoutePerformance, getSavedDayPlans } = require('../services/scheduling/route-performance');
+const { lifecycleMinutes, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops, getRoutePerformance, getSavedDayPlans } = require('../services/scheduling/route-performance');
 
 const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
 
@@ -113,6 +113,39 @@ test('malformed or duplicated baseline stops remain missing evidence instead of 
   expect(selectPlanningSnapshots([run], { from: day, to: day, now: new Date('2026-09-09T12:00:00Z') })).toEqual([]);
 });
 
+// Codex P2 (round 8): planned stops sharing a visitId are one physical
+// visit on the saved plan too, matching the live board's physicalStopCount.
+test('a saved plan reports planned physical stops with visitId groups collapsed', () => {
+  const plan = { ...snapshot, plannedStops: [
+    { ...snapshot.plannedStops[0], id: 'a', visitId: 'group-1' },
+    { ...snapshot.plannedStops[0], id: 'b', visitId: 'group-1' },
+    { ...snapshot.plannedStops[0], id: 'c', visitId: null },
+  ] };
+  expect(measureRoutePerformance(plan, [])).toMatchObject({ plannedVisits: 3, plannedPhysicalStops: 2 });
+});
+
+// Codex P2 (round 8): minutes are measured from the SERVICE day's midnight,
+// so a boundary stamped on the next ET day reads 1440+ and a span taken
+// from them stays positive (23:30 -> 00:30 is 60 minutes, never -1380).
+// recordedTiming itself refuses a completion dated after the service day,
+// so a real cross-midnight visit reads as an unknown completion, never a
+// negative span.
+test('lifecycle minutes carry a day offset past ET midnight; a real cross-midnight visit never goes negative', () => {
+  const row = { scheduled_date: day };
+  const crossing = lifecycleMinutes({ arrival: new Date('2026-09-09T03:30:00Z'), completion: new Date('2026-09-09T04:30:00Z') }, row);
+  expect(crossing).toEqual({ arrival: 1410, completion: 1470 });
+  expect(crossing.completion - crossing.arrival).toBe(60);
+
+  const late = recorded({ actual_start_time: '2026-09-09T03:30:00Z', actual_end_time: '2026-09-09T04:30:00Z', completionNotes: {},
+    statusHistory: [
+      { from_status: 'confirmed', to_status: 'on_site', transitioned_at: '2026-09-09T03:30:00Z' },
+      { from_status: 'on_site', to_status: 'completed', transitioned_at: '2026-09-09T04:30:00Z' },
+    ] });
+  const [stop] = measureRoutePerformance(snapshot, [late]).stops;
+  expect(stop.lifecycleArrivalMinute).toBe(1410);
+  expect(stop.lifecycleCompletionMinute).toBeNull();
+});
+
 // Minimal chainable knex stand-in for getRoutePerformance: records every
 // builder call (a where(fn) callback runs against the same builder) and
 // resolves select() with the fixture rows for its table.
@@ -163,7 +196,7 @@ test('getSavedDayPlans returns today\'s pre-service plan per technician, planned
   const { conn } = recordingConn({ route_optimization_planner_runs: [during, before] });
   const plans = await getSavedDayPlans({ date: day, now }, conn);
   expect([...plans.keys()]).toEqual(['tech']);
-  expect(plans.get('tech')).toEqual({ plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 20,
+  expect(plans.get('tech')).toEqual({ plannedVisits: 1, plannedPhysicalStops: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 20,
     plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'calibrated' });
   expect(selectPlanningSnapshots([before], { from: day, to: day, now })).toEqual([]);
 });

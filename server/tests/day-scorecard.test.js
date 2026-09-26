@@ -467,6 +467,39 @@ describe('getDayScorecard', () => {
     expect(getSavedDayPlans).not.toHaveBeenCalled();
   });
 
+  // Codex P2 (round 8): the saved plan's Stops and stops/hour use the
+  // visitId-collapsed physical count, like a future board row.
+  test('a saved-plan row reads physicalStops and derives stops/hour from it', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 4, plannedPhysicalStops: 2, plannedServiceMinutes: 120,
+        plannedDriveMinutes: 30, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 720, driveModel: 'legacy', stops: [] }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    // 2 physical stops over 08:00 -> 12:00 = 0.5/hr, not 4 rows = 1/hr.
+    expect(result.days[0].byTech[0].planned).toMatchObject({ stops: 4, physicalStops: 2, stopsPerHour: 0.5 });
+  });
+
+  test('a span across ET midnight (service-day minutes past 1440) is the real interval', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 1500, driveModel: 'legacy',
+        stops: [{ arrivalOutcome: 'unpromised', durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 60,
+          recordedArrivalMinute: 1410, recordedCompletionMinute: 1470, lifecycleArrivalMinute: 1410, lifecycleCompletionMinute: 1470 }] }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].actual).toMatchObject({ spanMinutes: 60, spanCoverage: { covered: 1, total: 1 } });
+  });
+
   test('the actual-drive assumption names both excluded purposes (personal and commute)', async () => {
     const date = '2026-09-01';
     getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'legacy', days: [{ date, closed: false, byTech: [] }] });

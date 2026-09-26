@@ -112,13 +112,37 @@ function physicalStopCount(stops) {
  * route-reorder-window-fit.js) rather than a second, driftable formula —
  * only the duration bookkeeping, no clock/travel state, so it needs no
  * RouteOptimizer or blocked-interval input.
+ *
+ * A version-2 allocation (allocationKey, no visit_id) is settled FIRST
+ * (Codex P2, round 8): it occupies the SUM of its members — visit-capacity's
+ * own occupiedRows contract, read from that helper rather than re-derived —
+ * so it counts once at that total and never enters a co-visit chain, which
+ * would keep only one member's fallback span (two 60-minute fallback
+ * members are 120, not 60).
  */
+function allocationTotals(stops) {
+  const members = stops.filter(stop => !stop.visit_id && allocationKey(stop));
+  const totals = new Map();
+  occupiedRows(members).forEach((row, index) => {
+    const key = allocationKey(members[index]);
+    if (!totals.has(key)) totals.set(key, row.endMin - (row.startMin ?? 0));
+  });
+  return totals;
+}
+
 function coVisitOnSiteMinutes(stops) {
   const ordered = currentOrder(stops);
-  let total = 0;
+  const allocations = allocationTotals(ordered);
+  let total = [...allocations.values()].reduce((sum, minutes) => sum + minutes, 0);
   let chain = null;
   let chainTail = null;
   for (const stop of ordered) {
+    if (!stop.visit_id && allocationKey(stop)) {
+      if (chain) total += chain.coMerged;
+      chain = null;
+      chainTail = null;
+      continue;
+    }
     if (chainTail && isCoVisitPair(effectiveWindowRange, chainTail, stop)) {
       chain = advanceCoVisit(chain, stop);
     } else {

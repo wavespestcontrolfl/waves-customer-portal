@@ -91,21 +91,27 @@ function plannedFutureRow(techQuality) {
 }
 
 // Past, PLANNED-as-of-the-day-before: the saved snapshot's own numbers
-// (route-performance's passthrough fields), never recomputed here. No
-// physical-stop count, and onSiteMinutes is the snapshot's flat per-stop
-// sum, NOT co-visit-aware: plan.stops keeps only ids/durations/windows, not
+// (route-performance's passthrough fields), never recomputed here.
+// onSiteMinutes is the snapshot's flat per-stop sum, NOT co-visit-aware: plan.stops keeps only ids/durations/windows, not
 // the customer/premise/coordinate columns isCoVisitPair needs to detect a
 // co-visit at all, so a co-visited pair sharing a fallback duration MAY be
 // double-counted here (see getDayScorecard's assumptions.plannedOnSiteMinutes
 // — noted rather than silently wrong or falsely "fixed").
+//
+// physicalStops (Codex P2, round 8) is route-performance's
+// plannedPhysicalStops — member rows sharing a visitId collapse to one, like
+// the board's physicalStopCount — and stops/hour uses it, so a two-service
+// visit reads as one stop on the saved plan and the future board alike.
+// null (older/partial shapes) falls back to the row count.
 function plannedPastRow(plan) {
   if (!plan) return null;
+  const physicalStops = Number.isFinite(plan.plannedPhysicalStops) ? plan.plannedPhysicalStops : null;
   return {
-    stops: plan.plannedVisits, physicalStops: null,
+    stops: plan.plannedVisits, physicalStops,
     onSiteMinutes: plan.plannedServiceMinutes, driveMinutes: plan.plannedDriveMinutes,
     waitMinutes: plan.plannedWaitingMinutes,
     driveShare: driveShare(plan.plannedDriveMinutes, plan.plannedServiceMinutes),
-    stopsPerHour: stopsPerHour(plan.plannedVisits, DEPARTURE_MINUTES, plan.plannedReturnMinuteBeforeBreaks),
+    stopsPerHour: stopsPerHour(physicalStops ?? plan.plannedVisits, DEPARTURE_MINUTES, plan.plannedReturnMinuteBeforeBreaks),
     returnMinute: plan.plannedReturnMinuteBeforeBreaks, lateVisits: null,
   };
 }

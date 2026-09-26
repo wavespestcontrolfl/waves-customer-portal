@@ -255,6 +255,34 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(withFlag.days[0]).toMatchObject({ unallocatedVisits: 2, unallocatedServiceMinutes: 90 });
   });
 
+  // Codex P2 (round 8): a version-2 allocation occupies the SUM of its
+  // members (visit-capacity occupiedRows). Treated as a co-visit chain it
+  // kept only one member's fallback span — 60 instead of 120 — on a named
+  // technician's row and in the unallocated summary alike.
+  test('a V2 allocation counts its summed member minutes (not one co-visit span) under includeStopExtras', async () => {
+    const allocationStop = (id, technicianId) => ({
+      id, technician_id: technicianId, customer_id: 'cust-a', visit_id: null,
+      scheduled_date: DATE, window_start: '09:00', window_end: '10:00', time_window: null, route_order: null,
+      status: 'confirmed', reservation_expires_at: null, created_at: `2020-01-01T0${id.length}:00:00Z`,
+      estimated_duration_minutes: null, service_type: null, is_recurring: false, is_callback: false,
+      reservation_service_mix: { version: 2, allocatedServiceIds: technicianId === 'tech1' ? ['a', 'bb'] : ['g1', 'g2'] },
+      lat: 27.4, lng: -82.4, service_address_line1: '1 Main St', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34205',
+      customer_address_line1: '1 Main St', customer_address_line2: null,
+      customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205',
+    });
+    const stops = [allocationStop('a', 'tech1'), allocationStop('bb', 'tech1'), allocationStop('g1', 'ghost'), allocationStop('g2', 'ghost')];
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve(stops) }));
+
+    const withFlag = await getScheduleQualityMeasurements({ date: DATE, includeStopExtras: true }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(withFlag.days[0].byTech[0]).toMatchObject({ physicalStops: 1, coVisitOnSiteMinutes: 120 });
+    expect(withFlag.days[0]).toMatchObject({ unallocatedVisits: 1, unallocatedServiceMinutes: 120 });
+
+    const withoutFlag = await getScheduleQualityMeasurements({ date: DATE }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(withoutFlag.days[0].byTech[0]).not.toHaveProperty('coVisitOnSiteMinutes');
+    expect(withoutFlag.days[0]).toMatchObject({ unallocatedVisits: 2, unallocatedServiceMinutes: 120 }); // flat, unchanged
+  });
+
   test('coVisitOnSiteMinutes only collapses a fallback-duration pair — two REAL, distinct estimates still sum', async () => {
     const realEstimateStop = (id, extra = {}) => ({
       id, technician_id: 'tech1', customer_id: 'cust-a', visit_id: null,

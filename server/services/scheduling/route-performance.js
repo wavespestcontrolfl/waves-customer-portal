@@ -35,10 +35,23 @@ function minuteInET(value) {
   return parts.hour * 60 + parts.minute + parts.second / 60;
 }
 
-// One row's recorded lifecycle arrival/completion as ET minutes of the day.
-function lifecycleMinutes(timing) {
-  return { arrival: timing.arrival ? minuteInET(timing.arrival) : null,
-    completion: timing.completion ? minuteInET(timing.completion) : null };
+// ET wall-clock minutes measured from the service day's midnight: a stamp on
+// a LATER ET date carries +1440 per day (Codex P2, round 8), so a caller
+// taking last completion minus first arrival never sees a visit that
+// crossed midnight as a negative ~23h span. recordedTiming currently only
+// corroborates stamps dated on the service day itself, so today this is
+// always the plain minute of day — the offset keeps the arithmetic right
+// without depending on that rule.
+function minuteOfServiceDay(stamp, serviceDate) {
+  const days = Math.round((Date.parse(`${etDateString(stamp)}T00:00:00Z`) - Date.parse(`${serviceDate}T00:00:00Z`)) / 86400000);
+  return minuteInET(stamp) + (Number.isFinite(days) ? days * 1440 : 0);
+}
+
+// One row's recorded lifecycle arrival/completion as minutes of its service day.
+function lifecycleMinutes(timing, row) {
+  const serviceDate = dateOnly(row.scheduled_date);
+  return { arrival: timing.arrival ? minuteOfServiceDay(timing.arrival, serviceDate) : null,
+    completion: timing.completion ? minuteOfServiceDay(timing.completion, serviceDate) : null };
 }
 
 function recordedTiming(row) {
@@ -142,9 +155,17 @@ function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId
 // into the ledger row) — day-scorecard.js's PLANNED-as-of-the-day-before
 // column reads these instead of recomputing them, so the scorecard can never
 // disagree with what was actually saved.
+//
+// plannedPhysicalStops (Codex P2, round 8): planned stops sharing a visitId
+// are one physical visit, the same collapse the live board's
+// physicalStopCount applies. The snapshot keeps only ids/visitIds/windows/
+// durations, so a same-property co-visit or a version-2 allocation without
+// a visit_id can't be recognized here and still counts per row.
 function plannedPassthrough(plan) {
   const finiteOrNull = value => (Number.isFinite(value) ? value : null);
+  const grouped = new Set(plan.plannedStops.filter(stop => stop.visitId).map(stop => stop.visitId));
   return {
+    plannedPhysicalStops: plan.plannedStops.filter(stop => !stop.visitId).length + grouped.size,
     plannedServiceMinutes: finiteOrNull(plan.serviceMinutes),
     plannedDriveMinutes: finiteOrNull(plan.modeledDriveMinutes),
     plannedWaitingMinutes: finiteOrNull(plan.modeledWaitingMinutes),
@@ -171,7 +192,7 @@ function measureRoutePerformance(plan, rows) {
     // (Codex P2) so a caller measuring the day's first-arrival-to-last-
     // completion span keeps grouped work that opened or closed the day,
     // without that row ever reading as a comparable duration.
-    const lifecycle = completedOnRoute ? lifecycleMinutes(timing) : { arrival: null, completion: null };
+    const lifecycle = completedOnRoute ? lifecycleMinutes(timing, row) : { arrival: null, completion: null };
     let arrivalOutcome = 'unknown';
     if (!row) arrivalOutcome = 'missing_visit';
     else if (!sameRoute) arrivalOutcome = 'day_or_technician_changed';
@@ -313,7 +334,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     if (row.status !== 'completed') continue;
     const key = routeKey(dateOnly(row.scheduled_date), row.technician_id);
     if (coveredRoutes.get(key)?.has(row.id)) continue;
-    const lifecycle = lifecycleMinutes(recordedTiming(row));
+    const lifecycle = lifecycleMinutes(recordedTiming(row), row);
     const entry = unbaselinedByRoute.get(key) || [];
     entry.push({ appointmentId: row.id,
       recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion });
@@ -360,7 +381,7 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
       && (row.technician_id || null) === route.technicianId && row.status === 'completed');
     byKey.set(routeKey(route.date, route.technicianId), completed.map(row => {
       const timing = recordedTiming(row);
-      const lifecycle = lifecycleMinutes(timing);
+      const lifecycle = lifecycleMinutes(timing, row);
       return { appointmentId: row.id,
         durationEvidence: row.visit_id ? 'unmatched_or_uncompleted_work' : timing.durationEvidence,
         recordedServiceMinutes: row.visit_id ? null : timing.durationMinutes,
@@ -370,4 +391,4 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
   return byKey;
 }
 
-module.exports = { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };
+module.exports = { lifecycleMinutes, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };
