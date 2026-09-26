@@ -53,6 +53,24 @@ describe('normalizeSignHost', () => {
     expect(out.length).toBeLessThanOrEqual(SIGN_HOST_MAX_LENGTH);
     expect(out).toBe(out.trim());
   });
+
+  // A lone surrogate is invalid JSON text to Postgres, so the jsonb write of
+  // extracted_data (and with it the lead row) would fail.
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  test('the cap never splits an emoji at the boundary', () => {
+    const out = normalizeSignHost(`${'x'.repeat(SIGN_HOST_MAX_LENGTH - 1)}🏠🏠`);
+    expect(out).toBe(`${'x'.repeat(SIGN_HOST_MAX_LENGTH - 1)}🏠`);
+    expect(Array.from(out)).toHaveLength(SIGN_HOST_MAX_LENGTH);
+    expect(out).not.toMatch(LONE_SURROGATE);
+  });
+
+  test('unpaired surrogates from the client become spaces', () => {
+    expect(normalizeSignHost('blue \uD83C house')).toBe('blue house');
+    expect(normalizeSignHost('a\uDFE0b')).toBe('a b');
+    expect(normalizeSignHost('the 🏠 at 4512')).toBe('the 🏠 at 4512');
+    expect(normalizeSignHost(`x${'🏠'.slice(0, 1)}`)).not.toMatch(LONE_SURROGATE);
+  });
 });
 
 describe('buildLeadWebhookIntake', () => {

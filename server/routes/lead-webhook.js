@@ -1599,17 +1599,18 @@ function truncateClickId(value) {
 
 // The neighbor page's optional "Which home had the sign?" answer: printable
 // text only, whitespace collapsed, capped so a pasted blob can't flood the
-// Customer 360 note.
+// Customer 360 note. Control characters and unpaired surrogates become spaces,
+// and the cap counts code points so it never cuts an emoji in half — a lone
+// surrogate makes Postgres reject the extracted_data jsonb and the lead row.
 const SIGN_HOST_MAX_LENGTH = 120;
 
 function normalizeSignHost(value) {
   if (typeof value !== 'string') return '';
-  return value
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, SIGN_HOST_MAX_LENGTH)
     .trim();
+  return Array.from(cleaned).slice(0, SIGN_HOST_MAX_LENGTH).join('').trim();
 }
 
 function buildLeadWebhookIntake(body = {}) {
