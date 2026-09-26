@@ -381,6 +381,16 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       }
     });
 
+    test('a discount change the mint\'s price guard cannot see (totals unchanged) is caught under the lock — the office is alerted, nothing billed at a guess', async () => {
+      const f = await coveredVisit();
+      const restore = aroundMint(() => trx('scheduled_services').where({ id: f.serviceId }).update({
+        discount_dollars: 9, discount_name: 'Synthetic visit discount', discount_type: 'fixed_amount', discount_amount: 9 }));
+      const out = await withFailure(restore, () => complete(f));
+      expect(out).toMatchObject({ status: 200 });
+      expect(await liveInvoices(f)).toHaveLength(0);
+      expect((await addonsAlert(f)).body).toMatch(/visit-wide discount/);
+    });
+
     test('an invoice that appears on the visit while billing is never taken as this bill — the office decides', async () => {
       const f = await coveredVisit();
       const appearedId = randomUUID();

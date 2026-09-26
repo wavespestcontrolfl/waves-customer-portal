@@ -88,13 +88,14 @@ async function annualPrepayAddonRows(svc, conn = db) {
 // credit (an appointment discount, the builder's "Scheduled price
 // adjustment") spans base and add-ons alike and nothing here can say which
 // share is the add-ons', so it makes the amount `ambiguous`.
-async function annualPrepayExtrasForVisit(svc, addons) {
+async function annualPrepayExtrasForVisit(svc, addons, database = null) {
   if (!addons.priced) return { lines: [], total: 0, ambiguous: false };
   const InvoiceService = require('./invoice');
   const { lineItems } = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
     fallbackDescription: svc.service_type,
     // An outage throws (a hold, retried) instead of reading as "no add-ons".
     strictReads: true,
+    database,
   });
   const primaryId = `scheduled_${svc.id}_primary`;
   const lines = lineItems.filter((li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for));
@@ -303,12 +304,21 @@ class CoveredVisitCloseout {
       // Quiet backfill closeout: the main backfill mint's posture — the
       // estimate deposit stays on its ledger for the reviewer.
       skipDepositCredit: quietBackfill,
+      // The add-on rows and the canonical lines, re-read under the visit
+      // lock: an edit the mint's price guard cannot see (an add-on replaced
+      // at the same price, a discount moved between lines at the same total)
+      // sends bill() back to decide again from the current visit. A status
+      // makes every failure here terminal for the mint's deposit retry.
       assertLinesCurrentInTrx: async (trx) => {
-        if ((await annualPrepayAddonRows(current, trx)).fingerprint !== addons.fingerprint) {
-          // A status makes it terminal for the mint's deposit retry: it
-          // reaches bill(), which rebuilds the lines from the current rows.
-          throw Object.assign(new Error('the visit\'s add-ons changed while billing'), { code: 'ADDON_LINES_MOVED', status: 409 });
+        let moved;
+        try {
+          const lockedAddons = await annualPrepayAddonRows(current, trx);
+          const lockedExtras = await annualPrepayExtrasForVisit(current, lockedAddons, trx);
+          moved = lockedAddons.fingerprint !== addons.fingerprint || JSON.stringify(lockedExtras) !== JSON.stringify(extras);
+        } catch (err) {
+          throw Object.assign(err, { status: err.status || 409 });
         }
+        if (moved) throw Object.assign(new Error('the visit\'s add-ons changed while billing'), { code: 'ADDON_LINES_MOVED', status: 409 });
       },
       buildCreateParams: () => ({
         customerId: current.customer_id,
