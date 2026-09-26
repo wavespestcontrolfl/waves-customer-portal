@@ -106,7 +106,7 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
   expect(SYSTEM_PROMPT).toContain('Mention at most one customer-visible finding');
   expect(SYSTEM_PROMPT).toContain('Never blame the customer');
-  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v3');
+  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v4');
 });
 
 test('current next visit replaces stale recap appointment in model facts and fallback', () => {
@@ -147,6 +147,15 @@ test('appointment sanitizer preserves unrelated decimal and AM/PM work and advic
   const recap = 'We documented a 1.5-foot gap at 8 a.m. Your next visit is scheduled for Sep 24, arriving 1–3 p.m. Keep pets away until 4 p.m.';
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 2' })).toBe(
     'We documented a 1.5-foot gap at 8 a.m. Keep pets away until 4 p.m.',
+  );
+});
+
+test('appointment sanitizer removes a colon-labeled stale slot', () => {
+  const recap = 'We treated the perimeter today. Next visit: Thursday, September 24, arriving 1–3 PM.';
+  const facts = groundingFacts(input({ recap }));
+  expect(facts.recap).toBe('We treated the perimeter today.');
+  expect(deterministicSummary(facts)).toBe(
+    'We treated the perimeter today. Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.',
   );
 });
 
@@ -231,7 +240,7 @@ test('clean model output is used verbatim', async () => {
   expect(callModel).toHaveBeenCalledWith(expect.objectContaining({
     jsonMode: true,
     maxTokens: 400,
-    promptVersion: 'pest_visit_summary_narrative_v3',
+    promptVersion: 'pest_visit_summary_narrative_v4',
   }));
 });
 
@@ -244,9 +253,38 @@ test('model output must include the supplied next visit', async () => {
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
 });
 
-test('model output cannot add a year to the supplied next-visit date', async () => {
+test.each([
+  'Friday, October 2, 2027',
+  'Friday, October 2 in 2027',
+  'Friday, October 2 of 2027',
+])('model output cannot add a year to the supplied next-visit date: %s', async (date) => {
   const args = input();
-  const summary = 'We refreshed the perimeter and entry points today. Your next visit is Friday, October 2, 2027, arriving 8–10 AM.';
+  const summary = `We refreshed the perimeter and entry points today. Your next visit is ${date}, arriving 8–10 AM.`;
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('each appointment promise must independently match the authoritative slot', async () => {
+  const args = input();
+  const summary = 'We refreshed the perimeter today. Your next visit is Friday, October 2, arriving 8–10 AM. We will return next week to inspect again.';
+  const problems = appointmentClaimProblems(summary, groundingFacts(args));
+  expect(problems).toEqual(expect.arrayContaining([
+    'duplicate_appointment_claim',
+    'unsupported_appointment_date',
+    'unsupported_appointment_window',
+  ]));
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('a negated statement of the authoritative slot falls back', async () => {
+  const args = input();
+  const summary = 'We refreshed the perimeter today. Your next visit is not scheduled for Friday, October 2, arriving 8–10 AM.';
+  expect(appointmentClaimProblems(summary, groundingFacts(args))).toContain('negated_appointment_claim');
   const out = await applyVisitSummaryNarrative(args, {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
   });
@@ -292,6 +330,19 @@ test('model cannot invent an appointment when no next visit was supplied', async
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
   });
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('zero pressure uses deterministic assessed-area wording instead of model absence claims', async () => {
+  const args = input({ pestPressure: { enabled: true, displayScore: 0, label: 'None', trend: null } });
+  const callModel = jest.fn().mockResolvedValue({
+    ok: true,
+    json: { summary: 'No visible pest activity was found anywhere on the property today. Your next visit is Friday, October 2, arriving 8–10 AM.' },
+  });
+  const out = await applyVisitSummaryNarrative(args, { callModel });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+  expect(out).toContain('No visible pest activity was noted in the areas assessed today.');
+  expect(out).not.toContain('anywhere on the property');
+  expect(callModel).not.toHaveBeenCalled();
 });
 
 test('appointment guard ignores grounded work numbers, aftercare times, and unrelated dates', async () => {

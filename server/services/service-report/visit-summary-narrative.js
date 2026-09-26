@@ -27,9 +27,9 @@ const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 const { appointmentClaimProblems } = require('./next-visit-claims');
 
-// v3: reviewed recurring-pest evidence/scope contract and authoritative
-// structured next-visit handling.
-const PROMPT_VERSION = 'pest_visit_summary_narrative_v3';
+// v4: reviewed recurring-pest evidence/scope contract, authoritative
+// structured next-visit handling, and deterministic zero-pressure scope.
+const PROMPT_VERSION = 'pest_visit_summary_narrative_v4';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -62,7 +62,7 @@ function cleanText(value) {
 const APPOINTMENT_DATE = '(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:st|nd|rd|th)?\\b(?:,?\\s+\\d{4})?';
 const APPOINTMENT_TIME = '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)';
 const APPOINTMENT_WINDOW = `\\d{1,2}(?::\\d{2})?(?:\\s*(?:a\\.?m\\.?|p\\.?m\\.?))?\\s*(?:–|—|-|to)\\s*${APPOINTMENT_TIME}`;
-const APPOINTMENT_LEAD = '(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service|follow[-\\s]?up)\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on)|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
+const APPOINTMENT_LEAD = '(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service|follow[-\\s]?up)(?::|\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on))|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
 const RECAP_APPOINTMENT_RE = new RegExp(
   `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME}|,?\\s+${APPOINTMENT_WINDOW})?(?:,?\\s+(?:and|then)\\s+(\\S))?`,
   'gi',
@@ -196,6 +196,9 @@ function groundingFacts({
 // Used verbatim when the model is unavailable or its output fails the guard.
 function deterministicSummary(facts) {
   const parts = [facts.recap];
+  if (facts.pressure?.isZero) {
+    parts.push('No visible pest activity was noted in the areas assessed today.');
+  }
   if (facts.nextVisit) {
     parts.push(facts.nextVisit.window
       ? `Your next visit is scheduled for ${facts.nextVisit.date}, arriving ${facts.nextVisit.window}.`
@@ -240,11 +243,18 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
   const hit = _cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
 
-  const callModel = deps.callModel
+  const generateNarrative = deps.callModel
     || ((payload) => dispatchWithFallback(
       MODELS.TEXT_POLICIES.customerCopy,
       { laneId: 'lawn_visit_narratives', jsonMode: true, maxTokens: 400, ...payload },
     ));
+  // A zero reading supports only assessed-scope wording. Keep its output on
+  // the fixed fallback path rather than trying to enumerate every broad
+  // property-wide absence claim a provider could phrase.
+  const callModel = [
+    generateNarrative,
+    async () => ({ ok: true, json: null }),
+  ][Number(Boolean(facts.pressure?.isZero))];
 
   let value = fallback;
   try {

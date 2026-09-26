@@ -215,6 +215,8 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('Your next visit is Monday, August 3 at 8 PM.', facts))
     .toContain('ungrounded_time:8 PM');
   expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('Your next visit is Monday, August 3 in 2027, arriving 8–10 AM.', facts)
+    .some((problem) => problem.includes('ungrounded_date:') && problem.includes('in 2027'))).toBe(true);
 
   // standalone weekday mentions validate against the grounded visit (codex
   // round-6 P1): no month-day needed for "Tuesday" to contradict a Monday

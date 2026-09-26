@@ -6,11 +6,12 @@
 const WINDOW_TEXT_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
 const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
 const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
-const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})\\b(?:,?\\s+(\\d{4}))?`, 'gi');
+const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})\\b(?:(?:,?\\s+|\\s*(?:in|of)\\s*)(\\d{4}))?`, 'gi');
 const APPOINTMENT_CLAIM_RE = new RegExp(
   `\\b(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service)(?:\\s*:\\s*|\\s+(?:is|has\\s+been|will\\s+be|scheduled|booked|set|on|for)\\b)|(?:we(?:\\s+will|[’']ll)?\\s+)?see\\s+you\\b|we(?:\\s+will|[’']ll)\\s+(?:return|arrive|be\\s+back)\\b|(?:appointment|visit|follow[-\\s]?up)\\s+(?:is\\s+)?(?:scheduled|booked|set)\\b)`,
   'i',
 );
+const NEGATED_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b/i;
 
 function normalizeWindowText(value) {
   return String(value || '').replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
@@ -63,22 +64,27 @@ function nextVisitProblems(text, facts) {
 function appointmentClaimProblems(text, facts) {
   const claims = String(text || '')
     .split(/(?<=[.!?])\s+/)
-    .map((sentence) => {
-      const marker = APPOINTMENT_CLAIM_RE.exec(sentence);
-      return marker ? sentence.slice(marker.index) : '';
-    })
-    .filter(Boolean)
-    .join(' ');
-  if (!claims) return facts?.nextVisit?.date ? ['missing_appointment_claim'] : [];
+    .flatMap((sentence) => {
+      const markers = [...sentence.matchAll(new RegExp(APPOINTMENT_CLAIM_RE.source, 'gi'))];
+      return markers.map((marker, index) => sentence.slice(
+        marker.index,
+        markers[index + 1]?.index ?? sentence.length,
+      ).trim());
+    });
+  if (!claims.length) return facts?.nextVisit?.date ? ['missing_appointment_claim'] : [];
   if (!facts?.nextVisit?.date) return ['ungrounded_appointment_claim'];
 
-  const problems = nextVisitProblems(claims, facts);
-  if (!claims.toLowerCase().includes(String(facts.nextVisit.date).toLowerCase())) {
-    problems.push('unsupported_appointment_date');
-  }
-  if (facts.nextVisit.window
-    && !normalizeWindowText(claims).includes(normalizeWindowText(facts.nextVisit.window))) {
-    problems.push('unsupported_appointment_window');
+  const problems = claims.length > 1 ? ['duplicate_appointment_claim'] : [];
+  for (const claim of claims) {
+    problems.push(...nextVisitProblems(claim, facts));
+    if (NEGATED_APPOINTMENT_RE.test(claim)) problems.push('negated_appointment_claim');
+    if (!claim.toLowerCase().includes(String(facts.nextVisit.date).toLowerCase())) {
+      problems.push('unsupported_appointment_date');
+    }
+    if (facts.nextVisit.window
+      && !normalizeWindowText(claim).includes(normalizeWindowText(facts.nextVisit.window))) {
+      problems.push('unsupported_appointment_window');
+    }
   }
   return [...new Set(problems)];
 }
