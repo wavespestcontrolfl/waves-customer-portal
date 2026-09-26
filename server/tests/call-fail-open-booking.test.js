@@ -2325,6 +2325,28 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(true);
   });
 
+  test.each([
+    ["We'll see you 10 Sunday at 10 o'clock.", '2026-08-02T10:00:00-04:00', false],
+    ["We'll see you Sunday 10 at noon.", '2026-08-02T12:00:00-04:00', false],
+    ["We'll see you 2 Sunday at 10 o'clock.", '2026-08-02T10:00:00-04:00', false],
+    ["We'll see you Sunday the 2 at 10 o'clock.", '2026-08-02T10:00:00-04:00', true],
+    ["We'll see you Sunday at 10.", '2026-08-02T10:00:00-04:00', true],
+    ["We'll see you Sunday 10 am.", '2026-08-02T10:00:00-04:00', true],
+  ])('Codex round-31: a lone number binds only in hour or date position — %s @ %s', (sentence, slot, expected) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, slot, '2026-07-30T15:50:00-04:00')).toBe(expected);
+  });
+
+  test.each([
+    ["We'll see you Sunday at 10 o'clock in the afternoon.", '2026-08-02T22:00:00-04:00', false],
+    ["We'll see you Sunday at 10 o'clock in the morning.", '2026-08-02T22:00:00-04:00', false],
+    ["We'll see you Sunday at 12 o'clock in the afternoon.", '2026-08-02T12:00:00-04:00', true],
+    ["We'll see you Sunday at 5 o'clock in the afternoon.", '2026-08-02T17:00:00-04:00', true],
+  ])('Codex round-31: a spoken day period must contain the slot hour — %s @ %s', (sentence, slot, expected) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, slot, '2026-07-30T15:50:00-04:00')).toBe(expected);
+  });
+
   // AT_WEEKDAY_RE false-positive guards, exercised directly against
   // quoteBindsConfirmedSlot (bypassing the closed-vocabulary/form gates,
   // which only ever admit "at <N>" glued right before the sentence end or

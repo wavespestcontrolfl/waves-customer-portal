@@ -1324,7 +1324,7 @@ function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
   const weekday = WEEKDAY_NAMES[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
   const monthName = MONTH_NAMES[month - 1];
   if (!(dayDiff >= 1 && dayDiff <= 6) || !weekday || !monthName) return null;
-  return { year, month, day, weekday, monthName, hour12: hour % 12 || 12, period: hour >= 12 ? 'pm' : 'am' };
+  return { year, month, day, weekday, monthName, hour24: hour, hour12: hour % 12 || 12, period: hour >= 12 ? 'pm' : 'am' };
 }
 
 // What ONE normalized sentence says about a slot, parsed once into a flat
@@ -1362,6 +1362,7 @@ const DATE_POSITION_PREV = new Set(['the', 'for', 'on', ...WEEKDAY_NAMES, ...MON
 // am/pm — they take precedence over business-hours inference and must match
 // the slot's period.
 const SPOKEN_DAY_PERIODS = { morning: 'am', afternoon: 'pm' };
+const SPOKEN_DAY_PERIOD_HOURS = { morning: [5, 11], afternoon: [12, 17] };
 const HOUR_MARKER_NEXT = new Set(['am', 'pm', 'o', 'oclock']);
 // A period token is ATTACHED when it follows an hour ("10 pm", "10 00 pm")
 // or an o'clock ("10 o'clock pm"); any other am/pm is a STANDALONE period.
@@ -1412,20 +1413,31 @@ function parseSpokenSlot(normalizedSentence) {
     // The day number directly after each month name ("August 2nd").
     monthDays: toks.flatMap((t, i) => (MONTH_NAMES.includes(t) && DAY_NUMBER_RE.test(at(i + 1)) ? [parseInt(at(i + 1), 10)] : [])),
     ordinals: toks.filter((t) => ORDINAL_DAY_RE.test(t)).map((t) => parseInt(t, 10)),
-    numberRuns: numberRuns.map(({ nums, prev, next }) => ({
-      nums, datePosition: nums.length === 1 && DATE_POSITION_PREV.has(prev) && !HOUR_MARKER_NEXT.has(next),
-    })),
+    // Codex round 31, P1 (:1359): a LONE number must now be EXPLAINED by its
+    // position — hour position (an hour marker follows: am/pm/o'clock, or
+    // "at" precedes it) or date position (see DATE_POSITION_PREV) — and is
+    // otherwise unexplained and fails binding. Position used to matter only
+    // for date position, so a lone number anywhere else passed merely by
+    // equalling the hour ("We'll see you 10 Sunday at 10 o'clock" for a
+    // Sunday-the-2nd slot). Guilty unless positioned, not one more
+    // preposition at a time.
+    numberRuns: numberRuns.map(({ nums, prev, next }) => {
+      const hourPosition = nums.length === 1 && (HOUR_MARKER_NEXT.has(next) || prev === 'at');
+      const datePosition = nums.length === 1 && !hourPosition && DATE_POSITION_PREV.has(prev);
+      return { nums, hourPosition, datePosition };
+    }),
+    spokenDayPeriods: new Set(toks.filter((t) => SPOKEN_DAY_PERIODS[t])),
     periods,
     times,
   };
 }
 
-// The complete numeric shapes a slot explains: [hour12] · [hour12, 00]
-// (spoken ":00") · [day] · [month, day] · [month, day, year] with a 2- or
-// 4-digit slot year. Anything else — extra components, stray street
-// numbers, prices, a 3–4 digit non-year — fails closed.
+// The complete MULTI-number shapes a slot explains: [hour12, 00] (spoken
+// ":00") · [month, day] · [month, day, year] with a 2- or 4-digit slot
+// year. A lone number is checked by position instead (SLOT_BINDING_CHECKS,
+// codex round 31). Anything else — extra components, stray street numbers,
+// prices, a 3–4 digit non-year — fails closed.
 const NUMBER_RUN_SHAPES = [
-  (r, s) => r.length === 1 && (r[0] === s.hour12 || r[0] === s.day),
   (r, s) => r.length === 2 && r[0] === s.hour12 && r[1] === 0,
   (r, s) => r.length === 2 && r[0] === s.month && r[1] === s.day,
   (r, s) => r.length === 3 && r[0] === s.month && r[1] === s.day && (r[2] === s.year || r[2] === s.year % 100),
@@ -1449,8 +1461,21 @@ const SLOT_BINDING_CHECKS = [
   (said, slot) => said.ordinals.every((d) => d === slot.day),
   // Every number run is a complete shape the slot explains, and a lone
   // number in date position is the slot's day.
-  (said, slot) => said.numberRuns.every((run) => (!run.datePosition || run.nums[0] === slot.day)
-    && NUMBER_RUN_SHAPES.some((fits) => fits(run.nums, slot))),
+  (said, slot) => said.numberRuns.every((run) => {
+    if (run.nums.length === 1) {
+      if (run.hourPosition) return run.nums[0] === slot.hour12;
+      if (run.datePosition) return run.nums[0] === slot.day;
+      return false;
+    }
+    return NUMBER_RUN_SHAPES.some((fits) => fits(run.nums, slot));
+  }),
+  // Codex round 31, P1 (:1400): a spoken day period must actually contain
+  // the slot's hour — "morning" 5–11, "afternoon" 12–17 — not just share its
+  // am/pm ("10 o'clock in the afternoon" never binds 22:00).
+  (said, slot) => [...said.spokenDayPeriods].every((word) => {
+    const [from, to] = SPOKEN_DAY_PERIOD_HOURS[word];
+    return slot.hour24 >= from && slot.hour24 <= to;
+  }),
 ];
 
 // Binds one ALREADY-NORMALIZED commitment sentence (normalizeCommitmentText
