@@ -109,7 +109,7 @@ Component classes own presentation. Customer styles may position record sections
 - Desktop, mobile tabs, and mobile More navigation must derive from one registry.
 - Every destination has one canonical ID, label, route, group, icon, role policy, and search keywords. Surface-specific overrides must be explicit.
 - The canonical groups are Overview, Operations, Sales, Communications, Finance, People, Marketing, and System.
-- Mobile keeps Dashboard, Schedule, Customers, Messages, and More as the five primary task tabs. More contains every remaining destination under the same canonical groups used on desktop.
+- Mobile keeps Dashboard, Schedule, Customers, Messages, and Settings as the five primary task tabs. The fifth tab keeps the stable `more` id and `/admin/more` route but is labelled Settings; it contains every remaining destination under the same canonical groups used on desktop.
 - A destination cannot be removed from either surface until usage and replacement-route checks are documented. Retired URLs must redirect during their deprecation window.
 - Active navigation uses both a visible state and `aria-current="page"`.
 - Navigation landmarks require an accessible label; section labels use real headings.

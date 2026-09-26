@@ -263,7 +263,7 @@ benchmark opt-in, MMS preview, and de-duplication with the service-report rail.
 2. **Token style** — plaintext + unique + rate-limited (matches existing convention) vs the
    stance's `report_token_hash`. *(Rec: match existing plaintext convention; add `report_expires_at`
    as the only new behavior.)*
-3. **`property_id`** — defer (properties aren't first-class)? *(Rec: defer.)*
+3. **`property_id`** — resolved: properties are now first-class, so reuse the existing `lawn_assessments.property_id` column (see §3). *(Originally: defer.)*
 4. **New `/quick` endpoint** vs reusing `/assess`. *(Rec: new endpoint.)*
 5. **Public report route** — dedicated `/api/reports/lawn/:token` vs generalizing the service-report
    route. *(Rec: dedicated lightweight surface.)*

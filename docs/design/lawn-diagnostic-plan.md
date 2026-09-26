@@ -3,8 +3,9 @@
 **Status:** Planning (approved 2026-05-28). v0.2 report contract scaffold, diagnostic
 tables migration, and analyze-only tech route added 2026-06-15. v0.3 added the LLM
 diagnosis + narrative layer and replaced the human-review gate with a no-block
-auto-release ladder (2026-06-15 — see "v0.3" section below). Persist/send/public report
-routes and UI still not built.
+auto-release ladder (2026-06-15 — see "v0.3" section below). **Update 2026-09-26:** the
+persist/send/public-report routes, the tech UI and the public `/lawn-report/:token` page
+have shipped; tech-side photo persistence and SMS/email link delivery remain open.
 **Owner:** Adam.
 
 ## What this is
@@ -503,9 +504,10 @@ rename deferred.
 
 ## v1 backend API (built 2026-06-15)
 
-The analyze route was step 1; the persist → send → public chain is now built (backend
-only — photo S3 persistence and the React tech UI + public `/lawn-report/:token` page are
-deferred; the public page's satellite hero is address-based so it does not need stored photos).
+The analyze route was step 1; the persist → send → public chain is now built. (As of
+2026-06-15 the React tech UI and public `/lawn-report/:token` page were deferred; both have
+since shipped. Tech-side photo S3 persistence is still open; the public page's satellite hero
+is address-based so it does not need stored photos.)
 
 Routes (all never-block, all on the existing `tech-lawn-diagnostic.js` router unless noted):
 - `POST /api/tech/lawn-diagnostic` — persist an analyzed diagnostic as a draft

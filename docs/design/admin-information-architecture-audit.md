@@ -25,7 +25,7 @@ The destinations in `client/src/config/adminNavigation.js` remain the supported 
 - Marketing
 - System
 
-The five mobile task tabs remain Dashboard, Schedule, Customers, Messages, and More.
+The five mobile task tabs remain Dashboard, Schedule, Customers, Messages, and Settings (the fifth tab keeps the `more` id and `/admin/more` route, labelled Settings).
 
 ## Already consolidated correctly
 

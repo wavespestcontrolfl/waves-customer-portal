@@ -383,7 +383,9 @@ Every entry survived the refute-by-default pass. "Fix" is the verifier's sketch 
 `expectedTotal` to the server's amount guard. The sheet still fetches the quote only
 after the Charge tap and charges in the same step
 (`client/src/components/schedule/MobileCardOnFileSheet.jsx`), so pre-charge amount
-disclosure and an explicit confirm step both remain open.
+disclosure and an explicit confirm step both remain open. The Actual, Fix and Test lines
+below predate that change: the quote call and `expectedTotal` they prescribe already exist,
+so only the pre-tap disclosure and the confirm step are still to do.
 
 - **Location:** `client/src/pages/admin/AdminInvoicesPage.jsx:1871` (reader billing-admin:BA-03)
 - **Reproduction:** Admin (role admin) → Invoices → expand an open invoice for a customer with a saved card → Charge card on file → tap Charge: the card is charged immediately.

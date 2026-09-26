@@ -69,6 +69,8 @@ termite_treatment: { eligible: true, variant: 'spray',
 registry's default is ineligible — and it does **not** break the coverage contract test, which
 enumerates only the generic lanes the completion-lane registry names, and foam is typed rather
 than generic. But it does mean foam has no positive classification of its own yet.
+**Update 2026-09-26:** since #3301 both keys are in `SERVICE_KEY_RULES` as eligible `photo`
+variants (`server/services/service-report/trace-eligibility.js`).
 
 ### The routing this needs
 

@@ -6,9 +6,12 @@
 > Phase A shipped as `server/models/migrations/20260712200000_rodent_family_graduation.js`,
 > Phase B's lane registry is `server/config/completion-lane-registry.js` (which records
 > the plan as ratified 2026-07-12), and the visit-timeline amendment in
-> `specialty-service-completion-contract.md` §8 cites it. Sections 1–4 describe the
-> state on 2026-07-12. Where this draft and a later DECISIONS.md entry or the
-> specialty contract differ, those win.
+> `specialty-service-completion-contract.md` §8 cites it. The whole draft describes
+> 2026-07-12: sections 1–4 are that day's state, and §§5–6 are the proposal and open
+> questions as drafted, several since executed or resolved (the rodent graduation,
+> the straggler and termite cutovers). Treat it as a design record, not a backlog.
+> Where this draft and a later DECISIONS.md entry or the specialty contract differ,
+> those win.
 
 Scoping proposal (2026-07-12, drafted for owner review — not yet ratified; no
 DECISIONS.md entry until PRs ship). Owner direction: "move into a universal UI

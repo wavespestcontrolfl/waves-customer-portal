@@ -2,7 +2,9 @@
 
 Design doc (2026-06-19). Phase 2 of the third-party Payer (Bill-To) subsystem
 (Phase 1 = PR #1850; deposit follow-up = PR #1906). **Implemented, dark behind
-`GATE_PAYER_STATEMENTS`.**
+`GATE_PAYER_STATEMENTS`.** The rest of this doc is the pre-implementation design
+record: its current-state notes, open decisions and P1–P4 plan describe
+2026-06-19, not today's code.
 
 ## Goal
 
