@@ -42,7 +42,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
   reseedRecurringSeriesAfterCancel, reseedRecurringSeriesAfterCancelBatch,
-  readReseedCandidate, reseedRefusal, reseedTermShortfall, probeReseedOverlaps, stampReseed,
+  readReseedCandidate, reseedRefusal, reseedTermShortfall, probeReseedOverlaps, stampReseed, recordReseedDeclines,
   RESEED_STALE_READ_ATTEMPTS,
 } = adminScheduleRouter._test;
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
@@ -415,26 +415,38 @@ describe('the writing wrapper and the batch', () => {
     expect(out.results[0].skipped).toBe('series_stopped');
   });
 
-  test('2+ counting cancels of one plan: no reseed, and the decline is persisted per visit with its episode key', async () => {
+  test('2+ counting cancels of one plan: no reseed, and the batch writes NO ledger rows of its own (the route wrote them in-trx)', async () => {
     const { handler, inserted } = scenario({
       transitions: [{ id: 71, job_id: 22, from_status: 'confirmed' }, { id: 72, job_id: 24, from_status: 'pending' }],
     });
     const conn = makeConn((q) => {
       if (q.table === 'scheduled_services' && q.op === 'await') {
-        return [{ id: 22, customer_id: 5, is_recurring: true, recurring_parent_id: 10 }, { id: 24, customer_id: 5, is_recurring: true, recurring_parent_id: 10 }];
+        return [{ id: 22, is_recurring: true, recurring_parent_id: 10 }, { id: 24, is_recurring: true, recurring_parent_id: 10 }];
       }
       return handler(q);
     });
     const out = await reseedRecurringSeriesAfterCancelBatch(conn, [22, 24], { source: 'test' });
     expect(out.results).toEqual([]);
     expect(out.skippedRoots).toEqual([{ rootId: '10', cancelledIds: ['22', '24'], skipped: 'batch_series_cancel' }]);
-    const declines = inserted.filter((row) => row.__table === 'activity_log');
-    expect(declines).toHaveLength(2);
-    const metas = declines.map((row) => ({ action: row.action, customer_id: row.customer_id, ...JSON.parse(row.metadata) }));
-    expect(metas).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: 'recurring_cancel_reseed_declined', customer_id: 5, cancelled_service_id: '22', episode_key: '71', recurring_parent_id: '10' }),
-      expect.objectContaining({ action: 'recurring_cancel_reseed_declined', customer_id: 5, cancelled_service_id: '24', episode_key: '72' }),
-    ]));
+    expect(inserted.filter((row) => row.__table === 'activity_log')).toHaveLength(0);
+  });
+
+  test('recordReseedDeclines: one row per cancelled visit, keyed on its CURRENT episode, carrying the whole reduction group', async () => {
+    const { handler, inserted } = scenario({
+      // job 22: an older cancel compensated back to live, then the current cancel (entering row 73)
+      transitions: [{ id: 73, job_id: 22, from_status: 'pending' }, { id: 70, job_id: 22, from_status: 'cancelled', to_status: 'pending' }, { id: 69, job_id: 22, from_status: 'confirmed' }],
+    });
+    await recordReseedDeclines(makeConn(handler), {
+      customerId: 5, rootId: 10, cancelledIds: [22], batchIds: [22, 24], reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel',
+    });
+    const rows = inserted.filter((row) => row.__table === 'activity_log');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ customer_id: 5, action: 'recurring_cancel_reseed_declined' });
+    expect(rows[0].description).toMatch(/^2 visits of one recurring plan cancelled together/);
+    expect(JSON.parse(rows[0].metadata)).toEqual({
+      cancelled_service_id: '22', recurring_parent_id: '10', episode_key: '73',
+      reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel', batch_ids: ['22', '24'],
+    });
   });
 
   test('RESEED_STALE_READ_ATTEMPTS is a small positive bound', () => {

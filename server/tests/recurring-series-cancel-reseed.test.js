@@ -25,7 +25,7 @@ const adminSchedule = require('../routes/admin-schedule');
 const gates = require('../config/feature-gates');
 const {
   runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, assignPlanTerms, countTermVisits,
-  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor,
+  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor, planReductionGroups,
   COUNTING_SOURCE_STATUSES,
 } = require('../services/recurring-series-cancel-reseed');
 
@@ -262,6 +262,26 @@ describe('term / count math (pure)', () => {
     ], today)).toBe(2);
   });
 
+  test('planReductionGroups: 2+ counting plan rows of one root in the request = a reduction; placeholders, boosters, callbacks and lone rows are not (pre-push audit P1)', () => {
+    const rows = [
+      { id: 'a1', status: 'pending', is_recurring: true, recurring_parent_id: 'A' },
+      { id: 'a2', status: 'confirmed', is_recurring: null, recurring_parent_id: 'A' },  // legacy child counts
+      { id: 'A', status: 'pending', is_recurring: true, recurring_parent_id: null },    // the root itself counts
+      { id: 'b1', status: 'pending', is_recurring: true, recurring_parent_id: 'B' },
+      { id: 'b2', status: 'rescheduled', is_recurring: true, recurring_parent_id: 'B' }, // placeholder: removes nothing
+      { id: 'c1', status: 'pending', is_recurring: true, recurring_parent_id: 'C' },
+      { id: 'c2', status: 'pending', is_recurring: false, recurring_parent_id: 'C' },   // booster
+      { id: 'c3', status: 'pending', is_recurring: true, is_callback: true, recurring_parent_id: 'C' },
+      { id: 'd1', status: 'cancelled', is_recurring: true, recurring_parent_id: 'D' },  // already cancelled
+      { id: 'd2', status: 'pending', is_recurring: true, recurring_parent_id: 'D' },
+    ];
+    const out = planReductionGroups(rows);
+    expect([...out.keys()].sort()).toEqual(['A', 'a1', 'a2']);
+    expect(out.get('a1')).toEqual({ rootId: 'A', groupIds: ['a1', 'a2', 'A'] });
+    expect(planReductionGroups([])).toEqual(new Map());
+    expect(planReductionGroups(null)).toEqual(new Map());
+  });
+
   test('reseedAnchorFloor: the latest slot-holding plan row or the cancelled row itself — legacy children count, boosters/callbacks/other cancels do not (pre-push audit P1s)', () => {
     const rows = [
       { id: 'root', status: 'completed', scheduled_date: '2026-07-10', is_recurring: true, recurring_parent_id: null },
@@ -390,6 +410,31 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(call).toBeGreaterThan(flush);
     expect(respond).toBeGreaterThan(call);
     expect(route.slice(0, flush)).not.toMatch(/runPostCancelSeriesReseed/);
+  });
+
+  test('bulk cancel: plan-reduction intent is read BEFORE the loop and each row\'s ledger row is written INSIDE its own cancel transaction, ungated (pre-push audit P1)', () => {
+    const route = schedule.slice(schedule.indexOf("router.post('/bulk-action'"), schedule.indexOf("serviceIds: cancelReseedIds, source: 'admin-schedule-bulk-cancel'"));
+    const intent = route.indexOf("? planReductionGroups(await db('scheduled_services').whereIn('id', serviceIds)");
+    const loop = route.indexOf('for (const id of serviceIds) {');
+    expect(intent).toBeGreaterThan(-1);
+    expect(intent).toBeLessThan(loop);
+    expect(route).toMatch(/const bulkPlanReductions = action === 'cancel'/);
+    const cancelCase = route.indexOf("case 'cancel': {");
+    const trxOpen = route.indexOf('await db.transaction(async (trx) => {', cancelCase);
+    const transition = route.indexOf('await transitionJobStatus({', trxOpen);
+    const ledger = route.indexOf('await recordReseedDeclines(trx, {', cancelCase);
+    // the per-row transaction's own closing line (12-space indent) — the first one after the ledger write
+    const trxClose = route.indexOf('\n            });', ledger);
+    expect(ledger).toBeGreaterThan(transition);
+    expect(ledger).toBeLessThan(route.indexOf('cancelReseedIds.push(id)'));
+    expect(trxClose).toBeGreaterThan(ledger);
+    expect(route.slice(transition, trxClose)).toMatch(/const reduction = bulkPlanReductions\.get\(String\(id\)\);\s*if \(reduction && isCountingSourceStatus\(fromStatus\)\) \{/);
+    expect(route.slice(transition, trxClose)).toMatch(/batchIds: reduction\.groupIds,\s*reason: 'batch_series_cancel'/);
+    // written whatever the reseed gate says
+    expect(route).not.toMatch(/cancelReseedsRecurringLive/);
+    // the post-commit batch no longer writes the ledger (it would duplicate the in-trx rows)
+    const batch = schedule.slice(schedule.indexOf('async function reseedRecurringSeriesAfterCancelBatch('));
+    expect(batch.slice(0, batch.indexOf('\n}\n'))).not.toMatch(/recordReseedDeclines/);
   });
 
   test('dispatch: the hook sits in the single-visit cancelled branch, not the series-scope cancel', () => {
@@ -601,11 +646,11 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(b).toMatch(/if \(!countingCancel\.has\(String\(row\.id\)\)\) continue;/);
     expect(b).not.toMatch(/\.where\('to_status', 'cancelled'\)/);
     expect(b).toMatch(/if \(!isPlanSeriesRow\(row\)\) continue;/);
-    expect(b).toMatch(/\.select\('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\)/);
+    expect(b).toMatch(/\.select\('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\)/);
     expect(b).not.toMatch(/row\.is_recurring !== true/);
     expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?skipped: 'batch_series_cancel'/);
-    // the decline is PERSISTED per visit + episode before moving on (pre-push audit P1)
-    expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?await recordReseedDeclines\(conn, \{[\s\S]*?reason: 'batch_series_cancel'[\s\S]*?\}\);[\s\S]*?continue;/);
+    // the decline ledger is written by the bulk route inside each row's cancel transaction, not here
+    expect(b).not.toMatch(/recordReseedDeclines/);
     // …and the visit-count trim records the same ledger inside its own transaction, after its cancels
     const rec = schedule.slice(schedule.indexOf('async function reconcileRecurringSeriesVisitCount('));
     expect(rec).toMatch(/result\.cancelledIds\.push\(visit\.id\);\s*\}[\s\S]*?await recordReseedDeclines\(trx, \{\s*customerId: parent\.customer_id, rootId: parentId, cancelledIds: result\.cancelledIds, reason: 'visit_count_trim'/);

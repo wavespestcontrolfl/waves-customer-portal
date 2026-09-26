@@ -247,6 +247,31 @@ function reseedAnchorFloor(rows, cancelledId) {
   return best ? { scheduled_date: best } : null;
 }
 
+// Plan-reduction INTENT of a bulk cancel request (pre-push audit P1 on
+// d3e302202d): the rows the operator selected that are plan rows in a
+// counting state, grouped by series root; a root with 2+ of them is a
+// deliberate shortening. Read BEFORE the per-row cancel transactions so each
+// row's "don't add back" ledger row commits atomically with its own cancel —
+// the bulk route commits row by row, so the batch's outcome is not known
+// until after the first rows are already visible to a replay. Returns a Map
+// of row id → { rootId, groupIds } for the rows in such groups only.
+function planReductionGroups(rows) {
+  const byRoot = new Map();
+  for (const row of rows || []) {
+    if (!isPlanSeriesRow(row) || !isCountingSourceStatus(row.status)) continue;
+    const rootId = String(row.recurring_parent_id || row.id);
+    if (!byRoot.has(rootId)) byRoot.set(rootId, []);
+    byRoot.get(rootId).push(String(row.id));
+  }
+  const out = new Map();
+  for (const [rootId, ids] of byRoot) {
+    const groupIds = [...new Set(ids)];
+    if (groupIds.length < 2) continue;
+    for (const id of groupIds) out.set(id, { rootId, groupIds });
+  }
+  return out;
+}
+
 // `serviceId` for the single-visit surfaces; `serviceIds` for the bulk
 // cancel, which hands over the whole batch so the writer can group by
 // series and treat several cancels of one plan as the plan reduction it is.
@@ -285,6 +310,7 @@ module.exports = {
   cancelEpisodeSourceStatus,
   planPositionDate,
   reseedAnchorFloor,
+  planReductionGroups,
   hasUpcomingPlanRow,
   countUpcomingPlanRows,
   NON_COUNTING_STATUSES,

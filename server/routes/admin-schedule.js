@@ -9341,6 +9341,18 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // batch settled, so a bulk cancel that removes several visits of one
     // plan reads as the plan reduction it is, not N single cancels.
     const cancelReseedIds = [];
+    // Plan-reduction INTENT, read before any row commits (pre-push audit P1
+    // on #4814): this route cancels row by row, each in its own transaction,
+    // so "2+ visits of one plan" cannot be decided after the fact without a
+    // window in which a replay of an already-committed row (Intelligence
+    // Bar / dispatch) could add it back. Each such row writes its "don't add
+    // back" ledger row INSIDE its own cancel transaction (below), whatever
+    // the reseed gate says.
+    const { planReductionGroups, isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
+    const bulkPlanReductions = action === 'cancel'
+      ? planReductionGroups(await db('scheduled_services').whereIn('id', serviceIds)
+        .select('id', 'status', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'))
+      : new Map();
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -9904,6 +9916,15 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // loop instead of a concurrent pass per cancelled row.
                 qualityDates,
               });
+              // Part of a plan reduction → its ledger row commits WITH the
+              // cancel (see bulkPlanReductions above).
+              const reduction = bulkPlanReductions.get(String(id));
+              if (reduction && isCountingSourceStatus(fromStatus)) {
+                await recordReseedDeclines(trx, {
+                  customerId: svc.customer_id, rootId: reduction.rootId, cancelledIds: [id], batchIds: reduction.groupIds,
+                  reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel',
+                });
+              }
             });
             // Counted-plan reseed candidate — collected the instant the
             // cancel committed, BEFORE any fallible post-commit work below
@@ -18581,11 +18602,19 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
 // cancellation EPISODE (the entering job_status_history row), which
 // reseedRefusal reads under the per-parent lock; an un-cancel + re-cancel is
 // a new episode and is evaluated fresh. Episode keys are read from the
-// audit rows on the caller's connection — call it AFTER the cancels.
-async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, reason, source }) {
+// audit rows on the caller's connection — call it AFTER the cancels, on the
+// SAME transaction (both writers do, whatever the reseed gate says): any
+// reseed that can see the cancel can then see its ledger row, because they
+// commit together — no extra lock is needed for that, and none is taken
+// here (the bulk route's per-row transaction holds no series locks to
+// order against).
+async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, batchIds = null, reason, source }) {
   const { cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const ids = [...new Set((cancelledIds || []).map(String))];
   if (!ids.length) return;
+  // The whole reduction the row belongs to (the bulk route writes one row
+  // per cancel transaction, but the group is the operator's selection).
+  const group = batchIds ? [...new Set(batchIds.map(String))] : ids;
   const history = await conn('job_status_history')
     .whereIn('job_id', ids)
     .orderBy('transitioned_at', 'desc')
@@ -18598,12 +18627,14 @@ async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, re
   await conn('activity_log').insert(ids.map((id) => ({
     customer_id: customerFor(id),
     action: 'recurring_cancel_reseed_declined',
+    // Staff see these in the dashboard's Recent activity feed (the gate does
+    // not hide them), so the text says what it means in plain words.
     description: reason === 'visit_count_trim'
-      ? 'Recurring plan shortened from Edit appointment — cancelled visit is a plan reduction, never added back'
-      : `${ids.length} visits of one recurring plan cancelled together — plan reduction, no visit added back`,
+      ? 'Recurring plan shortened from Edit appointment — the removed visit will not be added back automatically'
+      : `${group.length} visits of one recurring plan cancelled together — treated as a plan reduction; this visit will not be added back automatically`,
     metadata: JSON.stringify({
       cancelled_service_id: id, recurring_parent_id: String(rootId), episode_key: episodeKeyFor(id),
-      reason, source, batch_ids: ids,
+      reason, source, batch_ids: group,
     }),
   })));
 }
@@ -18613,7 +18644,7 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
   const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
   if (!ids.length) return { results: [], skippedRoots: [] };
   const rows = await conn('scheduled_services').whereIn('id', ids)
-    .select('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+    .select('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
   // Only cancels whose CURRENT episode removed a counting visit take part in
   // the per-plan count (Codex r2 / r4 / r7 P1s): a 'rescheduled' placeholder
   // cancelled beside one real visit must not read as a plan reduction, a
@@ -18635,7 +18666,6 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
     const episode = cancelEpisodeSourceStatus(history);
     if (episode && isCountingSourceStatus(episode.fromStatus)) countingCancel.add(key);
   }
-  const customerById = new Map(rows.map((row) => [String(row.id), row.customer_id]));
   const byRoot = new Map();
   for (const row of rows) {
     // Plan rows only: explicit recurring, or a legacy null-flagged child of
@@ -18651,16 +18681,10 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
   for (const [rootId, cancelledIds] of byRoot) {
     if (cancelledIds.length > 1) {
       skippedRoots.push({ rootId, cancelledIds, skipped: 'batch_series_cancel' });
+      // The "don't add back" ledger rows were already written by the bulk
+      // route, each in its own row's cancel transaction (see
+      // planReductionGroups) — this skip is the belt for the same decision.
       logger.info(`[recurring-cancel-reseed] ${cancelledIds.length} visits of parent=${rootId} cancelled in one batch (${source}) — plan reduction, no reseed`);
-      // Post-commit and best-effort, like the rest of the bridge: a failed
-      // write is logged, never thrown into the committed cancel.
-      try {
-        await recordReseedDeclines(conn, {
-          customerId: (id) => customerById.get(id), rootId, cancelledIds, reason: 'batch_series_cancel', source,
-        });
-      } catch (e) {
-        logger.error(`[recurring-cancel-reseed] could not record the batch decline for parent=${rootId}: ${e.message}`);
-      }
       continue;
     }
     // Per-root isolation (fallback auditor P1 on 9ab2099da1): each reseed is
@@ -24298,6 +24322,7 @@ router._test = {
   // let an unresolved helper fail silently at runtime).
   reseedRecurringSeriesAfterCancel,
   reseedRecurringSeriesAfterCancelBatch,
+  recordReseedDeclines,
   readReseedCandidate,
   reseedRefusal,
   reseedTermShortfall,
