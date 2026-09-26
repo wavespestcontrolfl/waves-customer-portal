@@ -265,64 +265,65 @@ Use approved technical explanations only when the caller actually provides them 
 Only a purpose/program-matched next visit may appear. Copy supplied display date and arrival window exactly; do not recompute them. Follow the caller's live-versus-static schedule policy. Keep all existing grounding, count, naming, stage, and scope validators; this prompt is not a replacement for them.`,
 });
 
-const SERVICE_KEY_MODULES = Object.freeze({
-  mosquito_monthly: 'mosquito',
-  mosquito_event: 'mosquito',
-  mosquito_one_time: 'mosquito',
-  mosquito_seasonal: 'mosquito',
-  rodent_bait: 'rodent_bait',
-  rodent_bait_quarterly: 'rodent_bait',
-  rodent_bait_setup: 'rodent_bait',
-  rodent_monitoring: 'rodent_bait',
-  rodent_trapping: 'rodent_trapping',
-  rodent_trapping_followup: 'rodent_trapping',
-  rodent_trapping_exclusion: ['rodent_trapping', 'rodent_exclusion'],
-  rodent_trapping_sanitation: ['rodent_trapping', 'rodent_sanitation'],
-  rodent_trapping_exclusion_sanitation: ['rodent_trapping', 'rodent_exclusion', 'rodent_sanitation'],
-  trap_only_retainer_standard: 'rodent_trapping',
-  trap_only_retainer_plus: 'rodent_trapping',
-  trap_only_retainer_monthly: 'rodent_trapping',
-  rodent_exclusion: 'rodent_exclusion',
-  rodent_exclusion_only: 'rodent_exclusion',
-  rodent_wire_mesh: 'rodent_exclusion',
-  rodent_bird_box: 'rodent_exclusion',
-  rodent_sanitation_light: 'rodent_sanitation',
-  rodent_sanitation_standard: 'rodent_sanitation',
-  rodent_sanitation_heavy: 'rodent_sanitation',
-  termite_bait: 'termite_stations',
-  termite_active_annual: 'termite_stations',
-  termite_active_bait_quarterly: 'termite_stations',
-  termite_monitoring: 'termite_stations',
-  termite_cartridge_replacement: 'termite_stations',
-  termite_installation_setup: 'termite_stations',
-  termite_liquid: 'termite_liquid',
-  termite_trenching: 'termite_liquid',
-  foam_drill: 'termite_localized',
-  foam_recurring: 'termite_localized',
-  termite_spot_treatment: 'termite_localized',
-  bora_care: 'termite_localized',
-  cockroach_control: 'cockroach',
-  german_roach: 'cockroach',
-  german_roach_initial: 'cockroach',
-  pest_initial_roach: 'cockroach',
-  pest_initial_german_knockdown: 'cockroach',
-  pest_initial_palmetto_knockdown: 'cockroach',
-  flea_tick: 'flea',
-  tick_control: 'tick',
-  bed_bug_treatment: 'bed_bug',
-  bee_wasp_removal: 'stinging_insects',
-  mud_dauber_removal: 'stinging_insects',
-  fire_ant: 'targeted_ant',
-  pest_inspection: 'assessment',
-  new_customer_inspection: 'assessment',
-  termite_inspection: 'assessment',
-  rodent_inspection: 'assessment',
-  rodent_general_one_time: 'assessment',
-  dethatching: 'physical_lawn',
-  plugging: 'physical_lawn',
-  top_dressing: 'physical_lawn',
-  palm_injection: 'palm_care',
-  palm_injection_semiannual: 'palm_care',
+// Each binding is [prompt module(s), exact canonical findings type]. A null
+// type is a generic report; related prose modules never establish form identity.
+const SERVICE_KEY_BINDINGS = Object.freeze({
+  mosquito_monthly: ['mosquito', null],
+  mosquito_event: ['mosquito', 'mosquito_event'],
+  mosquito_one_time: ['mosquito', 'mosquito_event'],
+  mosquito_seasonal: ['mosquito', null],
+  rodent_bait: ['rodent_bait', 'rodent_bait_station'],
+  rodent_bait_quarterly: ['rodent_bait', 'rodent_bait_station'],
+  rodent_bait_setup: ['rodent_bait', 'rodent_bait_station'],
+  rodent_monitoring: ['rodent_bait', 'rodent_bait_station'],
+  rodent_trapping: ['rodent_trapping', 'rodent_trapping'],
+  rodent_trapping_followup: ['rodent_trapping', 'rodent_trapping'],
+  rodent_trapping_exclusion: [['rodent_trapping', 'rodent_exclusion'], 'rodent_trapping'],
+  rodent_trapping_sanitation: [['rodent_trapping', 'rodent_sanitation'], 'rodent_trapping'],
+  rodent_trapping_exclusion_sanitation: [['rodent_trapping', 'rodent_exclusion', 'rodent_sanitation'], 'rodent_trapping'],
+  trap_only_retainer_standard: ['rodent_trapping', 'rodent_trapping'],
+  trap_only_retainer_plus: ['rodent_trapping', 'rodent_trapping'],
+  trap_only_retainer_monthly: ['rodent_trapping', 'rodent_trapping'],
+  rodent_exclusion: ['rodent_exclusion', 'rodent_exclusion'],
+  rodent_exclusion_only: ['rodent_exclusion', 'rodent_exclusion'],
+  rodent_wire_mesh: ['rodent_exclusion', 'rodent_exclusion'],
+  rodent_bird_box: ['rodent_exclusion', 'rodent_exclusion'],
+  rodent_sanitation_light: ['rodent_sanitation', 'rodent_sanitation'],
+  rodent_sanitation_standard: ['rodent_sanitation', 'rodent_sanitation'],
+  rodent_sanitation_heavy: ['rodent_sanitation', 'rodent_sanitation'],
+  termite_bait: ['termite_stations', 'termite_bait_station'],
+  termite_active_annual: ['termite_stations', 'termite_bait_station'],
+  termite_active_bait_quarterly: ['termite_stations', 'termite_bait_station'],
+  termite_monitoring: ['termite_stations', 'termite_bait_station'],
+  termite_cartridge_replacement: ['termite_stations', 'termite_bait_station'],
+  termite_installation_setup: ['termite_stations', 'termite_bait_station'],
+  termite_liquid: ['termite_liquid', 'termite_treatment'],
+  termite_trenching: ['termite_liquid', 'termite_treatment'],
+  foam_drill: ['termite_localized', 'termite_treatment'],
+  foam_recurring: ['termite_localized', 'termite_treatment'],
+  termite_spot_treatment: ['termite_localized', 'termite_treatment'],
+  bora_care: ['termite_localized', null],
+  cockroach_control: ['cockroach', 'cockroach'],
+  german_roach: ['cockroach', 'cockroach'],
+  german_roach_initial: ['cockroach', 'cockroach'],
+  pest_initial_german_knockdown: ['cockroach', 'german_roach_knockdown'],
+  pest_initial_palmetto_knockdown: ['cockroach', 'palmetto_roach_knockdown'],
+  flea_tick: ['flea', 'flea'],
+  tick_control: ['tick', null],
+  bed_bug_treatment: ['bed_bug', null],
+  bee_wasp_removal: ['stinging_insects', null],
+  mud_dauber_removal: ['stinging_insects', null],
+  fire_ant: ['targeted_ant', null],
+  pest_inspection: ['assessment', 'pest_inspection'],
+  new_customer_inspection: ['assessment', 'pest_inspection'],
+  termite_inspection: ['assessment', 'termite_inspection'],
+  rodent_inspection: ['assessment', 'rodent_inspection'],
+  rodent_general_one_time: ['assessment', 'rodent_inspection'],
+  dethatching: ['physical_lawn', null],
+  plugging: ['physical_lawn', null],
+  top_dressing: ['physical_lawn', null],
+  palm_injection: ['palm_care', 'palm_injection'],
+  palm_injection_semiannual: ['palm_care', 'palm_injection'],
 });
 
 const FINDINGS_TYPE_MODULES = Object.freeze({
@@ -360,19 +361,18 @@ function selectedModifierKeys(context = {}) {
   return selected;
 }
 
-function resolveRemainingServiceModules({ serviceKey = null, findingsType = null } = {}) {
+function resolveRemainingServiceModules(context = {}) {
+  const { serviceKey = null, findingsType = null } = context;
   const key = String(serviceKey || '').trim();
   const type = String(findingsType || '').trim();
-  const byServiceKey = Object.hasOwn(SERVICE_KEY_MODULES, key) ? [SERVICE_KEY_MODULES[key]].flat() : null;
+  const binding = Object.hasOwn(SERVICE_KEY_BINDINGS, key) ? SERVICE_KEY_BINDINGS[key] : null;
   const byFindingsType = Object.hasOwn(FINDINGS_TYPE_MODULES, type) ? [FINDINGS_TYPE_MODULES[type]].flat() : null;
-  // Every supplied identity is authoritative, including an unmapped type.
-  // Shared schemas such as termite_treatment need a canonical service key.
-  if (serviceKey && !byServiceKey) return null;
+  // Omitted types retain the key-only main writer contract. Every supplied
+  // type, including explicit null, must match the exact configured form.
+  if (serviceKey && !binding) return null;
   if (findingsType && !byFindingsType) return null;
-  // Bundles keep their primary form first; companion modules do not change
-  // the canonical findings schema that captures the visit (trapping for rodents).
-  if (byServiceKey && byFindingsType && !byFindingsType.includes(byServiceKey[0])) return null;
-  if (byServiceKey) return byServiceKey;
+  if (binding && Object.hasOwn(context, 'findingsType') && context.findingsType !== binding[1]) return null;
+  if (binding) return [binding[0]].flat();
   return byFindingsType?.length === 1 ? byFindingsType : null;
 }
 
@@ -401,7 +401,7 @@ module.exports = {
   REMAINING_SERVICE_MODULES,
   REMAINING_SERVICE_MODIFIERS,
   REMAINING_SERVICE_ADAPTERS,
-  SERVICE_KEY_MODULES,
+  SERVICE_KEY_BINDINGS,
   FINDINGS_TYPE_MODULES,
   selectRemainingServicePrompt,
   _test: {

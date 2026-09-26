@@ -4,7 +4,7 @@ const {
   REMAINING_SERVICE_MODULES,
   REMAINING_SERVICE_MODIFIERS,
   REMAINING_SERVICE_ADAPTERS,
-  SERVICE_KEY_MODULES,
+  SERVICE_KEY_BINDINGS,
   FINDINGS_TYPE_MODULES,
   selectRemainingServicePrompt,
 } = require('../services/service-report/remaining-service-copy-prompts');
@@ -61,6 +61,32 @@ describe('remaining service copy prompt registry', () => {
     },
   );
 
+
+  test.each([
+    ['pest_inspection', 'pest_inspection'], ['new_customer_inspection', 'pest_inspection'],
+    ['termite_inspection', 'termite_inspection'], ['rodent_inspection', 'rodent_inspection'],
+    ['rodent_general_one_time', 'rodent_inspection'], ['cockroach_control', 'cockroach'],
+    ['german_roach', 'cockroach'], ['german_roach_initial', 'cockroach'],
+    ['pest_initial_german_knockdown', 'german_roach_knockdown'],
+    ['pest_initial_palmetto_knockdown', 'palmetto_roach_knockdown'],
+  ])('%s accepts only its migrated schema even when another schema shares the prompt module', (serviceKey, expected) => {
+    expect(selectRemainingServicePrompt({ serviceKey, findingsType: expected }, 'typed')).not.toBeNull();
+    for (const findingsType of [...Object.keys(FINDINGS_TYPE_MODULES), null]) {
+      if (findingsType !== expected) expect(selectRemainingServicePrompt({ serviceKey, findingsType }, 'typed')).toBeNull();
+    }
+  });
+
+  test('generic and deliberately unbound identities cannot borrow a related typed schema', () => {
+    for (const [serviceKey, findingsType] of [
+      ['mosquito_monthly', 'mosquito_event'], ['bora_care', 'termite_treatment'], ['bed_bug_treatment', 'bed_bug'],
+    ]) {
+      expect(selectRemainingServicePrompt({ serviceKey, findingsType }, 'typed')).toBeNull();
+      expect(selectRemainingServicePrompt({ serviceKey, findingsType: null }, 'main')).not.toBeNull();
+    }
+    expect(selectRemainingServicePrompt({ serviceKey: 'pest_initial_roach' }, 'main')).toBeNull();
+    expect(selectRemainingServicePrompt({ serviceKey: 'termite_liquid', findingsType: null }, 'main')).toBeNull();
+  });
+
   test('adds only requested modifiers and deduplicates explicit and inferred selection', () => {
     const prompt = selectRemainingServicePrompt({
       serviceKey: 'mosquito_one_time',
@@ -100,12 +126,12 @@ describe('remaining service copy prompt registry', () => {
   });
 
   test('binds only code-verified exact keys and omits retired sanitation variants', () => {
-    expect(SERVICE_KEY_MODULES).toMatchObject({
-      mosquito_monthly: 'mosquito',
-      rodent_bait_quarterly: 'rodent_bait',
-      termite_active_annual: 'termite_stations',
-      flea_tick: 'flea',
-      palm_injection_semiannual: 'palm_care',
+    expect(SERVICE_KEY_BINDINGS).toMatchObject({
+      mosquito_monthly: ['mosquito', null],
+      rodent_bait_quarterly: ['rodent_bait', 'rodent_bait_station'],
+      termite_active_annual: ['termite_stations', 'termite_bait_station'],
+      flea_tick: ['flea', 'flea'],
+      palm_injection_semiannual: ['palm_care', 'palm_injection'],
     });
     expect(FINDINGS_TYPE_MODULES).toMatchObject({
       rodent_bait_station: 'rodent_bait',
@@ -113,11 +139,11 @@ describe('remaining service copy prompt registry', () => {
       german_roach_knockdown: 'cockroach',
       palm_injection: 'palm_care',
     });
-    expect(SERVICE_KEY_MODULES).not.toHaveProperty('rodent_sanitation_medium');
-    expect(SERVICE_KEY_MODULES).not.toHaveProperty('rodent_trapping_followup_3pack');
-    expect(Object.values(SERVICE_KEY_MODULES)).not.toContain('wildlife_conditional');
-    expect(Object.values(SERVICE_KEY_MODULES)).not.toContain('termite_preconstruction');
-    expect(Object.values(SERVICE_KEY_MODULES)).not.toContain('wdo_companion');
+    expect(SERVICE_KEY_BINDINGS).not.toHaveProperty('rodent_sanitation_medium');
+    expect(SERVICE_KEY_BINDINGS).not.toHaveProperty('rodent_trapping_followup_3pack');
+    expect(Object.values(SERVICE_KEY_BINDINGS).flat(2)).not.toContain('wildlife_conditional');
+    expect(Object.values(SERVICE_KEY_BINDINGS).flat(2)).not.toContain('termite_preconstruction');
+    expect(Object.values(SERVICE_KEY_BINDINGS).flat(2)).not.toContain('wdo_companion');
   });
   test('bundled rodent services include every recorded service boundary exactly once', () => {
     const prompt = selectRemainingServicePrompt({
