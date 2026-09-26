@@ -636,11 +636,14 @@ function classifyCoveredVisitInvoice(invoice, svc, addons) {
   const InvoiceService = require('../services/invoice');
   const lines = InvoiceService._parseInvoiceLineItems(invoice?.line_items);
   const isAddon = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
+  // Ledger-backed estimate deposit credit the shared mint rolls onto the
+  // add-ons bill — a payment toward it, not a charge of its own.
+  const isDepositCredit = (li) => String(li.category || '') === 'deposit_credit' && Number(li.amount) < 0;
   const positive = lines.filter((li) => Number(li.amount) > 0);
   return {
     // Positive evidence only: every line is one of this visit's add-ons (or
-    // a discount on one) and at least one bills something.
-    billsOnlyAddons: positive.length > 0 && lines.every(isAddon),
+    // a discount / deposit credit on them) and at least one bills something.
+    billsOnlyAddons: positive.length > 0 && lines.every((li) => isAddon(li) || isDepositCredit(li)),
     unknownCharges: positive.some((li) => !isAddon(li) && !InvoiceService.lineIsBaseApplication(li)),
   };
 }
@@ -650,7 +653,7 @@ function classifyCoveredVisitInvoice(invoice, svc, addons) {
 // adoption, deposit roll-forward). An invoice another writer committed first
 // is adopted only when it provably bills this visit's add-ons alone; anything
 // else comes back as a conflict for the office rather than as this bill.
-async function mintAnnualPrepayExtrasInvoice(svc, record, lines, addons, { coveredInvoiceId = null } = {}) {
+async function mintAnnualPrepayExtrasInvoice(svc, record, lines, addons, { coveredInvoiceId = null, isBackfillCompletion = false } = {}) {
   const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
   const serviceDate = serviceDateOnly(record?.service_date);
   const minted = await mintScheduledServiceInvoiceWithDeposit({
@@ -658,13 +661,18 @@ async function mintAnnualPrepayExtrasInvoice(svc, record, lines, addons, { cover
     // The covered-base settlement this completion just made is the bill's
     // sibling, not a replay of it.
     excludeFromAdoption: coveredInvoiceId ? [coveredInvoiceId] : [],
+    // Quiet backfill closeout: the same posture as its main invoice mint —
+    // the estimate deposit stays on its ledger for the reviewer.
+    skipDepositCredit: isBackfillCompletion,
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       serviceRecordId: record?.id || null,
       scheduledServiceId: svc.id,
       title: svc.service_type,
       serviceDate,
-      dueDate: serviceDate,
+      // Backfill: the backdated visit day would mint the bill already
+      // overdue; due today instead, like the main backfill mint.
+      dueDate: isBackfillCompletion ? etDateString() : serviceDate,
       notes: 'Add-ons beyond your annual prepay coverage. The covered visit itself is already paid.',
       lineItems: lines,
       trustedStoredDiscountSources: ['scheduled_service'],
@@ -10861,7 +10869,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return alertAnnualPrepayAddons('this visit is billed on its grouped closeout', { voidedInvoiceId, addonTotal: extras.total });
       }
       try {
-        const minted = await mintAnnualPrepayExtrasInvoice(current, record, extras.lines, addons, { coveredInvoiceId });
+        const minted = await mintAnnualPrepayExtrasInvoice(current, record, extras.lines, addons, { coveredInvoiceId, isBackfillCompletion });
         if (minted.conflict) {
           return alertAnnualPrepayAddons(`invoice ${minted.conflict.invoice_number || minted.conflict.id} already bills this visit including its covered base`, { voidedInvoiceId, conflictInvoiceId: minted.conflict.id, addonTotal: extras.total });
         }
@@ -10960,6 +10968,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (!annualPrepayAddonsHandled && annualPrepayCovered && !invoice?.id && !recapReviewOnly
       && visitPerformed && !terminalCompletionInvoice) {
       await billAnnualPrepayAddons();
+    }
+    // Resume after a crash between settling the covered base and minting its
+    // add-ons sibling: the retry reloads the base, already 'prepaid' as this
+    // term's coverage. Bill the add-ons beside it (the mint adopts a sibling
+    // an earlier pass did commit, and never the base itself).
+    if (!annualPrepayAddonsHandled && annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
+      && !recapReviewOnly && visitPerformed && !terminalCompletionInvoice
+      && String(invoice.status || '').toLowerCase() === 'prepaid'
+      && svc.annual_prepay_term_id
+      && String(invoice.annual_prepay_covered_term_id || '') === String(svc.annual_prepay_term_id)) {
+      await billAnnualPrepayAddons({ coveredInvoiceId: invoice.id });
     }
 
     // Auto-apply available account credit (e.g. the referral reward) to the

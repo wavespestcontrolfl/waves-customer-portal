@@ -88,9 +88,9 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   afterEach(async () => { if (trx) await trx.rollback(); });
   afterAll(async () => { await database?.destroy(); });
 
-  async function coveredVisit({ discountDollars = null, invoiceLines = null } = {}) {
+  async function coveredVisit({ discountDollars = null, invoiceLines = null, invoiceStatus = 'draft', daysAgo = 0, depositDollars = null } = {}) {
     const { etDateString, addETDays } = require('../utils/datetime-et');
-    const today = etDateString();
+    const today = daysAgo ? etDateString(addETDays(new Date(), -daysAgo)) : etDateString();
     const f = {
       customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(),
       termId: randomUUID(), addonId: randomUUID(), invoiceId: null,
@@ -110,13 +110,21 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       ...(discountDollars ? { discount_dollars: discountDollars, discount_name: 'Synthetic visit discount', discount_type: 'fixed_amount', discount_amount: discountDollars } : {}) });
     await trx('scheduled_service_addons').insert({ id: f.addonId, scheduled_service_id: f.serviceId,
       service_name: 'Wasp nest removal', estimated_price: ADDON, base_price: ADDON });
+    if (depositDollars) {
+      f.estimateId = randomUUID();
+      await trx('estimates').insert({ id: f.estimateId, customer_id: f.customerId, status: 'accepted' });
+      await trx('scheduled_services').where({ id: f.serviceId }).update({ source_estimate_id: f.estimateId });
+      await trx('estimate_deposits').insert({ estimate_id: f.estimateId, customer_id: f.customerId,
+        amount: depositDollars, status: 'received', stripe_payment_intent_id: `pi_fixture_${randomUUID()}` });
+    }
     if (invoiceLines) {
       f.invoiceId = randomUUID();
       const lines = invoiceLines(f);
       const total = lines.reduce((sum, li) => sum + li.amount, 0);
       await trx('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
-        invoice_number: `TEST-${f.invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft',
-        total, subtotal: total, service_date: today, line_items: JSON.stringify(lines) });
+        invoice_number: `TEST-${f.invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: invoiceStatus,
+        total, subtotal: total, service_date: today, line_items: JSON.stringify(lines),
+        ...(invoiceStatus === 'prepaid' ? { annual_prepay_covered_term_id: f.termId } : {}) });
     }
     return f;
   }
@@ -240,6 +248,71 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     const out = await complete(f);
     expect(out).toMatchObject({ status: 200 });
     expect(await liveInvoices(f)).toHaveLength(0);
+  });
+
+  test('a retry after the covered base was settled but before its add-ons were billed still bills them (P0 resume)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)], invoiceStatus: 'prepaid' });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('prepaid');
+    const bills = (await liveInvoices(f)).filter((i) => i.id !== f.invoiceId);
+    expect(bills).toHaveLength(1);
+    expect(Number(bills[0].total)).toBe(ADDON);
+    expect(linesOf(bills[0]).map((li) => li.client_id)).toEqual([`scheduled_${f.serviceId}_addon_${f.addonId}`]);
+    expect(out.body?.invoiceId).toBe(bills[0].id);
+  });
+
+  test('a retry that finds the add-ons sibling already minted beside the settled base adopts it, never a second bill', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)], invoiceStatus: 'prepaid' });
+    const siblingId = randomUUID();
+    await trx('invoices').insert({ id: siblingId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
+      invoice_number: `TEST-${siblingId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft',
+      total: ADDON, subtotal: ADDON, line_items: JSON.stringify([addonLine(f)]), created_at: new Date(Date.now() + 1000) });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    const bills = (await liveInvoices(f)).filter((i) => i.id !== f.invoiceId);
+    expect(bills.map((i) => i.id)).toEqual([siblingId]);
+  });
+
+  test('an add-ons bill partly funded by the estimate deposit is recognised as the add-ons bill and kept', async () => {
+    const f = await coveredVisit({ depositDollars: 10 });
+    // The bill an earlier pass minted: add-on line + ledger-backed deposit credit.
+    const InvoiceService = require('../services/invoice');
+    const bill = await InvoiceService.create({ database: trx, customerId: f.customerId, scheduledServiceId: f.serviceId,
+      title: 'Synthetic Quarterly Pest Control', lineItems: [addonLine(f)],
+      depositCredit: { amount: 10, estimateId: f.estimateId }, dueDate: require('../utils/datetime-et').etDateString() });
+    expect(Number(bill.applied_deposit_credit)).toBe(10);
+    await trx('estimate_deposits').where({ estimate_id: f.estimateId }).update({ credited_amount: 10, credited_invoice_id: bill.id });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: bill.id }).first('status')).status).not.toBe('void');
+    expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
+    expect(out.body?.invoiceId).toBe(bill.id);
+    expect(await addonsAlert(f)).toBeUndefined();
+  });
+
+  test('a live completion rolls the estimate deposit onto the add-ons bill', async () => {
+    const f = await coveredVisit({ depositDollars: 10 });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    const [bill] = await liveInvoices(f);
+    expect(Number(bill.total)).toBe(ADDON - 10);
+    expect(linesOf(bill).some((li) => li.category === 'deposit_credit')).toBe(true);
+  });
+
+  test('a quiet backfill completion bills the add-ons at face value, due today, and leaves the deposit on its ledger', async () => {
+    const f = await coveredVisit({ depositDollars: 10, daysAgo: 3 });
+    const out = await complete(f, { backfill: true, timeOnSite: 45 });
+    expect(out).toMatchObject({ status: 200 });
+    const invoices = await liveInvoices(f);
+    expect(invoices).toHaveLength(1);
+    const [bill] = invoices;
+    expect(Number(bill.total)).toBe(ADDON);
+    expect(linesOf(bill).some((li) => li.category === 'deposit_credit')).toBe(false);
+    const { etDateString } = require('../utils/datetime-et');
+    expect(String(bill.due_date instanceof Date ? bill.due_date.toISOString() : bill.due_date).slice(0, 10)).toBe(etDateString());
+    const deposit = await trx('estimate_deposits').where({ estimate_id: f.estimateId }).first();
+    expect(Number(deposit.credited_amount || 0)).toBe(0);
   });
 
   test('a visit that performed no application bills no add-ons', async () => {
