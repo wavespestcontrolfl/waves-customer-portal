@@ -4808,7 +4808,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "\\b(confirmed|booked|locked in|all set|reserved|guaranteed)\\b"
+      "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(confirmed|booked|locked in|all set|reserved|guaranteed)\\b"
      ],
      "severity": "critical"
     }

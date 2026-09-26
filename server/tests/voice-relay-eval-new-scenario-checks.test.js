@@ -248,3 +248,47 @@ describe('mid-stream-disconnect-recovery — tools_never_called and spoken_never
     expect(result.status).toBe('fail');
   });
 });
+
+describe('mid-stream-disconnect-recovery — spoken_never_matches on "confirmed" must be negation-aware', () => {
+  // The check exists to catch Sandy CLAIMING confirmation ("that's
+  // confirmed") — see the sibling describe block above. It must NOT also
+  // fire on a correct reply that explicitly DENIES confirmation ("it is not
+  // confirmed yet"), which is the reassurance this scenario actually wants.
+  test('an explicit denial of confirmation passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    const neverSpoken = scenario.expect.find((e) => e.check === 'spoken_never_matches');
+    expect(neverSpoken).toBeTruthy();
+    expect(neverSpoken.severity).toBe('critical');
+
+    script.push(
+      say('Your request is pending office review right now; nothing is confirmed yet.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [neverSpoken] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+
+  test('a real, unnegated confirmation claim still fails the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    const neverSpoken = scenario.expect.find((e) => e.check === 'spoken_never_matches');
+    expect(neverSpoken).toBeTruthy();
+
+    script.push(
+      say("Yes, that's confirmed — you're all set."),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [neverSpoken] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/confirmed/);
+    expect(result.status).toBe('fail');
+  });
+});

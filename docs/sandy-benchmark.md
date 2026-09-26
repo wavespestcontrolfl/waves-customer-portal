@@ -14,12 +14,25 @@ harness's own contract.
 |---|---|---|---|---|
 | 1 | current (Sonnet 5) | block (buffered) | unset | unset |
 | 2 | current (Sonnet 5) | stream (incremental) | unset | `stream` |
-| 3 | candidate (e.g. Haiku 4.5) | block | `claude-haiku-4-5-20251001` | unset |
-| 4 | candidate | stream | `claude-haiku-4-5-20251001` | `stream` |
+| 3 | candidate (e.g. Haiku 4.5) | block | `--candidate-model`'s value | unset |
+| 4 | candidate | stream | `--candidate-model`'s value | `stream` |
+
+`--candidate-model` is **required** — the runner has no default and never
+did pick one on its own after this fix. There is no "candidate under test"
+tier in the model registry (`server/config/models.js`'s `DEEP` / `FLAGSHIP` /
+`WORKHORSE` / `FAST` / `VOICE` / `VISION` / `EXTREME`) a fallback could safely
+resolve to: a benchmark candidate is a deliberate, one-off comparison choice
+for whoever runs it, not a standing production tier, so a hardcoded
+`'claude-…'` default in the script would be exactly the literal AGENTS.md's
+"Hardcoded Anthropic model IDs" rule forbids (it would pin a tier and defeat
+the env-var swap the registry exists for). Running it with no
+`--candidate-model` is a usage error (exit 2), the same as a runner crash,
+because no condition ran at all.
 
 `claude-haiku-4-5-20251001` is a valid, current, allowlisted id in
 `MODEL_CATALOG` as of this writing (`node -e "console.log(require('./server/config/models').MODEL_CATALOG['claude-haiku-4-5-20251001'])"`)
-— substitute any other allowlisted id with `--candidate-model=`.
+— this is an example for the command below, not a default; pass whichever
+allowlisted id you actually want to compare with `--candidate-model=`.
 
 **Important — these are the text-replay harness's own override variables,
 not the sandbox ones.** `server/services/eval/voice-relay-replay.js`'s
@@ -45,15 +58,16 @@ Twilio audio are faked). The exact commands, run by the owner or primary
 VOICE_RELAY_INBOUND_MODEL=claude-haiku-4-5-20251001 VOICE_RELAY_RENDERER=stream \
   node server/scripts/run-voice-relay-eval.js --json
 
-# All four conditions, interleaved trials, one combined report:
-node server/scripts/run-voice-relay-benchmark.js --trials=5
+# All four conditions, interleaved trials, one combined report
+# (--candidate-model is required — see "The four conditions" above):
+node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --trials=5
 
 # Narrow to the five new interruption/mechanics families only:
-node server/scripts/run-voice-relay-benchmark.js --trials=5 \
+node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --trials=5 \
   --only=mid-thought-pause,backchannel-vs-explicit-correction,interruption-inside-amount-or-date,delayed-tool-response-changed-instructions,mid-stream-disconnect-recovery
 
 # Add the optional transcript judge (extra API spend):
-node server/scripts/run-voice-relay-benchmark.js --trials=5 --judge
+node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --trials=5 --judge
 ```
 
 `server/scripts/run-voice-relay-benchmark.js` (new, this PR) is a thin
@@ -82,6 +96,45 @@ per turn, so a real warm/cold split needs reading `usage.cache_read_input_tokens
 / `cache_creation_input_tokens` off the raw API response — not exposed by
 `runVoiceRelayEval` today. Treat the label as a rough proxy, not proof.
 
+### Inconclusive runs are missing data, never a completed run
+
+The eval CLI (`run-voice-relay-eval.js`) has two exit codes that both carry
+valid JSON on stdout: `0`/`1` (`status: 'pass'`/`'fail'` — the eval evaluated
+the fixture, one way or the other) and `3` (`status: 'inconclusive'` — it
+could not evaluate anything at all, e.g. no scenario completed a model
+round). The runner treats ONLY `'pass'`/`'fail'` as a completed run
+(`ranOk`); an inconclusive run — however well-formed its JSON — is counted in
+`inconclusiveRuns`, its `error` is carried into `crashError` in the per-run
+detail, and it makes the whole benchmark's exit code non-zero, exactly like a
+real crash (`crashedRuns`, no JSON / exit 2 / a timeout). A candidate that
+merely could not be evaluated must never look like a clean pass, and its
+sample count must never be silently padded into `scenarioSamples`.
+
+### Retry accounting
+
+`runVoiceRelayEval` retries a failed first attempt once
+(`voice-relay-replay.js`'s `attemptWithRetry`) and a pass-on-retry is
+"flaky", not a failure — but `result.summary` and `result.results` reflect
+only the SELECTED `finalAttempt` (the retry, when there was one and it
+wasn't itself inconclusive). Reading only `result.summary` would silently
+drop a first attempt's critical miss the moment the retry happened to pass.
+The runner instead sums every entry of `result.attempts` (the eval CLI's own
+compact `{status, summary, error}` list — one entry, or two when the first
+attempt failed) into `scenarioSamples` / `scenarioPasses` / `scenarioFailures`
+/ `replayErrors` / `criticalMisses`, and reports `retriedRuns` (how many
+completed runs needed the retry) and `flakyRuns` (how many of those retries
+flipped to a pass) as their own fields, never folded into the pass/fail sums.
+This runner has no single-attempt mode to fall back to instead: neither the
+eval CLI nor `runVoiceRelayEval` exposes a flag to disable the retry-once
+wrapper, so aggregating every attempt is the only way to keep a first-attempt
+miss visible.
+
+**Consequence for the sample-size denominator**: `attemptSamples` (attempts ×
+trials × scenarios) is the true sample size behind `scenarioSamples` /
+`scenarioPasses` / `criticalMisses` once any run in the condition retried —
+it can be larger than `completedRuns × scenarios`. Report `attemptSamples`
+next to any rate computed from these fields.
+
 ## What text replay measures vs. what needs a sandbox call
 
 | | Text replay (`eval:voice-relay` / the runner above) | Real sandbox call |
@@ -102,18 +155,26 @@ placed while producing this document.
 For each condition, report all of the following — never a favorable average
 alone:
 
-- **Sample counts**: `scenarios` × `trials` actually completed
-  (`scenarioSamples` in the runner's report), separately from `trials`
-  requested — a crashed trial must show as a crash, not vanish from the
-  denominator.
+- **Sample counts**: `attemptSamples` (every attempt of every completed run,
+  including a first-attempt retry — see "Retry accounting" above) is the true
+  denominator behind `scenarioSamples` / `scenarioPasses` / `criticalMisses`;
+  report it alongside `trials` requested — a crashed OR inconclusive trial
+  must show as missing data, not vanish from the denominator or get folded
+  into a "completed" count.
 - **Failures**: `scenarioFailures` (a scenario's own checks failed) and
   `replayErrors` (the harness itself could not run the scenario) — these are
   different failure modes and must not be summed into one number.
-- **Missing-data rate**: the fraction of runs where `ranOk` is false
-  (`crashedRuns` / `trials`), and, within completed runs, the fraction of
-  turns with a null audio-latency field and its `audio_metrics_reason` (only
-  meaningful on a real sandbox call — see the table above; the text-replay
-  harness never writes this field at all).
+- **Retries**: `retriedRuns` (how many completed runs needed the eval CLI's
+  own retry-once) and `flakyRuns` (how many of those retries flipped a fail to
+  a pass) — report both; a condition with a high `flakyRuns` rate is a
+  reliability signal even when every run ultimately "passed".
+- **Missing-data rate**: the fraction of runs where `ranOk` is false —
+  broken down into `crashedRuns` / `trials` (the harness itself never
+  produced a result) and `inconclusiveRuns` / `trials` (it produced a result,
+  but the result says it could not evaluate the fixture) — and, within
+  completed runs, the fraction of turns with a null audio-latency field and
+  its `audio_metrics_reason` (only meaningful on a real sandbox call — see the
+  table above; the text-replay harness never writes this field at all).
 - **Latency**: median and p90 of `durationMsMedian` / `durationMsP90` per
   condition, **with the sample-size caveat already built into the runner**
   (`durationMsP90` is `null`/"n/a" below 3 completed runs — a p90 over 1-2
