@@ -206,6 +206,10 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
   let retryAddress = null;
   let addressBriefIds = [];
   await conn.transaction(async trx => {
+    // Address fan-out reuses this lock. Take it before visit/customer locks,
+    // matching admin address edits and primary-property changes.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(customerId)]);
     const needsVisitFence = ['verify_pin', 'outside_service_area', 'revoke'].includes(input.action);
     const includeProtected = ['outside_service_area', 'revoke'].includes(input.action);
     const prelocked = needsVisitFence

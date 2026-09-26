@@ -42,6 +42,7 @@ function connection() {
     };
     return query;
   };
+  conn.raw = jest.fn().mockResolvedValue({ rows: [] });
   conn.transaction = async callback => { await callback(conn); state.committed = true; };
   return { conn, state };
 }
