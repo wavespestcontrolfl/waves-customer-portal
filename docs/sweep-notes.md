@@ -39,6 +39,8 @@ PR/audit reference and date, newest first within its section.
 - Stripe Terminal reader showing "offline" between sessions is normal.
 - Cloudflare Bot Fight Mode is OFF on marketing zones by design.
 - SMS template rows are never deleted — deactivate via `isTemplateActive`.
+- Outbound calls skip the recurring-intent classification backstop by design;
+  the backstop is inbound-only (#2628).
 
 ## Known dead code (already catalogued — don't re-discover)
 

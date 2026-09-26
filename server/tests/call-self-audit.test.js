@@ -6,7 +6,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 
 const db = require('../models/db');
-const { runSelfAudit } = require('../services/call-self-audit');
+const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL } = require('../services/call-self-audit');
 
 const SAMPLE = (over = {}) => ({
   id: 'call-1', twilio_call_sid: 'CA_sa1', created_at: new Date(), processing_status: 'processed',
@@ -17,10 +17,17 @@ const SAMPLE = (over = {}) => ({
 function mockDb({ calls, onInsert = () => {}, whereCalls = [] }) {
   db.raw = (sql) => sql;
   db.mockImplementation((table) => {
+    const raws = [];
+    const isOutbound = (c) => String(c.direction || '').startsWith('outbound');
     const b = {
-      where(...args) { whereCalls.push(args); return b; }, whereIn() { return b; }, whereRaw() { return b; }, modify(fn) { fn(b); return b; },
+      where(...args) { whereCalls.push(args); return b; }, whereIn() { return b; }, whereRaw(sql) { raws.push(sql); return b; }, modify(fn) { fn(b); return b; },
       orderBy() { return b; }, limit() { return b; },
-      select: async () => (table === 'call_log' ? calls : []),
+      // Each direction query returns only its own direction's rows.
+      select: async () => {
+        if (table !== 'call_log') return [];
+        const wantsOutbound = raws.includes(OUTBOUND_DIRECTION_SQL);
+        return calls.filter((c) => isOutbound(c) === wantsOutbound);
+      },
       insert: (row) => { onInsert(table, row); return { onConflict: () => ({ merge: async () => {}, catch: () => {} }) }; },
     };
     // knex insert().onConflict().merge().catch() chain used in service
@@ -58,11 +65,33 @@ test('a lead stamped vendor_logged counts as a disposition mismatch', async () =
 });
 
 // Owner directive 2026-09-26: every call-agent rule is audited the same way
-// regardless of who dialed — the nightly sample must not filter to inbound only.
-test('an outbound call is sampled and audited, not filtered out by direction', async () => {
-  const whereCalls = [];
-  mockDb({ calls: [SAMPLE({ id: 'call-outbound', direction: 'outbound' })], whereCalls });
-  const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"outbound booked"}' }] }) });
-  expect(res.audited).toBe(1);
-  expect(whereCalls.some(([field, value]) => field === 'direction' && value === 'inbound')).toBe(false);
+// regardless of who dialed — and a burst of one direction must not crowd the
+// other out of the sample (codex #4912 r1 P2).
+const OK_VERDICT = { content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"ok"}' }] };
+
+test('outbound calls are sampled even when newer inbound calls alone would fill the sample', async () => {
+  const inbound = Array.from({ length: 40 }, (_, i) => SAMPLE({ id: `in-${i}`, direction: 'inbound' }));
+  const outboundText = 'Agent: Hi, this is Waves returning your call. Caller: Yes, about the ants. '.repeat(6);
+  const outbound = [
+    SAMPLE({ id: 'out-1', direction: 'outbound-dial', transcription: outboundText }),
+    SAMPLE({ id: 'out-2', direction: 'outbound', transcription: outboundText }),
+  ];
+  mockDb({ calls: [...inbound, ...outbound] });
+  const seen = [];
+  await runSelfAudit({ createMessage: async (params) => { seen.push(params.messages[0].content); return OK_VERDICT; } });
+  expect(seen.length).toBe(25);
+  expect(seen.filter((t) => t.includes('returning your call')).length).toBe(2);
+});
+
+test('stratifySample reserves half per direction and gives unused share to the other', () => {
+  const rows = (prefix, n) => Array.from({ length: n }, (_, i) => ({ id: `${prefix}-${i}` }));
+  const both = stratifySample({ inbound: rows('in', 40), outbound: rows('out', 40), size: 25 });
+  expect(both.filter((r) => r.id.startsWith('out')).length).toBe(12);
+  expect(both.length).toBe(25);
+  const fewOutbound = stratifySample({ inbound: rows('in', 40), outbound: rows('out', 2), size: 25 });
+  expect(fewOutbound.filter((r) => r.id.startsWith('out')).length).toBe(2);
+  expect(fewOutbound.length).toBe(25);
+  const fewInbound = stratifySample({ inbound: rows('in', 3), outbound: rows('out', 40), size: 25 });
+  expect(fewInbound.filter((r) => r.id.startsWith('in')).length).toBe(3);
+  expect(fewInbound.length).toBe(25);
 });

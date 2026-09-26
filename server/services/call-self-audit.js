@@ -32,6 +32,18 @@ const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Co
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
 Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead.`;
 
+const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
+const INBOUND_DIRECTION_SQL = "COALESCE(direction, '') NOT LIKE 'outbound%'";
+
+// Reserve up to half the sample for each direction; whatever one direction
+// cannot fill goes to the other. Each input is newest-first already.
+function stratifySample({ inbound = [], outbound = [], size = SAMPLE_SIZE } = {}) {
+  const half = Math.floor(size / 2);
+  const outTake = Math.min(outbound.length, Math.max(half, size - inbound.length));
+  const inTake = Math.min(inbound.length, size - outTake);
+  return [...inbound.slice(0, inTake), ...outbound.slice(0, outTake)];
+}
+
 async function runSelfAudit(depsIn = {}) {
   if (!isEnabled('callSelfAudit')) return { skipped: 'gate_off' };
   // createDeepMessage's contract is (client, params) — the caller owns the
@@ -43,16 +55,24 @@ async function runSelfAudit(depsIn = {}) {
     deps.createMessage = (params) => createDeepMessage(client, { laneId: 'call_self_audit', ...params });
   }
 
-  const calls = await db('call_log')
-    // Both directions are sampled (owner directive 2026-09-26: every
-    // call-agent rule is audited the same way regardless of who dialed).
+  // Both directions are sampled (owner directive 2026-09-26: every
+  // call-agent rule is audited the same way regardless of who dialed), each
+  // from its OWN newest-first query so a burst in one direction can never
+  // crowd the other out of a single recency-ordered LIMIT (codex #4912 r1 P2).
+  const sampleDirection = (directionSql) => db('call_log')
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not audited
+    .whereRaw(directionSql)
     .whereIn('processing_status', ['processed', 'voicemail', 'spam'])
     .whereRaw("LENGTH(COALESCE(transcription, '')) > 200")
     .where('created_at', '>', db.raw("NOW() - INTERVAL '3 days'"))
     .orderBy('created_at', 'desc')
     .limit(SAMPLE_SIZE)
-    .select('id', 'twilio_call_sid', 'created_at', 'processing_status', 'transcription', 'ai_extraction', 'disposition');
+    .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition');
+  const [inboundRows, outboundRows] = await Promise.all([
+    sampleDirection(INBOUND_DIRECTION_SQL),
+    sampleDirection(OUTBOUND_DIRECTION_SQL),
+  ]);
+  const calls = stratifySample({ inbound: inboundRows, outbound: outboundRows, size: SAMPLE_SIZE });
 
   if (!calls.length) return { sampled: 0 };
 
@@ -149,4 +169,4 @@ async function runSelfAudit(depsIn = {}) {
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL };

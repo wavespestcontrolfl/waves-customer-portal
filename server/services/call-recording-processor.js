@@ -8658,16 +8658,15 @@ const CallRecordingProcessor = {
 
     // Owner rule: recurring interest beats the single presenting pest — a
     // deterministic backstop on top of the same instruction in the prompt.
-    // Direction-independent (owner directive 2026-09-26, all four call
-    // sites): this used to run inbound-only because diarization label
-    // assignment was observed inconsistent on outbound calls (2026-07-11,
-    // the Copeman call labeled the WAVES AGENT as "Caller:"), which could
-    // read the agent's own plan pitch as customer intent on the caller-text
-    // scan. That residual mislabel risk is accepted under the directive that
-    // every call-agent rule applies to both directions; the prompt-driven
-    // model (which sees the whole conversation either way) remains the
-    // primary signal regardless.
-    extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+    // INBOUND ONLY (all four call sites), the one documented exception to
+    // the 2026-09-26 both-directions directive: it scans the text labeled
+    // "Caller:", and diarization label assignment is inconsistent on
+    // outbound calls — observed live 2026-07-11, the Copeman outbound call
+    // labeled the WAVES AGENT as "Caller:" — so the scan could read the
+    // agent's own plan pitch as customer intent. The prompt-driven model,
+    // which sees the whole conversation, still applies the rule on outbound
+    // calls. Revisit when outbound speaker identity is deterministic.
+    if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
@@ -8815,7 +8814,7 @@ const CallRecordingProcessor = {
         // fields (a stub call had nothing to upgrade). Re-assert it over the
         // adopted service labels BEFORE any lead write consumes them, exactly
         // like the enforce path's approved-booking re-assert (codex P2).
-        extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
     }
 
@@ -8892,7 +8891,7 @@ const CallRecordingProcessor = {
       // promotion — a "wasp nest, and I'd like the quarterly package"
       // voicemail was still is_lead=false then. Re-run it now that the
       // deterministic signals made this a lead (idempotent, no-op otherwise).
-      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
     }
 
     // Skip spam and non-workable voicemail
@@ -9558,10 +9557,14 @@ const CallRecordingProcessor = {
             // does, and the unit ask the same way the merge point does.
             canonicalRecord: extracted,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
-            // Agent-commitment authorization is direction-independent too
-            // (owner directive 2026-09-26): a spoken agreement on an outbound
-            // call authorizes the booking the same way it does inbound.
-            agentCommitFailOpen: isEnabled('callAgentCommitBooking'),
+            // Agent-commitment authorization stays INBOUND-only — the second
+            // documented exception to the 2026-09-26 both-directions directive
+            // (codex #4912 r1 P1): it trusts the "Agent:" speaker label, and
+            // outbound diarization has swapped roles (see the recurring-intent
+            // note above), so a customer's own "we're on for Sunday at noon"
+            // could ground as a Waves commitment. Revisit when outbound speaker
+            // identity is deterministic.
+            agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
             // Grounds the agent-commitment evidence quote against the labeled
             // source transcript — evidence objects are untrusted model output.
             transcript: transcription,
@@ -14708,7 +14711,7 @@ const CallRecordingProcessor = {
       // the merged fields; no-op when nothing singular survived.
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
-      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       if (extracted.matched_service !== preReassertMatched
         || extracted.specific_service_name !== preReassertSpecific) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
@@ -18693,7 +18696,8 @@ const CallRecordingProcessor = {
           failOpen: isEnabled('callFailOpenBooking'),
           callerAni: contactPhone,
           knownCustomer: failOpenKnownCustomer(knownCaller),
-          agentCommitFailOpen: isEnabled('callAgentCommitBooking'),
+          // Inbound-only, mirroring the enforce lane (codex #4912 r1 P1).
+          agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           callStartedAt: call.created_at,

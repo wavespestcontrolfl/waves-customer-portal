@@ -919,7 +919,13 @@ function compareScheduledService(scheduled, currentFlat, includeValues) {
     }));
 }
 
-function contactPhoneForCall(call) {
+// The same resolver production's routing uses (codex #4912 r1 P2): on a
+// lead-webhook-auto-bridge outbound call to_phone is the staff cell and the
+// customer leg lives in the bridge metadata, so a raw to_phone would hand
+// outbound fail-open an internal number as callerAni.
+function contactPhoneForCall(call, CRP) {
+  const resolve = CRP?._test?.resolveCallContactPhone;
+  if (resolve) return resolve(call);
   return String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
 }
 
@@ -1153,6 +1159,8 @@ async function loadCandidateCalls(db, options) {
     'from_phone',
     'to_phone',
     'direction',
+    'source',
+    'metadata',
     'processing_status',
     'transcription',
     'ai_extraction',
@@ -1227,7 +1235,7 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
 
 async function replayCall(call, context) {
   const { helpers, CRP, db, scheduledColumns, includeValues, retranscribe, fixtureCaseByCallId } = context;
-  const contactPhone = contactPhoneForCall(call);
+  const contactPhone = contactPhoneForCall(call, CRP);
   const legacyFlat = parseJson(call.ai_extraction, {}) || {};
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
