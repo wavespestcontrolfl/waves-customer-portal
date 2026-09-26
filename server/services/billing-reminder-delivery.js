@@ -113,6 +113,7 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
   // Only a durable denial waives its leg; a spacing window keeps it owed.
   const waived = new Set([...(existing?.waived || []),
     ...pending.filter((_channel, index) => verdictDurablyDenied(permitted[index]))]);
+  const episodeRowIds = new Set(entries.map((entry) => entry.id));
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
     const entry = await ContactLedger.recordContact({
@@ -121,6 +122,7 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
       metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels,
         ...(waived.size ? { policy_waived_channels: [...waived] } : {}) },
     });
+    episodeRowIds.add(entry?.id);
     const claim = await ContactLedger.claimAttempt(entry);
     if (claim.delivered) { delivered.add(channel); continue; }
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
@@ -132,7 +134,30 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
       if (!result.deduped) deliveredNow.push(channel);
     } else if (state === 'resolved') resolved.add(channel);
   }
-  return { complete: legsSettled(channels, delivered, resolved, waived), deliveredNow, results };
+  const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);
+  return { complete, deliveredNow, results };
+}
+
+// A waiver only settles the episode once it is durable: a reused row keeps
+// its original metadata, and a denial that arrives after the sibling was
+// delivered writes no new row at all.
+async function settleEpisode(channels, { delivered, resolved, waived }, rowIds) {
+  if (!legsSettled(channels, delivered, resolved, waived)) return false;
+  const reliesOnWaiver = channels.some((channel) => waived.has(channel)
+    && !delivered.has(channel) && !resolved.has(channel));
+  if (!reliesOnWaiver) return true;
+  const ids = [...rowIds].filter(Boolean);
+  if (!ids.length) return false;
+  try {
+    await db('collections_contact_ledger').whereIn('id', ids).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('policy_waived_channels', ?::jsonb)", [
+        JSON.stringify([...waived]),
+      ]),
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 module.exports = {

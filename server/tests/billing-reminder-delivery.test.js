@@ -23,9 +23,18 @@ describe('billing reminder per-channel delivery progress', () => {
     db.mockImplementation((table) => {
       if (table !== 'collections_contact_ledger') throw new Error(`Unexpected table ${table}`);
       const query = { where: jest.fn(() => query) };
+      query.whereIn = jest.fn((_column, ids) => { query.ids = ids; return query; });
+      query.update = jest.fn(async ({ metadata }) => {
+        const patch = JSON.parse(metadata.bindings[0]);
+        for (const row of rows.filter((candidate) => query.ids.includes(candidate.id))) {
+          row.metadata.policy_waived_channels = patch;
+        }
+        return query.ids.length;
+      });
       query.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
       return query;
     });
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     collectionsChannelPermitted.mockResolvedValue(true);
     ContactLedger.recordContact.mockImplementation(async (input) => {
       let row = rows.find((candidate) => candidate.idempotency_key === input.idempotencyKey);
@@ -161,6 +170,32 @@ describe('billing reminder per-channel delivery progress', () => {
     collectionsChannelPermitted.mockResolvedValue({ allowed: false, durable: true });
     await expect(deliver(['email', 'sms'], send, 'invoice-1:firm')).resolves.toMatchObject({ complete: false, deliveredNow: [] });
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('a durable Email denial after Text already delivered is persisted before settling', async () => {
+    const { reminderProgress } = require('../services/billing-reminder-delivery');
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email'
+      ? { allowed: false, durable: false } : { allowed: true, durable: false }));
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: false, deliveredNow: ['sms'] });
+
+    // A do-not-email flag lands later: no new leg is written this run.
+    collectionsChannelPermitted.mockResolvedValue({ allowed: false, durable: true });
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(rows.find((row) => row.channel === 'sms').metadata.policy_waived_channels).toEqual(['email']);
+    await expect(reminderProgress('customer-1', 'balance_reminder_workflow', ['email', 'sms']))
+      .resolves.toEqual([expect.objectContaining({ complete: true })]);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('an unpersisted waiver never reports the episode settled', async () => {
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email'
+      ? { allowed: false, durable: false } : { allowed: true, durable: false }));
+    await deliver(['email', 'sms'], send);
+    collectionsChannelPermitted.mockResolvedValue({ allowed: false, durable: true });
+    db.raw.mockImplementationOnce(() => { throw new Error('connection terminated'); });
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: false });
   });
 
   test('an unstamped acceptance is held and never sent twice', async () => {
