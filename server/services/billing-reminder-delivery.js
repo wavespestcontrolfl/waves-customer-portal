@@ -90,7 +90,13 @@ async function sendLeg(send, channel, entry) {
 // the reservation held; only a definite non-send becomes retryable.
 async function recordLegOutcome(entry, channel, result, results) {
   const accepted = result?.deliveryOutcome === 'accepted'
-    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined);
+    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined)
+    // App delivery has two customer-visible surfaces. push-channel-routing
+    // sets this witness only when this attempt created or refreshed a real,
+    // unsuppressed in-app bell. A device-level not_sent therefore still
+    // settles the App leg; it must not turn the reservation retryable and
+    // re-notify the customer tomorrow.
+    || (channel === 'push' && result?.bellPersisted === true);
   if (accepted) {
     if (await ContactLedger.markDelivered(entry)) return 'delivered';
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
