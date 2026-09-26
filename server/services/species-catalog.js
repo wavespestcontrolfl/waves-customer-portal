@@ -448,7 +448,7 @@ function resolveName(text) {
   // its name ("plaster bagworm" is an indoor casebearer, not the outdoor
   // bagworm): such text never resolves to it (Codex #4974 r10).
   const allowed = (node) => !(node && Array.isArray(node.not_matches)
-    && node.not_matches.some((phrase) => new RegExp(`\\b${normalizeName(phrase)}\\b`).test(normalized)));
+    && node.not_matches.some((phrase) => new RegExp(`\\b${normalizeName(phrase)}(?:s|es)?\\b`).test(normalized)));
 
   for (const via of NAME_ORDER) {
     const exact = exactMatch(normalized, NAME_INDICES[via].index);

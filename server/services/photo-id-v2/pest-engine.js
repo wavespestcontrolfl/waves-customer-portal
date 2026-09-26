@@ -898,30 +898,29 @@ function buildAnswer(ctx) {
   // with a needs-more-evidence tier, no next photo, and high v1 confidence.
   const evidenceBlocked = !qualityUsable || qualityIssue === 'multiple_subjects' || !!subjectConflict;
   const blockPrettySure = unansweredTrigger || !!openaiStoodInAlone || evidenceBlocked;
-  const top = candidates[0] || null;
-
-  // A sign-only read never names an organism: the photos show mud tubes, not
-  // a termite, and several species make them. The sign entry itself may
-  // still be named; an organism top climbs its lineage (Codex #4974 r7).
-  // ...and, symmetrically, an organism-only read never names a sign entry
-  // (discarded wings when the photos show a live insect; Codex #4974 r10).
+  // A sign-only read never names or lists an organism (the photos show mud
+  // tubes, not a termite, and several species make them), and an
+  // organism-only read never names or lists a sign (Codex #4974 r7, r10).
+  // The contradicted kind is filtered out FIRST, so the best remaining
+  // candidate can still be the answer (r11). If nothing remains, the
+  // answer climbs the full list's lineage but names nothing.
   const hiddenKind = signOnly ? 'organism' : (organismOnly ? 'sign' : null);
-  const organismFromSign = !!hiddenKind && top?.entry?.kind === hiddenKind;
+  const shownCandidates = hiddenKind ? candidates.filter((c) => c.entry?.kind !== hiddenKind) : candidates;
+  const top = shownCandidates[0] || null;
   const picked = disagreed
     ? climbedOrDisagreedAnswer(candidates, true, disagreementNode)
-    : ((!organismFromSign && entryLevelAnswer(candidates, top, blockPrettySure)) || climbedOrDisagreedAnswer(candidates, false, null));
+    : ((shownCandidates.length && entryLevelAnswer(shownCandidates, top, blockPrettySure))
+      || climbedOrDisagreedAnswer(shownCandidates.length ? shownCandidates : candidates, false, null));
   const { level, wording, nodeId, subhead, headline, entry } = picked;
 
   const group = groupBlockFor(level, nodeId, entry);
-  // On a sign-only read the photos show no animal: nothing a customer sees
-  // (evidence, other possibilities) comes from an organism candidate
+  // Evidence and other possibilities come from the same filtered list
   // (Codex #4974 r8-r9).
-  const shownCandidates = hiddenKind ? candidates.filter((c) => c.entry?.kind !== hiddenKind) : candidates;
   const evidence = evidenceFor(candidatesSupporting(shownCandidates, level, nodeId));
   // On a sign-only read the photos show no animal, so no organism is listed
   // as another possibility either (Codex #4974 r8).
   const candidatesBlock = candidatesBlockFor(shownCandidates, currentMonth);
-  const nextPhoto = nextPhotoFor(wording, candidates, level, nodeId);
+  const nextPhoto = nextPhotoFor(wording, shownCandidates.length ? shownCandidates : candidates, level, nodeId);
 
   // Contract delta 2026-09-26 #3: a chosen pair no single photo can settle
   // keeps the tier at needs_more_evidence even at entry level (`likely`) —

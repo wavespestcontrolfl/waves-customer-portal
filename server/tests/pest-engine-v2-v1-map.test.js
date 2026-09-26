@@ -79,8 +79,14 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
     expect(built.candidatesBlock.map((c) => c.slug)).not.toContain('discarded-wings');
   });
 
+  test('after dropping the contradicted kind, the best remaining candidate can still be named (Codex #4974 r11)', () => {
+    const built = buildAnswer({ ...ctx([cand('discarded-wings', 0.95), cand('subterranean-termite', 0.9)]), organismOnly: true });
+    expect(built.entry?.slug).toBe('subterranean-termite');
+  });
+
   test('"plaster bagworm" never resolves to the outdoor bagworm (Codex #4974 r10)', () => {
     expect(catalog.resolveName('plaster bagworm')?.node?.slug).not.toBe('bagworm');
+    expect(catalog.resolveName('I found plaster bagworms')?.node?.slug).not.toBe('bagworm');
     expect(catalog.resolveName('bagworm')?.node?.slug).toBe('bagworm');
   });
 
