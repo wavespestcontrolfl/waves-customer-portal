@@ -205,7 +205,7 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
     }
   });
   test('required watering needs a positive amount or timing before it can be credited', () => {
-    for (const irrigationNotes of ['Water in.', 'Do not water for 24 hours.']) {
+    for (const irrigationNotes of ['Water in.', 'Water in after application.', 'Water after service.', 'Water before the next mowing.', 'Do not water for 24 hours.']) {
       expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
         .toMatchObject({
           waterInRequired: true,
@@ -213,7 +213,7 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
           needsReview: true,
         });
     }
-    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: 'Water after service.' } }]))
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: 'Water immediately after service.' } }]))
       .toMatchObject({ evidenceSource: 'product_instruction', needsReview: false, creditableWaterIn: true });
     expect(buildAftercare([{ product: { irrigation_required: false, irrigation_notes: 'Do not water for 24 hours.' } }]))
       .toMatchObject({ evidenceSource: 'product_instruction', needsReview: false, creditableWaterIn: false });

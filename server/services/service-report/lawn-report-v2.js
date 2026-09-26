@@ -466,7 +466,7 @@ function isCompleteWaterInInstruction(note) {
   if (!isActionableWateringInstruction(text) || isWateringHoldInstruction(text)) return false;
   const positiveWaterAction = /\b(?:water(?:ing)?|irrigat\w*)\b/i.test(text)
     || /\b(?:add|apply|give)\b[^.]{0,48}\b(?:water|watering|irrigation)\b/i.test(text);
-  const amountOrTiming = /\b(?:within|after|before|for|until|immediately|today|tomorrow)\b/i.test(text)
+  const amountOrTiming = /\b(?:immediately|today|tomorrow)\b/i.test(text)
     || /\b\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?)\b/i.test(text);
   return positiveWaterAction && amountOrTiming;
 }
