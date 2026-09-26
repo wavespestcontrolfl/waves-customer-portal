@@ -1364,6 +1364,11 @@ const TwilioService = {
               : {}),
             ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
             ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+            // The visit this send is about, on the primary row itself: the
+            // messaging audit is best-effort, and readers that scope by
+            // property (SMS commitment evidence) must not depend on it
+            // (Codex #4816 r41). Same key the push proof row uses.
+            ...(options.appointmentId ? { scheduled_service_id: String(options.appointmentId) } : {}),
           }),
         });
       } catch (logErr) {

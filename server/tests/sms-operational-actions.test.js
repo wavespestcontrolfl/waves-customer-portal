@@ -766,7 +766,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Please call me about 2 years of invoices', 'The tech was here for like 2 hours and it failed; call me',
     "Please call me about this month's invoice", "Call me about tomorrow's appointment", "Can someone call about Friday's visit?",
     "Call me about next week's service", 'Please call me about my next visit', 'Can you call regarding the next appointment?',
-    'Call me about tomorrow and the treatment plan'])(
+    'Call me about tomorrow and the treatment plan', 'Please send me the report from this morning',
+    "Send the photos from Friday's visit"])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
         .toBe('default_kind');

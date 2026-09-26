@@ -207,6 +207,21 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
   });
 
   test.each([
+    ['stamps the visit an appointment send is about (Codex #4816 r41)', { appointmentId: 'visit-123' }, 'visit-123'],
+    ['leaves scheduled_service_id off when the send names no visit', {}, undefined],
+  ])('%s', async (_label, extra, expected) => {
+    const rows = [];
+    require('../models/db').mockImplementation(() => ({ insert: async row => { rows.push(row); } }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Your appointment is confirmed.', {
+        messageType: 'confirmation', fromNumber: FROM, ...extra,
+      });
+      expect(result.success).toBe(true);
+      expect(JSON.parse(rows[0].metadata).scheduled_service_id).toBe(expected);
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  test.each([
     ['a typed send with no media option (scheduled dispatch) records zero media', { humanAuthored: true }, []],
     ['a typed send with media urls but no media option stays unknown', { humanAuthored: true, mediaUrls: ['https://example.invalid/a.jpg'] }, undefined],
     ['an automated send records no media evidence', { humanAuthored: false }, undefined],

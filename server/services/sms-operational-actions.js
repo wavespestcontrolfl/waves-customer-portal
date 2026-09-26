@@ -110,15 +110,17 @@ const SPAN_UNIT = String.raw`(?:days?|weeks?|months?|years?)`;
 // service" (Codex #4816 r37–r39 kept finding one topical form per round).
 // The clause after about/regarding/concerning, up to the next punctuation,
 // is dropped before the timing test; "in/within/after/give me about 2
-// hours" is an offset, not a topic, and stays. Erring toward the default
-// deadline is the safe side: a missed bell is the worse failure.
+// hours" is an offset, not a topic, and stays. "from" names the source
+// of an artifact ("the report from this morning", Codex #4816 r41). Erring
+// toward the default deadline is the safe side: a missed bell is the worse
+// failure.
 // The clause always takes its first word ("about tomorrow's visit", "about
 // my next visit"), then stops before a word that starts a trailing deadline
 // ("about my invoice tomorrow", "... on Friday", "... by 5", "... next
 // week"), so that timing is still tested (Codex #4816 r40).
 const TRAILING_TIMING_START = String.raw`(?:today|tomorrow|tmrw|tonight|asap|eod|eow|by|before|after|on|until|till|at|in|within|later|end`
   + String.raw`|(?:mon|tues|wednes|thurs|fri|satur|sun)day|this (?:morning|afternoon|evening|week(?:end)?)|next (?:week(?:end)?|month|year))\b`;
-const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|re:|in regards? to|with regards? to)`
+const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|from|re:|in regards? to|with regards? to)`
   + String.raw`\s+[^\s,.;!?]+(?:\s+(?!${TRAILING_TIMING_START})[^\s,.;!?]+)*`, 'gi');
 function withoutTopics(quote) {
   return String(quote || '').replace(TOPIC_CLAUSE, ' ');
