@@ -116,6 +116,10 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   const customerName = `${customer.first_name} ${customer.last_name}`;
   const visitDuration = getVisitDuration(service);
   const isCallback = service.is_callback || (service.service_type && service.service_type.toLowerCase().includes('callback'));
+  // An included rodent trap check is a callback of the trapping job, not of
+  // a WaveGuard membership (owner ruling 2026-09-26: $350 trapping covers
+  // setup + 1 check; the paid $95 check is never a callback).
+  const isIncludedTrapCheck = isCallback && /\btrap/i.test(String(service.service_type || ''));
 
   // Parse weather data
   let weather = null;
@@ -287,7 +291,9 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
     doc.roundedRect(L, y, W, 30, 4).fill('#E8F5E9');
     doc.roundedRect(L, y, 4, 30, 2).fill(GREEN);
     doc.fontSize(9).font('Helvetica-Bold').fillColor('#2E7D32').text(
-      'This callback visit was included at no additional charge with your WaveGuard membership.',
+      isIncludedTrapCheck
+        ? 'This trap check was included at no additional charge with your rodent trapping service.'
+        : 'This callback visit was included at no additional charge with your WaveGuard membership.',
       L + 14, y + 9, { width: W - 28 }
     );
     doc.restore();
@@ -477,7 +483,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
     doc.fontSize(8).font('Helvetica').fillColor('#555').text('Service Value:', L + 10, y + 6);
     doc.font('Helvetica-Bold').fillColor(NAVY).text(`$${Number(invoice.total_amount).toFixed(2)}`, L + 85, y + 6);
     if (isCallback) {
-      doc.font('Helvetica').fillColor(GREEN).text('Included with WaveGuard — $0.00 billed', L + 160, y + 6);
+      doc.font('Helvetica').fillColor(GREEN).text(isIncludedTrapCheck ? 'Included with your trapping service — $0.00 billed' : 'Included with WaveGuard — $0.00 billed', L + 160, y + 6);
     } else {
       doc.font('Helvetica').fillColor('#555').text('View full invoice at portal.wavespestcontrol.com', L + 160, y + 6);
     }

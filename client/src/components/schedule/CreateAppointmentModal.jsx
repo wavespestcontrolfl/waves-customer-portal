@@ -2638,6 +2638,48 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     })();
   }, [selectedCustomer?.id, hasAutoMosquitoLine, mosquitoQuote]);
 
+  // Rodent trapping visit allowance (owner ruling 2026-09-26): $350 covers
+  // the setup visit + 1 trap check; visit 3+ is the separate $95 "Rodent
+  // Trap Check - Additional" row. Advisory only — the server counts the
+  // customer's current trapping job and the office picks the service.
+  const RODENT_TRAPPING_LINE_KEYS = ['rodent_trapping', 'rodent_trapping_followup', 'rodent_trap_check_additional'];
+  const isRodentTrappingLine = (svc) => RODENT_TRAPPING_LINE_KEYS.includes(svc?.service_key ?? svc?.serviceKey);
+  const hasRodentTrappingLine = services.some(isRodentTrappingLine);
+  const [trappingStatus, setTrappingStatus] = useState(null);
+  useEffect(() => {
+    const id = selectedCustomer?.id;
+    if (!id || !hasRodentTrappingLine) return;
+    if (trappingStatus?.customerId === id) return;
+    setTrappingStatus({ customerId: id, status: 'loading' });
+    (async () => {
+      try {
+        const r = await adminFetch(`/admin/schedule/rodent-trapping-status?customerId=${encodeURIComponent(id)}`);
+        setTrappingStatus((prev) => (prev?.customerId === id ? { customerId: id, status: 'ready', ...r } : prev));
+      } catch {
+        setTrappingStatus((prev) => (prev?.customerId === id ? { customerId: id, status: 'error' } : prev));
+      }
+    })();
+  }, [selectedCustomer?.id, hasRodentTrappingLine, trappingStatus]);
+  const trappingHint = (svc) => {
+    if (!isRodentTrappingLine(svc)) return null;
+    const t = trappingStatus;
+    if (!t || t.customerId !== selectedCustomer?.id || t.status !== 'ready' || !t.hasJob) return null;
+    const key = svc?.service_key ?? svc?.serviceKey;
+    const visitNo = t.visitCount + 1;
+    if (t.grandfathered) {
+      return key === 'rodent_trap_check_additional'
+        ? `Trapping job sold before 9/27 — checks are included. Book the no-charge Trap Follow-Up instead.`
+        : `Visit ${visitNo} of this trapping job — sold before 9/27, checks included.`;
+    }
+    if (t.nextVisitBillable && key !== 'rodent_trap_check_additional') {
+      return `Visit ${visitNo} of this trapping job — the 2 included visits are used. Book "Rodent Trap Check - Additional" ($${t.additionalCheckPrice}).`;
+    }
+    if (!t.nextVisitBillable && key === 'rodent_trap_check_additional') {
+      return `Visit ${visitNo} of this trapping job — still included. Book the no-charge Trap Follow-Up instead.`;
+    }
+    return `Visit ${visitNo} of this trapping job.`;
+  };
+
   const doSearch = async (val) => {
     setCustomerSearch(val);
     if (val.length >= 2) {
@@ -5189,6 +5231,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
                       Auto: ${mosquitoAutoAmount(svc).toFixed(2)} (lot-based)
                     </div>
+                  )}
+                  {trappingHint(svc) && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>{trappingHint(svc)}</div>
                   )}
                   {mosquitoQuotePending(svc) && (
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>

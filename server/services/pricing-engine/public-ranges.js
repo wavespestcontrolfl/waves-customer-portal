@@ -518,13 +518,14 @@ function buildRows() {
     oneTimePerkKey: 'rodent_trapping',
     name: 'Rodent Trapping',
     unit: 'per program',
-    // Standard is the only plan (owner 2026-08-26): flat program fee with
-    // unlimited callbacks/checks for the same active trapping job.
+    // Standard is the only plan (owner 2026-08-26): flat program fee
+    // covering the setup visit + 1 trap check; further checks are billed
+    // per visit (owner ruling 2026-09-26).
     values: sweepValues(
       [{ plan: 'standard' }],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
-    notes: `Standard plan (flat program fee — setup plus unlimited callbacks/checks for the same active trapping job). Emergency same-day service carries a surcharge quoted at booking. ${rodentBundleTerms}`,
+    notes: `Standard plan (flat program fee — covers the setup visit plus 1 trap check for the same active trapping job; additional trap checks are $${constants.RODENT.trapping.additionalCheckPrice} each). Emergency same-day service carries a surcharge quoted at booking. ${rodentBundleTerms}`,
   }));
 
   add('rodent_sanitation', () => rangeRow({

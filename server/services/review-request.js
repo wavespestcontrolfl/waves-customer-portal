@@ -89,9 +89,13 @@ const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
 // trapping programs do not share. Keys mirror the prod services catalog —
 // every rodent trapping row plus rodent_exclusion, whose catalog name is
 // "Rodent Exclusion & Trapping Service" (7-day return visit standard).
+// Generic return-check SKUs: the included trap check and its paid sibling
+// (rodent_trap_check_additional, $95 visit 3+ — owner ruling 2026-09-26).
+// Both are follow-ups by catalog definition, never a program's opener.
+const GENERIC_TRAP_CHECK_KEYS = new Set(["rodent_trapping_followup", "rodent_trap_check_additional"]);
 const RODENT_TRAPPING_SERIES_KEYS = new Set([
   "rodent_trapping",
-  "rodent_trapping_followup",
+  ...GENERIC_TRAP_CHECK_KEYS,
   "rodent_trapping_exclusion",
   "rodent_trapping_exclusion_sanitation",
   "rodent_trapping_sanitation",
@@ -102,7 +106,7 @@ const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "
 // unlinked future booking under one of these is a NEW program's opener at
 // booking level, before any report exists to declare it (codex #3243 r18
 // P2). Wildlife is excluded — its checks share the base key.
-const BASE_OPENER_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS].filter((k) => k !== "rodent_trapping_followup"));
+const BASE_OPENER_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS].filter((k) => !GENERIC_TRAP_CHECK_KEYS.has(k)));
 // ...but plain rodent_trapping ALSO covers trap-check visits (the schema
 // makes the tech's trap_visit_type authoritative — codex #3243 r23 P2), so
 // booking-level opener inference is conclusive only for the combo packages
@@ -1542,7 +1546,7 @@ const ReviewService = {
           // admin-completion-before-record path) is still a follow-up by
           // catalog definition — never a series opener.
           const positionalFollowup = visitDeclaredType === "followup"
-            || (visitDeclaredType == null && svc.service_key === "rodent_trapping_followup");
+            || (visitDeclaredType == null && GENERIC_TRAP_CHECK_KEYS.has(svc.service_key));
           if (!trapPrior && positionalFollowup) {
             if (trapLaterLive) return { skip: "multi_treatment_middle" };
             // The opener may sit beyond the position window (that is why
@@ -7005,7 +7009,7 @@ const ReviewService = {
         // its own key is the generic followup SKU.
         let visitWindowDays = windowDays;
         let originWindowDays = null;
-        if (visit.service_key === "rodent_trapping_followup") {
+        if (GENERIC_TRAP_CHECK_KEYS.has(visit.service_key)) {
           const peekW = etDayWindow(visit.scheduled_date, 60);
           const nearestRows = await db("scheduled_services as ps")
             .leftJoin("services as psv", "ps.service_id", "psv.id")
@@ -7033,7 +7037,7 @@ const ReviewService = {
           // break by appointment order (r25 P2) — DB row order must not
           // pick the wrong origin key/window.
           const originRow = nearestRows
-            .filter((r) => inPremise(r) && r.service_key && r.service_key !== "rodent_trapping_followup")
+            .filter((r) => inPremise(r) && r.service_key && !GENERIC_TRAP_CHECK_KEYS.has(r.service_key))
             .sort((a, b) => {
               const dayA = etDayWindow(a.scheduled_date, 0).anchorStr;
               const dayB = etDayWindow(b.scheduled_date, 0).anchorStr;
@@ -7056,7 +7060,7 @@ const ReviewService = {
           // boundary, not the check floor.
           const cWindow = firstHop && c.id === visit.id
             ? visitWindowDays
-            : (cKey === "rodent_trapping_followup" && originWindowDays != null
+            : (GENERIC_TRAP_CHECK_KEYS.has(cKey) && originWindowDays != null
               ? originWindowDays
               : trappingWindowDaysFor(cKey, cInterval));
           firstHop = false;

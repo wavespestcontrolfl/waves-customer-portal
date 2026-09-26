@@ -231,8 +231,12 @@ for each additional 1,000 sqft. Annual/12 is reporting only. A standalone
 rodent-bait customer pays the code-default $99 one-time setup; it is waived
 when another qualifying recurring service supplies WaveGuard membership.
 
-**Trapping:** flat $350 Standard plan with unlimited callbacks/checks for the
-same active trapping job. An emergency request adds the greater of 20% or $75.
+**Trapping:** flat $350 Standard plan covering the setup visit plus 1 trap
+check for the same active trapping job (owner ruling 2026-09-26). Visit 3+ is
+not priced on the estimate: the office books the `rodent_trap_check_additional`
+catalog row ($95, billed at completion, members included, never
+bundle-discounted). Jobs sold before 2026-09-27 keep unlimited included checks.
+An emergency request adds the greater of 20% or $75.
 The active pricer does not apply the legacy footprint/lot adjustment arrays.
 
 **WaveGuard:** `rodent_bait` is a tier qualifier and is eligible for the

@@ -1509,8 +1509,12 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
             ? 'unlimited'
             : Number(t.included_followups);
       }
-      // additional_followup_rate is retired (callbacks are unlimited on the
-      // Standard plan, owner 2026-08-26) — deliberately not mapped.
+      // additional_followup_rate is deliberately not mapped: the $95 extra
+      // check (owner ruling 2026-09-26) is billed by the office-booked
+      // "Rodent Trap Check - Additional" catalog row, whose base_price is
+      // the booking authority; additionalCheckPrice in constants only feeds
+      // customer copy and is pinned to that row by the catalog migration
+      // (20260927000001). A second DB-editable copy would let them drift.
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
       if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
       if (Array.isArray(t.home_size_adjustments)) {

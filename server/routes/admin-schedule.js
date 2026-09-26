@@ -50,6 +50,7 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
+const { trappingJobStatus } = require('../services/rodent-trap-check');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
@@ -2554,6 +2555,22 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
       ? computed
       : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
     res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
+  } catch (err) { next(err); }
+});
+
+// GET /rodent-trapping-status?customerId= — advisory for the
+// create-appointment modal: how many visits the customer's current rodent
+// trapping job already has, and whether the next one is billable as the
+// $95 "Rodent Trap Check - Additional" row (owner ruling 2026-09-26: $350
+// covers setup + 1 check; grandfathered jobs keep included checks). Read-only;
+// the office still picks the service.
+router.get('/rodent-trapping-status', requireAdmin, async (req, res, next) => {
+  try {
+    const customerId = String(req.query.customerId || '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(customerId)) {
+      throw httpError(400, 'customerId must be a valid customer id');
+    }
+    res.json(await trappingJobStatus(db, customerId));
   } catch (err) { next(err); }
 });
 

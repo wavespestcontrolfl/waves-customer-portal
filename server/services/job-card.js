@@ -347,7 +347,7 @@ const ADDON_PROGRAMS = Object.freeze({
     fallback: 'rodent',
     nonChemical: [
       'rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
-      'rodent_trapping', 'rodent_trapping_followup', 'rodent_trapping_followup_3pack',
+      'rodent_trapping', 'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
       'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
       'rodent_exclusion_only', 'rodent_wire_mesh', 'rodent_bird_box',
       'rodent_trapping_exclusion', 'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation',
