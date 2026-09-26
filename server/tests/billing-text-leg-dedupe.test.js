@@ -156,14 +156,18 @@ describe('billing-text-leg-dedupe', () => {
       expect(send).toHaveBeenCalledTimes(1);
     });
 
-    test('lock acquisition failure fails OPEN to an unprotected send (never double-sends)', async () => {
+    test('lock acquisition failure fails closed with a schedulable hold and never sends', async () => {
       db.transaction = jest.fn(async () => { throw new Error('advisory lock unavailable'); });
       const send = jest.fn(async () => ({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted' }));
 
       const result = await withBillingTextLegLock(baseInput(), send);
 
-      expect(send).toHaveBeenCalledTimes(1);
-      expect(result).toEqual({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted' });
+      expect(send).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent',
+        code: 'BILLING_TEXT_DEDUPE_UNAVAILABLE', retryable: true, deferred: true });
+      expect(Date.parse(result.nextAllowedAt)).toBeGreaterThan(Date.now());
+      expect(require('../services/messaging/billing-channel-routing').REPLAY_HOLD_CODES)
+        .toContain('BILLING_TEXT_DEDUPE_UNAVAILABLE');
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('lock/lookup failed'));
     });
 

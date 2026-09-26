@@ -112,6 +112,8 @@ function dedupedAcceptance(row) {
  * handoff), so a second, truly concurrent replay on the SAME key blocks on
  * the lock rather than racing this one.
  */
+const DEDUPE_RETRY_MS = 5 * 60 * 1000;
+
 async function withBillingTextLegLock(input, send) {
   const metadata = input?.metadata || {};
   if (metadata.billingDeliveryLeg !== 'sms') return send();
@@ -136,12 +138,16 @@ async function withBillingTextLegLock(input, send) {
     });
   } catch (err) {
     if (sendInvoked) throw err;
-    // The lock or the lookup itself failed before any send was attempted —
-    // fail OPEN to an unprotected send. Missing this one notice's dedupe on
-    // a transient lock/lookup failure is worse than withholding an owed
-    // billing text over it (same posture as sms-guard.js's own fail-open).
-    logger.warn(`[billing-text-leg-dedupe] lock/lookup failed before send, sending unprotected: ${err.message}`);
-    return send();
+    // The lock or the lookup failed before any send. Without the lookup we
+    // can't rule out a prior accepted text, so fail closed with a
+    // schedulable hold (in REPLAY_HOLD_CODES): nothing is sent now and the
+    // producer's replay retries once the database is reachable.
+    logger.warn(`[billing-text-leg-dedupe] lock/lookup failed before send, holding for retry: ${err.message}`);
+    return {
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'BILLING_TEXT_DEDUPE_UNAVAILABLE',
+      error: 'Billing text dedupe state is unavailable', retryable: true, deferred: true,
+      nextAllowedAt: new Date(Date.now() + DEDUPE_RETRY_MS).toISOString(),
+    };
   }
 }
 
