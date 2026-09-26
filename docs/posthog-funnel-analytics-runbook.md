@@ -45,10 +45,15 @@ absent), so the marketing→portal handoff keeps stitching for existing users.
    **Project API key** (`phc_…`).
 2. **Astro** (Cloudflare Pages env, all relevant builds):
    - `PUBLIC_POSTHOG_KEY=phc_…`
-   - `PUBLIC_POSTHOG_HOST=https://us.i.posthog.com` (default; only set to override)
+   - `PUBLIC_POSTHOG_HOST=https://us.i.posthog.com` (default; only set to override —
+     or `PUBLIC_POSTHOG_HOST=https://portal.wavespestcontrol.com/ingest` to use the
+     portal's first-party proxy, dark behind `GATE_POSTHOG_INGEST_PROXY`, if
+     ad-blocker loss matters more than the extra hop; the Astro sites run on other
+     origins, so the host must be absolute)
 3. **Portal** (Railway, client build env — Vite reads these at build time):
    - `VITE_POSTHOG_KEY=phc_…`
-   - `VITE_POSTHOG_HOST=https://us.i.posthog.com` (default)
+   - `VITE_POSTHOG_HOST=https://us.i.posthog.com` (default, or `/ingest` with the
+     proxy gate on)
 4. Redeploy both. Verify consent-gated `/book` network calls appear only after
    accepting the cookie banner. Separately verify that `/estimate/:token` can
    emit only its explicit cookieless events, with memory persistence and no

@@ -22,7 +22,8 @@ environment that carries the row (prod does), **editing
    the new shape.
 4. **Client mirrors** — search for static copies in the client estimators and
    update them manually; they do NOT read pricing_config. Known offender
-   class: `TechEstimatorPage` keeps static option tables (e.g. `TS_OPTS`).
+   class: `client/src/lib/estimateEngine.js` keeps static price mirrors
+   (e.g. `oneTimeMosquitoLadderPrice`).
    Use ripgrep (recursive `grep` is banned in this monorepo):
 
    ```
@@ -48,7 +49,7 @@ environment that carries the row (prod does), **editing
   `cd server && CAPTURE_BASELINE=1 npx jest tests/pricing-engine.regression.test.js`
   (the suite lives in the `server` workspace), then hand-apply the delta
   to `pricing-engine.baseline.json`.
-- Known client-mirror sites beyond TechEstimatorPage:
+- Known client-mirror sites:
   `client/src/lib/estimateEngine.js` (mosquito ×2 blocks),
   `EstimateToolViewV2.jsx` (approx preview), `PortalPage`, `EstimatePage.jsx`.
   Mosquito price changes must sync ALL of them in the SAME PR, and the
