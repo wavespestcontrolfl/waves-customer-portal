@@ -293,10 +293,20 @@ describe('producerEligible refusal codes', () => {
       .resolves.toEqual({ eligible: false, reason: 'charge-date-missing', retryable: false });
   });
 
-  test('autopay_pre_charge_reminder refuses a charge date that is no longer three days out', async () => {
-    await expect(obligation.producerEligible({ source_entry_point: 'autopay_pre_charge_reminder',
-      customer_id: customerId, charge_date: '2000-01-01' }))
-      .resolves.toEqual({ eligible: false, reason: 'charge-date-passed', retryable: false });
+  test.each([[0, 'charge-date-passed'], [-1, 'charge-date-passed'], [4, 'charge-date-not-due']])(
+    'autopay_pre_charge_reminder refuses a charge date %i ET days out', async (offset, reason) => {
+      await expect(obligation.producerEligible({ source_entry_point: 'autopay_pre_charge_reminder',
+        customer_id: customerId, charge_date: etDateString(addETDays(new Date(), offset)) }))
+        .resolves.toEqual({ eligible: false, reason, retryable: false });
+    },
+  );
+
+  test.each([1, 2, 3])('autopay_pre_charge_reminder keeps a charge %i ET days ahead in the notice window', async (offset) => {
+    const verdict = await obligation.producerEligible({ source_entry_point: 'autopay_pre_charge_reminder',
+      customer_id: customerId, charge_date: etDateString(addETDays(new Date(), offset)) });
+    // No customer row is mocked, so the date check passes and the live
+    // customer check refuses next.
+    expect(verdict).toEqual({ eligible: false, reason: 'precharge-no-longer-eligible', retryable: false });
   });
 
   test.each(['autopay_card_expiry_warning', 'payment_expiry_workflow'])(

@@ -258,7 +258,12 @@ const EXPIRY_ENTRY_POINTS = ['autopay_card_expiry_warning', 'payment_expiry_work
 async function prechargeRefusal(meta, database) {
   if (meta.source_entry_point !== 'autopay_pre_charge_reminder') return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(meta.charge_date || '')) return refused('charge-date-missing');
-  if (etDateString(addETDays(new Date(), 3)) !== meta.charge_date) return refused('charge-date-passed');
+  // The producer re-selects no-phone customers on T+2 and T+1 so a refused
+  // leg is retried before the charge; any charge date still ahead within the
+  // three-day notice window is live (ET). billing_day and pause checks below
+  // pin it to the real charge.
+  if (meta.charge_date <= etDateString()) return refused('charge-date-passed');
+  if (meta.charge_date > etDateString(addETDays(new Date(), 3))) return refused('charge-date-not-due');
   const customer = await database('customers').where({ id: meta.customer_id }).first();
   if (!customer || customer.deleted_at || customer.active !== true || customer.autopay_enabled !== true
     || !(Number(customer.monthly_rate) > 0) || resolveBillingLane(customer).mode !== 'monthly_membership'
