@@ -2068,9 +2068,10 @@ that answer directly; any other value is ignored and the question is
 keyword-routed as before, so older clients are unaffected. This route and the
 service-report `/api/reports/:token/ask` both answer with
 `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
-response, including the global `/api` limiter's 429 and body-parser errors —
-the middleware is mounted app-level ahead of those layers (`server/index.js`)
-and again inside the router ahead of the `:token` param gate and limiter).
+response, including CORS preflights, the global `/api` limiter's 429 and
+body-parser errors — the middleware is mounted app-level ahead of all
+response-producing middleware (`server/index.js`) and again inside the router
+ahead of the `:token` param gate and limiter).
 `/api/webhooks/voice-agent/lead` (POST; machine-to-machine webhook — the
 bilingual AI voice agent (ElevenLabs) posts a captured lead when an AI-handled
 call ends. NOT browser-facing. Fail-closed shared-secret auth in the route

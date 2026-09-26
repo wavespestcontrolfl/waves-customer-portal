@@ -198,6 +198,25 @@ describe('Ask Waves privacy headers on both report ask endpoints (AW-06 addition
     }
   });
 
+  test('a CORS preflight answered by global cors() still carries the headers (mounted first)', async () => {
+    const cors = require('cors');
+    const app = express();
+    app.use('/api/reports', reportsRouter.reportsAskPrivacyHeaders);
+    app.use(cors({ origin: 'https://www.wavespestcontrol.com' }));
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/api/reports/project/0123456789abcdef0123456789abcdef/ask`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://www.wavespestcontrol.com', 'Access-Control-Request-Method': 'POST' },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   test('a whitelisted explicit intent on the project ask route short-circuits free-text routing', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
