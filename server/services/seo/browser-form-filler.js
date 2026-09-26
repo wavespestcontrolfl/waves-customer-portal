@@ -29,6 +29,7 @@
 const dns = require('dns');
 const net = require('net');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const logger = require('../logger');
 const sharp = require('sharp');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname + isPrivateIp
@@ -183,7 +184,7 @@ async function boundedShot(page) {
 
 async function callVision(anthropic, screenshotB64, text) {
   const resp = await anthropic.messages.create({
-    model: MODEL, max_tokens: 2048,
+    model: MODEL, ...anthropicEffortConfig(MODEL), max_tokens: anthropicMaxTokens(MODEL, 2048),
     messages: [{ role: 'user', content: [
       { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshotB64 } },
       { type: 'text', text },

@@ -11,7 +11,7 @@ reproducible and matches the frontmatter already in the `.mdx`.
 
 - **Committed path:** `/images/blog/enzyme-drain-cleaner-drain-flies-fruit-flies/hero.webp`
 - **Mode:** `blog-hero` (1536×1024, 3:2, compressed to WebP by the publisher)
-- **Provider chain (default):** `gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1`
+- **Provider chain (code default):** `gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1`
 
 **Generation prompt — exactly what the publisher emits.** `generateHeroBuffer(post)`
 in `astro-publisher.js` calls `image-generator.generate` with `{ title, topic:

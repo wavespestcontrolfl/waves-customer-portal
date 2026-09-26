@@ -4,32 +4,80 @@ const {
   serviceKeysFromContext,
   serviceFamiliesFromText,
   searchTermsFromContext,
+  KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,
+  KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES,
 } = require('../services/estimate-ai-context');
 
+// The production knowledge_base allowlist is empty (no category is
+// customer-safe as a whole); mechanism tests populate it temporarily.
+function withKbAllowlist(categories, fn) {
+  return async () => {
+    KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES.push(...categories);
+    try {
+      await fn();
+    } finally {
+      KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES.length = 0;
+    }
+  };
+}
+
 function fakeDb(tables = {}) {
-  return (table) => ({
-    where(arg) {
-      if (typeof arg === 'function') {
-        arg.call(this);
-      }
-      return this;
-    },
-    whereNot(arg) {
-      if (typeof arg === 'function') {
-        arg.call(this);
-      }
-      return this;
-    },
-    whereIn() { return this; },
-    orWhereIn() { return this; },
-    whereNotIn() { return this; },
-    whereNull() { return this; },
-    orWhere() { return this; },
-    orWhereNull() { return this; },
-    orWhereRaw() { return this; },
-    select() { return this; },
-    limit(count) { return Promise.resolve((tables[table] || []).slice(0, count)); },
-  });
+  return (table) => {
+    // Minimal support for the category-allowlist predicate the loader pushes
+    // into SQL (`lower(category) = ANY(?::text[])`, AW-04 round 3 fix) —
+    // recorded here and applied in `.limit()`, BEFORE the row count is
+    // capped, exactly like the real query does. Mirrors Postgres NULL
+    // semantics: a missing category never matches ANY(...).
+    let categoryAllowlist = null;
+    // The Claudeopedia status gate (`status = 'active' OR status IS NULL`).
+    let requireActiveStatus = false;
+    // `where({ customer_visible: true })` — an absent fixture value stands in
+    // for the column default (true); an explicit false/null is excluded.
+    let requireCustomerVisible = false;
+    return {
+      where(arg, value) {
+        if (typeof arg === 'function') {
+          arg.call(this);
+        } else if (arg === 'status' && value === 'active') {
+          requireActiveStatus = true;
+        } else if (arg && typeof arg === 'object' && arg.customer_visible === true) {
+          requireCustomerVisible = true;
+        }
+        return this;
+      },
+      whereNot(arg) {
+        if (typeof arg === 'function') {
+          arg.call(this);
+        }
+        return this;
+      },
+      whereIn() { return this; },
+      orWhereIn() { return this; },
+      whereNotIn() { return this; },
+      whereNull() { return this; },
+      orWhere() { return this; },
+      orWhereNull() { return this; },
+      orWhereRaw() { return this; },
+      whereRaw(sql, bindings = []) {
+        if (String(sql).includes('lower(category)')) {
+          categoryAllowlist = (Array.isArray(bindings) ? bindings[0] : bindings) || [];
+        }
+        return this;
+      },
+      select() { return this; },
+      limit(count) {
+        const rows = (tables[table] || [])
+          .filter((row) => !requireActiveStatus || row.status == null || row.status === 'active')
+          .filter((row) => !requireCustomerVisible || row.customer_visible === undefined || row.customer_visible === true);
+        const filtered = categoryAllowlist
+          ? rows.filter((row) => categoryAllowlist
+            .map((value) => String(value).toLowerCase())
+            .includes(String(row.category || '').toLowerCase()))
+          : rows;
+        return Promise.resolve(filtered.slice(0, count));
+      },
+    };
+  };
 }
 
 // WHERE-aware fake: applies the recorded ilike patterns (and the normalized
@@ -199,6 +247,49 @@ describe('estimate AI support context', () => {
     // area after it stays a recipient.
     expect(serviceFamiliesFromText('Is the lawn insecticide on my shrubs safe?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('')).toEqual([]);
+  });
+
+  // AW-04 fix (round 2 follow-up, Codex P1): searchServiceLibrary used to
+  // drop the WHOLE row when its description matched INTERNAL_CONTENT_MARKER_PATTERN
+  // (here, a stray "$" figure) — which also dropped _productNames, the real
+  // service→product linkage loadEstimateAiSupportContext uses to fetch and
+  // attribute label-verified catalog facts (e.g. the initial roach knockdown
+  // services' Tekko Pro IGR / Maxforce / Alpine defaults). The row's product
+  // linkage must survive; only the unsafe description text is redacted.
+  test('a service row with a marker-matching description still contributes its default products, but the description text never reaches the context', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [{
+          service_key: 'pest_initial_roach_knockdown',
+          name: 'Initial Roach Knockdown',
+          category: 'pest_control',
+          description: 'Initial cleanout — includes a $45 material surcharge for heavy infestations.',
+          default_products: ['Tekko Pro IGR'],
+        }],
+        products_catalog: [{
+          name: 'Tekko Pro IGR',
+          category: 'insect growth regulator',
+          active_ingredient: 'Pyriproxyfen + Novaluron',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is the roach treatment safe for pets?',
+      context: { services: [{ label: 'Initial Roach Knockdown', detail: 'Initial cleanout' }] },
+    });
+
+    // The service row itself survives (name/service_key/category kept) —
+    // and so does its product linkage: the catalog row attributes.
+    const serviceRow = result.serviceLibrary.find((row) => row.path === 'pest_initial_roach_knockdown');
+    expect(serviceRow).toBeDefined();
+    const catalogRow = result.productCatalog.find((row) => row.activeIngredient === 'Pyriproxyfen + Novaluron');
+    expect(catalogRow).toBeDefined();
+    expect(catalogRow.serviceKeys).toEqual(['pest_control']);
+
+    // The marker-matching description text never reaches the serialized context.
+    expect(JSON.stringify(result)).not.toContain('$45');
+    expect(JSON.stringify(result)).not.toContain('material surcharge');
+    expect(serviceRow.snippet).toBe('');
   });
 
   test('token-subset default_products aliases still attribute the catalog row', async () => {
@@ -715,11 +806,10 @@ describe('estimate AI support context', () => {
   });
 
   test('misting-system questions always surface the misting protocol, past the repo-file cap', async () => {
-    // The fixed REPO_CONTEXT_FILES list and the mosquito BARRIER program's
-    // other repo matches (waveguard-tier-logic.md, protocols.json, the
-    // pricing README) are scanned first and share "mosquito" with the
-    // misting-system question — without an explicit guarantee, the misting
-    // protocol loses the 5-result cap to those before it's ever reached.
+    // The misting protocol is the ONLY entry in CUSTOMER_SAFE_REPO_FILES
+    // (AW-04 fix), gated behind its own isMistingSystemService check inside
+    // loadRepoContext — this pins that a genuine misting-system question
+    // still surfaces it and stays under the 5-result cap.
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({}),
       question: 'What happens at the design visit before you install the misting system?',
@@ -775,7 +865,7 @@ describe('estimate AI support context', () => {
     )).toBe(true);
   });
 
-  test('loads shaped support sources from knowledge tables and static references', async () => {
+  test('loads shaped support sources from knowledge tables and static references', withKbAllowlist(['services'], async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({
         knowledge_base: [{
@@ -785,10 +875,17 @@ describe('estimate AI support context', () => {
           summary: 'Seasonal lawn care guidance for Southwest Florida.',
           content: 'Longer content',
         }],
+        // AW-04 fix (round 2 follow-up, Codex P1): 'turf' was never a real
+        // knowledge_entries category — the table's only writer
+        // (agronomic-wiki.js) only ever uses 'product'/'condition'/'track'/
+        // 'seasonal', all framed as internal field intelligence, so
+        // KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES is empty and this row is
+        // excluded regardless of category. See the dedicated allowlist tests
+        // below for the exclude/allow mechanism itself.
         knowledge_entries: [{
           slug: 'st-augustine-fungus',
           title: 'St. Augustine Fungus',
-          category: 'turf',
+          category: 'condition',
           summary: 'Fungus pressure increases in wet conditions.',
           content: 'Longer wiki content',
           confidence: 'high',
@@ -824,14 +921,9 @@ describe('estimate AI support context', () => {
         title: 'Lawn Program',
       }),
     ]);
-    expect(result.agronomicWiki).toEqual([
-      expect.objectContaining({
-        source: 'agronomic_wiki',
-        path: 'st-augustine-fungus',
-        confidence: 'high',
-        dataPointCount: 12,
-      }),
-    ]);
+    // No knowledge_entries category is customer-safe today (see the fixture
+    // comment above) — the trusted 'condition' row above is excluded.
+    expect(result.agronomicWiki).toEqual([]);
     expect(result.serviceLibrary).toEqual([
       expect.objectContaining({
         source: 'admin_service_library',
@@ -852,7 +944,7 @@ describe('estimate AI support context', () => {
     expect(result.productCatalogTruncated).toBe(false);
     expect(result.externalSources.some((source) => source.title.includes('UF/IFAS'))).toBe(true);
     expect(result.externalSources.some((source) => source.title.includes('Florida-Friendly'))).toBe(true);
-  });
+  }));
 
   test('flags the product catalog slice as truncated when the row cap fills', () => {
     const manyProducts = Array.from({ length: 9 }, (_, i) => ({
@@ -989,4 +1081,343 @@ describe('estimate AI support context', () => {
     expect(result.some((source) => source.source === 'repo_file')).toBe(false);
     expect(result.some((source) => source.snippet)).toBe(false);
   });
+
+  // AW-04 (Ask Waves audit, 2026-09-25): the repo-file loader used to be a
+  // fixed list PLUS an open-ended wiki/docs directory scan that included
+  // business-strategy, dispatch/routing rules, and docs/pricing/POLICY.md.
+  // The audit's own reproduction (ask-waves-audit-20260925/estimates/
+  // repro_internal_context.js) asked this exact question against a tree_shrub
+  // estimate and captured wiki/services/service-dispatch-rules.md,
+  // wiki/protocols/routing-rules.md, and docs/pricing/POLICY.md in the
+  // model-bound context. The loader is now an allowlist
+  // (CUSTOMER_SAFE_REPO_FILES) — none of those internal files can match here
+  // no matter what search terms the question produces.
+  test('AW-04: a material/labor cost question never pulls an internal repo source', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: null,
+      question: 'What material cost and labor cost do you use for palm service?',
+      context: { services: [{ service: 'tree_shrub', label: 'Tree & Shrub' }], waveGuardTier: 'WaveGuard' },
+    });
+
+    expect(result.repositoryFiles).toEqual([]);
+
+    const INTERNAL_MARKERS = [
+      'margin', 'contribution margin', 'cost target', 'cogs', 'markup',
+      'labor rate', 'labor cost', 'material cost', 'dispatch', 'route density',
+      'adam only', 'pricing policy',
+    ];
+    const allSnippetText = [
+      ...result.repositoryFiles,
+      ...result.knowledgeBase,
+      ...result.agronomicWiki,
+      ...result.serviceLibrary,
+      ...result.productCatalog,
+    ].map((row) => `${row.path || ''} ${row.title || ''} ${row.snippet || ''}`.toLowerCase()).join(' | ');
+
+    for (const marker of INTERNAL_MARKERS) {
+      expect(allSnippetText).not.toContain(marker);
+    }
+
+    // The specific files the audit captured must never appear as a source.
+    const leakedPaths = [
+      'docs/pricing/POLICY.md',
+      'docs/TERMITE-PRICING.md',
+      'wiki/services/service-dispatch-rules.md',
+      'wiki/protocols/routing-rules.md',
+      'server/config/protocols.json',
+      'server/services/pricing-engine/README.md',
+    ];
+    for (const leaked of leakedPaths) {
+      expect(result.repositoryFiles.some((row) => row.path === leaked)).toBe(false);
+    }
+  });
+
+  // Companion to the AW-04 boundary test above: the fix must be an allowlist
+  // restriction, not a blanket removal of customer-safe support material.
+  test('AW-04: customer-safe sources still load after the allowlist restriction', withKbAllowlist(['services'], async () => {
+    // Structured, reviewed DB sources are untouched by the repo-file allowlist.
+    const structured = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [{
+          path: 'wiki/services/lawn.md',
+          title: 'Lawn Program',
+          category: 'services',
+          summary: 'Seasonal lawn care guidance for Southwest Florida.',
+          content: 'Longer content',
+        }],
+        services: [{
+          service_key: 'lawn_care',
+          name: 'Lawn Care',
+          category: 'lawn_care',
+          description: 'Seasonal lawn care program.',
+          default_products: ['Celsius WG'],
+        }],
+        products_catalog: [{
+          name: 'Celsius WG',
+          category: 'herbicide',
+          active_ingredient: 'Thiencarbazone + Iodosulfuron + Dicamba',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+    });
+    expect(structured.knowledgeBase.length).toBe(1);
+    expect(structured.serviceLibrary.length).toBe(1);
+    expect(structured.productCatalog.length).toBe(1);
+
+    // The one allowlisted repo file (the misting-system safety protocol)
+    // still loads for the question it exists to answer.
+    const misting = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'How often do you refill the misting system?',
+      context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
+    });
+    expect(misting.repositoryFiles.some((row) => row.path === 'wiki/protocols/mosquito-misting-systems.md')).toBe(true);
+  }));
+
+  // AW-04 rd2 (Codex P1): the repo-file allowlist fixed in rd1 left the
+  // DB-backed knowledge_base lookup wide open — any active, non-blocked row
+  // matching a search term was eligible, and this loader always searches for
+  // 'WaveGuard' (requiredContextTerms). The seeded founder-knowledge article
+  // (20260415000013_seed_founder_knowledge.js, category 'business-strategy')
+  // carries WaveGuard tier/decoy/margin strategy and was reachable from
+  // nearly any estimate question. searchKnowledgeBase now gates on
+  // KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES (an allowlist) plus
+  // INTERNAL_CONTENT_MARKER_PATTERN as a backstop.
+  test('AW-04 rd2: an internal business-strategy knowledge_base row is excluded; a customer-facing row still loads', withKbAllowlist(['services'], async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [
+          {
+            path: 'wiki/business-strategy/waveguard-tier-logic.md',
+            title: 'Why WaveGuard Tiers Are Structured This Way',
+            category: 'business-strategy',
+            summary: 'The WaveGuard Bronze/Silver/Gold/Platinum ladder is a Hormozi-style Grand Slam Offer — the middle tier is priced to look like the obvious choice, Bronze is a decoy, and margin compounds at Gold.',
+            content: 'Internal margin, decoy-effect, and route-density strategy notes for staff only.',
+          },
+          {
+            path: 'wiki/services/mosquito-barrier.md',
+            title: 'Mosquito Barrier Program',
+            category: 'services',
+            summary: 'WaveGuard mosquito barrier treatment overview: monthly barrier spray targeting resting and breeding zones.',
+            content: 'Customer-facing description of the mosquito barrier program.',
+          },
+        ],
+      }),
+      question: 'What does my WaveGuard plan include?',
+      context: {
+        services: [{ label: 'Mosquito Control', detail: 'Barrier treatment' }],
+        waveGuardTier: 'WaveGuard Gold',
+      },
+    });
+
+    expect(result.knowledgeBase.some((row) => row.path === 'wiki/business-strategy/waveguard-tier-logic.md')).toBe(false);
+    expect(result.knowledgeBase.some((row) => row.path === 'wiki/services/mosquito-barrier.md')).toBe(true);
+
+    const serialized = JSON.stringify(result).toLowerCase();
+    expect(serialized).not.toContain('decoy');
+    expect(serialized).not.toContain('margin');
+    expect(serialized).not.toContain('grand slam offer');
+  }));
+
+  // Production categories checked 2026-09-25: 'chemicals' rows carry
+  // wholesale supplier prices, 'protocols' holds staff routing / job-scoring
+  // notes, and 'general' is the uncategorized default.
+  test.each([
+    ['chemicals', 'Dimension 2EW', 'Pre-emergent herbicide. Container: 64 fl oz Best Price: $139.50 (SiteOne)'],
+    ['protocols', 'Routing Rules — Waves Pest Control', 'Lawn service ordering rules for technicians.'],
+    ['general', 'Lawn notes', 'Lawn care notes.'],
+    ['product', 'Outcome Data: Product: Celsius WG', 'Lawn performance outcome data.'],
+  ])('AW-04 rd2: a %s-category knowledge_base row is excluded', async (category, title, summary) => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_base: [{ path: `kb/${category}.md`, title, category, summary, content: summary }] }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Pre-emergent, fertilizer, weed control' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd2: a dollar figure in an allowlisted row is dropped by the backstop', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_base: [{ path: 'kb/agro.md', title: 'Lawn fertilizer timing', category: 'agronomics', summary: 'Lawn fertilizer runs about $3.20 per 1000 sq ft.', content: 'x' }] }),
+      question: 'When do you fertilize the lawn?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd3: an audit-flagged knowledge_base article is excluded even while active', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_base: [{ path: 'kb/lawn.md', title: 'Lawn Program', category: 'services', status: 'flagged', active: true, summary: 'Seasonal lawn care guidance.', content: 'x' }] }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd3: the misting SOP staff-escalation paragraph never reaches the context', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'Who handles an exposure report for a misting system? Do you call Adam?',
+      context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/call adam/i);
+  });
+
+  test('AW-04 rd4: with the production (empty) allowlist no knowledge_base row reaches the context', async () => {
+    expect(KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES).toEqual([]);
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [
+          { path: 'kb/fawn.md', title: 'FAWN Weather Stations — Blog & Pest Pressure', category: 'agronomics', status: 'active', summary: 'Station IDs feed the blog engine pest-pressure matrix.', content: 'x' },
+          { path: 'kb/lawn.md', title: 'Lawn Program', category: 'services', status: 'active', summary: 'Seasonal lawn care guidance.', content: 'x' },
+        ],
+      }),
+      question: 'How does the weather affect my lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd10: staff-only services (customer_visible false) never reach the context', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [
+          { service_key: 'lawn_re_service', name: 'Lawn Re-Service', category: 'lawn', customer_visible: false, default_products: [] },
+          { service_key: 'lawn_care', name: 'Lawn Care', category: 'lawn', customer_visible: true, default_products: [] },
+        ],
+      }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.serviceLibrary.some((row) => row.path === 'lawn_re_service')).toBe(false);
+    expect(result.serviceLibrary.some((row) => row.path === 'lawn_care')).toBe(true);
+  });
+
+  test('AW-04 rd6: service-library descriptions never reach the context; structure and products do', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [{
+          service_key: 'rodent_trapping_followup',
+          name: 'Rodent Trapping Follow-up',
+          category: 'rodent',
+          description: 'Standard trapping plan has unlimited no-charge callbacks; this row exists so the visit can be scheduled and reported.',
+          frequency: 'as needed',
+          default_products: [],
+        }],
+      }),
+      question: 'Do you use bait stations for rats?',
+      context: { services: [{ label: 'Rodent Bait Stations', detail: 'Exterior bait stations' }] },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toMatch(/unlimited no-charge callbacks|this row exists/);
+    expect(result.serviceLibrary.some((row) => row.title === 'Rodent Trapping Follow-up')).toBe(true);
+  });
+
+  test('AW-04 rd2: a knowledge_base row with no category is excluded (allowlist fails closed)', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [{
+          path: 'wiki/uncategorized/notes.md',
+          title: 'Uncategorized Notes',
+          category: null,
+          summary: 'A knowledge_base row with no category set.',
+          content: 'Uncategorized content.',
+        }],
+      }),
+      question: 'What is included?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer program' }] },
+    });
+
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
+  // AW-04 fix (round 2 follow-up, Codex P1): searchAgronomicWiki used to
+  // accept ANY trusted (review_status auto/approved) knowledge_entries row —
+  // review_status is a content-accuracy gate, not an audience boundary, and
+  // every real category this table holds ('product', 'condition', 'track',
+  // 'seasonal' — the only ones agronomic-wiki.js's generatePage ever writes)
+  // is framed as internal field intelligence, never customer-facing label
+  // guidance. KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES now gates this too.
+  test.each([
+    ['product', 'Product: Celsius WG', 'Herbicide performance summary across tracked visits.'],
+    ['condition', 'Condition: Chinch Bug Damage', 'Chinch bug recovery outcomes across serviced properties.'],
+    ['track', 'Track B2 Performance', 'Turf health trend across the B2 track this season.'],
+    ['seasonal', 'September — Seasonal Intelligence', 'Fungus pressure trend across serviced lawns this month.'],
+  ])('AW-04 rd2 follow-up: a trusted %s-category knowledge_entries row is excluded even with no marker words', async (category, title, summary) => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_entries: [{ slug: `wiki/${category}`, title, category, summary, content: summary, confidence: 'high', data_point_count: 20 }] }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+    });
+    // None of these fixtures contain an INTERNAL_CONTENT_MARKER_PATTERN word
+    // or a dollar figure — exclusion here can only be the category allowlist.
+    expect(result.agronomicWiki).toEqual([]);
+  });
+
+  test('AW-04 rd2 follow-up: an allowlisted knowledge_entries category still loads (fail-closed, not block-everything)', async () => {
+    // No real knowledge_entries category is customer-safe today (see the
+    // allowlist's own comment) — this proves the GATE works both ways, not
+    // just that it happens to exclude everything the wiki currently writes.
+    expect(KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES).toEqual([]);
+    KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES.push('reference');
+    try {
+      const result = await loadEstimateAiSupportContext({
+        db: fakeDb({
+          knowledge_entries: [{
+            slug: 'reference/st-augustine-fungus',
+            title: 'St. Augustine Fungus Reference',
+            category: 'reference',
+            summary: 'General turf fungus reference notes.',
+            content: 'Longer wiki content',
+            confidence: 'high',
+            data_point_count: 12,
+          }],
+        }),
+        question: 'What is included with lawn care?',
+        context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+      });
+      expect(result.agronomicWiki).toEqual([
+        expect.objectContaining({ source: 'agronomic_wiki', path: 'reference/st-augustine-fungus' }),
+      ]);
+    } finally {
+      KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES.length = 0;
+    }
+  });
+
+  // AW-04 fix (round 3, Codex P2): the knowledge_base category allowlist used
+  // to run as a JS `.filter()` AFTER `.limit(6)` — enough disallowed-category
+  // rows matching the search terms could fill the cap and crowd out an
+  // allowed row that never even reached the filter. fakeDb's whereRaw support
+  // mirrors the real SQL predicate this loader now applies.
+  test('AW-04 rd3: an allowed knowledge_base row survives 6 internal-category rows filling the cap', withKbAllowlist(['services'], async () => {
+    const internalRows = Array.from({ length: 6 }, (_, i) => ({
+      path: `kb/chemicals-${i}.md`,
+      title: `Chemical Note ${i}`,
+      category: 'chemicals',
+      summary: 'Lawn fertilizer supplier notes.',
+      content: 'x',
+    }));
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [
+          ...internalRows,
+          {
+            path: 'wiki/services/lawn.md',
+            title: 'Lawn Program',
+            category: 'services',
+            summary: 'Seasonal lawn care guidance for Southwest Florida.',
+            content: 'Longer content',
+          },
+        ],
+      }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+    });
+    expect(result.knowledgeBase).toEqual([
+      expect.objectContaining({ path: 'wiki/services/lawn.md' }),
+    ]);
+  }));
 });

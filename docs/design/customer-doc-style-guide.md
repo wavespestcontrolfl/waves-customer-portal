@@ -51,7 +51,8 @@ so glass and non-glass renders agree.
 Primary action = `BrandButton` (48px, r10, weight 600, sentence case — owner
 2026-09-04; the marketing site's UPPERCASE rule does not apply on glass).
 Gold accent actions (`data-glass-accent`) are 44px minimum; choice chips
-(`data-glass="chip"`) 40px minimum with a 999 radius when they are pills.
+(`data-glass="chip"`) are also 44px minimum with a 999 radius when they are
+pills (the 2026-09-11 C3 ruling supersedes the former 40px chip minimum).
 Inputs are 48px, r10, 16px text (no iOS zoom), placeholder 14px `#64748B`.
 Every control shows the shared `:focus-visible` ring (2px accent, 2px
 offset). Under `prefers-reduced-transparency` and `forced-colors` cards

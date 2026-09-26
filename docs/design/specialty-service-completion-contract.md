@@ -31,8 +31,12 @@ Cutover phases (profile row = feature flag; explicit allowlists only):
 | 2 | remaining cockroach, flea, rodent trap/exclusion, wildlife, bed bug | Phase 1 + 1b verified; client-read + support metrics reviewed; bed bug copy owner-approved |
 | 3 | termite_inspection, then termite remedial | Compliance signoff (FS 482.226, FS 482.2265, FAC 5E-14) |
 
-**Update 2026-09-26:** all four phases above are live. Termite (Phase 3) shipped
-2026-07-13 after compliance signoff (`server/models/migrations/20260713100000_termite_typed_cutover.js`, #2703).
+**Update 2026-09-26:** all four phases above shipped; termite (Phase 3) went last,
+on 2026-07-13, after compliance signoff (`server/models/migrations/20260713100000_termite_typed_cutover.js`, #2703).
+Later owner rulings moved some of these types back to the generic Service Report V1
+form: the one-time pest family (`20260730400000_pest_one_time_untyped_completion.js`)
+and bed bug (`20260731400000_bed_bug_untyped_completion.js`).
+`server/config/completion-lane-registry.js` records each service's current lane.
 
 ## 2. Hard product constraints (binding)
 

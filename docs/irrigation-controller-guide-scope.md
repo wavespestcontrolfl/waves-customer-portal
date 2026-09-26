@@ -1,8 +1,10 @@
 # Sprinkler Timer Guide — verified scope
 
 Concept scope · Waves Lawn Care · 2026-09-05. **Update 2026-09-26:** the Phase 2
-email send has shipped (see below); the hub pages and brand-capture phases remain
-scoping only, nothing built.
+email send has shipped (see below), and the hub index (`/sprinkler-timers/`) and the
+Rain Bird guide are live: the weekly irrigation email links both (migration
+`20260907000010_irrigation_guide_resources.js`). Further brand pages live in the Astro
+repo and are not tracked here; brand capture (Phase 3) is not built.
 
 The concept: a brand-by-brand guide that teaches lawn customers to operate
 the irrigation controller on their own wall — an email with brand buttons,
@@ -116,7 +118,7 @@ copy.
 | Phase | Scope | Effort |
 |---|---|---|
 | 0 · Content | Per brand, manual-first: OFF between runs, manual / run-all-zones with minutes, then the schedule section (clock, day, start time, minutes, rain delay, sensor bypass). Rain Bird ESP-TM2 / Me3 and Hunter X-Core / Pro-C / Hydrawise first, identify-your-controller page, Tier 2/3 stubs, faceplate photos. | 2–3 days + a photo session on the route |
-| 1 · Hub pages | Index + per-brand markdown pages, dial-position comparison, link from the lawn prep page. Print stylesheet doubles as the truck copy. | 1 day |
+| 1 · Hub pages | Index + per-brand markdown pages, dial-position comparison, link from the lawn prep page. Print stylesheet doubles as the truck copy. **Index and Rain Bird guide live** (linked by `20260907000010_irrigation_guide_resources.js`). | 1 day |
 | 2 · Email + send | Template seed migration, `PREP_CONFIG` entry with the no-token flag, Communications allow-list, SMS companion copy. **Shipped 2026-09-06 (#3953).** | 1 day |
 | 3 · Brand capture (optional) | Columns, validation, portal + admin inputs, one-button collapse. | 1–1½ days |
 

@@ -254,20 +254,25 @@ import { Button } from '../components/Button';
 <Button variant="nav" as="a" href="/quote">Free Quote</Button>              {/* compact gold pill */}
 <Button variant="utility">Pest Control</Button>                              {/* navy-outline chip */}
 
-<Button variant="primary" surface="admin">Save</Button>                      {/* D palette + DM Sans + 6px radius */}
+<Button variant="primary" surface="admin">Save</Button>                      {/* legacy Button compatibility surface */}
 ```
 
-**Customer surface (default):** `#FFD700` / `#04395E` / `#009CDE` / `Inter 700` / `rounded-full`. Responsive padding scales at `640px` and `1024px` breakpoints.
+**Customer surface (default):** gold `#FFD700`, CTA ink `#04395E`, accent
+`#009CDE`, and Inter. Primary and nav use weight 700; utility remains 600.
+Primary has a 48px minimum height; nav and utility have a 44px minimum.
+Responsive padding scales at `640px` and `1024px` breakpoints.
 
-**Admin surface (`surface="admin"`):** `#0ea5e9` / `DM Sans 600` / `6px radius`. Required on admin pages — see §14 admin-exclusion note. Do not pass `surface="customer"` (or omit it) on `/admin/*`.
+**Legacy admin Button surface (`surface="admin"`):** `#0ea5e9` / `DM Sans 600`
+/ `6px radius`. Use this compatibility surface where the shared Button is
+retained in admin code; see §14 for the current shell contract.
 
 | Variant | Role | Visual |
 |---|---|---|
 | `primary` | Hero / form-submit CTA | Gold fill, navy text, `0 4px 14px` shadow |
 | `secondary` | Ghost paired with primary (Back, cancel) | Transparent, teal `1.5px` outline, teal text |
 | `tertiary` | Subdued back link / inline action | Transparent, blue text, underline on hover |
-| `nav` | Header / toolbar CTA | Compact gold pill (40px) |
-| `utility` | Filter / chip / compact action | Transparent, navy `1.5px` outline, small (36px) |
+| `nav` | Header / toolbar CTA | Compact gold pill (44px minimum) |
+| `utility` | Filter / chip / compact action | Transparent, navy `1.5px` outline (44px minimum) |
 
 **Props:** `variant`, `surface` (default `"customer"`), `fullWidthMobile`, `icon` + `iconPosition` (`"left"|"right"` default `"right"`), `as` (polymorphic — pass `"a"` for link CTAs), `className`, plus all native `<button>` / `<a>` props via spread.
 
@@ -402,7 +407,7 @@ Tailwind v4 defaults plus two custom compound queries:
 
 ## 14. Portal alignment (waves-customer-portal)
 
-The customer-facing portal (LoginPage, EstimateViewPage, PortalPage, ReportViewPage, BookingPage, ReportViewPage) consumes this style guide via `client/src/theme-brand.js`, which is imported by 18 or more pages. Palette and fonts there should stay in sync with the tokens above.
+The customer-facing portal (LoginPage, EstimateViewPage, PortalPage, ReportViewPage, PublicBookingPage) consumes this style guide via `client/src/theme-brand.js`, which the customer pages import. Palette and fonts there should stay in sync with the tokens above.
 
 **Key equivalents:**
 
@@ -416,4 +421,9 @@ The customer-facing portal (LoginPage, EstimateViewPage, PortalPage, ReportViewP
 | `--font-subheading` | `FONTS.heading` | `'Montserrat', 'Inter', system-ui, sans-serif` |
 | `--font-sans` | `FONTS.body` / `FONTS.ui` | `'Inter', system-ui, sans-serif` |
 
-**Admin portal (`/admin/*`) is out of scope** — admin stays on the `D` dark palette + DM Sans. Do not apply customer brand palette to admin pages (see `feedback_admin_style_guide_exclusion`). The shared `<Button>` component (§8) supports this via `surface="admin"` — use it there rather than inline-styled admin buttons.
+**Admin portal (`/admin/*`) is out of scope.** Follow the current admin UI
+consistency contract: Tier 1 uses the light Square theme and the admin shell
+forces Roboto. Do not apply the customer brand palette to admin pages. The
+shared `<Button surface="admin">` styles described in §8 remain a legacy
+dark/DM Sans compatibility surface; they do not define the styling of the
+whole admin shell.
