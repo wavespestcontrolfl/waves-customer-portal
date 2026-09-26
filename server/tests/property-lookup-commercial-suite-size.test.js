@@ -295,3 +295,12 @@ describe('a cached suite stamp is reused only for the unit it sized', () => {
     expect(profile._commercialSuiteCandidate).not.toBeNull();
   });
 });
+
+describe('subtype reconciliation evidence', () => {
+  test('a web-search businessType alone never reclassifies office_retail', () => {
+    const { reconcileCommercialSuiteSubtype } = require('../routes/property-lookup-v2')._private;
+    if (typeof reconcileCommercialSuiteSubtype !== 'function') throw new Error('reconcileCommercialSuiteSubtype not exported');
+    expect(reconcileCommercialSuiteSubtype('office_retail', { source: 'suite_type_default', businessType: 'restaurant' })).toBe('office_retail');
+    expect(reconcileCommercialSuiteSubtype('office_retail', { source: 'license_seats' })).toBe('restaurant');
+  });
+});

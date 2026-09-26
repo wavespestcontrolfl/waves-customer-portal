@@ -1652,11 +1652,13 @@ function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
   return (now - resolvedAt) < maxAge;
 }
 
+// Only the state food-service license (a public record) may reclassify a
+// plaza's generic office_retail as restaurant. A web-search businessType is
+// model output and stays display-only — the subtype rides into the pricing
+// input, and model output never reaches it (AGENTS.md).
 function reconcileCommercialSuiteSubtype(subtype, suiteSize) {
   if (!suiteSize || subtype !== 'office_retail') return subtype;
-  const isFoodService = suiteSize.source === 'license_seats'
-    || /restaurant|food/i.test(String(suiteSize.businessType || ''));
-  return isFoodService ? 'restaurant' : subtype;
+  return suiteSize.source === 'license_seats' ? 'restaurant' : subtype;
 }
 
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null, lookupAddress = null, options = {}) {
@@ -5413,6 +5415,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,
+  reconcileCommercialSuiteSubtype,
   buildResultFromCachedLookup,
   cachedAggregateResolvesToOwnUnit,
   subdivisionMedianEstimate,
