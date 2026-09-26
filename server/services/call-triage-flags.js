@@ -952,6 +952,27 @@ const RETRACTION_MARKER_TERMS = [
 // ("Sorry, what was your email?", "Please wait for the text.") uses them,
 // and a genuine retraction carries its own signal ("Sorry, we can't do
 // Sunday." — negation and a slot mention).
+// SLOT talk only, not the broad other-sentence scheduling screen: later
+// turns are wrap-up, where an address/phone read-back ("100 Example
+// Street"), "our technician will text you", or a price are routine. Day,
+// date, and time words, "at <hour>", and booking/cancel verbs are what a
+// retraction or a different slot is made of.
+const LATER_TURN_SLOT_TERMS = [
+  ' sunday ', ' monday ', ' tuesday ', ' wednesday ', ' thursday ', ' friday ', ' saturday ',
+  ' january ', ' february ', ' march ', ' april ', ' june ', ' july ',
+  ' august ', ' september ', ' october ', ' november ', ' december ',
+  ' tomorrow ', ' today ', ' tonight ', ' next week ', ' weekend ',
+  ' am ', ' pm ', ' clock ', ' noon ', ' midnight ', ' morning ', ' afternoon ', ' evening ',
+  ' appointment ', ' appointments ', ' book ', ' booked ', ' booking ',
+  ' schedule ', ' scheduled ', ' reschedule ', ' rescheduled ', ' visit ', ' slot ',
+  ' available ', ' availability ', ' unavailable ', ' confirm ', ' confirmed ',
+];
+function laterSentenceNamesSlot(ns) {
+  const padded = ` ${ns} `;
+  return LATER_TURN_SLOT_TERMS.some((t) => padded.includes(t))
+    || MAY_DATE_RE.test(ns)
+    || /\bat \d{1,4}\b/.test(ns);
+}
 function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   const ns = sentence.ns;
   const padded = ` ${ns} `;
@@ -962,7 +983,7 @@ function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   // off." through as a same-slot mention. A later sentence with scheduling
   // content passes only as a full RESTATEMENT — the same checks the pinned
   // commitment sentence itself must pass.
-  if (sentenceHasSchedulingPredicate(stripBenignTopicPhrases(ns))) {
+  if (laterSentenceNamesSlot(ns)) {
     return !(!sentence.interrogative
       && commitmentTurnVocabularyOk(ns)
       && !turnHasUnresolvedConditional(ns)
