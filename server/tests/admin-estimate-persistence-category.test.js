@@ -154,3 +154,13 @@ describe('shared detector stays strict; YES is read for the category only', () =
     expect(isCommercialEstimateData({ inputs: { isCommercial: 'YES' } })).toBe(false);
   });
 });
+
+describe('explicit V2 selection decides over stale derived signals', () => {
+  test('a correction to residential with a stale commercialSubtype still writes RESIDENTIAL', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: { inputs: { isCommercial: 'NO', commercialSubtype: 'office_retail' }, result: { total: 125 } },
+    });
+    expect(fields.category).toBe('RESIDENTIAL');
+  });
+});

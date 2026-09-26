@@ -1690,15 +1690,23 @@ function verifiedSqftLooksSuiteScoped(rc) {
   const verifiedValue = Number(rc?.squareFootage);
   if (!(verifiedValue > 0)) return false;
   const evidence = rc?._fieldEvidence?.squareFootage?.evidence;
-  // The building total is the LARGEST pre-verification figure (county
-  // record, GIS, AI): an AI leg may report the unit's own area too, and the
-  // building is always the biggest number on the chain.
-  const priorValues = Array.isArray(evidence)
-    ? evidence.filter((e) => e && e.sourceType && e.sourceType !== 'verified').map((e) => Number(e.value)).filter((v) => v > 0)
+  const prior = Array.isArray(evidence)
+    ? evidence.filter((e) => e && e.sourceType && e.sourceType !== 'verified' && Number(e.value) > 0)
     : [];
-  const buildingSqft = priorValues.length ? Math.max(...priorValues) : null;
-  if (!(buildingSqft > 0)) return true;
-  return verifiedValue <= buildingSqft * 0.5;
+  if (!prior.length) return true;
+  // The legacy failure is specific: the old admin flow saved the lookup-
+  // PREFILLED building figure as "verified" under the unit address. So a
+  // verified size is distrusted only when it repeats a building-level
+  // figure (any county record, or the largest figure on the chain) —
+  // never merely for being large: an anchor tenant can genuinely occupy
+  // most of a plaza, and an on-site figure matching an AI unit estimate is
+  // a confirmation, not a repeat of the building.
+  const values = prior.map((e) => Number(e.value));
+  const buildingFigures = new Set([
+    Math.max(...values),
+    ...prior.filter((e) => e.sourceType === 'county').map((e) => Number(e.value)),
+  ]);
+  return ![...buildingFigures].some((v) => Math.abs(v - verifiedValue) <= Math.max(1, v * 0.01));
 }
 
 // Only the state food-service license (a public record) may reclassify a

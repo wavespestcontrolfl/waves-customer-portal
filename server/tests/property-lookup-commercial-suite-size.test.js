@@ -423,6 +423,47 @@ describe('a tech-verified sqft outranks the suite resolver', () => {
     expect(profile.homeSqFt).not.toBe(46031);
   });
 
+  test('an anchor tenant verified at over half the plaza is still trusted (only a repeat of a building figure is distrusted)', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 40000,
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: {
+          value: 40000, confidence: 'high', sourceType: 'verified',
+          evidence: [
+            { sourceType: 'verified', value: 40000 },
+            { sourceType: 'county', value: 46031 },
+            { sourceType: 'county', value: 73194 },
+          ],
+        },
+      },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    expect(profile.suiteSize).toEqual(expect.objectContaining({ value: 40000, source: 'verified' }));
+    expect(profile.homeSqFt).toBe(40000);
+  });
+
+  test('an on-site figure that confirms an AI unit-level estimate is trusted', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 1400,
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: {
+          value: 1400, confidence: 'high', sourceType: 'verified',
+          evidence: [
+            { sourceType: 'verified', value: 1400 },
+            { sourceType: 'ai', value: 1400 },
+            { sourceType: 'county', value: 46031 },
+          ],
+        },
+      },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    expect(profile.suiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'verified' }));
+  });
+
   test('a non-aggregated commercial condo keeps its own county folio measurement', () => {
     const record = plazaSuiteRecord({
       squareFootage: 1850,

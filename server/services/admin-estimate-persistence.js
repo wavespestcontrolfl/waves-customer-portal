@@ -1640,9 +1640,16 @@ function buildEstimatePersistenceFields(body, context = {}) {
     // (e.g. after a false-positive commercial-suite lookup) — that positive
     // marker, not a genuinely partial payload's mere absence of commercial
     // signals, is what downgrades the column. See v2FormMarkedResidential.
-    ...(isCommercialEstimateData(estimateData) || v2FormMarkedCommercial(estimateData)
+    // The operator's explicit V2-form selection decides first (a stale
+    // commercialSubtype left in the inputs after a correction to
+    // residential must not keep the column COMMERCIAL); only without an
+    // explicit selection do the derived commercial signals apply, and they
+    // never downgrade.
+    ...(v2FormMarkedCommercial(estimateData)
       ? { category: 'COMMERCIAL' }
-      : (v2FormMarkedResidential(estimateData) ? { category: 'RESIDENTIAL' } : {})),
+      : v2FormMarkedResidential(estimateData)
+        ? { category: 'RESIDENTIAL' }
+        : (isCommercialEstimateData(estimateData) ? { category: 'COMMERCIAL' } : {})),
     // Always emitted: a non-SERVER rewrite RESETS the column to its migration
     // default, so a draft first stamped by a server price can't keep claiming
     // that version after a CLIENT_FALLBACK/quote-required rewrite replaced
