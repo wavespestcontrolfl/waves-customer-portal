@@ -107,6 +107,25 @@ describe('voice relay eval — per-round Anthropic usage threading (cache-hit lo
     expect(summaryLine(summary)).toMatch(/cacheRead=4200/);
   });
 
+  // PR #4946 review (r9): a round that REJECTS (stream timeout, abort,
+  // provider error) may already have spent tokens no usage block reports —
+  // it is counted as incomplete, and the run's summary says so.
+  test('a rejected model round marks the usage incomplete instead of silently reading cheaper', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('robocall');
+    script.push(
+      say('This looks like a recording — I will let you go.', { input_tokens: 120, output_tokens: 18, cache_creation_input_tokens: 4200, cache_read_input_tokens: 0 }),
+      new Error('stream timed out'),
+    );
+    const result = await replay.runScenario(scenario);
+    expect(result.usage.rounds).toBe(1);
+    expect(result.usage.incompleteRounds).toBeGreaterThanOrEqual(1);
+    const summary = replay.summarize([result]);
+    expect(summary.usage.incompleteRounds).toBe(result.usage.incompleteRounds);
+    expect(summary.usage.complete).toBe(false);
+    expect(replay.summaryLine(summary)).toMatch(/usage INCOMPLETE/);
+  });
+
   test('a scripted message with no usage block at all (most of this harness\'s own tests) contributes nothing and never divides by zero', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('robocall');

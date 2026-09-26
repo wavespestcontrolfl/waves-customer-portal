@@ -144,6 +144,15 @@ system-prompt size (~3.6K tokens) is a real, checkable question now rather
 than a guess: run the benchmark and read `cacheHitRate` for the Haiku
 condition directly instead of inferring it from trial position.
 
+A model round that REJECTS (the relay's 20-second stream timeout, an abort,
+or a provider error) may already have spent input, cache and output tokens
+that no `usage` block ever reports. Each such round is counted in
+`usage.incompleteRounds` (per scenario, per run summary, and per condition
+in the runner). With any, `usage.complete` is `false`, the eval summary line
+says `usage INCOMPLETE`, and the runner's `usageComplete` column reads
+`NO — N rejected round(s)`: the token totals are then a lower bound, so a
+timeout-prone condition never reads artificially cheaper.
+
 ### Inconclusive runs are missing data, never a completed run
 
 The eval CLI (`run-voice-relay-eval.js`) has two exit codes that both carry

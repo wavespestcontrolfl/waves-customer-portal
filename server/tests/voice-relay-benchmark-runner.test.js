@@ -609,6 +609,28 @@ describe('summarizeCondition — real per-round usage (cache-hit logging, this P
     expect(s.usage.rounds).toBe(3);
     expect(s.usage.cacheReadRounds).toBe(1);
     expect(s.usage.cacheHitRate).toBeCloseTo(1 / 3);
+    // No rejected rounds anywhere: the totals are complete.
+    expect(s.usage.incompleteRounds).toBe(0);
+    expect(s.usage.complete).toBe(true);
+  });
+
+  // PR #4946 review (r9): a rejected model round (timeout/abort) spent tokens
+  // no usage block reports — the condition's totals must say they are a lower
+  // bound instead of reading artificially cheaper.
+  test('rejected rounds in any attempt mark the condition\'s usage incomplete', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } },
+        attempts: [
+          { status: 'fail', summary: { scenarios: 1, passed: 0, usage: { input_tokens: 40, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 2 } } },
+          { status: 'pass', summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } } },
+        ],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.usage.incompleteRounds).toBe(2);
+    expect(s.usage.complete).toBe(false);
   });
 
   test('no usage anywhere (an older/mocked result summary) reports zero counts and a null — never NaN or a false zero — cacheHitRate', () => {

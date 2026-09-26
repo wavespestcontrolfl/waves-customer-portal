@@ -1166,6 +1166,11 @@ function installHarness() {
               const aborted = (err && err.name === 'AbortError') || /abort/i.test(message);
               if (aborted && record.interruptInFlight) record.modelAborts += 1;
               else record.modelErrors.push(aborted ? `stream aborted by the relay's own bound: ${message}` : message);
+              // A rejected round (timeout, abort, provider error) may already
+              // have spent input/cache/output tokens that no usage block ever
+              // reports — count it, so a run's token totals are marked
+              // incomplete instead of silently reading cheaper.
+              if (record.usage) record.usage.incompleteRounds += 1;
               throw err;
             },
           );
@@ -1639,7 +1644,7 @@ function newRecord(scenario, h) {
     // tokens; Sandy's system prompt is smaller, so this is how we actually
     // see whether any round gets a cache hit rather than guessing from trial
     // position (see docs/sandy-benchmark.md).
-    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0 },
+    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 },
   };
 }
 
@@ -1802,6 +1807,7 @@ function tallyUsage(summaryUsage, recordUsage = {}) {
   summaryUsage.cache_write_tokens += recordUsage.cache_write_tokens || 0;
   summaryUsage.rounds += recordUsage.rounds || 0;
   summaryUsage.cacheReadRounds += recordUsage.cacheReadRounds || 0;
+  summaryUsage.incompleteRounds += recordUsage.incompleteRounds || 0;
 }
 
 // One record's contribution to the run summary (misses per tier and telemetry).
@@ -1844,7 +1850,7 @@ function summarize(results, { judge = false } = {}) {
     // this run (see newRecord's `usage` field and the finalMessage patch in
     // installHarness). `rounds` / `cacheReadRounds` are the cache-hit-rate
     // denominator/numerator — see cacheHitRate below.
-    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0 },
+    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 },
   };
   const all = [];
   for (const r of results) tallyRecord(summary, r, all);
@@ -1852,6 +1858,9 @@ function summarize(results, { judge = false } = {}) {
   // null (not 0) with zero rounds carrying usage — no evidence either way,
   // never read as "no cache hits ever".
   summary.usage.cacheHitRate = summary.usage.rounds ? summary.usage.cacheReadRounds / summary.usage.rounds : null;
+  // Token totals are only complete when no model round was rejected — a
+  // rejected round's spend is real but unreported (a lower bound, not a total).
+  summary.usage.complete = summary.usage.incompleteRounds === 0;
   return summary;
 }
 
@@ -1869,6 +1878,9 @@ function summaryLine(summary = {}) {
     (summary.replayErrorIds || []).length && `errors=[${summary.replayErrorIds.join(', ')}]`,
     summary.usage && summary.usage.rounds
       ? `tokens(in=${summary.usage.input_tokens}/out=${summary.usage.output_tokens}/cacheRead=${summary.usage.cached_input_tokens}/cacheWrite=${summary.usage.cache_write_tokens}) cacheHitRate=${summary.usage.cacheHitRate == null ? 'n/a' : `${(summary.usage.cacheHitRate * 100).toFixed(1)}%`} (${summary.usage.rounds} round(s) with usage)`
+      : null,
+    summary.usage && summary.usage.incompleteRounds
+      ? `usage INCOMPLETE: ${summary.usage.incompleteRounds} rejected round(s) spent unreported tokens (totals are a lower bound)`
       : null,
   ];
   return segments.filter(Boolean).join(' ');

@@ -960,6 +960,11 @@ describe('voice relay eval — each expect key', () => {
     [['It is $119 per application and 99 per visit.'], 'application', 'fail'],
     [['Son 119 por aplicación y 99 por aplicación.'], 'aplicación', 'pass'],
     [['It is $119 per application; we come 2 per month.'], 'application', 'pass'],
+    // r9: a bare figure governed by a price verb is a price too — never a count.
+    [['El programa mejorado cuesta 119 por aplicación y el premium cuesta 99.'], 'aplicación', 'fail'],
+    [['The enhanced plan is $119 per application, and premium runs 99.'], 'application', 'fail'],
+    [['El programa mejorado cuesta 119 por aplicación; son 12 aplicaciones al año.'], 'aplicación', 'pass'],
+    [['The enhanced plan is $119 per application; it runs 9 applications a year.'], 'application', 'pass'],
   ])('amount_requires_unit: every billed figure needs the unit: %j', (spoken, unit, status) => {
     const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
     expect(SPOKEN_CHECK_RUNNERS.amount_requires_unit({ amount: [119, 99], unit }, {}, { spoken })[0]).toBe(status);
@@ -1037,6 +1042,25 @@ describe('voice relay eval — each expect key', () => {
       expect(failing(id, [pest, uncut, lawn, good])).toContain('spoken_matches_any');
       expect(failing(id, [quote, lawn, good])).toContain('tool_input_includes'); // no turn-1 pest lookup
       expect(failing(id, [pest, quote, lawn, stale])).toContain('spoken_never_matches'); // stale pest figure without "$"
+    });
+
+    // r9: both are pinned to turn 2 — S3 first, then S1 and a refresh
+    // afterwards, books the replacement before learning S1 was gone.
+    test.each(['slot-gone', 'spanish-slot-gone'])('%s: S1 and the refresh must happen on turn 2, before S3', (id) => {
+      const es = id.startsWith('spanish');
+      const find1 = { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 1 };
+      const s3 = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 };
+      const lateS1 = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: true, turn: 3 };
+      const lateFind = { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 3 };
+      const gone = { kind: 'agent', turn: 3, text: es ? 'Ese horario ya no está disponible.' : 'Sorry, that one just got taken.' };
+      expect(failing(id, [find1, s3, lateS1, lateFind, gone])).toContain('tool_input_includes');
+    });
+
+    test.each(['read-back-grouping', 'spanish-read-back-grouping'])('%s: the lead capture is blocking', (id) => {
+      const scenario = load(id);
+      expect(scenario.expect.find((c) => c.check === 'capture_lead_input_asserts').severity).toBe('critical');
+      expect(scenario.expect).toContainEqual({ check: 'tools_performed_include', value: ['capture_lead'], severity: 'critical' });
+      expect(failing(id, [{ kind: 'agent', turn: 1, text: id.startsWith('spanish') ? 'Gracias.' : 'Thanks.' }])).toEqual(expect.arrayContaining(['capture_lead_input_asserts', 'tools_performed_include']));
     });
 
     test.each(['slot-gone', 'spanish-slot-gone'])('%s: the S1 attempt and the refreshed lookup must both happen', (id) => {
@@ -5518,9 +5542,11 @@ describe('voice relay eval — named spoken checks', () => {
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-read-back-grouping');
     const wrongNumber = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550999', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
     const wrong = replay._internals.evaluateChecks(scenario, record({ order: [wrongNumber, { kind: 'agent', text: 'Gracias, un miembro del equipo le dará seguimiento.' }] }));
-    // major, not critical (same tier as the EN original) — proven failable on
-    // its own terms, not via scenarioStatus (a lone major miss never flips it).
-    expect(wrong.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'major', status: 'fail' });
+    // Critical since Codex r9 on #4946 (the scenario's required action is an
+    // exact lead capture), in parity with the EN original — a wrong number
+    // now fails the scenario itself.
+    expect(wrong.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: wrong })).toBe('fail');
     const rightCapture = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
     const english = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Thank you, a Waves team member will follow up.' }] }));
     expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });

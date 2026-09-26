@@ -426,7 +426,8 @@
       "input": {
        "slot_ref": "S1"
       },
-      "fromTurn": 2
+      "fromTurn": 2,
+      "untilTurn": 2
      },
      "severity": "critical"
     },
@@ -437,7 +438,8 @@
       "input": {
        "city": "Bradenton"
       },
-      "fromTurn": 2
+      "fromTurn": 2,
+      "untilTurn": 2
      },
      "severity": "critical"
     }
@@ -2107,7 +2109,8 @@
       "input": {
        "slot_ref": "S1"
       },
-      "fromTurn": 2
+      "fromTurn": 2,
+      "untilTurn": 2
      },
      "severity": "critical"
     },
@@ -2118,7 +2121,8 @@
       "input": {
        "city": "Bradenton"
       },
-      "fromTurn": 2
+      "fromTurn": 2,
+      "untilTurn": 2
      },
      "severity": "critical"
     }
@@ -2517,7 +2521,7 @@
       ],
       "address_line1": ["^\\s*348\\s+ohio\\s+ave(?:nue)?\\.?\\s*$"]
      },
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "spoken_matches_any",
@@ -2539,6 +2543,13 @@
     {
      "check": "only_language",
      "value": "es",
+     "severity": "critical"
+    },
+    {
+     "check": "tools_performed_include",
+     "value": [
+      "capture_lead"
+     ],
      "severity": "critical"
     }
    ],
@@ -4455,7 +4466,7 @@
       ],
       "address_line1": ["^\\s*1220\\s+gulf\\s+dr(?:ive)?\\.?\\s+n(?:orth)?\\.?\\s*$"]
      },
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "spoken_matches_any",
@@ -4472,6 +4483,13 @@
     {
      "check": "no_visit_time",
      "value": true,
+     "severity": "critical"
+    },
+    {
+     "check": "tools_performed_include",
+     "value": [
+      "capture_lead"
+     ],
      "severity": "critical"
     }
    ],

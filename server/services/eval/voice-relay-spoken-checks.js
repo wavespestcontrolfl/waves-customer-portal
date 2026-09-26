@@ -175,7 +175,12 @@ const PRICE_NUMBER = `(?:(?<![\\d.,/-])(?:0|[1-9][\\d,]*)(?:\\.\\d+)?(?![\\d/-])
 // digit before "por mes"/"per visit" is a count ("2 por mes"), not a price.
 const BILLING_UNIT = '(?:applications?|treatments?|visits?|services?|months?|years?|weeks?|quarters?|aplicaci[oó]n(?:es)?|tratamientos?|visitas?|servicios?|mes(?:es)?|a[nñ]os?|semanas?|trimestres?)';
 const BARE_BILLED_NUMBER = '(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?(?![\\d/-])';
-const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por|cada)\\s+${BILLING_UNIT}(?![a-záéíóúñ])`, 'gi');
+// PR #4946 review (r9): a bare figure governed by a price verb is a price
+// too ("el premium cuesta 99", "it runs 99") — same two-digit rule, and never
+// a count ("cuesta 12 aplicaciones al año" names a quantity, not a price).
+const PRICE_VERB = '(?:cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
+const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
+const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por|cada)\\s+${BILLING_UNIT}(?![a-záéíóúñ])|\\b${PRICE_VERB}\\s+(?:de\\s+|about\\s+|around\\s+)?(${BARE_BILLED_NUMBER})${COUNT_NOUN_AHEAD}`, 'gi');
 // Customer-facing price copy reads "per application"/"por aplicación" —
 // AGENTS.md; "per visit"/"por visita"/"cada visita" is banned outright,
 // negated or not: "not per visit" is still the prohibited phrase in the
@@ -245,7 +250,7 @@ function amount_requires_unit(value, record, { spoken }) {
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
       for (const clause of sentence.split(PRICE_CLAUSE_SPLIT_RE)) {
         price.lastIndex = 0;
-        const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3] || m[4]));
+        const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3] || m[4] || m[5]));
         if (!amounts.length) continue;
         if (!unit.test(clause)) {
           // The caller cut Sandy off right after the figure, before its unit

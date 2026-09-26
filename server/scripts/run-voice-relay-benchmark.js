@@ -424,10 +424,15 @@ function summarizeCondition(id, runs) {
     cacheWriteTokens: sumAttemptsUsage('cache_write_tokens'),
     rounds: sumAttemptsUsage('rounds'),
     cacheReadRounds: sumAttemptsUsage('cacheReadRounds'),
+    // Rejected model rounds (timeout/abort/provider error) spent tokens no
+    // usage block reports: with any, the totals above are a lower bound, and
+    // a timeout-prone condition would otherwise read artificially cheaper.
+    incompleteRounds: sumAttemptsUsage('incompleteRounds'),
   };
   // null (not 0) with no rounds carrying usage at all — missing data, never
   // read as "confirmed zero cache hits".
   usage.cacheHitRate = usage.rounds ? usage.cacheReadRounds / usage.rounds : null;
+  usage.complete = usage.incompleteRounds === 0;
 
   return {
     condition: id,
@@ -641,6 +646,7 @@ if (require.main === module) {
         tokensIn: c.usage.inputTokens, tokensOut: c.usage.outputTokens,
         cacheRead: c.usage.cachedInputTokens, cacheWrite: c.usage.cacheWriteTokens,
         cacheHitRate: c.usage.cacheHitRate == null ? 'n/a (0 rounds)' : `${(c.usage.cacheHitRate * 100).toFixed(1)}% (${c.usage.rounds} round(s))`,
+        usageComplete: c.usage.incompleteRounds ? `NO — ${c.usage.incompleteRounds} rejected round(s), totals are a lower bound` : 'yes',
       })));
       process.exitCode = exitCode;
     } catch (err) {
