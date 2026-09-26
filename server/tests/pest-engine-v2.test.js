@@ -319,7 +319,11 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-c', 0.95, { traitsVisible: [1] })] }));
     expect(built.answer.wording).toBe('likely');
     expect(built.tier).toBe('needs_more_evidence');
-    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.nextPhoto).toEqual({
+      ask: 'A technician can confirm this one on site or from a sample.',
+      why: 'It has a close look-alike that a photo alone can\'t rule out.',
+      photo_can_confirm: false,
+    });
     expect(JSON.stringify(built)).not.toMatch(/unreviewed/i);
   });
 });

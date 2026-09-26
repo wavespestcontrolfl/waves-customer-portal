@@ -647,6 +647,15 @@ function pairIfBothApproved(entry, targetSlug) {
  * same "no second candidate to pair against" fallback `nextPhotoFor` uses),
  * shared with `entryLevelAnswer`'s photo-confirmability guard so both apply
  * the SAME fallback pair consistently. */
+// Shown when the governing look-alike pair can't be settled by any photo
+// and its own (curated) wording can't be shown because it names an
+// unapproved species (pre-push audit on Codex #4916 r2).
+const NO_PHOTO_CONFIRMS = Object.freeze({
+  ask: 'A technician can confirm this one on site or from a sample.',
+  why: 'It has a close look-alike that a photo alone can\'t rule out.',
+  photo_can_confirm: false,
+});
+
 /** The look-alike pair that governs whether a photo can confirm `top`:
  * its curated pair against the second candidate, else its own first
  * look-alike — read WITHOUT the approval filter. `photo_can_confirm: false`
@@ -684,10 +693,13 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   if (level === 'entry' && top?.entry) {
     const governing = governingPair(top, second);
     if (governing && !isApproved(catalog.getEntry(governing.slug))) {
-      // Its prose names the unapproved look-alike: ask with the group's
-      // generic prompt instead, but keep the pair's own confirmability.
+      // Its prose names the unapproved look-alike, so it can't be shown.
+      // A pair no photo can settle gets fixed technician guidance (the
+      // group's photo prompt would contradict it); otherwise the group's
+      // generic prompt stands in.
+      if (governing.photo_can_confirm === false) return { ...NO_PHOTO_CONFIRMS };
       const np = catalog.nextPhoto(top.entry.group);
-      return { ask: np?.ask || null, why: np?.why || null, photo_can_confirm: governing.photo_can_confirm !== false };
+      return { ask: np?.ask || null, why: np?.why || null, photo_can_confirm: true };
     }
     const fallbackPair = firstApprovedLookAlike(top.entry);
     return fallbackPair
