@@ -421,6 +421,13 @@ describe('llm call ledger', () => {
       metrics.ledgerCallRejected(message, 'invalid_json');
       metrics.ledgerCallRejected({ ...message }, 'invalid_json'); // a copy was never returned by ledgerCall
       metrics.ledgerCallRejected(undefined, 'invalid_json'); // the call threw before a value existed
+      // A row already filed as a refusal / truncation keeps that classification.
+      const refused = { ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [] };
+      const cut = { ...ANTHROPIC_MESSAGE, stop_reason: 'max_tokens' };
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(refused));
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(cut));
+      metrics.ledgerCallRejected(refused, 'invalid_json');
+      metrics.ledgerCallRejected(cut, 'invalid_json');
       await flush();
       expect(mockUpdate.mock.calls.map(([t, cond, patch]) => [t, cond.id > 0, patch])).toEqual([
         ['llm_dispatch_log', true, { ok: false, error_code: 'invalid_json', error_class: 'instruction' }],

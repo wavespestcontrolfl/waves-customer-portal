@@ -429,8 +429,11 @@ function endedWithoutText(message) {
 /**
  * Flip the row ledgerCall recorded for `value` (the object it returned) to a
  * failure with the caller's own reason — `invalid_json`, `schema_invalid`,
- * `invalid_output`. Same fire-and-forget contract as failCall: never throws,
- * no-op off-gate or for a value ledgerCall did not return.
+ * `invalid_output`. Only a row ledgerCall filed as ok is flipped: a refusal,
+ * truncation or empty answer keeps its own classification, so the failure
+ * class still says why the caller could not parse (Codex r3 on #4884). Same
+ * fire-and-forget contract as failCall: never throws, no-op off-gate or for
+ * a value ledgerCall did not return.
  */
 function ledgerCallRejected(value, errorCode) {
   try {
@@ -493,7 +496,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     policyLabel: label,
   });
   if (trace) recordTrace(callId, { system: trace.system, prompt: trace.prompt, response: messageText(value), laneId });
-  if (value && typeof value === 'object') ledgerCallIdOf.set(value, callId);
+  if (value && typeof value === 'object' && !errorCode) ledgerCallIdOf.set(value, callId);
   return value;
 }
 

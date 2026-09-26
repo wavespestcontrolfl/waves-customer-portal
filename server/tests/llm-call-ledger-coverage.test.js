@@ -128,12 +128,13 @@ describe('llm call-ledger coverage', () => {
   });
 });
 
-// Every `.messages.create(` / `.messages.stream(` call in server code runs
-// inside ledgerCall, or is listed here with the count and the reason its lane
-// stays `unrecordable`. Structural, not import-based: a file that receives an
-// injected Anthropic client (llm/deep.js has that shape) is covered too, so
-// the one non-Anthropic client with the same method name (Twilio) is listed
-// explicitly (Codex on #4884).
+// Every `<x>.messages.create(...)` / `<x>.messages.stream(...)` call in server
+// code runs inside ledgerCall, or is listed here with the count and the reason
+// its lane stays `unrecordable`. Structural on both axes (Codex on #4884): not
+// import-based, so a call through an injected client (llm/deep.js's shape) is
+// covered and the one non-Anthropic client with the same method name (Twilio)
+// is listed explicitly; and parsed, not line-matched, so a call split across
+// lines (`client.messages` / `.create(`) is still seen.
 // Two-sided like UNLABELLED_LANES: a file whose unwrapped count drops below
 // its entry fails (shrink the entry), and a new unwrapped call fails (wrap it:
 // `await ledgerCall('anthropic', model, () => client.messages.create({...}),
@@ -153,6 +154,33 @@ const KNOWN_UNWRAPPED = {
   'services/twilio.js': [1, "Twilio's SMS client — its messages.create is Twilio's API, not Anthropic"],
 };
 
+// A declared dependency (package.json), so the guard never rides a transitive one.
+const acorn = require('acorn');
+
+// Direct SDK calls in `src` that no enclosing ledgerCall(...) wraps.
+function unwrappedSdkCalls(src) {
+  const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true, allowHashBang: true });
+  let count = 0;
+  const isNamed = (node, name) => node && !node.computed && node.property && node.property.name === name;
+  (function walk(node, insideLedger) {
+    if (!node || typeof node.type !== 'string') return;
+    let inside = insideLedger;
+    if (node.type === 'CallExpression') {
+      const callee = node.callee;
+      if ((callee.type === 'Identifier' && callee.name === 'ledgerCall') || (callee.type === 'MemberExpression' && isNamed(callee, 'ledgerCall'))) inside = true;
+      const sdk = callee.type === 'MemberExpression' && (isNamed(callee, 'create') || isNamed(callee, 'stream'))
+        && callee.object.type === 'MemberExpression' && isNamed(callee.object, 'messages');
+      if (sdk && !insideLedger) count += 1;
+    }
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (Array.isArray(value)) value.forEach((child) => walk(child, inside));
+      else if (value && typeof value.type === 'string') walk(value, inside);
+    }
+  })(ast, false);
+  return count;
+}
+
 function jsFiles(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
@@ -163,12 +191,26 @@ function jsFiles(dir) {
 
 describe('direct Anthropic SDK calls are on the call ledger', () => {
   const counts = {};
+  const unparsed = [];
   for (const file of jsFiles(SERVER_DIR)) {
     const src = read(file);
-    const unwrapped = src.split('\n').filter((line) => /\.messages\.(create|stream)\(/.test(line)
-      && !/ledgerCall\(/.test(line) && !/^\s*(\/\/|\*)/.test(line)).length;
+    // Cheap prefilter; whitespace-tolerant so a line break cannot hide a call.
+    if (!/\bmessages\s*\??\.\s*(create|stream)\b/.test(src)) continue;
+    let unwrapped;
+    try { unwrapped = unwrappedSdkCalls(src); } catch (err) { unparsed.push(`${path.relative(SERVER_DIR, file)}: ${err.message}`); continue; }
     if (unwrapped) counts[path.relative(SERVER_DIR, file)] = unwrapped;
   }
+
+  test('the scan is structural: a call split across lines counts, one inside ledgerCall does not', () => {
+    expect(unwrappedSdkCalls('client.messages\n  .create({ model: m });')).toBe(1);
+    expect(unwrappedSdkCalls('client.messages?.stream({ model: m });')).toBe(1);
+    expect(unwrappedSdkCalls("ledgerCall('anthropic', m, () => client.messages\n  .create({ model: m }), { laneId: 'x' });")).toBe(0);
+    expect(unwrappedSdkCalls("metrics.ledgerCall('anthropic', m, () => client.messages.create(req));")).toBe(0);
+  });
+
+  test('every candidate file parses', () => {
+    expect(unparsed).toEqual([]);
+  });
 
   test('no unlisted file makes an unwrapped call', () => {
     const unlisted = Object.keys(counts).filter((file) => !KNOWN_UNWRAPPED[file]);
