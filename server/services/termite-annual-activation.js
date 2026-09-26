@@ -1024,6 +1024,35 @@ function whereTermHasCompletedInstallation(builder, alias, conn = db) {
   });
 }
 
+// THE installation a term anchors to: the plan's earliest completed
+// installation visit (whereInstallationVisitForPlan). `term` needs id,
+// customer_id, source_estimate_id, term_start, created_at.
+async function earliestCompletedInstallation(term, conn) {
+  const estimate = term.source_estimate_id
+    ? await conn('estimates').where({ id: term.source_estimate_id }).first('property_id')
+    : null;
+  return whereInstallationVisitForPlan(
+    conn('scheduled_services as ss').where('ss.status', 'completed'),
+    installationPlanFor(term, estimate),
+  ).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
+}
+
+// The anchored coverage year: the installation date through the same day
+// 12 months on (inclusive term_end).
+function installationTermWindow(installation) {
+  const termStart = dateOnlyString(installation.scheduled_date);
+  return { termStart, termEnd: addMonthsSameDay(termStart, 12) };
+}
+
+// The window the anchor WOULD give this term — for a term installed but never
+// anchored (e.g. an overlap refusal), whose term_end is still provisional
+// (#4940 pre-push P1: the decline retrieval waits for this real end). Null
+// when no completed installation is on file.
+async function installationTermWindowForTerm(term, conn = db) {
+  const installation = await earliestCompletedInstallation(term, conn);
+  return installation ? installationTermWindow(installation) : null;
+}
+
 async function anchorTermToInstallation({ termId, conn = db }) {
   // A term the customer declined online BEFORE its installation gets its
   // real term_end here; its station retrieval is evaluated by the daily
@@ -1042,17 +1071,10 @@ async function anchorTermToInstallation({ termId, conn = db }) {
     }
     if (await trx('annual_prepay_terms').where({ renewed_from_term_id: term.id }).first('id')) return { skipped: 'renewed' };
 
-    const estimate = term.source_estimate_id
-      ? await trx('estimates').where({ id: term.source_estimate_id }).first('property_id')
-      : null;
-    const installation = await whereInstallationVisitForPlan(
-      trx('scheduled_services as ss').where('ss.status', 'completed'),
-      installationPlanFor(term, estimate),
-    ).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
+    const installation = await earliestCompletedInstallation(term, trx);
     if (!installation) return { skipped: 'no_completed_installation' };
 
-    const termStart = dateOnlyString(installation.scheduled_date);
-    const termEnd = addMonthsSameDay(termStart, 12);
+    const { termStart, termEnd } = installationTermWindow(installation);
     const clash = await trx('annual_prepay_terms')
       .where({ customer_id: term.customer_id })
       .whereNot({ id: term.id })
@@ -1564,6 +1586,7 @@ module.exports = {
   anchorTermToInstallation,
   reconcileTermiteAnnualActivations,
   whereTermHasCompletedInstallation,
+  installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,
   _private: { CASTABLE_ISO_INSTANT, SIGNATURE_NUDGE_EVENT, expireAbandonedSignature },

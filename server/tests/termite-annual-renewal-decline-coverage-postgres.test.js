@@ -173,7 +173,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     if (fixture) await fixture.destroy();
   });
 
-  async function load() {
+  async function load({ invoiceModule = null } = {}) {
     fixture = await createScratchDb();
     const { db } = fixture;
     const notifyAdmin = jest.fn(async () => ({ id: randomUUID() }));
@@ -199,6 +199,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask, termRetrievalDedupeKey }));
+    if (invoiceModule) jest.doMock('../services/invoice', () => invoiceModule);
     const Renewals = require('../services/annual-prepay-renewals');
     const { anchorTermToInstallation } = require('../services/termite-annual-activation');
     return {
@@ -742,6 +743,140 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).installation_anchored_at).toBeNull();
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: null }));
+  });
+  // #4940 pre-push P1: an installed plan the anchor never landed on still
+  // carries its PROVISIONAL term_end — the retrieval waits for the real end
+  // the anchor's own rule derives (installation date + 12 months).
+  async function unanchoredPaidDecline(db, { installedMonthsAgo }) {
+    const customerId = randomUUID();
+    const today = etToday();
+    const signedOn = addMonths(today, -14);
+    await db('customers').insert({ id: customerId, first_name: 'Jane', last_name: 'Doe' });
+    const [estimate] = await db('estimates').insert({ customer_id: customerId }).returning('*');
+    const [invoice] = await db('invoices').insert({
+      customer_id: customerId, status: 'paid', paid_at: new Date(`${signedOn}T17:00:00Z`), stripe_payment_intent_id: `pi_${randomUUID()}`,
+    }).returning('*');
+    const installedOn = addMonths(today, -installedMonthsAgo);
+    await db('scheduled_services').insert({
+      customer_id: customerId, source_estimate_id: estimate.id, status: 'completed',
+      service_type: 'Termite Bait Station Installation', scheduled_date: installedOn,
+    });
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: customerId,
+      source_estimate_id: estimate.id,
+      prepay_invoice_id: invoice.id,
+      plan_label: 'WaveGuard Termite Annual Protection',
+      prepay_amount: 450,
+      coverage_service_type: 'Termite Monitoring Visit',
+      coverage_visit_count: 2,
+      coverage_cadence: 'annual',
+      term_start: signedOn,
+      // Provisional (signing + 12 months): already in the past.
+      term_end: addMonths(signedOn, 12),
+      status: 'cancelled',
+      renewal_decision: 'cancel',
+      cancel_disposition: 'end_at_term',
+      annual_plan_version: 'v3',
+      created_at: new Date(`${signedOn}T16:00:00Z`),
+    }).returning('*');
+    const fx = {
+      customerId, today, estimate, invoice, term, installedOn,
+    };
+    await portalDeclineRow(db, fx);
+    return fx;
+  }
+
+  test('unanchored PAID plan, provisional term_end past, installed 2 months ago: not due — the real end is installation + 12 months', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await unanchoredPaidDecline(db, { installedMonthsAgo: 2 });
+    expect(ymd(fx.term.term_end) < fx.today).toBe(true);
+
+    // A candidate (past provisional term_end + installation evidence), but
+    // not due: nothing raised, nothing settled.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: fx.today })).toEqual({ scanned: 1, raised: 0 });
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+    expect(await settledMarker(db, fx)).toBeUndefined();
+  });
+
+  test('unanchored PAID plan installed 13 months ago: due, dated to installation + 12 months (the anchor rule); no false correction bell', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    const fx = await unanchoredPaidDecline(db, { installedMonthsAgo: 13 });
+    const { addMonthsSameDay } = jest.requireActual('../utils/date-only');
+    const realEnd = addMonthsSameDay(fx.installedOn, 12);
+    expect(realEnd < fx.today).toBe(true);
+    expect(realEnd > ymd(fx.term.term_end)).toBe(true);
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: fx.today })).toEqual({ scanned: 1, raised: 1 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: realEnd, termId: fx.term.id }));
+    expect((await settledMarker(db, fx)).metadata).toEqual(expect.objectContaining({ outcome: 'raised', retrieve_after: realEnd }));
+    // The correction pass reads the same derived end, never the provisional
+    // term_end — no "date moved earlier" bell.
+    await Renewals.raisePendingDeclineRetrievalTasks({ today: fx.today });
+    expect(notifyAdmin.mock.calls.filter((c) => String(c[3]?.dedupeKey || '').endsWith(':date_moved_earlier'))).toHaveLength(0);
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+  });
+
+  // #4940 pre-push P1: the paid follow-through of a declined pending term
+  // stamps billing_mode 'annual_prepay' only while the term covers today.
+  async function unpaidDeclinedPlan(db, Renewals, { expired }) {
+    await db.raw('ALTER TABLE customers ADD COLUMN billing_mode text, ADD COLUMN updated_at timestamptz');
+    await db.raw('ALTER TABLE invoices ADD COLUMN scheduled_service_id uuid, ADD COLUMN annual_prepay_covered_term_id uuid, ADD COLUMN payer_id uuid, ADD COLUMN payment_recorded_at timestamptz');
+    const fx = await paidInstalledTerm(db);
+    await db('customers').where({ id: fx.customerId }).update({ billing_mode: 'per_application' });
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'sent', paid_at: null });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'payment_pending' });
+    const declined = await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
+    expect(declined).toEqual(expect.objectContaining({ ok: true, unpaid: true }));
+    if (expired) {
+      // The whole year has run out while the invoice stayed unpaid.
+      const termStart = addMonths(fx.today, -14);
+      await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_start: termStart, term_end: addMonths(termStart, 12) });
+    }
+    const term = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    // A covered visit completed inside the year and billed per visit (open
+    // invoice): the historical payment's reconcile settles it as covered.
+    const [completed] = await db('scheduled_services').insert({
+      customer_id: fx.customerId, annual_prepay_term_id: fx.term.id, status: 'completed',
+      service_type: 'Termite Monitoring Visit', scheduled_date: addMonths(ymd(term.term_start), 1),
+    }).returning('*');
+    const [visitInvoice] = await db('invoices').insert({ customer_id: fx.customerId, status: 'sent', scheduled_service_id: completed.id }).returning('*');
+    return { ...fx, term, visitInvoice };
+  }
+
+  const settleInvoiceModule = () => ({ settleInvoiceAsAnnualPrepayCovered: jest.fn(async () => ({ settled: true })) });
+
+  test('unpaid decline PAID BEFORE term_end: covered decided lapse, billing_mode annual_prepay, historical visit reconciled', async () => {
+    const invoiceModule = settleInvoiceModule();
+    const { db, Renewals } = await load({ invoiceModule });
+    const fx = await unpaidDeclinedPlan(db, Renewals, { expired: false });
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(await Renewals.isPaidDecidedLapseTerm(after, db)).toBe(true);
+    expect((await db('customers').where({ id: fx.customerId }).first()).billing_mode).toBe('annual_prepay');
+    expect(invoiceModule.settleInvoiceAsAnnualPrepayCovered).toHaveBeenCalledWith(fx.visitInvoice.id, fx.term.id);
+  });
+
+  test('unpaid decline PAID AFTER term_end: still a decided lapse and reconciled, but billing_mode is left — never annual_prepay on expired coverage', async () => {
+    const invoiceModule = settleInvoiceModule();
+    const { db, Renewals } = await load({ invoiceModule });
+    const fx = await unpaidDeclinedPlan(db, Renewals, { expired: true });
+    expect(ymd(fx.term.term_end) < fx.today).toBe(true);
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect((await db('customers').where({ id: fx.customerId }).first()).billing_mode).toBe('per_application');
+    expect(invoiceModule.settleInvoiceAsAnnualPrepayCovered).toHaveBeenCalledWith(fx.visitInvoice.id, fx.term.id);
+    // A replayed payment sync neither activates it nor stamps the mode.
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).status).toBe('cancelled');
+    expect((await db('customers').where({ id: fx.customerId }).first()).billing_mode).toBe('per_application');
   });
 });
 

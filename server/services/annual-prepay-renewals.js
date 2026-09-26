@@ -3596,8 +3596,9 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
 // decided-lapse shape — never 'active', so it never renews:
 //   - paid: covered through term_end by coveredTermsAsOf's decided-lapse
 //     branch; the paid follow-through (attach + stamp through the end-at-term
-//     upkeep, pending-window reconcile, billing-mode stamp, dispute recovery)
-//     runs as it would for an activated term;
+//     upkeep, pending-window reconcile, dispute recovery) runs as it would
+//     for an activated term — the billing-mode stamp only while the term
+//     covers today (paid after term_end: the mode is left as it was);
 //   - voided / refunded: nothing was ever covered — it simply leaves the
 //     pending rails.
 // Kept out of syncTermForInvoicePayment's own loop (which only walks
@@ -3620,7 +3621,14 @@ async function settleDecidedPendingTerms(decided, nextStatus, conn) {
 async function followThroughPaidDecidedLapse(lapse, conn) {
   const refreshed = await refreshTermSnapshot(lapse, conn);
   await reconcilePendingWindowCompletions(refreshed || lapse, conn);
-  await stampAnnualPrepayBillingMode(lapse.customer_id, conn, lapse.id);
+  // #4940 pre-push P1: the billing-mode stamp only while the term covers
+  // TODAY — the decided-coverage restore's coveredToday rule. Paid after
+  // term_end, 'annual_prepay' on expired coverage is the nothing-bills limbo
+  // (the monthly cron skips the mode); the historical payment is still
+  // reconciled above. A pending term was never stamped, so the mode is left.
+  if (await coveredTermsAsOf(conn, etDateString()).where('t.id', lapse.id).first('t.id')) {
+    await stampAnnualPrepayBillingMode(lapse.customer_id, conn, lapse.id);
+  }
   if (lapse.dispute_suspended_at) await finishDisputeRecoveryForTerm(lapse, conn);
   return refreshed || lapse;
 }
@@ -8130,16 +8138,22 @@ const DECLINE_RETRIEVAL_IMMEDIATE = 'immediate';
 // the helper treats as internal test data (nothing is ever raised there).
 const DECLINE_RETRIEVAL_SELF_SETTLING = new Set(['raised', 'internal_test_customer']);
 
+// Columns declineRetrievalEnd (and the anchor's installation rule) reads.
+const DECLINE_RETRIEVAL_TERM_COLUMNS = [
+  'id', 'customer_id', 'source_estimate_id', 'term_start', 'term_end', 'created_at',
+  'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at',
+];
+
 // Every read/write here uses the ROOT pool: raiseTermiteRetrievalTask writes
 // on its own connection, so it must only ever see committed state.
 async function evaluateDueDeclineRetrieval(termId, today = etDateString()) {
   let retrieval = null;
   try {
     const term = await db('annual_prepay_terms').where({ id: termId })
-      .first('id', 'customer_id', 'source_estimate_id', 'prepay_invoice_id', 'status', 'renewal_decision', 'term_end', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
+      .first(...DECLINE_RETRIEVAL_TERM_COLUMNS, 'prepay_invoice_id', 'status', 'renewal_decision');
     const due = await dueDeclineRetrieval(term, today);
     if (due.reason) return { raised: false, reason: due.reason };
-    retrieval = { termEnd: dateOnly(term.term_end), retrieveAfterKey: due.key, customerId: term.customer_id };
+    retrieval = { termEnd: due.retrievalEnd, retrieveAfterKey: due.key, customerId: term.customer_id };
     // A failed action is belled (settleDeclineRetrieval) but never settled.
     Object.assign(retrieval, await actOnDueDeclineRetrieval(term, due, today).catch((actErr) => {
       logger.error(`[annual-prepay] renewal-decline retrieval action failed for term ${termId}: ${actErr.message}`);
@@ -8154,13 +8168,15 @@ async function evaluateDueDeclineRetrieval(termId, today = etDateString()) {
 }
 
 // Whether this term's retrieval is due now — { portalDecline, retrieveAfter,
-// key } — or why not — { reason }. Due = an installed, PORTAL-declined
-// decided lapse, not yet settled, whose prepay was refunded/voided
-// (immediate) or whose paid-through term_end has passed (dated).
+// key, retrievalEnd } — or why not — { reason }. Due = an installed,
+// PORTAL-declined decided lapse, not yet settled, whose prepay was
+// refunded/voided (immediate: no coverage owed) or whose paid-through end
+// (declineRetrievalEnd) has passed (dated).
 async function dueDeclineRetrieval(term, today) {
   if (!term) return { reason: 'not_found' };
   if (term.status !== 'cancelled' || term.renewal_decision !== 'cancel') return { reason: 'not_declined' };
-  if (coverageAwaitsInstallation(term) && !(await hasCompletedInstallationEvidence(term))) return { reason: 'not_installed' };
+  const retrievalEnd = await declineRetrievalEnd(term);
+  if (!retrievalEnd) return { reason: 'not_installed' };
   const termIdText = String(term.id);
   const portalDecline = await db('activity_log')
     .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
@@ -8173,19 +8189,22 @@ async function dueDeclineRetrieval(term, today) {
     .whereRaw("metadata->>'term_id' = ?", [termIdText])
     .first('id');
   if (settled) return { reason: 'already_settled' };
-  if (await isTermPrepayRefunded(term)) return { portalDecline, retrieveAfter: null, key: DECLINE_RETRIEVAL_IMMEDIATE };
-  const termEnd = dateOnly(term.term_end);
-  if (termEnd && termEnd < today) return { portalDecline, retrieveAfter: termEnd, key: termEnd };
+  if (await isTermPrepayRefunded(term)) return { portalDecline, retrieveAfter: null, key: DECLINE_RETRIEVAL_IMMEDIATE, retrievalEnd };
+  if (retrievalEnd < today) return { portalDecline, retrieveAfter: retrievalEnd, key: retrievalEnd, retrievalEnd };
   return { reason: 'not_due' };
 }
 
-// An original term not yet anchored may still have its stations in the ground
-// (#4940 pre-push P1: e.g. installed, then the anchor was refused) — a
-// completed installation visit, by the anchor's own plan-scoped rule, counts.
-async function hasCompletedInstallationEvidence(term) {
-  const { whereTermHasCompletedInstallation } = require('./termite-annual-activation');
-  const row = await whereTermHasCompletedInstallation(db('annual_prepay_terms as it').where('it.id', term.id), 'it', db).first('it.id');
-  return !!row;
+// The date a declined term's stations wait for. An anchored or renewal term:
+// its term_end. An original term the anchor never landed on still carries a
+// PROVISIONAL term_end (#4940 pre-push P1) — if its installation completed
+// (stations in the ground, e.g. the anchor was refused), the real end is
+// derived by the anchor's own rule (installation date + 12 months, inclusive);
+// with no completed installation there is nothing to retrieve (null).
+async function declineRetrievalEnd(term) {
+  if (!coverageAwaitsInstallation(term)) return dateOnly(term.term_end);
+  const { installationTermWindowForTerm } = require('./termite-annual-activation');
+  const window = await installationTermWindowForTerm(term, db);
+  return window ? window.termEnd : null;
 }
 
 async function isTermPrepayRefunded(term) {
@@ -8423,9 +8442,10 @@ async function correctDeclineRetrievalDates(today) {
 
 async function correctDeclineRetrievalDate(meta, today) {
   const term = meta.termId
-    ? await db('annual_prepay_terms').where({ id: meta.termId }).first('id', 'customer_id', 'source_estimate_id', 'term_end')
+    ? await db('annual_prepay_terms').where({ id: meta.termId }).first(...DECLINE_RETRIEVAL_TERM_COLUMNS)
     : null;
-  const termEnd = term ? dateOnly(term.term_end) : null;
+  // The same end the due check used — never a provisional term_end.
+  const termEnd = term ? await declineRetrievalEnd(term) : null;
   if (!termEnd || termEnd === meta.retrieveAfter) return;
   const retrieval = { termEnd, customerId: term.customer_id, retrieveAfterKey: termEnd };
   if (termEnd < meta.retrieveAfter) {
