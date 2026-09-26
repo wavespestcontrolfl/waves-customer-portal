@@ -1025,6 +1025,8 @@ const CALLER_CAVEAT_TERMS = [
   ' changed my mind ', ' change my mind ', ' don t want ', ' do not want ',
   ' stop the service ', ' skip it ', ' skip this ',
 ];
+const CALLER_REFUSAL_STEM_RE = /\b(?:reject|object|refus|declin|disagree|deny|denied|cancel|nix)\w*|\bturn(?:ing|ed)? (?:it|that|this|them) down\b/;
+const CALLER_SLOT_REFERENCE_TERMS = [' time ', ' times ', ' day ', ' days ', ' date ', ' dates '];
 function laterCallerSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   const ns = sentence.ns.replace(CALLER_CLOSER_NEGATION_RE, ' ').trim();
   if (!ns) return false;
@@ -1033,7 +1035,12 @@ function laterCallerSentenceRetracts(sentence, confirmedStartAt, callStartedAt) 
   if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
   if (RETRACTION_MARKER_TERMS.some((t) => padded.includes(t))) return true;
   if (CALLER_CAVEAT_TERMS.some((t) => padded.includes(t))) return true;
-  if (laterSentenceNamesSlot(ns)) {
+  if (CALLER_REFUSAL_STEM_RE.test(ns)) return true;
+  // Codex round 27, P1 (:1024): "I reject that time." — a caller sentence
+  // that talks about the time/day/date/appointment AT ALL must be a plain
+  // same-slot acknowledgement, whatever verb it uses, so a new objection
+  // synonym never needs a new word here.
+  if (laterSentenceNamesSlot(ns) || CALLER_SLOT_REFERENCE_TERMS.some((t) => padded.includes(t))) {
     return !(!sentence.interrogative
       && commitmentTurnVocabularyOk(ns)
       && !turnHasUnresolvedConditional(ns)

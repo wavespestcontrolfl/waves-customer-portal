@@ -1724,6 +1724,10 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     "Caller: I have to pass.",
     "Caller: Forget it, that's too expensive.",
     "Caller: I changed my mind.",
+    "Caller: I reject that time.",
+    "Caller: I object to that day.",
+    "Caller: That time is bad for me.",
+    "Caller: That date is terrible.",
   ])('Codex round-26 regression: a later caller rejection or caveat holds the call — %s', (later) => {
     const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
@@ -1738,6 +1742,7 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     "Caller: No, that's all, thanks so much.",
     "Caller: Please stop by the side gate.",
     "Caller: You can pass through the gate.",
+    "Caller: Okay, talk to you then.",
   ])('Codex round-26: a later caller acknowledgement or closer still grounds — %s', (later) => {
     const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
