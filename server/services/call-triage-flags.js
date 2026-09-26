@@ -891,13 +891,35 @@ const COMMITMENT_TURN_ACKNOWLEDGEMENTS = new Set([
   'yes', 'yeah', 'okay', 'ok', 'alright', 'all right', 'perfect', 'great',
   'awesome', 'sounds good', 'thank you', 'thanks', 'no problem',
 ]);
+// A sentence made ENTIRELY of listed phrases, back to back ("Okay, thank
+// you." → "okay thank you", "Alright, bye.") is still nothing but
+// acknowledgement — requiring a single exact phrase sent the most common
+// real wrap-up ("Okay, thank you.") to triage. Every token must belong to a
+// listed phrase; any other word ("Okay will come in the email.") fails, so a
+// sequence can never carry a withdrawal, condition or deferral.
+function isPhraseSequence(ns, phraseSets) {
+  const toks = String(ns || '').split(' ').filter(Boolean);
+  if (!toks.length) return false;
+  const reachable = [true];
+  for (let i = 0; i < toks.length; i += 1) {
+    if (!reachable[i]) continue;
+    for (const set of phraseSets) {
+      for (const phrase of set) {
+        const words = phrase.split(' ');
+        if (words.every((w, k) => toks[i + k] === w)) reachable[i + words.length] = true;
+      }
+    }
+  }
+  return reachable[toks.length] === true;
+}
 function otherSentenceIsBareAcknowledgement(other) {
-  return COMMITMENT_TURN_ACKNOWLEDGEMENTS.has(other.ns);
+  return isPhraseSequence(other.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS]);
 }
 // LATER_TURN_CLOSERS extends the acknowledgement list with the call-ending
 // phrases a routine wrap-up actually uses that a mid-call acknowledgement
 // would not (owner ruling 2026-09-25, round 28 extension) — still
-// whole-sentence exact match only, same as COMMITMENT_TURN_ACKNOWLEDGEMENTS.
+// whole sentences made only of listed phrases (isPhraseSequence), same as
+// COMMITMENT_TURN_ACKNOWLEDGEMENTS.
 const LATER_TURN_CLOSERS = new Set([
   'bye', 'goodbye', 'have a good day', 'have a great day', 'you too',
   'thank you so much', 'talk to you then', 'see you then',
@@ -907,7 +929,7 @@ const LATER_TURN_CLOSERS = new Set([
 // replaces every later-turn term list and restatement carve-out rounds
 // 23-27 built, for both speakers alike.
 function laterSentenceRetracts(sentence) {
-  return !COMMITMENT_TURN_ACKNOWLEDGEMENTS.has(sentence.ns) && !LATER_TURN_CLOSERS.has(sentence.ns);
+  return !isPhraseSequence(sentence.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS, LATER_TURN_CLOSERS]);
 }
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);

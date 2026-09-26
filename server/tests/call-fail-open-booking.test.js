@@ -215,17 +215,15 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // synthetic.
   const AGENT_COMMIT_QUOTE = "So we'll confirm it for noon on Sunday, and just let us know if anything changes.";
   // single-sentence rule (owner ruling 2026-09-25, round 28 extension): the
-  // trailing caller line is a LATER turn, so it must be an EXACT
-  // acknowledgement/closer match, not a combination of two ("Okay, thank
-  // you." combines "okay" and "thank you" into one sentence, matching
-  // neither list entry exactly) — "Thank you." alone is the single fixture
-  // wrap-up line every unrelated test in this file relies on.
+  // trailing caller line is a LATER turn, so it must be made only of listed
+  // acknowledgement/closer phrases — "Okay, thank you." is two listed
+  // phrases back to back, the most common real wrap-up, and grounds.
   const TRANSCRIPT = [
     'Caller: Hi, I want to confirm the inspection for noon on Sunday.',
     'Agent: Sounds good, let me grab the address.',
     'Caller: 100 Example Street in Venice.',
     `Agent: ${AGENT_COMMIT_QUOTE}`,
-    'Caller: Thank you.',
+    'Caller: Okay, thank you.',
   ].join('\n');
 
   function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = AGENT_COMMIT_QUOTE } = {}) {
@@ -1717,7 +1715,6 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // so all six now fail closed instead of grounding through the (removed)
   // owner allowlist.
   test.each([
-    "Okay, sounds good. We'll see you Sunday at noon.",
     "We'll see you Sunday at noon. Have a good one.",
     "We'll see you Sunday at noon. Okay, bye.",
     "I'll send you the invoice. We'll see you Sunday at noon.",
@@ -1838,7 +1835,6 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     "Caller: No, that's all, thanks so much.",
     "Caller: Please stop by the side gate.",
     "Caller: You can pass through the gate.",
-    "Caller: Okay, talk to you then.",
   ])('Codex round-26: a later caller acknowledgement or closer no longer grounds — single-sentence rule (owner ruling 2026-09-25) — %s', (later) => {
     const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
@@ -1859,6 +1855,39 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test.each([
+    'Caller: Okay, thank you.',
+    'Caller: Alright, bye.',
+    'Caller: Yes, perfect, thank you so much. Bye.',
+    'Agent: Okay, perfect. Have a great day.',
+    'Caller: Okay, talk to you then.',
+  ])('single-sentence rule: a later sentence made only of listed acknowledgements/closers still grounds — %s', (later) => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  test.each([
+    'Caller: Okay, never mind.',
+    'Caller: Okay, thank you, but I have to ask my husband.',
+    'Caller: Okay will come in the email.',
+    'Caller: Okay, the 10th works better.',
+  ])('single-sentence rule: any non-listed word in a later sentence still holds — %s', (later) => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "Okay, perfect. We'll see you Sunday at noon.",
+    "Okay, sounds good. We'll see you Sunday at noon.",
+  ])('single-sentence rule: an acknowledgement sequence before the commitment still grounds — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
   });
 
   test.each([
