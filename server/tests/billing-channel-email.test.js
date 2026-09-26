@@ -194,6 +194,22 @@ describe('billing channel email adapter', () => {
     });
   });
 
+  test.each([
+    ['a broken annual-offer guard lookup', { sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed', providerAttempted: false },
+      'ANNUAL_OFFER_GUARD_FAILED', true],
+    ['a lost lease / refused handoff', { sent: false, aborted: true, reason: 'aborted_before_dispatch' },
+      'EMAIL_ABORTED_BEFORE_DISPATCH', true],
+    ['a withheld annual offer', { sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false },
+      'ANNUAL_OFFER_WITHHELD', false],
+    ['an active suppression', { sent: false, blocked: true, reason: 'Suppressed: bounce' },
+      'EMAIL_SUPPRESSED', false],
+  ])('classifies %s from the template library as not sent', async (_label, result, code, retryable) => {
+    mockSendTemplate.mockResolvedValue(result);
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code, reason: result.reason });
+    expect(outcome.retryable === true).toBe(retryable);
+  });
+
   test('redacts email addresses out of a provider failure reason', async () => {
     mockRedactEmailAddresses.mockImplementation(() => 'contact [redacted] failed');
     mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {

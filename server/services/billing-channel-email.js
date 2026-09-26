@@ -26,6 +26,21 @@ function acceptedResult(result) {
   };
 }
 
+// Every sendTemplate result that returns without sending is pre-provider
+// (providerAttempted is never true here), so each is `not_sent`; only the
+// retry decision differs. A suppression or a withheld annual offer refuses
+// this content permanently. A lost lease / refused handoff (`aborted`) and a
+// broken annual-offer guard lookup (`guardError`) are transient
+// infrastructure failures the library already records as retryable.
+function templateNotSent(result) {
+  const reason = result.reason || result.message?.error_message || 'Billing email was not sent';
+  if (result.guardError) return blocked('ANNUAL_OFFER_GUARD_FAILED', reason, { retryable: true });
+  if (result.aborted) return blocked('EMAIL_ABORTED_BEFORE_DISPATCH', reason, { retryable: true });
+  if (result.blocked && result.reason === 'annual_offer_withheld') return blocked('ANNUAL_OFFER_WITHHELD', reason);
+  if (result.blocked) return blocked('EMAIL_SUPPRESSED', reason);
+  return blocked('EMAIL_NOT_SENT', reason, { retryable: result.retryable === true });
+}
+
 // After the handoff begins, a definite SendGrid rejection (the canonical
 // sendgrid-mail.isDefiniteRejection statuses) accepted nothing, so the
 // outcome is `not_sent` and retryable; a 408, other 4xx, 5xx or network
@@ -93,11 +108,7 @@ async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
 
     if (state.boundaryBlock) return state.boundaryBlock;
     if (result.sent) return acceptedResult(result);
-    return blocked(
-      result.blocked ? 'EMAIL_SUPPRESSED' : 'EMAIL_NOT_SENT',
-      result.reason || result.message?.error_message || 'Billing email was not sent',
-      { retryable: result.retryable === true },
-    );
+    return templateNotSent(result);
   } catch (err) { return providerFailure(err, state.handoffStarted); }
 }
 
