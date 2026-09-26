@@ -336,6 +336,32 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
   });
 
+  // codex #4919 review round 4 P1: "tonight" is evening-only even for a
+  // SINGLE time mention (no range) — the generic business-hours table would
+  // otherwise read a bare "at 8" as morning.
+  test('agent-committed "tonight at 8" (no range) demotes commercial_requires_quote for 8 PM, not 8 AM', () => {
+    const turn = "We'll be there tonight at 8.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-07-30T20:00:00-04:00'; // 8 PM, same day
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
+  });
+
+  test('"tonight at 8" does not bind the business-hours-inferred 8 AM', () => {
+    const turn = "We'll be there tonight at 8.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-07-30T08:00:00-04:00'; // 8 AM, same day
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
   // codex #4919 r1 P1: a RELATIVE-day word ("tonight") with no weekday
   // mention binds a same-day slot — the call is Thursday 7/30, so "tonight"
   // must bind ONLY a 7/30 slot (dayDiff 0), never a different day.

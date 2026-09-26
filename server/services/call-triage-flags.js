@@ -1529,8 +1529,17 @@ const SPOKEN_TIME_RES = [
   /(?:^| )(\d{1,2}) o ?clock(?: (am|pm))?(?= |$)/g,
   new RegExp(`(?:^| )at (\\d{1,2})(?= $| on (?:${WEEKDAY_NAMES.join('|')})(?= |$))`, 'g'),
 ];
-function inferPeriodFromBusinessHours(n) {
-  if (n >= 7 && n <= 11) return 'am';
+// codex #4919 review rounds 3-4, P1: "tonight" is an evening-only word
+// (unlike "today"/"tomorrow", which carry no time-of-day signal on their
+// own) — a bare hour with no other period evidence at all is normally read
+// off this business-hours table, but "tonight at 8"/"tonight between 8 and
+// 10" is 8 PM, never this table's inferred 8 AM. `ns` is optional so every
+// pre-existing (non-"tonight") caller is unaffected; passed through from
+// BOTH callers below — the single-time-mention path and the range-collapse
+// fallback — so the override applies everywhere a bare hour can appear,
+// not just inside a range.
+function inferPeriodFromBusinessHours(n, ns) {
+  if (n >= 7 && n <= 11) return / tonight /.test(` ${ns || ''} `) ? 'pm' : 'am';
   return n >= 1 && n <= 12 ? 'pm' : null;
 }
 function parseSpokenSlot(normalizedSentence) {
@@ -1552,7 +1561,7 @@ function parseSpokenSlot(normalizedSentence) {
   const statedPeriod = periods.size === 1 ? [...periods][0] : null;
   const times = new Set(SPOKEN_TIME_RES.flatMap((re) => [...` ${ns} `.matchAll(re)].map((m) => {
     const n = Number(m[1]);
-    const period = m[2] || (periods.size ? statedPeriod : inferPeriodFromBusinessHours(n));
+    const period = m[2] || (periods.size ? statedPeriod : inferPeriodFromBusinessHours(n, ns));
     return n >= 1 && n <= 12 && period ? `${n} ${period}` : 'invalid';
   })));
   if (toks.includes('noon')) times.add('12 pm');
@@ -1636,18 +1645,6 @@ function resolveRangeStartPeriod(hour1, endClock24) {
   if (durAm === 0 || durPm === 0 || durAm === durPm) return null;
   return durAm < durPm ? 'am' : 'pm';
 }
-// "tonight" is an evening-only word (unlike "today"/"tomorrow", which carry
-// no time-of-day signal on their own) — when NEITHER bound resolves a
-// period any other way, the generic business-hours table's morning half
-// (7-11) is overridden to PM under "tonight" (codex review round 3 P1:
-// "tonight between 8 and 10" is 8-10 PM, never the inferred 8 AM). Scoped to
-// this range fallback only, not the shared business-hours table itself,
-// which many already-hardened non-range SLOT_BINDING_CHECKS paths rely on.
-function inferRangeStartFallbackPeriod(hour, ns) {
-  const businessHours = inferPeriodFromBusinessHours(Number(hour));
-  if (businessHours === 'am' && / tonight /.test(` ${ns} `)) return 'pm';
-  return businessHours;
-}
 function collapseRangeToFirstBound(ns) {
   const m = RANGE_RE.exec(ns);
   if (!m) return ns;
@@ -1667,7 +1664,7 @@ function collapseRangeToFirstBound(ns) {
     );
     const period = explicitPeriod
       || resolveRangeStartPeriod(hour, endClock24)
-      || inferRangeStartFallbackPeriod(hour, ns);
+      || inferPeriodFromBusinessHours(Number(hour), ns);
     if (!period) return ns;
     replacement = `${hour} ${period}`;
   }
