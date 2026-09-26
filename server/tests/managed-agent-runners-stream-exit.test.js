@@ -190,7 +190,8 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
       { event: 'tool_use', data: { id: 'send-1', name: 'send_lead_response', input: { message: 'Synthetic draft' } } },
       { event: 'done', data: {} },
     ]);
-    expect(await run(load(path))).toMatchObject({ actionTaken: queued.failed ? null : 'auto_send_suppressed_queued' });
+    // The saved draft is reported, but never as a clean hand-off while its owner alert failed (#4179).
+    expect(await run(load(path))).toMatchObject({ actionTaken: queued.failed ? 'auto_send_suppressed_queued_unalerted' : 'auto_send_suppressed_queued' });
     const events = global.fetch.mock.calls.flatMap(([, options]) => JSON.parse(options.body || '{}').events || []);
     const result = events.find(event => event.custom_tool_use_id === 'send-1');
     expect(Boolean(result.is_error)).toBe(Boolean(queued.failed));
@@ -223,5 +224,239 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     global.fetch = fetchFor([text('first '), idle('requires_action')]);
     await run(load(path));
     expect(recorded()).toMatchObject({ failure: 'session_stream_eof' });
+  });
+
+  it('a run with more than 25 stream events still succeeds — the old 25-event max_events cap is gone', async () => {
+    const chatter = Array.from({ length: 30 }, (_, i) => text(`chunk ${i} `));
+    global.fetch = fetchFor([...chatter, idle('end_turn')]);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('a stream that never reaches a terminal event fails as session_timeout under a small LEAD_AGENT_TIMEOUT_MS', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '500';
+    global.fetch = fetchFor([text('still going'), text('still going 2'), text('still going 3')]);
+    await run(load(path));
+    expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: expect.objectContaining({ code: 'session_timeout' }) });
+  });
+
+  it('an invalid LEAD_AGENT_TIMEOUT_MS override falls back to the default instead of failing fast', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = 'not-a-number';
+    global.fetch = fetchFor([text('all done'), { event: 'done', data: {} }]);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('opens the SSE stream before posting the kickoff user.message (Managed Agents streams do not replay earlier events)', async () => {
+    global.fetch = fetchFor([{ event: 'done', data: {} }]);
+    await run(load(path));
+    const calls = global.fetch.mock.calls;
+    const streamIndex = calls.findIndex(([url]) => /\/events\/stream$/.test(String(url)));
+    const kickoffIndex = calls.findIndex(([url, opts]) => opts?.method === 'POST' && /\/events$/.test(String(url)));
+    expect(streamIndex).toBeGreaterThan(-1);
+    expect(kickoffIndex).toBeGreaterThan(-1);
+    expect(streamIndex).toBeLessThan(kickoffIndex);
+  });
+
+  it('agent.message content blocks become the returned report, even when the SSE event line is absent', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', content: [{ type: 'text', text: 'Lead ' }, { type: 'text', text: 'handled.' }] } },
+      idle('end_turn'),
+    ]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'Lead handled.' });
+  });
+
+  // Frames arrive without advancing the fake clock, then the stream stays
+  // open: only the real-time deadline timers (tool wait, POST signal) can
+  // end these runs — the per-frame deadline check never fires.
+  function openStreamBody(frames) {
+    const enc = new TextEncoder();
+    const chunks = frames.map(({ event, data }) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    return {
+      getReader: () => ({
+        read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : new Promise(() => {})),
+        cancel: async () => {},
+        releaseLock() {},
+      }),
+    };
+  }
+  function fetchWithOpenStream({ frames = [], onEventsPost }) {
+    const seen = {};
+    const fetchMock = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return onEventsPost(opts);
+      seen.streamSignal = opts.signal;
+      return Promise.resolve({ ok: true, status: 200, body: openStreamBody(frames) });
+    });
+    return { fetchMock, seen };
+  }
+
+  it('a tool that never returns ends the run at the deadline — session_timeout, no tool result sent', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    mockExecuteLeadTool.mockImplementation(() => new Promise(() => {}));
+    const { fetchMock } = fetchWithOpenStream({
+      frames: [{ event: 'agent.custom_tool_use', data: { id: 'tool-1', name: 'get_lead_details', input: {} } }],
+      onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+    const toolResultPosts = fetchMock.mock.calls
+      .filter(([, opts = {}]) => opts.method === 'POST' && String(opts.body || '').includes('user.custom_tool_result'));
+    expect(toolResultPosts).toHaveLength(0);
+  });
+
+  it('an events POST that hangs is cut off at the deadline, and the open stream is closed', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: (opts) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+    expect(seen.streamSignal.aborted).toBe(true);
+  });
+
+  it('a non-2xx stream response whose error body stalls still ends at the deadline (session_timeout)', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        body: {},
+        text: () => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))),
+      });
+    });
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+  });
+
+  const leadTool = (id, name, input = {}) => ({ event: 'agent.custom_tool_use', data: { id, name, input } });
+
+  it('a session-creation POST that stalls ends at the deadline — no paid session, nothing billed', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))));
+    expect(await run(load(path))).toBeNull();
+    expect(mockRecordSessionUsage).not.toHaveBeenCalled();
+  });
+
+  it('a repeated request for a tool use id already answered is not executed again', async () => {
+    mockExecuteLeadTool.mockResolvedValue({ ok: true });
+    global.fetch = fetchFor([leadTool('tool-1', 'get_lead_details'), leadTool('tool-1', 'get_lead_details'), idle('end_turn')]);
+    await run(load(path));
+    expect(mockExecuteLeadTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('a lead gets at most ONE text per run — a second send_lead_response is answered as skipped', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'send_lead_response' ? { sent: true } : { ok: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'send_lead_response', { message: 'First' }),
+      leadTool('tool-2', 'send_lead_response', { message: 'Second' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.filter(([name]) => name === 'send_lead_response')).toHaveLength(1);
+    expect(result).toMatchObject({ actionTaken: 'auto_sent' });
+  });
+
+  it('once the lead is queued for the owner, the agent cannot also text it (one reply decision)', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'queue_for_adam' ? { queued: true } : { sent: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'queue_for_adam', { draft_response: 'Draft' }),
+      leadTool('tool-2', 'send_lead_response', { message: 'Text' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam' });
+  });
+
+  it('a blocked text does not use up the reply — the agent may still queue it for the owner', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'send_lead_response' ? { sent: false, blocked: true } : { queued: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'send_lead_response', { message: 'Text' }),
+      leadTool('tool-2', 'queue_for_adam', { draft_response: 'Draft' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['send_lead_response', 'queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam' });
+  });
+
+  it('a draft saved for the owner counts as the reply even when the owner alert failed', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'queue_for_adam'
+      ? { queued: true, failed: true, error: 'Owner alert delivery failed' }
+      : { sent: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'queue_for_adam', { draft_response: 'Draft' }),
+      leadTool('tool-2', 'queue_for_adam', { draft_response: 'Draft again' }),
+      leadTool('tool-3', 'send_lead_response', { message: 'Text' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam_unalerted' });
+  });
+
+  it('a final agent.message carrying end_turn collects its text AND ends the run', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', stop_reason: { type: 'end_turn' }, content: [{ type: 'text', text: 'Done.' }] } },
+      text('never read'),
+    ]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'Done.' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  // check_existing_estimates / get_pest_context / triage_lead write rows or spend
+  // on providers as a side effect, so they count as writes here.
+  it.each(['send_lead_response', 'update_lead_pipeline', 'check_existing_estimates', 'get_pest_context', 'triage_lead'])('a %s write still in flight at the deadline is awaited, not abandoned — the run returns only after it lands', async (writeTool) => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    let sendLanded = false;
+    mockExecuteLeadTool.mockImplementation((name) => (name === writeTool
+      ? new Promise((resolve) => setTimeout(() => { sendLanded = true; resolve({ sent: true }); }, 120))
+      : Promise.resolve({ ok: true })));
+    let landedWhenRecorded = null;
+    mockRecordSessionUsage.mockImplementation(async () => { landedWhenRecorded = sendLanded; return null; });
+    global.fetch = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      const enc = new TextEncoder();
+      const chunks = [enc.encode(`event: agent.custom_tool_use\ndata: ${JSON.stringify({ id: 'tool-1', name: writeTool, input: { message: 'Hi' } })}\n\n`)];
+      // Like a real fetch body, the open stream rejects once its signal aborts.
+      const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
+      const aborted = () => (opts.signal.aborted
+        ? Promise.reject(abortError())
+        : new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(abortError()))));
+      return Promise.resolve({ ok: true, status: 200, body: { getReader: () => ({ read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : aborted()), cancel: async () => {}, releaseLock() {} }) } });
+    });
+    await run(load(path));
+    expect(landedWhenRecorded).toBe(true);
+  });
+
+  it('a session that asks for more than 20 tool calls is stopped (max_tool_calls)', async () => {
+    mockExecuteLeadTool.mockResolvedValue({ ok: true });
+    global.fetch = fetchFor([
+      ...Array.from({ length: 21 }, (_, i) => leadTool(`tool-${i}`, 'get_lead_details')),
+      idle('end_turn'),
+    ]);
+    expect(await run(load(path))).toBeNull();
+    expect(mockExecuteLeadTool).toHaveBeenCalledTimes(20);
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'max_tool_calls' }) });
+  });
+
+  it('a kickoff POST that fails closes the already-open stream', async () => {
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: () => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(seen.streamSignal.aborted).toBe(true);
+    expect(recorded().failure).toBeTruthy();
   });
 });

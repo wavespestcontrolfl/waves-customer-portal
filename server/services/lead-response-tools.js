@@ -15,6 +15,8 @@ const {
 
 const { phoneMatchDigits } = require('../utils/phone');
 const { lockCustomerComms, withSmsConsentLock } = require('../utils/customer-comms-lock');
+
+const { stripTrailingSignature } = require('./messaging/sms-signoff');
 const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
 
 // Authority comes from the server's assigned session, never model arguments.
@@ -270,6 +272,8 @@ async function executeLeadTool(toolName, input, context) {
     case 'send_lead_response': {
       const customer = subject.customer;
       if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
+      const message = stripTrailingSignature(input.message, { addresseeFirstName: customer.first_name });
+      if (!message) return { error: 'Message is empty once the sign-off is removed', validationError: true };
 
       // Routed through the customer-message middleware so consent /
       // suppression / identity / voice / segment checks all apply, and
@@ -286,7 +290,7 @@ async function executeLeadTool(toolName, input, context) {
       // releases its locks before global-database audit and bookkeeping.
       const result = await sendCustomerMessage({
         to: customer.phone,
-        body: input.message,
+        body: message,
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',
@@ -384,6 +388,7 @@ async function executeLeadTool(toolName, input, context) {
         logger.info(`[lead-agent] Auto-sent response (customerId=${customer.id} leadId=${input.lead_id || 'n/a'} auditLogId=${result.auditLogId || 'n/a'})`);
         return {
           sent: true,
+          message, // the text actually sent (sign-off stripped) — save this, not the draft
           to: customer.phone,
           name: customer.first_name,
           providerMessageId: result.providerMessageId,
@@ -598,7 +603,8 @@ async function executeLeadTool(toolName, input, context) {
             lead_id: input.lead_id,
             customer_id: input.customer_id,
             action_taken: input.action_taken,
-            response_message: input.response_message,
+            // Same addressee as the send, so the saved text matches what went out.
+            response_message: stripTrailingSignature(input.response_message, { addresseeFirstName: subject.customer?.first_name }) || null,
             response_time_seconds: input.response_time_seconds,
             triage_summary: input.triage_summary,
             follow_up_scheduled: input.follow_up_scheduled || false,

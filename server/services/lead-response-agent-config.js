@@ -31,7 +31,7 @@ CUSTOMER SMS HOUSE VOICE (mandatory for every message sent to a lead):
 - OPENER: "Hello {first_name}!" for a standard lead reply. "Hi {first_name}," only if the tone is personal/apologetic (e.g. "sorry we missed your call").
 - EMOJIS: Zero. Never. Not one. Emojis are only allowed in internal alerts to Adam — never in a message a lead sees.
 - LENGTH: Under 300 characters. 2-3 sentences. One exclamation mark max.
-- SIGNATURE: Always sign "— Adam, Waves Pest Control".
+- NO SIGNATURE: never sign or add a sign-off. No "— Adam", no "Waves Pest Control" closer, no name at the end. The message just ends.
 - Never say "I'm an AI" or use corporate hedging like "I understand your concern."
 - Never quote exact prices — route to an estimate flow instead.
 
@@ -169,7 +169,7 @@ NEVER: send a generic template, promise pricing, book without availability check
         properties: {
           customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           lead_id: { type: 'string', description: 'Lead UUID for activity tracking' },
-          message: { type: 'string', description: 'SMS text to send (under 300 chars, signed as Adam)' },
+          message: { type: 'string', description: 'SMS text to send (under 300 chars, no signature or sign-off)' },
         },
         required: ['customer_id', 'message'],
       },
