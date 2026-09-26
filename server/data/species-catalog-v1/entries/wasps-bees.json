@@ -548,17 +548,12 @@
     "risk": "defensive",
     "action": "fix_conditions",
     "season_basis": "observed",
-    "verification": [
-      {
-        "claim": "Carpenter bee traits and behavior cited here are confirmed against the primary UF/IFAS EENY-100/IN257 page",
-        "note": "That page returned errors (410/403) during this research pass; facts here are drawn from search-result summaries of that same publication plus the already-published website copy. Worth a follow-up direct verification."
-      }
-    ],
+    "verification": [],
     "safety_line": "Females can sting if handled but rarely do; males cannot sting at all. See a doctor for signs of an allergic reaction, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
-      "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition — see verification for the source-access note."
+      "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added."
     },
     "slug": "carpenter-bee",
     "common_name": "Carpenter Bee",
@@ -642,7 +637,8 @@
     },
     "tech_notes": "Confirm round drilled holes + shiny bare abdomen. Treat active galleries per label; recommend painting/sealing exposed wood to prevent new drilling.",
     "sources": [
-      "https://journals.flvc.org/edis/article/view/108283"
+      "https://journals.flvc.org/edis/article/view/108283",
+      "https://journals.flvc.org/edis/article/download/108283/103564"
     ],
     "links": {
       "site_page": "/pest-identifier/carpenter-bee/",

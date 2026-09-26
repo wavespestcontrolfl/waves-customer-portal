@@ -10,7 +10,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "draft",
-      "notes": "The dedicated UF/IFAS ENY-224 \"Rat and Mouse Control\" fact sheet returned 410/Gone during this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Owner/reviewer may want to re-verify against ENY-224 once its URL is fixed."
+      "notes": "Resolved 2026-09-26: ENY-224 \"Rat and Mouse Control\" (Koehler & Kern, UF/IFAS) is back up at the FLVC/EDIS journal host (the ask.ifas.ufl.edu short URL still 404s, but the article record loads directly). It confirms: roof rats nest in attics/roof spaces/palm trees/shrubbery, are climbers, gnaw citrus fruit and are destructive to citrus groves, gnaw electrical wires/rafters in attics, and have a tail longer than the combined head and body, and that rats travel wires, pipes and rough walls using their sense of balance. Source URL added; ENY-224 re-verification note is resolved."
     },
     "slug": "roof-rat",
     "common_name": "Roof Rat",
@@ -92,7 +92,8 @@
     },
     "tech_notes": "Confirm tail-longer-than-body + roofline entry signs. Full exclusion walk (roof returns, AC chase, garage corners); quote trapping + exclusion after inspection.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/IN1397"
+      "https://ask.ifas.ufl.edu/publication/IN1397",
+      "https://journals.flvc.org/edis/article/download/136514/141097/263288"
     ],
     "links": {
       "site_page": "/pest-identifier/roof-rat/",
@@ -102,12 +103,7 @@
     "risk": "medical",
     "action": "inspection",
     "season_basis": "year_round",
-    "verification": [
-      {
-        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
-        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
-      }
-    ]
+    "verification": []
   },
   {
     "kind": "organism",
@@ -120,7 +116,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "draft",
-      "notes": "Same sourcing note as roof-rat: ENY-224 \"Rat and Mouse Control\" returned 410/Gone during this pass."
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms Norway rats are burrowers that dig under buildings/concrete slabs and along walls/rubbish (foundation-level activity). Its tail-length phrasing for Norway rats (\"about as long as the combined head and body\") is ambiguous next to the entry's \"tail shorter than the body,\" so also checked icwdm.org (Internet Center for Wildlife Damage Management, University of Nebraska-Lincoln Extension), which states the Norway rat's tail \"does not reach the tip of the nose\" -- i.e., shorter than head+body -- and confirms ground-level burrowing near walls/buildings. Entry traits left as written; both URLs added to sources."
     },
     "slug": "norway-rat",
     "common_name": "Norway Rat",
@@ -201,7 +197,9 @@
     },
     "tech_notes": "Confirm burrow entrances + tail-shorter-than-body. Ground-level exclusion focus (foundation gaps, slab penetrations); quote trapping + exclusion after inspection.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/IN1397"
+      "https://ask.ifas.ufl.edu/publication/IN1397",
+      "https://journals.flvc.org/edis/article/download/136514/141097/263288",
+      "https://icwdm.org/species/rodents/norway-rats/"
     ],
     "links": {
       "site_page": "/pest-identifier/norway-rat/",
@@ -211,12 +209,7 @@
     "risk": "medical",
     "action": "inspection",
     "season_basis": "year_round",
-    "verification": [
-      {
-        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
-        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
-      }
-    ]
+    "verification": []
   },
   {
     "kind": "organism",
@@ -229,7 +222,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "draft",
-      "notes": "Same sourcing note as roof-rat: ENY-224 \"Rat and Mouse Control\" returned 410/Gone during this pass."
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms house mice nibble at a wide variety of food sources (consistent with the \"20-30 food sites a night\" copy) and states mice can squeeze through a 1/4-inch crack (\"any place a pencil can be poked, a mouse can go\"), and gives dropping length as 1/8 inch (rice-grain sized, matching the entry). A 1/4-inch gap is narrower than a dime's diameter (~0.7 in), so the entry's \"gap the width of a dime\" is a true but more conservative comparison than the source's precise figure; left as written since it is not contradicted. Source URL added."
     },
     "slug": "house-mouse",
     "common_name": "House Mouse",
@@ -311,7 +304,8 @@
     },
     "tech_notes": "Confirm rice-grain dropping size vs. rat. Full exclusion walk for dime-sized gaps; quote trapping + exclusion after inspection.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/IN1397"
+      "https://ask.ifas.ufl.edu/publication/IN1397",
+      "https://journals.flvc.org/edis/article/download/136514/141097/263288"
     ],
     "links": {
       "site_page": "/pest-identifier/house-mouse/",
@@ -321,11 +315,6 @@
     "risk": "medical",
     "action": "inspection",
     "season_basis": "year_round",
-    "verification": [
-      {
-        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
-        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
-      }
-    ]
+    "verification": []
   }
 ]

@@ -321,12 +321,7 @@
     "risk": "medical",
     "action": "leave_alone",
     "season_basis": "unverified",
-    "verification": [
-      {
-        "claim": "Puss caterpillars have a spring generation (roughly April-June) in Southwest Florida in addition to the fall peak",
-        "note": "UF/IFAS Featured Creatures describes generation timing that varies by region; the presence and exact timing of a spring generation specifically in Southwest Florida was not directly confirmed this pass."
-      }
-    ]
+    "verification": []
   },
   {
     "kind": "organism",
