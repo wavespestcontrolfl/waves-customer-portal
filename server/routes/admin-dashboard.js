@@ -655,6 +655,10 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     //    status='paid' and remain counted as collected — this only drops credit closures.
     const EXCLUDED_STATUSES = ['void', 'cancelled', 'canceled', 'refunded', 'draft', 'prepaid'];
     let collectionRate = null, collectedCount = 0, issuedCount = 0, collectedTotal = 0, billedTotal = 0;
+    // Set when the query below throws: issuedCount then stays at its 0 default,
+    // which a reader must not mistake for "no invoices issued" (the BI
+    // briefing's small-sample rule, bi-agent-tools.js buildOperationsKpis).
+    let collectionFailed = false;
     try {
       const cAgg = await db('invoices')
         .whereNotIn('status', EXCLUDED_STATUSES)
@@ -726,6 +730,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       // large unpaid one. The paid/issued counts are kept for the tile sub only.
       collectionRate = billedTotal > 0 ? Math.round((collectedTotal / billedTotal) * 1000) / 10 : null;
     } catch (err) {
+      collectionFailed = true;
       logger.error(`[admin-dashboard] collection rate failed: ${err.message}`);
     }
 
@@ -997,6 +1002,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         billed: billedTotal,
         collectedCount,
         issuedCount,
+        collectionFailed,
         autopayPct,
         autopayCount,
         customerBase,

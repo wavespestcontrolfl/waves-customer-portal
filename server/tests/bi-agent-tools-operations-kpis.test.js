@@ -57,14 +57,14 @@ const last7From = etDateString(addETDays(new Date(), -7));
 const last30From = etDateString(addETDays(new Date(), -30));
 
 // Only the paths get_operations_snapshot's kpis actually read.
-function kpiSet({ completion = 80, callback = 3, response = 64, conversion = 22, stops = 4.2, rpmh = 90, margin = 38, arDays = 34, retention = 88, collection = 65, issuedCount = 20 } = {}) {
+function kpiSet({ completion = 80, callback = 3, response = 64, conversion = 22, stops = 4.2, rpmh = 90, margin = 38, arDays = 34, retention = 88, collection = 65, issuedCount = 20, collectionFailed = false } = {}) {
   return {
     service: { completionRate: completion, callbackRate: callback },
     sales: { avgResponseMin: response, conversion },
     financial: { stopsPerHour: stops, rpmh, grossMarginWeighted: margin },
     ar: { days: arDays },
     retention: { pct: retention },
-    billing: { collectionRate: collection, issuedCount },
+    billing: { collectionRate: collection, issuedCount, collectionFailed },
   };
 }
 
@@ -285,6 +285,27 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
       // miss, and not an "; n/a: ..." mention either (that bucket is for a
       // real computation failure, not a too-small sample).
       expect(result.opsLine).toBe('Ops 7d: all on target');
+      expect(result.opsLine).not.toMatch(/collections/);
+    });
+
+    it('a failed collection query (issuedCount left at 0) is unavailable, never a small sample (pre-push P1)', async () => {
+      // computeCoreKpis catches the query error and returns collectionRate
+      // null with issuedCount at its 0 default, plus collectionFailed.
+      mockComputeCoreKpis.mockResolvedValue(kpiSet({ ...GOOD, collection: null, issuedCount: 0, collectionFailed: true }));
+      const result = await executeBITool('get_operations_snapshot', {});
+
+      const collection = result.kpis.find((k) => k.metric === 'collection_rate');
+      expect(collection).toMatchObject({ n: null, lowSample: false, last7: null, tone: null });
+      expect(result.opsLine).not.toBe('Ops 7d: all on target');
+      expect(result.opsLine).toMatch(/n\/a: .*collections/);
+    });
+
+    it('a query that ran with zero issued invoices is a small sample, not an outage', async () => {
+      mockComputeCoreKpis.mockResolvedValue(kpiSet({ ...GOOD, collection: null, issuedCount: 0 }));
+      const result = await executeBITool('get_operations_snapshot', {});
+
+      const collection = result.kpis.find((k) => k.metric === 'collection_rate');
+      expect(collection).toMatchObject({ n: 0, lowSample: true, tone: null });
       expect(result.opsLine).not.toMatch(/collections/);
     });
 

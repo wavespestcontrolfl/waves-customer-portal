@@ -155,7 +155,12 @@ async function buildOperationsKpis() {
     const last30 = getter ? toFiniteOrNull(getter(k30)) : null;
     // The 7-day issued-invoice count backs collection_rate's small-sample
     // fade (see MIN_CONFIDENT_ISSUED_INVOICES) — null for every other metric.
-    const n = metric === 'collection_rate' ? toFiniteOrNull(k7?.billing?.issuedCount) : null;
+    // Only a query that ran supplies a count: a failed collection query leaves
+    // issuedCount at 0, which is an outage, not a small sample, so n stays
+    // null and the metric reads as unavailable (pre-push audit P1).
+    const n = metric === 'collection_rate' && !k7?.billing?.collectionFailed
+      ? toFiniteOrNull(k7?.billing?.issuedCount)
+      : null;
     return buildKpiRow(metric, { last7, last30, storeTargets, n });
   });
 }
