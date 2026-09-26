@@ -15151,7 +15151,10 @@ const CallRecordingProcessor = {
               const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(parsedDt);
               scheduledDate = etDate; // YYYY-MM-DD in Eastern
               const etTime = new Intl.DateTimeFormat('en-US', etOptions).format(parsedDt);
-              windowStart = etTime;
+              // Node's h24 hour cycle renders midnight as "24:00"; the window
+              // start (and every end/display/insert derived from it) is
+              // "00:00" (codex #4890 r9 P2, same quirk etParts corrects).
+              windowStart = etTime.replace(/^24:/, '00:');
             } else {
               // Fallback: extract date + time from the raw string. Pin parsing
               // to noon so a UTC server's `new Date('April 30 2026')` (which
