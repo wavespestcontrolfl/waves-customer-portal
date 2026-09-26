@@ -1527,6 +1527,35 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Codex round 19 (review of 4de001a2fc): three P1s.
+  // P1 (:1215) — an approval need coordinated onto a benign routing span.
+  // P1 (:1169) — a subjectless approval need (ASR fragment).
+  // P1 (:1543) — a second trigger with no consequent of its own.
+  test.each([
+    "You may get a text and need to okay it. We'll see you Sunday at noon.",
+    "Need to okay it. We'll see you Sunday at noon.",
+    "Have to okay it. We'll see you Sunday at noon.",
+    "Got to okay it. We'll see you Sunday at noon.",
+    "Okay, need to sign off on it. We'll see you Sunday at noon.",
+    "If the email goes to you, I'll make sure that's rectified, and if the text goes to him. We're all set. We'll see you Sunday at noon.",
+  ])('Codex round-20 regression: coordinated or subjectless approval needs and dangling second triggers poison — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "You may get a text. We'll see you Sunday at noon.",
+    "If the email goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
+    "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.",
+  ])('Codex round-20: benign routing and single-trigger conditionals with a consequent still ground — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",

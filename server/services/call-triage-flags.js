@@ -1166,7 +1166,14 @@ const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = new RegExp(`\\b(?:tell|ask|have|get) $
 // also/just) may now sit between them — "you'll need to", "you will have
 // to", "they're going to need to", "he'll still have to". Only widens what
 // poisons; the auxiliary + authorization-verb anchor is unchanged.
-const SUBJECT_LED_APPROVAL_NEED_RE = /\b(?:i|we|you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys) (?:(?:ll|will|would|d|should|may|might|shall|re going to|are going to|is going to|going to|re gonna|are gonna|gonna|still|also|just) ){0,2}(?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
+// Codex round 19, P1 (:1169, :1215): the subject can also be MISSING —
+// an ASR fragment ("Need to okay it.", "Have to okay it.") at the start of
+// the sentence after at most two openers — or INHERITED through a
+// coordinator ("You may get a text and need to okay it." — the benign
+// routing span carried the subject, so no subject sits before "need").
+// Both now take the same slot as a named subject; the auxiliary +
+// authorization-verb anchor is unchanged.
+const SUBJECT_LED_APPROVAL_NEED_RE = /(?:^(?:(?:so|and|but|yeah|yep|yes|ok|okay|alright) ){0,2}|\b(?:i|we|you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys|and|or|but|then|so|also) )(?:(?:ll|will|would|d|should|may|might|shall|re going to|are going to|is going to|going to|re gonna|are gonna|gonna|still|also|just) ){0,2}(?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
 // Unconditional declarative-poison check (codex rounds 2, 4, 7, 9 and this
 // round): either term list, or any anchored shape, anywhere in the sentence
 // poisons regardless of conditional structure. Restored as a real function
@@ -1322,16 +1329,27 @@ function splitConditionalSentence(rawSentence) {
   const re = new RegExp(CONDITION_TRIGGER_RE.source, 'gi');
   const triggers = [...s.matchAll(re)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
   const clauses = [];
-  const consequents = triggers.length ? [normalizeCommitmentText(s.slice(0, triggers[0].start))] : [];
+  const leading = triggers.length ? normalizeCommitmentText(s.slice(0, triggers[0].start)) : '';
+  const consequents = triggers.length ? [leading] : [];
+  // Codex round 19, P1 (:1543): every trigger needs its OWN consequent.
+  // Filtering empty pieces let one trigger's benign consequent cover a
+  // second, dangling one ("If the email goes to you, I'll make sure that's
+  // rectified, and if the text goes to him." then "We're all set."). Only
+  // the FIRST trigger may take the text before it ("Let me know if the
+  // email goes to you.") as its consequent.
+  let danglingTrigger = false;
   triggers.forEach((trigger, i) => {
     const segEnd = i + 1 < triggers.length ? triggers[i + 1].start : s.length;
     const segment = s.slice(trigger.end, segEnd);
     const cut = conditionalClauseCut(segment);
     const clause = normalizeCommitmentText(segment.slice(0, cut));
     if (clause) clauses.push(clause);
-    consequents.push(normalizeCommitmentText(segment.slice(cut)));
+    const consequent = normalizeCommitmentText(segment.slice(cut));
+    consequents.push(consequent);
+    const own = trimConsequentFillers(consequent) || (i === 0 ? trimConsequentFillers(leading) : '');
+    if (!own) danglingTrigger = true;
   });
-  return { clauses, consequents: consequents.filter(Boolean) };
+  return { clauses, consequents: consequents.filter(Boolean), danglingTrigger };
 }
 function extractConditionalClauses(rawSentence) {
   return splitConditionalSentence(rawSentence).clauses;
@@ -1538,10 +1556,12 @@ function trimConsequentFillers(consequentNs) {
 // consequent into the next sentence, where the reinforcing-affirmation
 // shape passed it on its own; the dangling half now poisons instead.
 function conditionalConsequentIsUnexempted(rawSentence) {
-  const consequents = splitConditionalSentence(rawSentence).consequents
+  const split = splitConditionalSentence(rawSentence);
+  const consequents = split.consequents
     .map(trimConsequentFillers)
     .filter(Boolean);
   return !consequents.length
+    || split.danglingTrigger
     || consequents.some((c) => !BENIGN_CONDITIONAL_CONSEQUENT_RES.some((re) => re.test(c)));
 }
 function sentenceHasSchedulingPredicate(strippedNs) {
