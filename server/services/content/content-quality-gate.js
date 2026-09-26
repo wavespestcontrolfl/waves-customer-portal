@@ -1159,9 +1159,20 @@ function hasAttributedSource(body) {
   return false;
 }
 
+// Reduce inline Markdown/HTML to its visible text so a LINKED or emphasized
+// source ("According to [UF/IFAS](…)", "**CDC** recommends") reads the same
+// as plain text to the attribution matchers (Codex P2, 2026-09-26).
+function visibleInlineText(body) {
+  return String(body || '')
+    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, ' ')
+    .replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, '$1')
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1')
+    .replace(/(\*\*|__|\*|_)(?=\S)([^*_\n]+?)\1/g, '$2');
+}
+
 function checkCitabilityNamedSources(draft, brief) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
-  const body = String(draft.body || '');
+  const body = visibleInlineText(draft.body);
   if (NAMED_SOURCE_RE.test(body) || hasAttributedSource(body)) return { ok: true };
   return { ok: false, reason: 'no_named_source_attribution' };
 }

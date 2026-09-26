@@ -1397,6 +1397,12 @@ describe('citability nudges (weight-0, signal-only)', () => {
     // Our own service name is not an authority; a county program or district is.
     expect(checkCitabilityNamedSources({ body: '## Mosquito Control in Venice\nWe treat yards monthly.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'The Manatee County Mosquito Control District reports aerial spray dates.' }).ok).toBe(true);
+    // Linked / emphasized sources read as their visible text (Codex r5 P2).
+    expect(checkCitabilityNamedSources({ body: 'According to [UF/IFAS](https://edis.ifas.ufl.edu/x), chinch bugs peak in May.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: '[UF/IFAS](https://edis.ifas.ufl.edu/x) recommends mowing at 4 inches.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The **CDC** recommends draining water; <a href="https://cdc.gov">CDC</a> data agrees.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Per [Mote Marine Laboratory](https://mote.org), red tide peaks in fall.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Use an [EPA](https://epa.gov)-registered product.' }).ok).toBe(false);
     // A bare authority mention is not attribution (Codex P2, 2026-09-26).
     expect(checkCitabilityNamedSources({ body: 'Use an EPA-registered product. We follow FDACS licensing.' }).ok).toBe(false);
   });
