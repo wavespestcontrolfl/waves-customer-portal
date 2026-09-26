@@ -57,11 +57,10 @@ function emailInvoiceNumber(email) {
 
 const moneyClose = (a, b) => Math.abs(Number(a) - Number(b)) <= MONEY_TOLERANCE;
 
-// null when the extraction reconciles with itself and names the email's own
-// invoice number; otherwise which check failed.
+// null when the extraction's lines reconcile with themselves and it names the
+// email's own invoice number; otherwise which check failed.
 function verificationProblem(extracted, invoiceNumber) {
-  const lines = extracted?.line_items;
-  if (!Array.isArray(lines) || !lines.length) return 'no_lines';
+  const lines = extracted.line_items;
   if (extracted.invoice_number !== invoiceNumber) return 'invoice_number';
   if (!lines.every((line) => moneyClose(Number(line.quantity) * Number(line.unit_price), line.total))) return 'line_math';
   if (!moneyClose(lines.reduce((sum, line) => sum + Number(line.total), 0), extracted.subtotal)) return 'subtotal';
@@ -85,7 +84,8 @@ async function invoiceExtraction(emailId, conn) {
  * @returns {Promise<null | {pending: true} | {number, problem, lines}>}
  *   null: the email names no invoice number (nothing to key it by).
  *   pending: not read into lines yet, still inside the grace window.
- *   problem: null (use the lines), 'unreadable', or the failed check.
+ *   problem: null (use the lines), 'unreadable' (never read, or read with
+ *   no usable lines), or the failed check.
  *   lines: [{ title, quantity, lineNo }] — lineNo is the invoice line's own
  *   position, so both copies of an invoice key the same line the same way.
  */
@@ -96,8 +96,9 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   if (!extracted) {
     return now - new Date(email.received_at).getTime() < EXTRACTION_GRACE_MS ? { pending: true } : { number, problem: 'unreadable', lines: [] };
   }
+  if (!Array.isArray(extracted.line_items) || !extracted.line_items.length) return { number, problem: 'unreadable', lines: [] };
   const problem = verificationProblem(extracted, number);
-  const lines = (extracted.line_items || []).map((line, index) => ({
+  const lines = extracted.line_items.map((line, index) => ({
     title: String(line.description || ''), quantity: Number(line.quantity), lineNo: index + 1,
   }));
   return { number, problem, lines };

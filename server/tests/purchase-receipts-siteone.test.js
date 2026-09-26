@@ -51,7 +51,6 @@ describe('verificationProblem', () => {
   });
 
   test.each([
-    ['no lines', (d) => { d.line_items = []; }, 'no_lines'],
     ['a different invoice number than the email names', (d) => { d.invoice_number = '900000002-001'; }, 'invoice_number'],
     ['a quantity that disagrees with its line total (ordered 2, charged for 1)', (d) => { d.line_items[0].quantity = 2; }, 'line_math'],
     ['lines that don\'t sum to the subtotal', (d) => { d.subtotal = 298.34; }, 'subtotal'],
@@ -81,6 +80,14 @@ describe('readSiteOneInvoice', () => {
     const invoice = await readSiteOneInvoice(storeEmail, now, conn(JSON.stringify(extracted())));
     expect(invoice.problem).toBeNull();
     expect(invoice.lines.map(({ quantity, lineNo }) => [quantity, lineNo])).toEqual([[1, 1], [1, 2], [1, 3], [-1, 4]]);
+  });
+
+  test.each([
+    ['empty', []],
+    ['not a list', { description: 'Taurus SC' }],
+  ])('read, but its lines are %s: one unreadable placeholder, never a crash', async (_label, lineItems) => {
+    expect(await readSiteOneInvoice(storeEmail, now, conn({ ...extracted(), line_items: lineItems })))
+      .toEqual({ number: INVOICE, problem: 'unreadable', lines: [] });
   });
 
   test('an email that names no invoice number is not keyed at all', async () => {

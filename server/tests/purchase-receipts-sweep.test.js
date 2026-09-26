@@ -344,6 +344,17 @@ describe('SiteOne invoices in the sweep', () => {
     expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001 wasn't added. The invoice couldn't be read. If it has stock, log it by hand.");
   });
 
+  test('one invoice that can\'t be read is recorded as an error and never stops the next', async () => {
+    const siteOne = require('../services/purchase-receipts/siteone-invoices');
+    mockState.siteOneEmails = [siteOneEmail, { ...siteOneEmail, id: 's2' }];
+    siteOne.readSiteOneInvoice.mockImplementationOnce(async () => { throw new Error('extraction row locked'); });
+    mockState.siteOneInvoice = { number: '900000002-001', problem: null, lines: [lines[0]] };
+    mockState.outcomes = [{ status: 'logged', product: taurus, receivedQty: 78, receivedUnit: 'fl_oz', hasOpenRestockRequest: false, lineId: 'line-s2' }];
+    const result = await run();
+    expect(result.errors).toEqual([{ title: siteOneEmail.subject, message: 'extraction row locked', emailId: 's1' }]);
+    expect(result.logged).toEqual([expect.objectContaining({ emailId: 's2' })]);
+  });
+
   test.each([
     ['still being read', () => { mockState.siteOneInvoice = { pending: true }; }],
     ['the other copy of the invoice already recorded', () => { mockState.otherCopy = { id: 'line-from-store-copy' }; }],

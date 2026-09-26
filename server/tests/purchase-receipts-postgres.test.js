@@ -290,6 +290,26 @@ jest.setTimeout(30000);
       expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toHaveLength(2);
     });
 
+    test('an invoice handed off as unreadable never auto-logs its lines when they are read later', async () => {
+      const [email] = await mockConn('emails').insert({
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com',
+        subject: `SiteOne Confirmation : Invoice #${INVOICE}`, authentication_results: 'dkim=pass header.i=@siteone.com',
+        received_at: new Date(Date.now() - 3 * HOUR),
+      }).returning('*');
+      await runPurchaseReceiptRestockSweep({ notify }); // no extraction after 2 hours: one unreadable placeholder
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toEqual([expect.objectContaining({ status: 'unreadable', line_no: 1 })]);
+      await mockConn('email_attachments').insert({
+        email_id: email.id, filename: 'invoice.pdf', mime_type: 'application/pdf', is_invoice: true,
+        extracted_data: JSON.stringify({ invoice_number: INVOICE, subtotal: 190, tax: 13.3, total: 203.3, line_items: [
+          { description: SPRAYER_LINE, quantity: 1, unit_price: 95, total: 95 },
+          { description: TAURUS_LINE, quantity: 1, unit_price: 95, total: 95 },
+        ] }),
+      });
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(0);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toHaveLength(1);
+    });
+
     test('a return of a stocked product is held for a hand adjustment, never subtracted or added', async () => {
       await storeCopy([{ description: TAURUS_LINE, quantity: -1, unit_price: 95, total: -95 }], -101.65);
       await runPurchaseReceiptRestockSweep({ notify });

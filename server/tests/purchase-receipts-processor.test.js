@@ -47,9 +47,10 @@ jest.mock('../models/db', () => {
       q.first = async () => { mockDbState.lockedProducts.push(q._cond.id); return { id: q._cond.id }; };
       return q;
     }
-    // By full key, or (the hand-off check) by vendor + shipment + status.
-    q.first = async () => (q._cond.status
-      ? Object.values(mockDbState.lines).find((l) => l.vendor === q._cond.vendor && l.shipment_key === q._cond.shipment_key && l.status === q._cond.status)
+    // By full key, or (the hand-off check) by vendor + shipment + a status list.
+    q.whereIn = (_column, statuses) => { q._statuses = statuses; return q; };
+    q.first = async () => (q._statuses
+      ? Object.values(mockDbState.lines).find((l) => l.vendor === q._cond.vendor && l.shipment_key === q._cond.shipment_key && q._statuses.includes(l.status))
       : mockDbState.lines[`${q._cond.vendor}|${q._cond.order_number}|${q._cond.shipment_key}|${q._cond.line_no}`]);
     q.insert = (row) => {
       const res = {
@@ -419,6 +420,14 @@ describe('processReceiptLine', () => {
     mockState.match = { matched: true, product: taurus };
     await processReceiptLine(taurusLine());
     expect(require('../models/db').raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['purchase-receipt-shipment:amazon:ship-1']);
+  });
+
+  test('an invoice handed to a person as unreadable never auto-logs lines read later', async () => {
+    mockState.match = { matched: true, product: taurus };
+    mockDbState.lines['siteone|900000001-001|900000001-001|1'] = { id: 'line-unreadable', vendor: 'siteone', shipment_key: '900000001-001', status: 'unreadable' };
+    const late = { vendor: 'siteone', email, orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 2, item: { title: 'Taurus SC 78 fl oz. Bottle', quantity: 1 } };
+    expect(await processReceiptLine(late)).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
+    expect(mockAdjustStock).not.toHaveBeenCalled();
   });
 
   test('a shipment already handed to a person (no_delivery_email) is never auto-logged by its late Delivered email', async () => {

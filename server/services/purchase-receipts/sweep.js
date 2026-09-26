@@ -228,7 +228,9 @@ async function siteOneInvoiceLines(email, now) {
   if (!siteOne.isSiteOneInvoiceEmail(email) || !authenticated(email)) return null;
   const invoice = await siteOne.readSiteOneInvoice(email, now);
   if (!invoice || invoice.pending) return null;
-  // The store and billing emails carry the same invoice: the first handled owns it.
+  // The store and billing emails carry the same invoice: the first handled
+  // owns it. (A hand-off placeholder also stops this email's own later lines,
+  // under the shipment lock in receipt-processor.js.)
   const otherCopy = await db('purchase_receipt_lines')
     .where({ vendor: siteOne.VENDOR, shipment_key: invoice.number }).whereNot({ email_id: email.id }).first('id');
   if (otherCopy) return null;
@@ -250,7 +252,15 @@ function siteOneHold(problem, quantity) {
 
 async function processSiteOneInvoices({ floor, now, notifyAdmin, totals }) {
   for (const email of await siteOne.findSiteOneInvoiceEmails(floor)) {
-    const found = await siteOneInvoiceLines(email, now);
+    let found;
+    try {
+      found = await siteOneInvoiceLines(email, now);
+    } catch (err) {
+      // One invoice that can't be read never stops the others.
+      logger.error(`[purchase-receipts] SiteOne invoice email ${email.id} failed: ${err.message}`);
+      totals.errors.push({ title: email.subject, message: err.message, emailId: email.id });
+      continue;
+    }
     if (!found) continue;
     const receipt = { vendor: siteOne.VENDOR, noun: 'SiteOne invoice', label: `SiteOne invoice ${found.invoice.number}` };
     const summary = emptySummary();

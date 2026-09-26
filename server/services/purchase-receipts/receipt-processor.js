@@ -41,12 +41,13 @@
  * invoice whose numbers don't reconcile ('unverified') — so it surfaces for
  * review rather than moving stock. Unmatched lines stay 'unmatched'.
  *
- * A shipment already handed to a person — undelivered-shipments.js recorded
- * it as 'no_delivery_email' and asked for a hand log because its Delivered
- * email never came — is never auto-logged when that email arrives late:
- * the box would be counted twice. Every writer of a shipment's lines takes
- * the same per-shipment advisory lock (lockShipment), so the alert and a
- * late Delivered email can't both act on it.
+ * A shipment or invoice already handed to a person as a whole is never
+ * auto-logged afterwards, or the box would be counted twice:
+ * undelivered-shipments.js recorded it as 'no_delivery_email' (its Delivered
+ * email never came), or a SiteOne invoice got an 'unreadable' placeholder
+ * and its lines were read later. Every writer of a shipment's lines takes
+ * the same per-shipment advisory lock (lockShipment), and the hand-off is
+ * checked under it.
  *
  * Duplicate-receipt guard: the claim only catches the SAME email twice. If
  * staff already put the box on the shelf by hand, the line is held as
@@ -69,6 +70,9 @@ const SOURCES = { amazon: 'amazon_delivery', siteone: 'siteone_invoice' };
 const DUPLICATE_RESTOCK_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const UNKNOWN_ORDER = 'unknown';
 const HANDED_TO_PERSON = Object.freeze({ skipped: true, reason: 'asked_to_log_by_hand' });
+// A shipment or invoice with one of these rows was handed to a person as a
+// whole (see the header): nothing more from it is ever auto-logged.
+const HANDED_OFF_STATUSES = ['no_delivery_email', 'unreadable'];
 const ALREADY_PROCESSED = Object.freeze({ skipped: true, reason: 'already_processed' });
 
 // Within 1% (min 0.01 unit) counts as agreement — the rounding slack the
@@ -251,7 +255,7 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
 
   return conn.transaction(async (trx) => {
     await lockShipment(trx, vendor, shipmentKey);
-    if (await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey, status: 'no_delivery_email' }).first('id')) {
+    if (await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey }).whereIn('status', HANDED_OFF_STATUSES).first('id')) {
       return { ...HANDED_TO_PERSON };
     }
     let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
