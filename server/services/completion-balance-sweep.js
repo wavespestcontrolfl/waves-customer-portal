@@ -87,17 +87,6 @@ async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
   return new Set(rows.map((r) => String(r.invoice_id)));
 }
 
-/**
- * Charge the customer's other open invoices with the SAME saved method the
- * completion charge just succeeded on. Serial + oldest first; stops on the
- * first failure. Never throws — the completion response must not depend on
- * the sweep, and every outcome is logged.
- *
- * @param {string} customerId
- * @param {string} excludeInvoiceId — the visit's own invoice (just collected)
- * @param {string} paymentMethodId — payment_methods.id the completion charge used
- * @returns {{ charged: number, failed: number, skipped: number, considered: number }}
- */
 // Invoices whose visit hasn't happened yet (owner ruling 2026-09-26). A
 // linked visit must be 'completed'; a missing, cancelled or still-scheduled
 // visit means the service was not performed, so the bill waits.
@@ -113,7 +102,11 @@ async function unperformedVisitInvoiceIds(invoices, { database = db, today = etD
   }
   const skip = new Set();
   for (const inv of invoices) {
-    if (inv.scheduled_service_id) {
+    // Fail closed: a candidate read without the visit link or the service
+    // date can't prove its visit happened, so it waits.
+    if (!('scheduled_service_id' in inv) || !('service_date' in inv)) {
+      skip.add(String(inv.id));
+    } else if (inv.scheduled_service_id) {
       if (!performed.has(String(inv.scheduled_service_id))) skip.add(String(inv.id));
     } else if (inv.service_date && etCalendarDayOf(inv.service_date) > today) {
       skip.add(String(inv.id));
@@ -122,6 +115,17 @@ async function unperformedVisitInvoiceIds(invoices, { database = db, today = etD
   return skip;
 }
 
+/**
+ * Charge the customer's other open invoices with the SAME saved method the
+ * completion charge just succeeded on. Serial + oldest first; stops on the
+ * first failure. Never throws — the completion response must not depend on
+ * the sweep, and every outcome is logged.
+ *
+ * @param {string} customerId
+ * @param {string} excludeInvoiceId — the visit's own invoice (just collected)
+ * @param {string} paymentMethodId — payment_methods.id the completion charge used
+ * @returns {{ charged: number, failed: number, skipped: number, considered: number }}
+ */
 async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, paymentMethodId, triggerScheduledServiceId = null }) {
   const summary = { charged: 0, pending: 0, failed: 0, skipped: 0, considered: 0 };
   if (!isEnabled('completionBalanceSweep')) return { ...summary, gateOff: true };

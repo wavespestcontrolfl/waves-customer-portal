@@ -91,8 +91,8 @@ describe('completion balance sweep', () => {
 
   test('charges each open invoice with its own cap, autopay + self-pay guards', async () => {
     openBalanceResults.rows = [
-      { id: 'old-1', invoice_number: 'INV-1', subtotal: '107.10', discount_amount: '7.10', total: '100.00', scheduled_service_id: 'svc-old-1' },
-      { id: 'old-2', invoice_number: 'INV-2', subtotal: null, total: '62.10', discount_amount: null, scheduled_service_id: null },
+      { id: 'old-1', invoice_number: 'INV-1', subtotal: '107.10', discount_amount: '7.10', total: '100.00', scheduled_service_id: 'svc-old-1', service_date: null },
+      { id: 'old-2', invoice_number: 'INV-2', subtotal: null, total: '62.10', discount_amount: null, scheduled_service_id: null, service_date: null },
     ];
     const result = await runCompletionBalanceSweep(baseArgs);
     expect(result.charged).toBe(2);
@@ -125,8 +125,8 @@ describe('completion balance sweep', () => {
 
   test('stop-on-failure: a decline ends the sweep before later invoices', async () => {
     openBalanceResults.rows = [
-      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00' },
-      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00' },
+      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00', scheduled_service_id: null, service_date: null },
+      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: null, service_date: null },
     ];
     mockCharge.mockImplementationOnce(async () => { throw new Error('card_declined'); });
     const result = await runCompletionBalanceSweep(baseArgs);
@@ -144,8 +144,8 @@ describe('completion balance sweep', () => {
 
   test('a fenced (ambiguous/orphaned) outcome stops the sweep and flags it', async () => {
     openBalanceResults.rows = [
-      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00' },
-      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00' },
+      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00', scheduled_service_id: null, service_date: null },
+      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: null, service_date: null },
     ];
     mockCharge.mockImplementationOnce(async () => {
       const err = new Error('ambiguous');
@@ -163,8 +163,8 @@ describe('completion balance sweep', () => {
 
   test('admin-stopped dunning sequences are never collected', async () => {
     openBalanceResults.rows = [
-      { id: 'old-stopped', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00' },
-      { id: 'old-live', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00' },
+      { id: 'old-stopped', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00', scheduled_service_id: null, service_date: null },
+      { id: 'old-live', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: null, service_date: null },
     ];
     stoppedResults.rows = [{ invoice_id: 'old-stopped' }];
     const result = await runCompletionBalanceSweep(baseArgs);
@@ -179,8 +179,8 @@ describe('completion balance sweep', () => {
     // 'processing' and can still fail — the sweep must never fan out more
     // debits behind money in flight (pre-push r3 P0).
     openBalanceResults.rows = [
-      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00' },
-      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00' },
+      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00', scheduled_service_id: null, service_date: null },
+      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: null, service_date: null },
     ];
     mockCharge.mockImplementationOnce(async () => ({ status: 'processing' }));
     const result = await runCompletionBalanceSweep(baseArgs);
@@ -194,8 +194,8 @@ describe('completion balance sweep', () => {
 
   test('a credit-covered (prepaid) outcome is final and the sweep continues', async () => {
     openBalanceResults.rows = [
-      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00' },
-      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00' },
+      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00', scheduled_service_id: null, service_date: null },
+      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: null, service_date: null },
     ];
     mockCharge.mockImplementationOnce(async () => ({ covered_by_credit: true, status: 'prepaid' }));
     const result = await runCompletionBalanceSweep(baseArgs);
@@ -207,8 +207,8 @@ describe('completion balance sweep', () => {
     // The Oct 2 pest bill minted at estimate accept must wait for Oct 2's
     // own completion, not ride a lawn visit's Auto Pay charge.
     openBalanceResults.rows = [
-      { id: 'future-visit', invoice_number: 'INV-1', subtotal: '106.20', total: '106.20', scheduled_service_id: 'svc-future' },
-      { id: 'done-visit', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: 'svc-done' },
+      { id: 'future-visit', invoice_number: 'INV-1', subtotal: '106.20', total: '106.20', scheduled_service_id: 'svc-future', service_date: null },
+      { id: 'done-visit', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: 'svc-done', service_date: null },
     ];
     mockVisitState.unperformed = new Set(['svc-future']);
     const result = await runCompletionBalanceSweep(baseArgs);
@@ -233,13 +233,14 @@ describe('completion balance sweep', () => {
     const { unperformedVisitInvoiceIds } = require('../services/completion-balance-sweep');
     mockVisitState.unperformed = new Set(['svc-cancelled', 'svc-pending']);
     const skip = await unperformedVisitInvoiceIds([
-      { id: 'a', scheduled_service_id: 'svc-done' },
-      { id: 'b', scheduled_service_id: 'svc-cancelled' },
-      { id: 'c', scheduled_service_id: 'svc-pending' },
+      { id: 'a', scheduled_service_id: 'svc-done', service_date: null },
+      { id: 'b', scheduled_service_id: 'svc-cancelled', service_date: null },
+      { id: 'c', scheduled_service_id: 'svc-pending', service_date: null },
       { id: 'd', scheduled_service_id: null, service_date: new Date('2026-10-02T04:00:00Z') },
       { id: 'e', scheduled_service_id: null, service_date: null },
+      { id: 'f', invoice_number: 'no-link-columns' },
     ], { today: '2026-09-26' });
-    expect([...skip].sort()).toEqual(['b', 'c', 'd']);
+    expect([...skip].sort()).toEqual(['b', 'c', 'd', 'f']);
   });
 
   test('a DATE column read as UTC midnight still counts as its own calendar day', async () => {
