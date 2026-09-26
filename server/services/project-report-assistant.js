@@ -168,19 +168,22 @@ function answerProjectReportQuestion({ question, project, payload, intent }) {
     || WHEN_SEE_AGAIN_RE.test(q)) {
     return answerNextVisit({ project, payload });
   }
-  // codex #4839 round-4 P2 (4109926460): explicit findings/observation
-  // cues outrank the treatment nouns below — "What did you find in the
-  // treated areas?" / "What did you observe while treating?" answer with
-  // the recorded findings, not just the treatment fields, even though both
-  // cues are present.
+  // Intent verbs outrank topic nouns (codex #4839): explicit recommendation
+  // wording first ("What should I do about the results?"), then future
+  // treatment timing ("When will you treat again?"), then observation verbs
+  // ("What did you find in the treated areas?"), then treatment nouns.
+  if (/\b(recommend(?:ation|ations)?|next step|advice|prep|do now|should i|do i need|need to do|do next|do about)\b/.test(q)) {
+    return answerRecommendations({ project });
+  }
+  if (!/\b(was|were|did|have you|has)\b/.test(q)
+    && (/\b(when|next)\b[^?.!]*\b(treat\w*|spray\w*|appl\w*)\b/.test(q) || /\b(treat|spray)\w*\s+again\b/.test(q))) {
+    return answerNextVisit({ project, payload });
+  }
   if (/\b(find|found|finding|findings|see|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {
     return answerFindings({ project, typeCfg });
   }
   if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|use|used|appl(?:y|ies|ied|ying|ication|ications)|chemical|chemicals|spray|sprays|sprayed|spraying|bait|baits|baited|gallon|gallons)\b/.test(q)) {
     return answerTreatment({ project, typeCfg });
-  }
-  if (/\b(recommend(?:ation|ations)?|next step|advice|prep|do now|should i|do i need|need to do|do next)\b/.test(q)) {
-    return answerRecommendations({ project });
   }
   if (/\b(follow|when|visit|next)\b/.test(q)) {
     return answerNextVisit({ project, payload });

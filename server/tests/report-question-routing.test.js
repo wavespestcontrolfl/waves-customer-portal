@@ -39,6 +39,21 @@ describe('project report — every shipped chip answers its own category (AW-06)
     expect(answerProjectReportQuestion({ question, project, payload })).toMatch(expected);
   });
 
+  test.each([
+    'What do you recommend based on what you found?',
+    'What should I do about the results?',
+  ])('explicit recommendation wording outranks findings words: %s', (question) => {
+    expect(answerProjectReportQuestion({ question, project, payload })).toMatch(/Seal the gap at the rear wall/i);
+  });
+
+  test.each([
+    ['When will you treat again?', /Nothing further is scheduled|scheduled for/i],
+    ['When is the next treatment?', /Nothing further is scheduled|scheduled for/i],
+    ['When was it treated?', /Exterior perimeter/i],
+  ])('future treatment timing goes to the next visit, past tense to treatment: %s', (question, expected) => {
+    expect(answerProjectReportQuestion({ question, project, payload })).toMatch(expected);
+  });
+
   test('an unrecognized or missing intent falls back to free-text routing (older-client compatibility)', () => {
     expect(answerProjectReportQuestion({ question: 'What was treated?', project, payload, intent: 'not_a_real_intent' }))
       .toMatch(/Exterior perimeter/i);
@@ -325,6 +340,30 @@ describe('service report — every shipped chip answers its own category (AW-06)
   test('explicit advice wording outranks a lawn-trend subject', () => {
     expect(answerServiceReportQuestion({ question: 'What do you recommend for the stress areas?', data: lawnData }))
       .toBe(answerServiceReportQuestion({ question: 'What do you recommend?', data: lawnData }));
+  });
+
+  // codex #4839 round 5: intent verbs outrank topic nouns.
+  test.each([
+    'What did you find while treating?',
+    'What did you find while spraying?',
+  ])('observation verb outranks a treatment inflection: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData }))
+      .toBe(answerServiceReportQuestion({ question: 'What did you find?', data: pestData }));
+  });
+
+  test('preparation wording outranks the appointment noun; "Should I schedule…" stays scheduling', () => {
+    expect(answerServiceReportQuestion({ question: 'What should I do before my next visit?', data: pestData, nextAppointment }))
+      .not.toMatch(/Your next appointment is/);
+    expect(answerServiceReportQuestion({ question: 'Should I schedule my next appointment?', data: pestData, nextAppointment }))
+      .toMatch(/Your next appointment is/);
+  });
+
+  test.each([
+    'Are my pets okay after the ant treatment?',
+    'Is my dog okay after the pest treatment?',
+  ])('a pest noun does not suppress a genuine pet safety question: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData }))
+      .toBe(answerServiceReportQuestion({ question: 'When can my pets go back out?', data: pestData }));
   });
 
   test('"When will you come back?" is a scheduling question, not re-entry', () => {

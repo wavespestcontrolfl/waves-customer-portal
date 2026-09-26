@@ -20,6 +20,12 @@ const TREATMENT_QUESTION_RE = /\b(treat|treats|treating|treated|treatment|treatm
 // about what was FOUND there — "What did you find outdoors?" / "Did you see
 // any ants indoors?" are findings questions, not re-entry timing.
 const FINDINGS_QUESTION_RE = /\b(find|found|finding|see|saw|notice|noticed|activity|ants?|pests?|bugs?|roaches?|spiders?|rodents?|mice|rats?)\b/;
+// Observation verbs only — an intent verb outranks topic nouns. A pest noun
+// alone ("…after the ant treatment?") never suppresses a safety subject.
+const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|observe|observed|spot|spotted)\b/;
+// Preparation / action wording outranks appointment nouns ("What should I do
+// before my next visit?"); "Should I schedule…" stays a scheduling question.
+const PREP_ADVICE_RE = /\b(what\s+should\s+i\s+do|should\s+i\s+(?:do|prepare|prep|move|clean|mow|water|cover|remove)|prepare|before\s+(?:my|the|your)\s+next)\b/;
 // A temporal "when/after/how long … go/get/come/let … in/out" question is
 // re-entry even when it names the treatment ("When can I go inside after
 // the treatment?").
@@ -32,7 +38,7 @@ const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:
 // still caught below by REENTRY_PHRASE_RE / REENTRY_TEMPORAL_RE on their own
 // wording, so this guard only needs to stop the bare-subject branch.
 function isReentryIntent(q) {
-  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_QUESTION_RE.test(q))
+  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q))
     || REENTRY_PHRASE_RE.test(q)
     || REENTRY_TEMPORAL_RE.test(q)
     || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q));
@@ -540,6 +546,11 @@ function questionRoutingRules({
     // codex #4839 round-4 P2 4109926457: explicit appointment wording
     // outranks a treatment inflection ("What are you applying at my next
     // appointment?" answers with the appointment, not today's application).
+    // Observation verbs outrank treatment inflections ("What did you find
+    // while treating?") — codex #4839 P2.
+    { test: (q) => FINDINGS_VERB_RE.test(q), answer: () => answerFindings({ data }) },
+    // Preparation wording outranks appointment nouns — codex #4839 P2.
+    { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
     {
       test: (q) => TREATMENT_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q),
       // "Is the treatment working?" asks about results, not what was applied.
