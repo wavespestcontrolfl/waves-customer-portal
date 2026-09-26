@@ -106,6 +106,30 @@ describe("CustomerGeocodeReviewForm", () => {
     expect(screen.getByRole("button", { name: "Mark saved address outside service area" })).toBeDisabled();
   });
 
+  it("withholds verification for implausible pins and incomplete street addresses", () => {
+    const { onResolve } = renderForm();
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Confirmed with the customer." } });
+    fireEvent.click(screen.getByLabelText("I confirmed this is the primary service location"));
+    const verify = screen.getByRole("button", { name: "Verify pin" });
+    expect(verify).toBeEnabled();
+
+    for (const [label, invalid, corrected] of [
+      ["Longitude", "82.57", "-82.57"],
+      ["Latitude", "40.71", "27.49"],
+      ["Address", "Main Street", "100 Main Street"],
+      ["Address", "123", "123A Main Street"],
+    ]) {
+      fireEvent.change(screen.getByLabelText(label), { target: { value: invalid } });
+      expect(verify).toBeDisabled();
+      fireEvent.click(verify);
+      expect(onResolve).not.toHaveBeenCalled();
+      fireEvent.change(screen.getByLabelText(label), { target: { value: corrected } });
+      expect(verify).toBeEnabled();
+    }
+    fireEvent.click(verify);
+    expect(onResolve).toHaveBeenCalledOnce();
+  });
+
   it("preserves the draft but withholds conflict acknowledgment while the saved record is unavailable", () => {
     const { rerender, onAcknowledgeConflict, onResolve, onCancel } = renderForm();
     fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Keep this note through recovery." } });

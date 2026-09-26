@@ -104,8 +104,11 @@ export default function CustomerGeocodeReviewForm({
   const address = Object.fromEntries(ADDRESS_FIELDS.map((key) => [key, draft[key].trim()]));
   const originalAddress = initialDraft(record);
   const addressChanged = ADDRESS_FIELDS.some((key) => address[key] !== originalAddress[key].trim());
-  const addressComplete = ["address_line1", "city", "state", "zip"].every((key) => address[key]);
-  const coordinatesValid = hasCompletePin(draft);
+  const addressComplete = ["address_line1", "city", "state", "zip"].every((key) => address[key])
+    && /^\d+[A-Za-z-]*\s+\S/.test(address.address_line1);
+  // Match server/services/service-area.js; this is a routing sanity check.
+  const coordinatesValid = coordinate(draft.latitude, 26.3, 27.95) !== null
+    && coordinate(draft.longitude, -82.9, -81.5) !== null;
   const canConfirmOutsideArea = !conflicted && !unavailable && draft.evidence.trim() && draft.confirmed;
   const canVerify = canConfirmOutsideArea && addressComplete && coordinatesValid;
   const retryAvailable = !hasCompletePin(record.customer);
