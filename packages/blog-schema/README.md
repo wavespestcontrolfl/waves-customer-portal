@@ -22,15 +22,15 @@ The sync script assumes the Astro repo is cloned as a sibling of this repo (i.e.
 |---|---|
 | `schema.ts` | Human-readable source reference (mirrors upstream; read-only here) |
 | `service-areas.ts` | Valid values for `service_areas_tag` — mirrors upstream; read-only here |
-| `schema.json` | JSON Schema bundle — admin code validates drafts against this via `ajv` (`server/services/content-astro/schema-validator.js`) |
+| `schema.json` | JSON Schema bundle — admin code validates drafts against this via `ajv` (wiring lands in PR 1) |
 | `upstream-checksum.txt` | Expected sha256 over `schema.ts + service-areas.ts` — drift check compares against this |
 | `scripts/verify-vendor.js` | Drift check; runs on `prestart` and `prebuild` |
 | `scripts/sync-from-astro.js` | Pulls updated files from the Astro repo |
 
 ## What it's used for
 
-PR 0 shipped the schema contract. PR 1 wired the admin Blog Content Engine to:
+PR 0 ships the schema contract only. PR 1 wires the admin Blog Content Engine to:
 
 - Validate draft frontmatter against `schema.json` before publish
 - Run `validateRenderedComponents(html, frontmatter)` from `schema.ts` against the rendered HTML to enforce §10 post-type component requirements
-- Publish posts to the Astro spoke fleet via a new admin endpoint + Cloudflare Pages deploy hook
+- Publish posts to the Astro spoke fleet via a new admin endpoint + Cloudflare Pages deploy hook (replacing the legacy WordPress REST publish path)

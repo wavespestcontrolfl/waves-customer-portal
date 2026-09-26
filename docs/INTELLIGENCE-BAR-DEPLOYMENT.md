@@ -2,13 +2,16 @@
 
 ## Pre-flight
 
-The Intelligence Bar is fully built. Tool modules span `server/services/intelligence-bar/`, 13 pages wired, ⌘K global overlay in AdminLayout. The route is already registered in `server/index.js`. This guide covers what remains to go live.
+The Intelligence Bar is fully built. 104 tools, 11 modules, 13 pages wired, ⌘K global overlay in AdminLayout. The route is already registered in `server/index.js`. This guide covers what remains to go live.
 
 ## Step 1: Verify Files Exist
 
-Confirm the tool modules are present:
+Confirm all 11 tool modules are present:
 ```bash
 ls server/services/intelligence-bar/
+# Expected: tools.js schedule-tools.js dashboard-tools.js seo-tools.js
+#           procurement-tools.js revenue-tools.js review-tools.js
+#           comms-tools.js tax-tools.js leads-tools.js tech-tools.js
 ```
 
 Confirm the route file exists and is registered:
@@ -38,7 +41,7 @@ In Railway dashboard, confirm these are set:
 - `DATABASE_URL` — Already set (PostgreSQL).
 
 Optional:
-- `INTELLIGENCE_BAR_TECH_MODEL` — Override the tech portal model (default: the FLAGSHIP tier, unless this is set)
+- `INTELLIGENCE_BAR_TECH_MODEL` — Override the tech portal model (default: `claude-sonnet-4-20250514`)
 
 ## Step 4: Deploy
 
@@ -113,7 +116,7 @@ Watch Railway logs for the first few days:
 Key things to watch:
 - **Errors**: Any `[intelligence-bar] Tool X failed:` messages → fix the SQL query or missing table
 - **Latency**: Tool-use loops with 4+ rounds → might need query optimization
-- **Model usage**: Tech context defaults to the FLAGSHIP tier unless `INTELLIGENCE_BAR_TECH_MODEL` is set to something cheaper for the field
+- **Model usage**: Verify tech context logs show `claude-sonnet-4-20250514`, not Opus
 - **Token costs**: Each Opus query with 2-3 tool rounds costs ~$0.05-0.15. Monitor daily spend.
 
 ## Troubleshooting
