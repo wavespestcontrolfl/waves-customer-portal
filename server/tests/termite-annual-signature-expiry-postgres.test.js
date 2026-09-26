@@ -177,8 +177,11 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
   }
 
   async function makeAgreement(db, {
-    estimateId, customerId, status = 'sent', shareTokenExpiresAt = null, createdAt = new Date(),
+    estimateId, customerId, status = 'sent', shareTokenExpiresAt = daysAgo(31), createdAt = new Date(),
   }) {
+    // Default: the signing link lapsed long ago (the 14-day link of an
+    // offer parked 45+ days). A LIVE link defers the close-out — tests for
+    // that pass a future expiry, or `null` (a hash with no window is live).
     const [contract] = await db('customer_contracts').insert({
       customer_id: customerId,
       document_template_key: ANNUAL_TEMPLATE_KEY,
@@ -312,6 +315,45 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
       expect((await db('customer_contracts').where({ id: contract.id }).first()).status).toBe('sent');
       expect(closedBellCalls(notifyAdmin)).toHaveLength(0);
+    });
+
+    test('a staff-reissued link that is still live defers the close-out until it lapses (Codex #4922 r2 P0)', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1) });
+      const contract = await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000) });
+
+      const counts = await sweep();
+      // Not even a candidate while the link is live — it can't crowd the batch.
+      expect(counts).toMatchObject({ signatureExpireScanned: 0, signatureExpired: 0 });
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+      const still = await db('customer_contracts').where({ id: contract.id }).first();
+      expect(still.status).toBe('sent');
+      expect(still.share_token_hash).toBe('a-token-hash');
+      expect(closedBellCalls(notifyAdmin)).toHaveLength(0);
+
+      // The link lapses → the next sweep closes the offer.
+      await db('customer_contracts').where({ id: contract.id }).update({ share_token_expires_at: daysAgo(1) });
+      expect((await sweep()).signatureExpired).toBe(1);
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('signature_expired');
+    });
+
+    test('a hash with NO expiry is a live link (served indefinitely) and also defers the close-out', async () => {
+      const { sweep, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1) });
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: null });
+
+      expect((await sweep()).signatureExpired).toBe(0);
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+    });
+
+    test('the locked re-check also refuses a live link (a resend that lands between scan and lock)', async () => {
+      const { db } = load();
+      const { expireAbandonedSignature } = require('../services/termite-annual-activation')._private;
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1) });
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000) });
+
+      await expect(expireAbandonedSignature({ estimateId, conn: db })).resolves.toEqual({ skipped: 'live_signing_link' });
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
     });
 
     test('exactly past the 45-day park: flips terminal, retires the unsigned agreement (share link burned), records an event, bells once', async () => {
@@ -580,6 +622,7 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
         document_template_key: ANNUAL_TEMPLATE_KEY,
         status: 'sent',
         share_token_hash: 'a-token-hash',
+        share_token_expires_at: daysAgo(31), // lapsed — a live link would defer the close-out
         document_variables_snapshot: JSON.stringify({ estimate: { id: estimate.id } }),
       }).returning('*');
 
@@ -609,6 +652,7 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
         document_template_key: ANNUAL_TEMPLATE_KEY,
         status: 'sent',
         share_token_hash: 'a-token-hash',
+        share_token_expires_at: daysAgo(31), // lapsed — a live link would defer the close-out
         document_variables_snapshot: JSON.stringify({ estimate: { id: estimate.id } }),
       }).returning('*');
 
@@ -616,7 +660,7 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(counts.signatureExpireFailed).toBe(1);
       expect((await db('estimates').where({ id: estimate.id }).first()).annual_plan_activation_status).toBe('awaiting_signature');
       expect((await db('customer_contracts').where({ id: contract.id }).first()).status).toBe('sent');
-      expect(await db('customer_contract_events').where({ contract_id: contract.id })).toHaveLength(0);
+      expect(await db('customer_contract_events').where({ contract_id: contract.id }).whereNot({ event_type: 'signature_link_expired_nudged' })).toHaveLength(0);
     });
   });
 
@@ -650,7 +694,7 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       const stillOpen = await db('customer_contracts').where({ id: contract.id }).first();
       expect(stillOpen.status).toBe('sent');
       expect(stillOpen.share_token_hash).toBe('a-token-hash');
-      expect(await db('customer_contract_events').where({ contract_id: contract.id })).toHaveLength(0);
+      expect(await db('customer_contract_events').where({ contract_id: contract.id }).whereNot({ event_type: 'signature_link_expired_nudged' })).toHaveLength(0);
     });
   });
 

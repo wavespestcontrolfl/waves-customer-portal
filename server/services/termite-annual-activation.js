@@ -1181,7 +1181,7 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
           ? etDateString(new Date(parkedAt.getTime() + ANNUAL_SIGNATURE_ABANDON_DAYS * 24 * 60 * 60 * 1000))
           : null;
         const closeClause = closeDate
-          ? `or let it close out automatically on ${closeDate} if it stays unsigned`
+          ? `or let it close out automatically on ${closeDate} if it stays unsigned (a resent link stays usable until it expires; the offer closes after that)`
           : 'or let it close out automatically if it stays unsigned';
         const expiresAtKey = new Date(row.share_token_expires_at).toISOString();
         const bell = await NotificationService.notifyAdmin(
@@ -1235,6 +1235,12 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
 // activated — so this tick skips it and the next sweep's re-check sees the
 // outcome. Either way the customer's actual signature always wins over this
 // administrative close-out.
+function liveSigningLink(contract) {
+  if (!contract?.share_token_hash) return false;
+  if (!contract.share_token_expires_at) return true;
+  return new Date(contract.share_token_expires_at).getTime() > Date.now();
+}
+
 async function expireAbandonedSignature({ estimateId, conn = db }) {
   return conn.transaction(async (trx) => {
     const peek = await trx('estimates').where({ id: estimateId }).first('id', 'customer_id');
@@ -1271,6 +1277,21 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
       .first('id');
     if (signedContract) return { skipped: 'signed' };
 
+    // Locked (customer → contract, the order above) BEFORE the estimate
+    // flips, so a staff resend can't slip a fresh link in between.
+    const openAgreements = await trx('customer_contracts')
+      .where({ document_template_key: ANNUAL_TEMPLATE_KEY })
+      .whereNotIn('status', ['signed', 'cancelled', 'voided'])
+      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimateId)])
+      .forUpdate();
+    // A signing link staff reissued late in the window (the lapse nudge's
+    // own advice) carries its full template TTL; burning it at day 45 would
+    // 410 a link whose advertised expiry is still ahead (Codex #4922 r2 P0).
+    // The close-out waits for every live link to lapse — the next sweep
+    // after that closes the offer. A hash with no expiry is live too
+    // (contracts-public serves it indefinitely).
+    if (openAgreements.some(liveSigningLink)) return { skipped: 'live_signing_link' };
+
     const expiredCount = await trx('estimates')
       .where({ id: estimateId, annual_plan_activation_status: 'awaiting_signature' })
       .update({ annual_plan_activation_status: 'signature_expired' });
@@ -1281,11 +1302,6 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
     // (termite-program-agreement.js): terminal 'cancelled', share link
     // burned, an audit event recorded. Never touches a signed one (excluded
     // by the WHERE, and the check above already refused if one exists).
-    const openAgreements = await trx('customer_contracts')
-      .where({ document_template_key: ANNUAL_TEMPLATE_KEY })
-      .whereNotIn('status', ['signed', 'cancelled', 'voided'])
-      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimateId)])
-      .forUpdate();
     const now = new Date();
     let retiredCount = 0;
     for (const row of openAgreements) {
@@ -1347,6 +1363,19 @@ async function expireAbandonedSignatures({ conn, limit, counts }) {
       .where('e.annual_plan_activation_status', 'awaiting_signature')
       .whereRaw(`${parkedAtExpr} IS NOT NULL`)
       .whereRaw(`${parkedAtExpr} < ?`, [cutoff])
+      // An offer whose agreement still has a live signing link waits (see
+      // expireAbandonedSignature) — keep it out of the batch so it can't
+      // crowd out offers that can actually close.
+      .whereNotExists(function liveLinkOnOffer() {
+        this.select(1).from('customer_contracts as cc')
+          .where('cc.document_template_key', ANNUAL_TEMPLATE_KEY)
+          .whereNotIn('cc.status', ['signed', 'cancelled', 'voided'])
+          .whereRaw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text")
+          .whereNotNull('cc.share_token_hash')
+          .where(function linkWindowOpen() {
+            this.whereNull('cc.share_token_expires_at').orWhere('cc.share_token_expires_at', '>', new Date());
+          });
+      })
       // A close-out that failed is stamped (below) and rotates behind the
       // never-attempted rows, so a backlog of failures larger than the limit
       // can't re-select the same oldest batch every day. A successful close
@@ -1384,5 +1413,5 @@ module.exports = {
   reconcileTermiteAnnualActivations,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,
-  _private: { CASTABLE_ISO_INSTANT, SIGNATURE_NUDGE_EVENT },
+  _private: { CASTABLE_ISO_INSTANT, SIGNATURE_NUDGE_EVENT, expireAbandonedSignature },
 };
