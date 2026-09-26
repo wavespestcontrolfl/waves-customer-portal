@@ -52,17 +52,14 @@ describe('global delivery kill switch and generation authorization (r74)', () =>
 });
 
 describe('deterministic fallback parser approval (r16)', () => {
-  test('echoed typed free text with parser-only terms degrades to the generic template', () => {
+  test('thin typed data with parser-only terms cannot invent a completed inspection', () => {
     const report = buildDeterministicReportCopy({
       serviceType: 'Termite Inspection Service',
       areas: [], actions: [],
       observations: ['Infestation extent: localized infestation at the garage sill'],
       recommendations: [], ratingLabel: null,
     });
-    // parser-only 'infestation' nulls the body — the fallback must degrade
-    // to the generic template rather than hand back undeliverable copy
-    expect(report).toContain('We completed the scheduled service');
-    expect(report).not.toContain('Infestation extent');
+    expect(report).toBeNull();
   });
 });
 
@@ -193,16 +190,138 @@ describe('deterministic report fallback', () => {
 
   test('does not echo an unsafe request service type', () => {
     const report = buildDeterministicReportCopy({
-      serviceType: 'Guaranteed pest-free service',
+      serviceType: 'Guaranteed Fire Ant Treatment',
       areas: ['Exterior'],
+      actions: ['Applied the recorded ant treatment'],
     });
-    expect(report).toContain('scheduled service');
-    expect(report).not.toMatch(/guaranteed|pest-free/i);
+    expect(report).toContain('Applied the recorded ant treatment');
+    expect(report).not.toMatch(/guaranteed/i);
     expect(reportCopyRejection(report)).toBeNull();
   });
 
   test('returns no fallback when only unstructured notes could be preserved', () => {
     expect(buildDeterministicReportCopy({ serviceType: 'General Pest Control' })).toBeNull();
+  });
+
+  test.each([
+    ['product-only/empty structured facts', {}],
+    ['area without work', { areas: ['Front lawn'] }],
+    ['observation without work', { observations: ['Thin turf near the drive'] }],
+    ['customer concern without work', { customerConcern: 'The side strip looks thin.' }],
+    ['recommendation without work', { recommendations: ['Watch the side strip'] }],
+  ])('lawn fallback refuses to invent completion from %s', (_label, input) => {
+    expect(buildDeterministicReportCopy({
+      serviceType: 'Every 6 Weeks Lawn Care Service',
+      ...input,
+    })).toBeNull();
+  });
+
+  test.each([
+    ['Quarterly Pest Control Service', { areas: ['Exterior'] }],
+    ['Quarterly Pest Control Service', { observations: ['Light ant activity'] }],
+    ['Monthly Pest Control', { areas: ['Exterior'] }],
+    ['Monthly Pest Control', { observations: ['Light ant activity'] }],
+    ['Bi-Monthly Pest Control', { areas: ['Exterior'] }],
+    ['bi_monthly_pest_control', { observations: ['Light ant activity'] }],
+    ['Quarterly Pest Control Service', { customerConcern: 'Ants were seen near the entry.' }],
+    ['Quarterly Pest Control Service', { recommendations: ['Watch the entry area'] }],
+    ['Tree and Shrub Care', { areas: ['Front landscape'] }],
+    ['Tree and Shrub Care', { observations: ['Mealybugs remain on the hibiscus'] }],
+    ['Tree and Shrub Care', { customerConcern: 'The palms look pale.' }],
+    ['Tree and Shrub Care', { recommendations: ['Recheck the palms'] }],
+  ])('%s fallback refuses to invent completion from thin visit facts', (serviceType, input) => {
+    expect(buildDeterministicReportCopy({ serviceType, ...input })).toBeNull();
+  });
+
+  test('recurring pest fallback can use an approved broad application fact without exposing a product', () => {
+    const report = buildDeterministicReportCopy({
+      serviceType: 'Quarterly Pest Control Service',
+      applicationRecords: [{
+        role: 'insect-control application', method: 'perimeter spray', area: 'Exterior',
+        areaValue: 120, areaUnit: 'linear_ft', name: 'Private Brand', activeIngredient: 'Private Active',
+      }],
+    });
+    expect(report).toContain('Recorded applications: insect-control application using perimeter spray in Exterior with 120 linear ft recorded.');
+    expect(report).not.toMatch(/Private Brand|Private Active/);
+    expect(report).not.toMatch(/inspected|we checked|we will|scheduled follow-up/i);
+    expect(reportCopyRejection(report)).toBeNull();
+  });
+
+  test.each([
+    ['Monthly Pest Control', {
+      applicationRecords: [{ role: 'insect-control application', method: 'perimeter spray', area: 'Exterior' }],
+    }, 'Recorded applications: insect-control application using perimeter spray in Exterior.'],
+    ['Bi-Monthly Pest Control', {
+      actions: ['Applied the recorded exterior pest treatment'],
+    }, 'Recorded completed work: Applied the recorded exterior pest treatment.'],
+  ])('%s evidence-bound fallback succeeds with completed-work evidence', (serviceType, input, expected) => {
+    const report = buildDeterministicReportCopy({ serviceType, ...input });
+    expect(report).toContain(expected);
+    expect(report).not.toMatch(/continued monitoring|next scheduled service/i);
+    expect(reportCopyRejection(report)).toBeNull();
+  });
+
+  test.each([
+    ['rear gate 2468', '2468'],
+    ['lockbox code BLUE', 'BLUE'],
+    ['garage PIN 9753', '9753'],
+  ])('application-only fallback scrubs credentials in %s', (area, secret) => {
+    const report = buildDeterministicReportCopy({
+      serviceType: 'Quarterly Pest Control Service',
+      applicationRecords: [{ role: 'insect-control application', method: 'broadcast spray', area }],
+    });
+    expect(report).toContain('Recorded applications: insect-control application using broadcast spray');
+    expect(report).not.toContain(secret);
+    expect(reportCopyRejection(report)).toBeNull();
+  });
+
+  test('tree fallback preserves two approved methods for the same product as separate applications', () => {
+    const report = buildDeterministicReportCopy({
+      serviceType: 'Tree and Shrub Care',
+      applicationRecords: [
+        {
+          role: 'insect-control application', method: 'foliar spray', area: 'Hibiscus and palms',
+          name: 'Safari', activeIngredient: 'dinotefuran',
+        },
+        {
+          role: 'insect-control application', method: 'root injection', area: 'Six palms',
+          areaValue: 6, areaUnit: 'count', name: 'Safari', activeIngredient: 'dinotefuran',
+        },
+      ],
+    });
+    expect(report).toContain('insect-control application using foliar spray in Hibiscus and palms');
+    expect(report).toContain('insect-control application using root injection in Six palms');
+    expect(report).not.toMatch(/Safari|dinotefuran|6 count/i);
+    expect(report).not.toMatch(/inspected|we checked|we will|scheduled follow-up/i);
+    expect(reportCopyRejection(report)).toBeNull();
+  });
+
+  test('WDO keeps its separate legacy path while specialties require work evidence', () => {
+    const wdo = buildDeterministicReportCopy({
+      serviceType: 'WDO Inspection',
+      areas: ['Structure'],
+    });
+    const specialty = buildDeterministicReportCopy({
+      serviceType: 'Fire Ant Treatment',
+      areas: ['Front lawn'],
+    });
+    expect(wdo).toContain('We completed the WDO Inspection visit in Structure.');
+    expect(specialty).toBeNull();
+  });
+
+  test('lawn fallback preserves completed-work, concern, and recommendation ownership', () => {
+    const report = buildDeterministicReportCopy({
+      serviceType: 'Every 6 Weeks Lawn Care Service',
+      actions: ['Applied the recorded turf treatment'],
+      areas: ['Front lawn'],
+      customerConcern: 'The side strip looks thin',
+      recommendations: ['Watch the side strip before the next visit'],
+    });
+    expect(report).toContain('Recorded completed work: Applied the recorded turf treatment.');
+    expect(report).toContain('You reported: The side strip looks thin.');
+    expect(report).toContain('The visit record includes this recommended next step:');
+    expect(report).not.toMatch(/inspected|we checked|we will|scheduled follow-up/i);
+    expect(reportCopyRejection(report)).toBeNull();
   });
 
   test.each([
@@ -274,9 +393,8 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
       target_termite: 'Subterranean termites',
     });
     expect(sections.work.join(' ')).toContain('Trenching');
-    // target_termite is completed-work context since r14 (what the
-    // treatment targets, not a sighting)
-    expect(sections.work.join(' ')).toContain('Subterranean termites');
+    expect(sections.objectives.join(' ')).toContain('Subterranean termites');
+    expect(sections.work.join(' ')).not.toContain('Subterranean termites');
     expect(sections.products.join(' ')).toContain('Termidor HE');
     expect(sections.work.join(' ')).not.toContain('Termidor');
     expect(sections.observations.join(' ')).not.toContain('Termidor');
@@ -821,12 +939,14 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(wild.work).toHaveLength(0);
   });
 
-  test('treatment targets are completed-work context, not findings (r14)', () => {
+  test('a treatment target is an objective, not completed work or a sighting', () => {
     const treat = typedFindingsPromptSections('termite_treatment', { target_termite: 'Unknown / preventive' });
-    expect(treat.work.join(' ')).toContain('Unknown / preventive');
+    expect(treat.objectives.join(' ')).toContain('Unknown / preventive');
+    expect(treat.work).toHaveLength(0);
     expect(treat.observations).toHaveLength(0);
     const pest = typedFindingsPromptSections('one_time_pest_treatment', { target_pest: 'Ghost ants' });
-    expect(pest.work.join(' ')).toContain('Ghost ants');
+    expect(pest.objectives.join(' ')).toContain('Ghost ants');
+    expect(pest.work).toHaveLength(0);
     expect(pest.observations).toHaveLength(0);
   });
 

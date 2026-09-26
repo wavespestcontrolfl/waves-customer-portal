@@ -21414,46 +21414,97 @@ async function generateReportCopyWithFallback({
 // selected values are echoed; raw notes and product names are intentionally
 // excluded because they may contain customer-private details, brand names, or
 // unsafe claims that an AI validator would normally rewrite.
-function buildDeterministicReportCopy({ serviceType, areas, actions, observations, recommendations, ratingLabel } = {}) {
+function buildDeterministicReportCopy({
+  serviceType, areas, actions, observations, recommendations, ratingLabel, customerConcern,
+  applicationRecords,
+} = {}) {
   const cleanItems = (items) => (Array.isArray(items) ? items : [])
-    .map((item) => String(item || '').trim())
+    .map((item) => redactAccessCodes(String(item || '').trim()))
     .filter(Boolean)
+    .filter((item) => !containsReportAccessCode(item))
     .filter((item) => ActivityIndicators.findBannedCustomerCopy(item).length === 0)
     .slice(0, 4);
   const cleanAreas = cleanItems(areas);
   const cleanActions = cleanItems(actions);
   const cleanObservations = cleanItems(observations);
   const cleanRecommendations = cleanItems(recommendations);
-  const hasSafeVisitDetails = cleanAreas.length > 0
-    || cleanActions.length > 0
-    || cleanObservations.length > 0
-    || cleanRecommendations.length > 0
-    || Boolean(ratingLabel);
-  if (!hasSafeVisitDetails) return null;
-  const candidateType = String(serviceType || 'scheduled service').trim().slice(0, 120) || 'scheduled service';
-  const safeType = ActivityIndicators.findBannedCustomerCopy(candidateType).length === 0
-    ? candidateType
-    : 'scheduled service';
-
-  const did = [];
-  did.push(`We completed the ${safeType} visit${cleanAreas.length ? ` in ${cleanAreas.join(', ')}` : ''}.`);
-  did.push(cleanActions.length
-    ? `Completed work included ${cleanActions.join('; ')}.`
-    : 'The technician documented the work performed and the areas addressed during the visit.');
-
-  const found = [];
-  if (cleanObservations.length) found.push(`The technician noted ${cleanObservations.join('; ')}.`);
-  if (ratingLabel) found.push(`Recorded pest activity was ${ratingLabel}.`);
-  if (cleanRecommendations.length) found.push(`Recommended next steps include ${cleanRecommendations.join('; ')}.`);
-  if (!found.length) found.push('The visit details were documented for continued monitoring at the next scheduled service.');
-
+  const cleanConcern = cleanItems([customerConcern])[0];
+  const safeRoles = new Set([
+    'weed-control application', 'fertilizer application', 'insect-control application',
+    'disease-control application', 'moisture-support application', 'soil-support application',
+    'growth-regulator application',
+  ]);
+  const safeMethods = new Set([
+    'perimeter spray', 'broadcast spray', 'spot treatment', 'granular broadcast',
+    'soil drench', 'root injection', 'soil injection', 'bait placement', 'station check',
+    'fog/ULV application', 'foliar spray', 'trunk injection', 'pin stream application',
+  ]);
+  const cleanApplications = (Array.isArray(applicationRecords) ? applicationRecords : [])
+    .flatMap((record) => {
+      if (!safeRoles.has(record?.role)) return [];
+      const method = safeMethods.has(record?.method) ? record.method : null;
+      const area = cleanItems(record?.area ? [record.area] : [])[0] || null;
+      const areaValue = Number(record?.areaValue);
+      const areaUnit = record?.areaUnit === 'sqft' ? 'sq ft'
+        : record?.areaUnit === 'linear_ft' ? 'linear ft' : null;
+      return [{
+        role: record.role,
+        method,
+        area,
+        measurement: Number.isFinite(areaValue) && areaValue > 0 && areaUnit
+          ? `${areaValue} ${areaUnit}` : null,
+      }];
+    })
+    .slice(0, 6);
+  // A concern, observation, rating, area, or recommendation cannot establish
+  // completed work. WDO/pre-slab keep their existing separate document behavior.
+  const legacyDocument = /\bwdo\b|pre[- ]?slab|pre[- ]?treat/i.test(String(serviceType));
+  const evidence = legacyDocument
+    ? [cleanAreas.length, cleanActions.length, cleanObservations.length, cleanRecommendations.length, ratingLabel]
+    : [cleanActions.length, cleanApplications.length];
+  if (!evidence.some(Boolean)) return null;
+  const wording = legacyDocument ? {
+    work: 'Completed work included', finding: 'The technician noted',
+    advice: 'Recommended next steps include',
+    emptyFinding: 'The visit details were documented for continued monitoring at the next scheduled service.',
+  } : {
+    work: 'Recorded completed work:', finding: 'The technician recorded',
+    advice: 'The visit record includes this recommended next step:',
+    emptyFinding: 'No separate technician finding was supplied with the structured details used for this fallback.',
+  };
+  const did = cleanActions.length ? [`${wording.work} ${cleanActions.join('; ')}.`] : [];
+  if (legacyDocument) {
+    const candidateType = String(serviceType).trim().slice(0, 120);
+    const safeType = ActivityIndicators.findBannedCustomerCopy(candidateType).length === 0
+      ? candidateType : 'scheduled service';
+    did.unshift(`We completed the ${safeType} visit${cleanAreas.length ? ` in ${cleanAreas.join(', ')}` : ''}.`);
+    if (!cleanActions.length) did.push('The technician documented the work performed and the areas addressed during the visit.');
+  } else {
+    if (cleanApplications.length) {
+      const applications = cleanApplications.map((application) => {
+        const details = [
+          application.method ? `using ${application.method}` : null,
+          application.area ? `in ${application.area}` : null,
+          application.measurement ? `with ${application.measurement} recorded` : null,
+        ].filter(Boolean).join(' ');
+        return `${application.role}${details ? ` ${details}` : ''}`;
+      });
+      did.push(`Recorded applications: ${applications.join('; ')}.`);
+    }
+    if (cleanAreas.length) did.push(`Recorded service area: ${cleanAreas.join(', ')}.`);
+  }
+  const found = [
+    [cleanObservations.length, `${wording.finding} ${cleanObservations.join('; ')}.`],
+    [!legacyDocument && cleanConcern, `You reported: ${cleanConcern}.`],
+    [ratingLabel, `Recorded pest activity was ${ratingLabel}.`],
+    [cleanRecommendations.length, `${wording.advice} ${cleanRecommendations.join('; ')}.`],
+  ].filter(([present]) => present).map(([, sentence]) => sentence);
+  if (!found.length) found.push(wording.emptyFinding);
   const report = `WHAT WE DID\n\n${did.join(' ')}\n\nWHAT WE FOUND\n\n${found.join(' ')}`;
-  // Same egress rule as the AI path (codex r16): the completion parser must
-  // APPROVE the copy — echoed typed free text can carry parser-only terms
-  // (bare 'infestation'), and returning it would hand the tech a report that
-  // completion later discards for another template.
   if (!reportCopyRejection(report) && technicianReportCustomerCopy(report)?.body) return report;
-  return 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.';
+  return legacyDocument
+    ? 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.'
+    : null;
 }
 
 // Provenance classifier for typed findings fields (codex r2). Some fields
@@ -21465,7 +21516,8 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // customer copy).
 // target_animal is EXEMPT from the target rule: wildlife's "Suspected
 // species" is an observation, not what a treatment targets (codex r15).
-const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|^target_(?!animal\b)|_target$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
+const TYPED_OBJECTIVE_FIELD_RE = /^target_(?!animal\b)|_target$/;
 const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$|linear_feet|square_footage|trench_depth/i;
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
@@ -21493,6 +21545,7 @@ const TYPED_WORK_SECTION_RE = /work completed/i;
 const TYPED_ADVICE_SECTION_RE = /recommendation/i;
 function typedFieldProvenance(field) {
   if (field.type === 'applications' || TYPED_PRODUCT_FIELD_RE.test(field.key)) return 'product';
+  if (TYPED_OBJECTIVE_FIELD_RE.test(field.key)) return 'objective';
   if (TYPED_CUSTOMER_FIELD_RE.test(field.key) || TYPED_CUSTOMER_SECTION_RE.test(field.section || '')) return 'customer';
   if (TYPED_ADVICE_FIELD_RE.test(field.key) || TYPED_ADVICE_SECTION_RE.test(field.section || '')) return 'advice';
   if (TYPED_WORK_FIELD_RE.test(field.key) || TYPED_WORK_SECTION_RE.test(field.section || '')) return 'work';
@@ -21512,7 +21565,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
   const schema = ActivityIndicators.findingsSchemaForType(findingsType, { companion });
   // productValues carries the RAW text of product-record fields so the
   // output validator can reject echoed trade names (codex r4).
-  const sections = { work: [], observations: [], products: [], advice: [], customer: [], productValues: [] };
+  const sections = { work: [], observations: [], objectives: [], products: [], advice: [], customer: [], productValues: [] };
   if (!schema) return sections;
   let total = 0;
   for (const field of schema.fields || []) {
@@ -21570,7 +21623,8 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       } else {
         sections.advice.push(line);
       }
-    } else if (target === 'customer') sections.customer.push(line);
+    } else if (target === 'objective') sections.objectives.push(line);
+    else if (target === 'customer') sections.customer.push(line);
     else if (target === 'work') {
       // Work-classified CHIP fields can mix actions with observed status
       // ("Damaged or missing traps found"), recommendations ("Insulation
@@ -21669,6 +21723,7 @@ function renderTypedGroupLines(sections) {
   const parts = [];
   if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
+  if (sections.objectives?.length) parts.push(`Recorded treatment objectives (targets only — not proof of a sighting, inspection, or completed application):\n${sections.objectives.join('\n')}`);
   if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
   if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
   if (sections.customer.length) parts.push(`Customer communication (the homeowner's words / what was discussed — attribute it, NEVER present as a technician-verified finding):\n${sections.customer.join('\n')}`);
@@ -22333,6 +22388,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       : [];
     let contextText = '';
     let contextSignals = {};
+    let deterministicApplications = [];
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -22353,6 +22409,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       });
       contextText = ctx.contextText || '';
       contextSignals = ctx.signals || {};
+      deterministicApplications = Array.isArray(ctx.deterministicApplications)
+        ? ctx.deterministicApplications : [];
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
     }
@@ -22462,6 +22520,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         observations: [...promptObs, ...typedFallbackObservations],
         recommendations: [...promptRecs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
+        customerConcern: promptConcern,
+        applicationRecords: deterministicApplications,
       });
       // Same request-specific trade-name guard as the AI path (codex r19):
       // typed free text ("Reapply Termidor HE next visit") can carry names
