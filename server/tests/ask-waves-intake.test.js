@@ -868,6 +868,13 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
+  test('chain miss on a child eating a product → 911 script plus the Poison Control line', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
+    const out = await processIntakeMessage({ message: 'My child ate pesticide granules' });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
   test('chain miss on a Spanish emergency → emergency-safe fallback', async () => {
     dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'mi hijo fue picado por una avispa y no puede respirar' });

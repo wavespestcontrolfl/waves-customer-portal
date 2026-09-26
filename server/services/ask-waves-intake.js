@@ -474,7 +474,7 @@ function emergencyGuidance(result, contextText = '') {
   const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || humanClause;
   const vet = VET_DIRECTION_RE.test(folded) || petClause;
   if (!(result.intent === 'emergency' || human || vet)) return null;
-  const ingestion = POISON_MENTION_RE.test(folded) || INGESTION_RE.test(context);
+  const ingestion = POISON_MENTION_RE.test(folded) || INGESTION_RE.test(context) || EAT_EXPOSURE_RE.test(context);
   const parts = [];
   if (human || (result.intent === 'emergency' && !vet)) {
     parts.push(EMERGENCY_FALLBACK_RESULT.reply + (ingestion ? POISON_CONTROL_LINE : ''));
