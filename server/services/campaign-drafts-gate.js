@@ -169,7 +169,7 @@ async function campaignCooldownReason(customerId, { excludeDraftId = null } = {}
 // columns (45-day rung + both late catch-ups, Codex #4921 r3) are added by
 // newer migrations, so they are only queried once present — a rolling
 // deploy that runs this code before those migrations must not throw for
-// every customer's cooldown check. Only a successful probe is cached.
+// every customer's cooldown check. Only a complete probe is cached.
 const BASE_NOTICE_COLUMNS = ['notice_30_sent_at', 'notice_15_sent_at', 'notice_7_sent_at'];
 const TERMITE_NOTICE_COLUMNS = ['notice_45_sent_at', 'notice_45_late_sent_at', 'notice_30_late_sent_at'];
 let cachedNoticeColumns = null;
@@ -177,8 +177,11 @@ async function prepayNoticeCooldownColumns() {
   if (cachedNoticeColumns) return cachedNoticeColumns;
   try {
     const present = await Promise.all(TERMITE_NOTICE_COLUMNS.map((c) => db.schema.hasColumn('annual_prepay_terms', c)));
-    cachedNoticeColumns = [...BASE_NOTICE_COLUMNS, ...TERMITE_NOTICE_COLUMNS.filter((c, i) => present[i])];
-    return cachedNoticeColumns;
+    const cols = [...BASE_NOTICE_COLUMNS, ...TERMITE_NOTICE_COLUMNS.filter((c, i) => present[i])];
+    // Cache only the complete set: a partial result (mid rolling deploy)
+    // is re-probed next call so a column added moments later is picked up.
+    if (present.every(Boolean)) cachedNoticeColumns = cols;
+    return cols;
   } catch (err) {
     logger.warn(`[campaign-gate] annual_prepay_terms column probe failed: ${err.message}`);
     return BASE_NOTICE_COLUMNS;

@@ -328,6 +328,14 @@ describe('unified 30d cooldown (HOLD)', () => {
     const apt = builders.find((b) => b._table === 'annual_prepay_terms');
     const cols = apt.orWhere.mock.calls.map((c) => c[0]);
     expect(cols).toEqual(['notice_30_sent_at', 'notice_15_sent_at', 'notice_7_sent_at', 'notice_45_sent_at']);
+    // A partial probe is NOT cached: the next call re-probes.
+    const probesAfterFirst = db.schema.hasColumn.mock.calls.length;
+    enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
+    enqueue('message_drafts', { first: undefined });
+    enqueue('sms_log', { first: undefined });
+    enqueue('annual_prepay_terms', { first: undefined });
+    await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
+    expect(db.schema.hasColumn.mock.calls.length).toBeGreaterThan(probesAfterFirst);
     delete db.schema;
     _resetNoticeColumnCacheForTests();
   });
