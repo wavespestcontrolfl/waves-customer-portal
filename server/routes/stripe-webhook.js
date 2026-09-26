@@ -20,6 +20,7 @@ const { triggerNotification } = require('../services/notification-triggers');
 // GATE_ADMIN_BELL_POLICY chokepoint covers them.
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { isReplayHold } = require('../services/messaging/billing-channel-routing');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const {
@@ -222,8 +223,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   // so callers log deferred, not lost; a failed enqueue falls through and
   // returns the block unchanged (loudly logged).
   if (!result.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code)
-    && result.deferred
+    && isReplayHold(result)
     && result.nextAllowedAt) {
     try {
       const TWILIO_NUMBERS = require('../config/twilio-numbers');

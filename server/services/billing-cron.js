@@ -37,6 +37,7 @@ const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+const { isReplayHold } = require('./messaging/billing-channel-routing');
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0 }) {
   const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
@@ -54,8 +55,7 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     metadata,
   });
   if (purpose === 'payment_failure' && paymentId && attemptPaymentId && !sendResult.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(sendResult.code)
-    && sendResult.deferred && sendResult.nextAllowedAt) {
+    && isReplayHold(sendResult) && sendResult.nextAllowedAt) {
     await db('sms_log').insert({
       customer_id: customer.id, direction: 'outbound',
       from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone,

@@ -173,7 +173,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // (the invoice receipt path) opt in.
   // The visit's saved property owns the appointment toggles when it decided
   // them (app property scope, PR 3); everything else stays the customer row.
-  const { billingDeliveryCategory, usesBillingDeliveryPreferences } = require('../billing-channel-routing');
+  const { billingDeliveryCategory, usesBillingDeliveryPreferences, preferenceChangeHold } = require('../billing-channel-routing');
   const { explicitBillingChannels } = require('../../billing-delivery-channels');
   const usesExplicitBilling = usesBillingDeliveryPreferences(input, contactState);
   if (input.metadata?.billingDeliveryLeg && !usesExplicitBilling) {
@@ -184,16 +184,28 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // Both refusals below can fire only because selectedLegs() snapshotted the
   // customer's explicit channels before this per-leg check re-reads them
   // fresh — the customer changed their billing channel choice mid-dispatch,
-  // not a permanent block. Retryable so the caller's retry re-runs the
-  // fan-out (under the same notificationEventKey, so already-accepted legs
-  // dedupe) against the NEW choice instead of dropping the notice.
-  if (input.metadata?.billingDeliveryLeg && explicitChannels === null) {
-    return {
-      ok: false, code: 'BILLING_PREFERENCES_CHANGED', reason: 'Billing delivery choices changed before delivery',
-      retryable: true, deliveryOutcome: 'not_sent',
-    };
-  }
-  if (explicitChannels && !explicitChannels.includes(input.channel)) {
+  // not a permanent block. On an explicit leg (billingDeliveryLeg set) this
+  // is a SCHEDULABLE hold, not just a retryable-this-pass refusal: the one
+  // shared preferenceChangeHold() shape (deferred + nextAllowedAt, ONE code
+  // BILLING_PREFERENCES_CHANGED for both refusals below) lets a one-shot
+  // producer (billing-cron.js, stripe-webhook.js, complete-scheduled-
+  // service.js) persist a retry row instead of losing the notice on an
+  // Email-only -> Text-only race (Codex r3 P1 on PR #4843). Off a leg —
+  // a direct, non-fanned-out call that still happens to be a billing-
+  // delivery candidate — CHANNEL_NOT_SELECTED keeps its original
+  // retryable-only, non-deferred shape; nothing calls dispatchBillingChannels
+  // for it, so there is no replay pass to schedule against.
+  if (explicitChannels === null) {
+    if (input.metadata?.billingDeliveryLeg) {
+      return { ok: false, ...preferenceChangeHold() };
+    }
+  } else if (!explicitChannels.includes(input.channel)) {
+    if (input.metadata?.billingDeliveryLeg) {
+      return {
+        ok: false,
+        ...preferenceChangeHold({ reason: 'Recipient has not selected this billing delivery channel' }),
+      };
+    }
     return {
       ok: false, code: 'CHANNEL_NOT_SELECTED', reason: 'Recipient has not selected this billing delivery channel',
       retryable: true, deliveryOutcome: 'not_sent',

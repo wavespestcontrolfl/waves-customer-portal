@@ -333,22 +333,51 @@ describe('explicit billing channel refusals mid-dispatch are retryable', () => {
   });
   const billingContactState = (prefs) => contactState(prefs, { id: 'c1', phone: '+19415550100' });
 
-  test('BILLING_PREFERENCES_CHANGED (explicit array cleared) is retryable on an explicit Text leg', async () => {
+  test('BILLING_PREFERENCES_CHANGED (explicit array cleared) is a schedulable hold on an explicit Text leg', async () => {
+    // Codex r3 P1 on #4843: a preference-change refusal on an explicit
+    // billing leg is now a SCHEDULABLE hold (deferred + nextAllowedAt), not
+    // just retryable-this-pass — a one-shot producer (billing-cron.js,
+    // stripe-webhook.js, complete-scheduled-service.js) persists a retry
+    // row off it instead of losing the notice on a mid-dispatch race.
     const res = await checkConsentForPurpose(
       billingLegInput(),
       resolvePolicy('customer', 'billing'),
       billingContactState({ sms_enabled: true }), // no billing_channels array anymore
     );
-    expect(res).toMatchObject({ ok: false, code: 'BILLING_PREFERENCES_CHANGED', retryable: true, deliveryOutcome: 'not_sent' });
+    expect(res).toMatchObject({
+      ok: false, code: 'BILLING_PREFERENCES_CHANGED', deferred: true, retryable: true,
+      deliveryOutcome: 'not_sent', nextAllowedAt: expect.any(String),
+    });
   });
 
-  test('CHANNEL_NOT_SELECTED (Text dropped from the array) is retryable on an explicit Text leg', async () => {
+  test('CHANNEL_NOT_SELECTED (Text dropped from the array) is a schedulable BILLING_PREFERENCES_CHANGED hold on an explicit Text leg', async () => {
+    // Same ONE-code schedulable-hold contract as above (Codex r3 P1 on
+    // #4843) — a dropped channel and a cleared array are the same race.
     const res = await checkConsentForPurpose(
       billingLegInput(),
       resolvePolicy('customer', 'billing'),
       billingContactState({ sms_enabled: true, billing_channels: ['email'] }),
     );
+    expect(res).toMatchObject({
+      ok: false, code: 'BILLING_PREFERENCES_CHANGED', deferred: true, retryable: true,
+      deliveryOutcome: 'not_sent', nextAllowedAt: expect.any(String),
+    });
+  });
+
+  test('CHANNEL_NOT_SELECTED keeps its original retryable-only shape off an explicit leg', async () => {
+    // A direct, non-fanned-out billing-delivery-candidate call (no
+    // metadata.billingDeliveryLeg — e.g. estimate-deposits.js's immediate
+    // SMS send) never re-enters dispatchBillingChannels, so there is no
+    // replay pass to schedule against; this refusal must stay exactly as
+    // it was before the r3 P1 fix.
+    const res = await checkConsentForPurpose(
+      smsInput('billing'),
+      resolvePolicy('customer', 'billing'),
+      billingContactState({ sms_enabled: true, billing_channels: ['email'] }),
+    );
     expect(res).toMatchObject({ ok: false, code: 'CHANNEL_NOT_SELECTED', retryable: true, deliveryOutcome: 'not_sent' });
+    expect(res.deferred).not.toBe(true);
+    expect(res.nextAllowedAt).toBeUndefined();
   });
 });
 

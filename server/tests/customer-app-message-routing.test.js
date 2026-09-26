@@ -545,19 +545,21 @@ describe('explicit billing channel combinations', () => {
     expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
   });
 
-  test('a mid-dispatch App preference change is retryable, not a terminal APP_UNAVAILABLE (finding D)', async () => {
+  test('a mid-dispatch App preference change is a schedulable hold, not a terminal APP_UNAVAILABLE (finding D; Codex r3 P1 on #4843)', async () => {
     // pushEligibleRuntime's late re-read (push-channel-routing.js) can catch
     // a switch away from App that landed after this leg was selected — the
     // SAME race the consent layer's BILLING_PREFERENCES_CHANGED/
     // CHANNEL_NOT_SELECTED refusals cover for Email/Text. It must get the
-    // identical retryable/not_sent contract so the caller's retry re-fans-out
+    // identical SCHEDULABLE hold (ONE code, deferred + nextAllowedAt, via the
+    // shared preferenceChangeHold() helper) so the caller's retry re-fans-out
     // under the same notificationEventKey, instead of a dead-end terminal
     // APP_UNAVAILABLE that drops the event.
     prefs.payment_receipt_channels = ['push'];
     Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'preference_changed' });
     const result = await sendCustomerMessage(input);
     expect(result.channelResults.push).toMatchObject({
-      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'APP_PREFERENCES_CHANGED', retryable: true,
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'BILLING_PREFERENCES_CHANGED',
+      deferred: true, retryable: true, nextAllowedAt: expect.any(String),
     });
     expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   });
@@ -730,18 +732,23 @@ describe('explicit billing channel combinations', () => {
     expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
   });
 
-  test('fresh channel changes are enforced at the provider boundary', async () => {
+  test('fresh channel changes are enforced at the provider boundary (Codex r3 P1 on #4843: schedulable hold)', async () => {
     prefs.payment_receipt_channels = ['sms'];
     Twilio.sendSMS.mockImplementation(async (_to, _body, options) => {
       prefs.payment_receipt_channels = ['email'];
       const verdict = await options.preSendCheck();
-      expect(verdict).toMatchObject({ ok: false, code: 'CHANNEL_NOT_SELECTED' });
+      expect(verdict).toMatchObject({ ok: false, code: 'BILLING_PREFERENCES_CHANGED', deferred: true, nextAllowedAt: expect.any(String) });
       return { success: false, preSendBlocked: true, code: verdict.code, error: verdict.reason };
     });
-    expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, blocked: true, code: 'CHANNEL_NOT_SELECTED' });
+    const result = await sendCustomerMessage(input);
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'BILLING_PREFERENCES_CHANGED' });
+    // The boundary block carries the real consent verdict's deferred/nextAllowedAt
+    // through, independent of what the Twilio adapter mock itself forwards.
+    expect(result.deferred).toBe(true);
+    expect(result.nextAllowedAt).toEqual(expect.any(String));
   });
 
-  test('a mid-dispatch preference change makes the Text leg retryable, not terminal (Codex r1 P1 on #4843)', async () => {
+  test('a mid-dispatch preference change makes the Text leg a schedulable hold, not terminal (Codex r1 P1, updated r3 P1, on #4843)', async () => {
     // Same race as above, but forwarding the boundary verdict's `retryable`
     // flag the way the real Twilio adapter does — the caller's retry must
     // re-run the fan-out under the same notificationEventKey rather than
@@ -750,10 +757,12 @@ describe('explicit billing channel combinations', () => {
     Twilio.sendSMS.mockImplementation(async (_to, _body, options) => {
       prefs.payment_receipt_channels = ['email'];
       const verdict = await options.preSendCheck();
-      expect(verdict).toMatchObject({ ok: false, code: 'CHANNEL_NOT_SELECTED', retryable: true });
+      expect(verdict).toMatchObject({ ok: false, code: 'BILLING_PREFERENCES_CHANGED', retryable: true, deferred: true });
       return { success: false, preSendBlocked: true, code: verdict.code, error: verdict.reason, retryable: verdict.retryable };
     });
-    expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, blocked: true, code: 'CHANNEL_NOT_SELECTED', retryable: true });
+    expect(await sendCustomerMessage(input)).toMatchObject({
+      sent: false, blocked: true, code: 'BILLING_PREFERENCES_CHANGED', retryable: true, deferred: true, nextAllowedAt: expect.any(String),
+    });
   });
 
   test('an accepted Email cannot hide a Text leg refused by a mid-dispatch preference change', async () => {
@@ -819,14 +828,43 @@ describe('explicit billing channel combinations', () => {
         body: 'Your deposit was received. https://portal.wavespestcontrol.com/estimate/abcdefghijklmnop',
       });
       expect(result.channelResults.push).toMatchObject({ sent: true });
+      // Codex r3 P1 on #4843: the App leg no longer carries the SMS phone
+      // snapshot — it identifies its recipient by the verified customerId,
+      // so a mid-dispatch phone change on Email/App legs can't misfire
+      // BILLING_RECIPIENT_CHANGED.
       expect(Twilio.sendSMS).toHaveBeenCalledWith(
-        input.to,
+        null,
         rewrittenBody,
         expect.objectContaining({ explicitPushOnly: true, estimateId: null, estimateIds: [] }),
       );
     } finally {
       rewriteSpy.mockRestore();
     }
+  });
+
+  test('a phone change mid-dispatch never blocks Email/App; the Text leg still refuses/rechecks per existing rules (Codex r3 P1 on #4843)', async () => {
+    // The top-level fan-out decision already verified input.to belongs to
+    // the account holder before dispatchBillingChannels ever ran. Email and
+    // App no longer carry that phone snapshot into their own legs (P1 B), so
+    // a phone change landing mid-dispatch can't misfire their fresh
+    // usesBillingDeliveryPreferences recheck — only Text, which still needs
+    // a real phone, is exposed to the race, and it keeps its existing
+    // terminal BILLING_RECIPIENT_CHANGED refusal (unaffected by this fix).
+    prefs.payment_receipt_channels = ['email', 'push', 'sms'];
+    Twilio.sendSMS.mockImplementation(async (_to, _body, options) => {
+      if (options.explicitPushOnly) {
+        // Mutate AFTER the App leg's own dispatch reached the provider —
+        // by the time the Text leg (dispatched last) reloads contact state,
+        // it sees a different customer phone than the one it still carries.
+        customerPhone = '+19415559999';
+        return { success: true, deliveryOutcome: 'accepted', sid: 'push:billing-qa', pushRouted: true };
+      }
+      return { success: true, deliveryOutcome: 'accepted', sid: `SM${'1'.repeat(32)}` };
+    });
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults.email).toMatchObject({ sent: true });
+    expect(result.channelResults.push).toMatchObject({ sent: true });
+    expect(result.channelResults.sms).toMatchObject({ sent: false, code: 'BILLING_RECIPIENT_CHANGED' });
   });
 
   test('a missing phone suppresses only the selected Text leg', async () => {

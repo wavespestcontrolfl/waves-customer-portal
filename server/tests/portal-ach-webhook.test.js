@@ -231,7 +231,11 @@ test('gate off + browser died: a CARD completion still proceeds (card lane unaff
   expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
 });
 
-test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('setup failure deferred by %s queues the same event identity and allows a later event', async (code) => {
+// BILLING_PREFERENCES_CHANGED (Codex r3 P1 on #4843) joins the legacy 4 via
+// the shared isReplayHold() in billing-channel-routing.js — sendBillingSms
+// persists the same durable retry for it, so an Email-only -> Text-only
+// preference race on a deduped Stripe event no longer drops the notice.
+test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY', 'BILLING_PREFERENCES_CHANGED'])('setup failure deferred by %s queues the same event identity and allows a later event', async (code) => {
   state.customer = { id: 'cust-1', phone: '+15550001111' };
   require('../services/sms-template-renderer').renderRequiredSmsTemplate.mockResolvedValue('Please verify your bank account.');
   const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;

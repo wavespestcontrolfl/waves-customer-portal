@@ -53,6 +53,7 @@ const TermiteStations = require('../services/termite-stations');
 // Mirrors the CompletionPanel auto-count zeroing on customer_declined.
 const DECLINED_VISIT_STATION_COUNT_KEYS = ['stations_checked', 'stations_inaccessible', 'stations_with_activity', 'traps_checked'];
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { isReplayHold } = require('../services/messaging/billing-channel-routing');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
@@ -11662,7 +11663,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // confirmed 'sent' drops it) — a morning double-link is coherent
             // copy; a night with no link is not.
             let paymentFailedNoticeDeferred = false;
-            if (!failResult.sent && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
+            if (!failResult.sent && isReplayHold(failResult) && failResult.nextAllowedAt) {
               try {
                 const TWILIO_NUMBERS = require('../config/twilio-numbers');
                 await db('sms_log').insert({

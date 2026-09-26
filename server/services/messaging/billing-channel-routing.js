@@ -63,8 +63,43 @@ function billingNotificationEventKey(input) {
   return `billing:${input.customerId}:${input.metadata?.original_message_type || input.purpose}:${crypto.createHash('sha256').update(String(identity)).digest('hex')}`;
 }
 
+// The one list of codes a deferred hold can carry. The four legacy codes
+// were copy-pasted across every one-shot producer (billing-cron.js,
+// stripe-webhook.js, complete-scheduled-service.js) alongside this file's own
+// isReplayHold — a single exported set keeps them from drifting apart.
+// BILLING_PREFERENCES_CHANGED is the schedulable shape a preference-change
+// refusal on an explicit billing leg now returns (Codex r3 P1 on PR #4843):
+// without it here too, a producer's copy of the old 4-code list would never
+// persist a retry for it and an Email-only -> Text-only race would drop the
+// notice.
+const REPLAY_HOLD_CODES = Object.freeze([
+  'QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY',
+  'BILLING_PREFERENCES_CHANGED',
+]);
+
 function isReplayHold(result) {
-  return result.deferred === true && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code);
+  return result.deferred === true && REPLAY_HOLD_CODES.includes(result.code);
+}
+
+// Shared core shape for every "the customer changed their billing delivery
+// preference mid-dispatch" refusal — consent.js's BILLING_PREFERENCES_CHANGED
+// and its explicit-leg CHANNEL_NOT_SELECTED, and send-customer-message.js's
+// push-leg preference_changed branch. ONE code (BILLING_PREFERENCES_CHANGED)
+// so a caller checking against REPLAY_HOLD_CODES/isReplayHold treats all
+// three the same: a schedulable hold, not a terminal drop, so the caller's
+// replay re-fans-out under the same notificationEventKey against the
+// customer's now-current choice. Callers spread in their own `ok`/`sent`/
+// `blocked`/`auditLogId` — this only owns the fields that must agree.
+function preferenceChangeHold(overrides = {}) {
+  return {
+    code: 'BILLING_PREFERENCES_CHANGED',
+    reason: 'Billing delivery choices changed before delivery',
+    deferred: true,
+    retryable: true,
+    deliveryOutcome: 'not_sent',
+    nextAllowedAt: new Date(Date.now() + 60 * 1000).toISOString(),
+    ...overrides,
+  };
 }
 
 function needsRetry(result) {
@@ -101,8 +136,21 @@ async function sendBillingLeg({ input, channel, channels, channelResults, catego
     if (channel === 'push' && (channels.includes('sms') || needsRetry(channelResults.email))) {
       delete metadata.scheduled_sms_log_id;
     }
+    // Email and App legs identify their recipient by the verified customerId
+    // (usesBillingDeliveryPreferences falls back to the customer row when no
+    // phone is supplied) — the fan-out already verified the caller-supplied
+    // phone belongs to the account holder before any leg ran (the top-level
+    // usesBillingDeliveryPreferences digit check in send-customer-message.js,
+    // before dispatchBillingChannels is ever called). Spreading the ORIGINAL
+    // `to` into every leg instead bound Email/App to that SMS phone snapshot:
+    // if the customer's phone changes mid-dispatch, each leg's own fresh
+    // consent recheck (providerPreparationCheck -> usesBillingDeliveryPreferences)
+    // compares that stale phone against the customer's NEW one and refuses
+    // with a terminal BILLING_RECIPIENT_CHANGED, even though Email/App never
+    // needed a phone at all (Codex r3 P1 on PR #4843).
     return await sendLeg({
-      ...input, channel: channel === 'push' ? 'sms' : channel,
+      ...input, to: channel === 'sms' ? input.to : null,
+      channel: channel === 'push' ? 'sms' : channel,
       metadata,
     });
   } catch (err) {
@@ -149,5 +197,5 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
-  billingNotificationEventKey, dispatchBillingChannels,
+  billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold,
 };

@@ -583,4 +583,23 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     expect(catchBody).not.toMatch(/deliveryUnverifiedProviderOutcome\(failErr\)/);
     expect(catchBody).toMatch(/restoreDeclineSendClaim\(\)/);
   });
+
+  test('the deferred-hold branch checks isReplayHold() (Codex r3 P1 on #4843), not a copy-pasted 4-code list', () => {
+    // Same "source contract" convention as the rest of this describe block
+    // (no functional harness reaches this ~13k-line-deep branch). The
+    // structural fix replaces the copy-pasted
+    // ['QUIET_HOURS_HOLD','PUSH_IN_FLIGHT','APP_DELIVERY_HOLD',
+    // 'APP_PROVIDER_RETRY'].includes(code) && deferred literal with the one
+    // shared isReplayHold() from billing-channel-routing.js, which now also
+    // recognizes BILLING_PREFERENCES_CHANGED — so a preference-change
+    // refusal on this decline notice persists a retry row too, instead of
+    // silently dropping the notice.
+    expect(source).toMatch(
+      /const \{ isReplayHold \} = require\('..\/services\/messaging\/billing-channel-routing'\);/,
+    );
+    expect(noticeBlock).toMatch(
+      /if \(!failResult\.sent && isReplayHold\(failResult\) && failResult\.nextAllowedAt\) \{/,
+    );
+    expect(noticeBlock).not.toMatch(/\['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'\]\.includes\(failResult\.code\)/);
+  });
 });

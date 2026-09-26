@@ -1050,14 +1050,18 @@ async function sendCustomerMessageCore(input) {
     // was selected. That is the SAME race the consent-layer
     // BILLING_PREFERENCES_CHANGED/CHANNEL_NOT_SELECTED refusals cover for
     // Email/Text — a mid-dispatch choice change, not a dead App — so it
-    // gets the identical retryable/not_sent contract instead of falling
-    // into the terminal APP_UNAVAILABLE branch below. The caller's retry
-    // re-fans-out under the same notificationEventKey against whatever the
-    // customer now has selected. Checked BEFORE the generic
+    // gets the identical SCHEDULABLE hold (Codex r3 P1 on PR #4843: deferred
+    // + nextAllowedAt, the same ONE code, via the shared preferenceChangeHold()
+    // helper) instead of falling into the terminal APP_UNAVAILABLE branch
+    // below — a one-shot producer can now persist a retry row for this leg
+    // exactly like it already does for the consent-layer refusals. The
+    // caller's retry re-fans-out under the same notificationEventKey against
+    // whatever the customer now has selected. Checked BEFORE the generic
     // appOnly/billingDeliveryLeg branch, which stays terminal for every
     // other appUnavailable reason (no fresh device, app gate off, …).
     if (sendInput.metadata?.billingDeliveryLeg === 'push' && providerOutcome.error === 'preference_changed') {
-      return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'APP_PREFERENCES_CHANGED', reason: 'Billing delivery choices changed before delivery', retryable: true, auditLogId: audit.id };
+      const { preferenceChangeHold } = require('./billing-channel-routing');
+      return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
     }
     if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
       return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
