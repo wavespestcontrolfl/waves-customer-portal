@@ -16,10 +16,14 @@ const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bback\s*(
 // unless the question is about what was applied there.
 const LOCATION_RE = /\b(outside|inside|outdoors|indoors)\b/;
 const TREATMENT_QUESTION_RE = /\b(treat|treats|treating|treated|treatment|treatments|product|products|application|applications|apply|applies|applied|applying|spray|sprays|sprayed|spraying|bait|baits|baited|chemical|chemicals|used)\b/;
+// AW-06 r1: a location word also must not mean re-entry when the question is
+// about what was FOUND there — "What did you find outdoors?" / "Did you see
+// any ants indoors?" are findings questions, not re-entry timing.
+const FINDINGS_QUESTION_RE = /\b(find|found|finding|see|saw|notice|noticed|activity|ants?|pests?|bugs?|roaches?|spiders?|rodents?|mice|rats?)\b/;
 function isReentryIntent(q) {
   return SAFETY_SUBJECT_RE.test(q)
     || REENTRY_PHRASE_RE.test(q)
-    || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q));
+    || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q));
 }
 
 const PRODUCT_INSIGHTS = [
@@ -511,18 +515,21 @@ function answerServiceReportQuestion({
     return answerReentry({ data });
   }
 
+  // AW-06: exact-word matching missed inflections ("treated", "applying",
+  // "products", "used") — this is the branch "What was applied outside
+  // today?" and "Why was <product> used?" must reach. Checked before the
+  // trend branch below: a question that mentions both ("What was applied to
+  // the weeds?", "What did you spray on the thin areas?") is asking about
+  // the treatment, not the lawn trend, so treatment cues win when both match.
+  if (TREATMENT_QUESTION_RE.test(q)) {
+    return answerAppliedToday({ data });
+  }
+
   // AW-06: covers the lawn V2 insight chips too (water/weeds/damage/
   // coverage/color categories in ReportViewPage.jsx's reportAskPrompts),
   // which all read from this same score breakdown in answerTrend.
   if (/\b(pressure|trend|trending|better|worse|score|index|improving|lawn|turf|weeds?|fungus|thatch|stress|damage|coverage|color|thicken\w*|thin)\b/.test(q)) {
     return answerTrend({ data });
-  }
-
-  // AW-06: exact-word matching missed inflections ("treated", "applying",
-  // "products", "used") — this is the branch "What was applied outside
-  // today?" and "Why was <product> used?" must reach.
-  if (TREATMENT_QUESTION_RE.test(q)) {
-    return answerAppliedToday({ data });
   }
 
   // "watch" added (AW-06): "What should I watch for next?" is advisory

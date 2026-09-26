@@ -137,6 +137,24 @@ describe('Ask Waves privacy headers on both report ask endpoints (AW-06 addition
     });
   });
 
+  test('the headers are set on an uppercase /ASK path too — Express routing is case-insensitive', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/0123456789abcdef0123456789abcdef/ASK`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'What was applied today?' }),
+      });
+      expect(res.status).toBe(404);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    });
+  });
+
   test('the headers are set even when the router.param suppression gate itself answers 404', async () => {
     db.mockImplementation((table) => {
       if (table === 'service_records') {

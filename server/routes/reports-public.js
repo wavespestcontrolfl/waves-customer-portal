@@ -218,7 +218,7 @@ const reportLimiter = rateLimit({
 // route path: a `:token` path would fire router.param('token') (the
 // suppression DB read) ahead of both this and the limiter, and a param-gate
 // 404 would then go out without these headers.
-const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/;
+const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/i;
 function reportsAskPrivacyHeaders(req, res, next) {
   if (REPORT_ASK_PATH_RE.test(req.path || '')) {
     res.setHeader('Cache-Control', 'no-store');

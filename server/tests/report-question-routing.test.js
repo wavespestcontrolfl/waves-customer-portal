@@ -88,6 +88,49 @@ describe('project report — every shipped chip answers its own category (AW-06)
     });
     expect(answer).toMatch(/next visit is scheduled for/i);
   });
+
+  // AW-06 r1: "use" restored as a treatment cue, guarded against the
+  // "use my yard again" scheduling phrasing.
+  test('"What did you use?" answers with the recorded treatment', () => {
+    expect(answerProjectReportQuestion({ question: 'What did you use?', project, payload }))
+      .toMatch(/Synthetic bait/i);
+  });
+
+  test('"When can I use my yard again?" answers the next visit, not treatment', () => {
+    const answer = answerProjectReportQuestion({ question: 'When can I use my yard again?', project, payload });
+    expect(answer).toMatch(/Nothing further is scheduled|scheduled for/i);
+    expect(answer).not.toMatch(/Synthetic bait/i);
+  });
+
+  // AW-06 r1: "see" restored as a findings cue, guarded against "see you
+  // again" scheduling phrasing (already covered above for "When can I see
+  // you again?" — reconfirmed here against the findings answer specifically).
+  test('"What did you see?" answers with the recorded findings', () => {
+    expect(answerProjectReportQuestion({ question: 'What did you see?', project, payload }))
+      .toMatch(/Activity at the rear wall/i);
+  });
+
+  test('"When can I see you again?" answers the next visit, not findings', () => {
+    const answer = answerProjectReportQuestion({ question: 'When can I see you again?', project, payload });
+    expect(answer).toMatch(/Nothing further is scheduled|scheduled for/i);
+    expect(answer).not.toMatch(/Activity at the rear wall/i);
+  });
+
+  // AW-06 r1: bare "next" reaches the weak final scheduling branch, while
+  // "What should I do next?" still hits recommendations (checked earlier).
+  test.each([
+    'What happens next?',
+    "What's next?",
+  ])('"%s" answers the next visit', (question) => {
+    const answer = answerProjectReportQuestion({ question, project, payload });
+    expect(answer).toMatch(/Nothing further is scheduled|scheduled for/i);
+  });
+
+  test('"What should I do next?" still answers with customer next steps, not the next-visit fallback', () => {
+    const answer = answerProjectReportQuestion({ question: 'What should I do next?', project, payload });
+    expect(answer).toMatch(/Seal the gap at the rear wall/i);
+    expect(answer).not.toMatch(/Nothing further is scheduled/i);
+  });
 });
 
 describe('service report — every shipped chip answers its own category (AW-06)', () => {
@@ -231,6 +274,32 @@ describe('service report — every shipped chip answers its own category (AW-06)
     expect(answer).toMatch(/Your next appointment is/);
   });
 
+  // AW-06 r1: a findings/observation cue paired with a location word is not
+  // a re-entry question — "outdoors"/"indoors" describes WHERE something was
+  // found, not a request to know when it's safe to go there.
+  test('"What did you find outdoors?" is a findings question, not re-entry', () => {
+    const answer = answerServiceReportQuestion({ question: 'What did you find outdoors?', data: pestData });
+    expect(answer).not.toBe('Treated areas are ready for normal use.');
+    expect(answer).toMatch(/Ant activity noted/i);
+  });
+
+  test('"Did you see any ants indoors?" is not a re-entry question', () => {
+    const answer = answerServiceReportQuestion({ question: 'Did you see any ants indoors?', data: pestData });
+    expect(answer).not.toBe('Treated areas are ready for normal use.');
+  });
+
+  // Regression: the new findings-cue guard on isReentryIntent must not
+  // swallow the genuine location-only re-entry questions below (already
+  // covered by the "Location words alone" table above), reconfirmed here
+  // against the two audit-named phrasings specifically.
+  test.each([
+    'When can we go outside again?',
+    'Can the kids play outdoors now?',
+  ])('"%s" still gets the re-entry answer (findings cue guard does not swallow it)', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: pestData });
+    expect(answer).toBe('Treated areas are ready for normal use.');
+  });
+
   // --- Lawn V2 insight chips (category-specific, ReportViewPage.jsx QUESTION_BY_CATEGORY) ---
   test('chip "Am I watering the right amount?" answers with the weekly watering plan', () => {
     expect(answerServiceReportQuestion({ question: 'Am I watering the right amount?', data: lawnData }))
@@ -275,5 +344,20 @@ describe('service report — every shipped chip answers its own category (AW-06)
   test('chip "How is my lawn trending?" answers the lawn trend/score breakdown', () => {
     expect(answerServiceReportQuestion({ question: 'How is my lawn trending?', data: lawnData }))
       .toMatch(/Lawn snapshot summary/);
+  });
+
+  // AW-06 r1: a question that names both a treatment cue and a lawn-trend
+  // cue ("weeds", "thin areas") is asking about what was applied, not the
+  // score breakdown — treatment cues must win when both match.
+  test('"What was applied to the weeds?" answers with the recorded treatment, not the lawn trend', () => {
+    const answer = answerServiceReportQuestion({ question: 'What was applied to the weeds?', data: lawnData });
+    expect(answer).toMatch(/Sources used: this service report/);
+    expect(answer).not.toMatch(/Lawn snapshot summary|weed cleanliness/i);
+  });
+
+  test('"What did you spray on the thin areas?" answers with the recorded treatment, not the lawn trend', () => {
+    const answer = answerServiceReportQuestion({ question: 'What did you spray on the thin areas?', data: lawnData });
+    expect(answer).toMatch(/Sources used: this service report/);
+    expect(answer).not.toMatch(/Lawn snapshot summary|overall/i);
   });
 });
