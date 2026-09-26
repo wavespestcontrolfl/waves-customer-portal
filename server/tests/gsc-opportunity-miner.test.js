@@ -2917,7 +2917,7 @@ describe('local_gap anchoring + sweep provenance + segment coverage (round-8 clo
 
   test('local_gap is PAGE-ANCHORED — the router cannot reroute it to an article', () => {
     const dr = fs.readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
-    expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\['answer_gap', 'listicle_family', 'local_gap'\]\)/);
+    expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\['answer_gap', 'listicle_family', 'local_gap', 'citability_backfill'\]\)/);
   });
 
   test('the sweep consumes PRE-arbitration keys — an arbitration loss is not "signal gone"', () => {

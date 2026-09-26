@@ -33,6 +33,16 @@ const router = require('./decision-router');
 const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
+
+// citability_backfill gap id → the binding required_sections line the
+// refresh agent must satisfy (mirrors refresh-agent-config CITABILITY MODE
+// and the quality gate's citability_* nudges; same ids as the seeder).
+const CITABILITY_GAP_SECTIONS = Object.freeze({
+  named_sources: 'attribute the page\'s technical claims in prose to the specific named authority the evidence comes from (UF/IFAS, FDACS, the EPA product label, the county mosquito program, the CDC) — never "experts say"; never invent an agency, publication, program, or business',
+  concrete_specifics: 'where the facts_pack, knowledge base, or an allowed source supplies a measurement, state it as the number with its unit (inches, days, a date window, a percentage) instead of an adjective — not a quota, never a dollar amount, never an invented figure',
+  comparison: 'the page frames a two-path choice in its title or a heading — render ONE <ComparisonTable> in CATEGORY mode with the decision criteria as rows (no winner, no ranking, cost qualitative)',
+  how_to_choose: 'add an H2 "How to choose …" (or "Which option fits your situation") with 3–5 bulleted criteria, each an observable check followed by the option it points to',
+});
 const spokeSeeder = require('./spoke-seed-seeder');
 const categorySeeder = require('./category-seed-seeder');
 
@@ -715,6 +725,21 @@ class ContentBriefBuilder {
       ];
     }
 
+    // citability_backfill refreshes: the measured gaps become BINDING
+    // sections (the data in gsc_signal, the requirement in
+    // required_sections — the answer-gap pattern). Comparison / how-to-
+    // choose only ever appear here when the seeder's scan found the post
+    // frames a choice, so this never asks for a filler table.
+    const citabilityGaps = Array.isArray(opportunity.signal_metadata?.citability_gaps)
+      ? opportunity.signal_metadata.citability_gaps.filter((g) => CITABILITY_GAP_SECTIONS[g])
+      : [];
+    if (decision.action_type === 'refresh_existing_page' && citabilityGaps.length) {
+      requiredSections = [
+        ...requiredSections,
+        ...citabilityGaps.map((g) => `citability (${g}): ${CITABILITY_GAP_SECTIONS[g]}`),
+      ];
+    }
+
     // Collapsed city-service demand, same shape and same reason as the
     // family block above. mineNoContentYet emits ONE row per (service, city)
     // target because every query for that segment create-or-refreshes the
@@ -837,6 +862,15 @@ class ContentBriefBuilder {
         // so the refresh agent writes self-contained answer blocks without
         // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
         unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
+        // citability_backfill rows: the seeder's per-post gap list
+        // (['named_sources', 'concrete_specifics', 'comparison',
+        // 'how_to_choose'] subset) rides the brief so the refresh agent's
+        // CITABILITY MODE addresses exactly the measured gaps, and the
+        // quality gate's GSC-evidence exemption can verify the provenance
+        // after the content_briefs round-trip (isCitabilityBackfillBrief).
+        citability_gaps: Array.isArray(opportunity.signal_metadata?.citability_gaps)
+          ? opportunity.signal_metadata.citability_gaps
+          : null,
         // listicle_family rows: `impressions` above is the FAMILY SUM, not
         // the representative query's own volume — carry the provenance so
         // the writer and reviewers see the aggregation instead of reading
@@ -1062,6 +1096,7 @@ function nextWeekday9amET() {
 module.exports = new ContentBriefBuilder();
 module.exports.ContentBriefBuilder = ContentBriefBuilder;
 module.exports._internals = {
+  CITABILITY_GAP_SECTIONS,
   REQUIRED_SECTIONS,
   SCHEMA_TYPES,
   WORD_COUNT_TARGET,

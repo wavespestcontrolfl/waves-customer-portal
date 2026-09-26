@@ -146,6 +146,14 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Citability nudges ride the refresh lane too (2026-09-25 backfill):
+    // weight 0, signal-only, and each short-circuits to ok on a non-blog
+    // target (the runner resolves target_page_type from the live file). The
+    // all-hard refresh threshold (47) is unchanged.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   'supporting-blog': [
     // Hard: hub links are the point of a supporting blog (hub-and-spoke
@@ -438,12 +446,27 @@ function isCompetitorGapBrief(brief) {
     && !!s.competitor_domain;
 }
 
+// citability_backfill briefs (citability-backfill-seeder) are page-anchored
+// refreshes mined from a corpus SCAN, not from GSC: the scan result
+// (gsc_signal.citability_gaps, a non-empty gap list) IS the provenance.
+// Same anti-spoofing key (persisted gsc_signal.bucket) and same "evidence
+// must actually be present" posture as isCompetitorGapBrief — a backfill
+// row that lost its gap list still hard-fails.
+function isCitabilityBackfillBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'citability_backfill'
+    && Array.isArray(s.citability_gaps) && s.citability_gaps.length > 0;
+}
+
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
   }
   if (isCompetitorGapBrief(brief)) {
     return { ok: true, reason: 'competitor_gap_evidence' };
+  }
+  if (isCitabilityBackfillBrief(brief)) {
+    return { ok: true, reason: 'citability_backfill_scan_evidence' };
   }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
@@ -1102,7 +1125,15 @@ function draftPostType(draft) {
 // ComparisonTable, so neither may count toward this nudge.
 const NAMED_SOURCE_RE = /\b(?:UF\s*\/\s*IFAS|IFAS|University of Florida|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|(?:[A-Z][a-z]+ County )?Mosquito (?:Control|Management)|(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label)\b/;
 
-function checkCitabilityNamedSources(draft) {
+// Refresh lane: the runner stamps target_page_type 'page' for non-blog
+// targets (service/city pages), where the blog citability contract does not
+// apply. Supporting-blog briefs carry no target_page_type → checks apply.
+function nonBlogTarget(brief) {
+  return brief?.target_page_type === 'page';
+}
+
+function checkCitabilityNamedSources(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const body = String(draft.body || '');
   if (NAMED_SOURCE_RE.test(body)) return { ok: true };
   return { ok: false, reason: 'no_named_source_attribution' };
@@ -1120,7 +1151,8 @@ function countConcreteSpecifics(body) {
   return (String(body || '').match(CONCRETE_SPECIFIC_RE) || []).length;
 }
 
-function checkCitabilityConcreteSpecifics(draft) {
+function checkCitabilityConcreteSpecifics(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const n = countConcreteSpecifics(draft.body);
   if (n >= CONCRETE_SPECIFICS_MIN) return { ok: true };
   return { ok: false, reason: `only_${n}_concrete_measurements_need_${CONCRETE_SPECIFICS_MIN}+` };
@@ -1148,7 +1180,8 @@ function postFramesAChoice(draft) {
   return headingLines(draft.body).some((h) => CHOICE_FRAMING_RE.test(h));
 }
 
-function checkCitabilityComparison(draft) {
+function checkCitabilityComparison(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const hasTable = COMPARISON_TABLE_RE.test(String(draft.body || ''));
   if (hasTable) return { ok: true };
   if (!postFramesAChoice(draft)) return { ok: true, reason: 'no_choice_framed' };
@@ -1157,7 +1190,8 @@ function checkCitabilityComparison(draft) {
 
 const HOW_TO_CHOOSE_HEADING_RE = /\b(?:how to (?:choose|pick|decide)|choosing (?:between|the right|a|your)|which (?:one|option|approach|method|plan|treatment|service)[^\n]{0,40}\b(?:right|fits?|for you|for your)|what to (?:weigh|look for|consider)|decision (?:guide|checklist)|fits your situation)\b/i;
 
-function checkCitabilityHowToChoose(draft) {
+function checkCitabilityHowToChoose(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const body = String(draft.body || '');
   const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body);
   if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
@@ -1331,7 +1365,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
-  isOperatorAuthoredBrief, isCompetitorGapBrief,
+  isOperatorAuthoredBrief, isCompetitorGapBrief, isCitabilityBackfillBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
