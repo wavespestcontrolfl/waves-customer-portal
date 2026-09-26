@@ -3602,7 +3602,7 @@ function initScheduledJobs() {
             // finalizers that settle once-ever claims key on the accepted
             // SID, and retrying without it would release a claim for a
             // message Twilio already delivered.
-            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null })) || { ok: true };
+            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null, smsLogId: msg.id })) || { ok: true };
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
               // finalize_pending clears on BOTH outcomes or the stranded-
               // finalization sweep would convert this row forever.
@@ -4113,6 +4113,15 @@ function initScheduledJobs() {
               ...(claimMeta.billingDeliveryCategory
                 ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory }
                 : {}),
+              // Which billing legs already delivered on the attempt that
+              // queued this row (Codex #4963 round 4 P2) — Text has no
+              // provider-side event dedupe the way Email/App do, so
+              // billing-channel-routing.js's selectedLegs needs this to
+              // skip re-sending an already-accepted Text/App leg on replay.
+              ...(Array.isArray(claimMeta.replaySkipChannels)
+                && claimMeta.replaySkipChannels.filter((c) => ['email', 'push', 'sms'].includes(c)).length
+                ? { replaySkipChannels: claimMeta.replaySkipChannels.filter((c) => ['email', 'push', 'sms'].includes(c)) }
+                : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,
@@ -4184,7 +4193,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channelResults: smsResult.channelResults || null, smsLogId: msg.id, body: msg.message_body, toPhone });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({

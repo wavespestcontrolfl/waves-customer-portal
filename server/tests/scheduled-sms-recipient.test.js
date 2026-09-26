@@ -85,6 +85,53 @@ test('a deferred billing notice replays with its delivery category and Email-sid
   }));
 });
 
+// Codex #4963 round 4 P2 (finding B): Text has no provider-side event
+// dedupe the way Email/App do, so a partial-fanout replay must be TOLD
+// which legs already delivered — replaySkipChannels rides the same
+// claimMeta -> replayInput.metadata path as hasEmailLeg above.
+test('a partial-fanout replay forwards replaySkipChannels into the router metadata', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: 'cust-1', message_body: 'Invoice ready', message_type: 'invoice' },
+    claimMeta: { entry_point: 'invoice_send_deferred', billingDeliveryCategory: 'invoice',
+      replaySkipChannels: ['sms'], notificationEventKey: 'invoice:inv-1:sent', invoice_id: 'inv-1' },
+    toPhone: '+19415550101', purpose: 'payment_link', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+    SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    Array,
+    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+  });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    metadata: expect.objectContaining({ replaySkipChannels: ['sms'] }),
+  }));
+});
+
+test('replaySkipChannels is never forwarded when absent, empty, or carrying only unknown channels', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  for (const skip of [undefined, [], ['carrier_pigeon']]) {
+    const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+    await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+      msg: { id: 'queue-row', customer_id: 'cust-1', message_body: 'Invoice ready', message_type: 'invoice' },
+      claimMeta: { entry_point: 'invoice_send_deferred', billingDeliveryCategory: 'invoice',
+        ...(skip === undefined ? {} : { replaySkipChannels: skip }),
+        notificationEventKey: 'invoice:inv-1:sent', invoice_id: 'inv-1' },
+      toPhone: '+19415550101', purpose: 'payment_link', replayConsentBasis: undefined,
+      sendCustomerMessage,
+      dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+      SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+      Array,
+      require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).not.toHaveProperty('replaySkipChannels');
+  }
+});
+
 test('scheduled completion sends the body after the review guard strips its bundled ask', async () => {
   const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
   const start = source.indexOf('const sendReplay = () => {');

@@ -331,7 +331,7 @@ const ALLOWLIST = [
   {
     file: 'services/invoice.js',
     snippet: 'const existingQueued = await db("sms_log")',
-    reason: 'metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
+    reason: 'sendViaSMSAndEmail\'s held-SMS-leg queue: same metadata key (entry_point = \'invoice_send_deferred\') exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/invoice.js',

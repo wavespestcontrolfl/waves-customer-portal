@@ -116,10 +116,20 @@ function needsRetry(result) {
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
 }
 
+// Text has no provider-side event dedupe the way Email (billing-channel-
+// email.js's idempotencyKey) and App (push-channel-routing.js's
+// notifyCustomer dedupeKey) do, so a replay must be TOLD which legs already
+// delivered rather than re-deriving it — replaySkipChannels (Codex #4963
+// round 4 P2) carries that from the queuing side (invoice.js's
+// queuePendingChannelReplay). hasEmailLeg stays its own separate rule
+// (an Email leg this call never owned in the first place, not one that
+// already delivered).
 function selectedLegs(input, prefs, category) {
   const selected = explicitBillingChannels(prefs, category);
+  const skip = Array.isArray(input.metadata?.replaySkipChannels) ? input.metadata.replaySkipChannels : [];
   return ['email', 'push', 'sms'].filter((channel) => selected.includes(channel)
-    && !(channel === 'email' && input.hasEmailLeg === true));
+    && !(channel === 'email' && input.hasEmailLeg === true)
+    && !skip.includes(channel));
 }
 
 function legFailure(channel, err) {
@@ -191,11 +201,37 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
   // in their own follow-up PRs.
   const notificationEventKey = billingNotificationEventKey(input);
   if (!channels.length) {
+    const skip = Array.isArray(input.metadata?.replaySkipChannels) ? input.metadata.replaySkipChannels : [];
+    const currentlySelected = explicitBillingChannels(prefs, category) || [];
     // Only Email is selected and the caller's own email sender owns it:
-    // CHANNEL_EMAIL_ONLY tells the caller to send that email. Anything else
-    // here is a selection with no deliverable channel.
+    // CHANNEL_EMAIL_ONLY tells the caller to send that email — checked
+    // FIRST and takes precedence even when replaySkipChannels also covers
+    // every OTHER selected channel (Codex round-4 P1 pre-push audit: Email
+    // "missing" because hasEmailLeg excludes it is a different fact than
+    // Email having actually delivered, and CHANNEL_EMAIL_ONLY must not be
+    // shadowed by the newer ALREADY_DELIVERED code below).
     const callerOwnsEmail = input.hasEmailLeg === true
-      && explicitBillingChannels(prefs, category).includes('email');
+      && currentlySelected.includes('email');
+    // A replay whose skip list alone accounts for every currently-selected
+    // channel has nothing left to do — every leg the customer has chosen
+    // already delivered on the attempt that queued this replay. That is a
+    // clean terminal outcome, not "nothing selected" (NO_BILLING_CHANNEL_
+    // SELECTED) or "the caller's own email sender owns it" (CHANNEL_EMAIL_
+    // ONLY, above). Only reachable when Email's absence (if selected) is
+    // NOT explained by hasEmailLeg — otherwise CHANNEL_EMAIL_ONLY already
+    // returned above. Every selected channel must be individually
+    // accounted for by the skip list itself (not just "channels is empty",
+    // which — once callerOwnsEmail is false — only happens when skip does
+    // cover them all, but spelled out explicitly for clarity/safety).
+    if (!callerOwnsEmail && currentlySelected.length
+      && currentlySelected.every((channel) => skip.includes(channel))
+      && currentlySelected.some((channel) => skip.includes(channel))) {
+      return {
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNELS_ALREADY_DELIVERED',
+        reason: 'Every currently-selected billing channel already delivered on an earlier attempt',
+        channelResults: {}, notificationEventKey,
+      };
+    }
     return callerOwnsEmail ? {
       sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CHANNEL_EMAIL_ONLY',
       reason: 'The selected email is delivered by this notice’s email sender', channelResults: {}, notificationEventKey,

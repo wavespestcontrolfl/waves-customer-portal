@@ -1112,3 +1112,127 @@ describe('explicit billing channel combinations', () => {
     expect(await bellPushAllowed(customerId, 'invoice')).toBe(false);
   });
 });
+
+// The activation-checklist finding from PR #4843 (Codex round-6, cited at
+// send-customer-message.js:419 as of that PR): InvoiceService.sendViaSMS
+// always supplies withProviderHandoff, but that handoff is only allowlisted
+// for SMS/App — an explicit customer Email selection fanned out by
+// dispatchBillingChannels used to hit the SAME allowlist and refuse with
+// UNSUPPORTED_PROVIDER_HANDOFF, silently losing the Email leg. These pin the
+// fix: the Email leg drops withProviderHandoff and instead runs the SAME
+// invoice preconditions through billingEmailPreSendCheck, composed into
+// providerPreparationCheck and invoked exactly as the Email authority does
+// (channel:'email', database: the locked trx) — see invoice.js's
+// checkInvoiceDeliveryPreconditions for the shared check.
+describe('invoice_send_via_sms explicit billing Email leg (send-customer-message.js billingEmailPreSendCheck guard)', () => {
+  // Mirrors the shape InvoiceService.sendViaSMS actually sends to
+  // sendCustomerMessage — entryPoint/purpose/audience gate both the
+  // withProviderHandoff allowlist and the Email leg's guard exemption.
+  const invoiceInput = (overrides = {}) => ({
+    to: '+19415550142', body: 'Your invoice is ready: https://waves.test/pay',
+    channel: 'sms', audience: 'customer', purpose: 'payment_link', customerId,
+    invoiceId: 'test-invoice', entryPoint: 'invoice_send_via_sms',
+    metadata: { original_message_type: 'invoice', billingDeliveryCategory: 'invoice', notificationEventKey: 'invoice:test-invoice:sent' },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    Twilio.sendSMS.mockResolvedValue({ success: true, deliveryOutcome: 'accepted', sid: `SM${'1'.repeat(32)}` });
+    // invoice_send_via_sms is deliberately NOT in send-window.js's operator/
+    // customer-action exemption sets (only an authenticated route's explicit
+    // operatorInitiated marker exempts it) — pin the clock inside the 8am-8pm
+    // ET window so these assertions never depend on the real wall clock.
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('an Email-only explicit selection reaches the Email adapter with a pre-send check that runs the invoice guard', async () => {
+    prefs.invoice_channels = ['email'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: true }));
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(invoiceInput({ withProviderHandoff, billingEmailPreSendCheck }));
+
+    expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
+    // withProviderHandoff must never wrap the Email leg — that would take
+    // THIS handoff's own lock on the invoice row the Email authority already
+    // holds a DIFFERENT lock on (deadlock).
+    expect(withProviderHandoff).not.toHaveBeenCalled();
+
+    // The Email adapter's hooks carry providerPreparationCheck as
+    // preSendCheck. Invoking it exactly as billing-channel-email-authority.js
+    // does (channel:'email', database: the locked trx) must reach the
+    // caller's billingEmailPreSendCheck with that same locked handle.
+    // providerPreparationCheck's suppression/consent recheck (it runs for
+    // every billingDeliveryLeg, not just Email) reads through the SAME `db`
+    // double the rest of this file uses — a bare jest.fn() has no query
+    // builder and fails those reads closed before ever reaching our hook.
+    const [, hooks] = sendBillingChannelEmail.mock.calls[0];
+    await expect(hooks.preSendCheck({ database: db })).resolves.toMatchObject({ ok: true });
+    expect(billingEmailPreSendCheck).toHaveBeenCalledWith({ channel: 'email', database: db });
+  });
+
+  test('an Email+Text explicit selection runs both legs; the Text leg still goes through withProviderHandoff', async () => {
+    prefs.invoice_channels = ['email', 'sms'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: true }));
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(invoiceInput({ withProviderHandoff, billingEmailPreSendCheck }));
+
+    expect(result.channelResults).toMatchObject({ email: { sent: true }, sms: { sent: true } });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    // Only the Text leg takes the locked invoice handoff.
+    expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+    const [, emailHooks] = sendBillingChannelEmail.mock.calls[0];
+    await emailHooks.preSendCheck({ database: db });
+    expect(billingEmailPreSendCheck).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['send_claim_lost', 'Invoice send claim changed; delivery not attempted'],
+    ['INVOICE_VISIT_TERMINAL', 'Linked visit is cancelled; delivery not attempted'],
+    ['INVOICE_BALANCE_CHANGED', 'Invoice balance changed while preparing delivery; retry send'],
+  ])('billingEmailPreSendCheck blocking on %s stops the Email adapter with that same code', async (code, reason) => {
+    prefs.invoice_channels = ['email'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: false, code, reason }));
+    // Stand-in for billing-channel-email-authority.js's preSendBlock: it
+    // invokes hooks.preSendCheck under its own lock and maps a non-ok verdict
+    // onto a blocked email outcome carrying the SAME code.
+    sendBillingChannelEmail.mockImplementation(async (_input, hooks) => {
+      const verdict = await hooks.preSendCheck({ database: db });
+      if (verdict.ok !== true) {
+        return { sent: false, provider: 'email', providerMessageId: null, deliveryOutcome: 'not_sent',
+          blocked: true, code: verdict.code, reason: verdict.reason };
+      }
+      return { sent: true, provider: 'email', providerMessageId: 'email:qa', deliveryOutcome: 'accepted' };
+    });
+    const result = await sendCustomerMessage(invoiceInput({
+      withProviderHandoff: jest.fn(async (dispatch) => dispatch()), billingEmailPreSendCheck,
+    }));
+    expect(result.channelResults.email).toMatchObject({ sent: false, blocked: true, code });
+  });
+
+  test('a caller supplying withProviderHandoff on an Email leg from any OTHER entry point is still UNSUPPORTED_PROVIDER_HANDOFF', async () => {
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    // Shaped exactly like one leg dispatchBillingChannels would recurse into
+    // (channel + metadata.billingDeliveryLeg already resolved to 'email'),
+    // but from a DIFFERENT entryPoint — the allowlist must still refuse it.
+    const result = await sendCustomerMessage({
+      to: '+19415550142', body: 'hi', channel: 'email', audience: 'customer', purpose: 'payment_link',
+      customerId, invoiceId: 'test-invoice', entryPoint: 'some_other_entry_point',
+      metadata: { billingDeliveryLeg: 'email', billingDeliveryCategory: 'invoice', notificationEventKey: 'qa:other-caller' },
+      withProviderHandoff,
+    });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(withProviderHandoff).not.toHaveBeenCalled();
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
+  test('an Email leg with withProviderHandoff but no billingEmailPreSendCheck is refused, never silently dropped to no invoice check at all', async () => {
+    prefs.invoice_channels = ['email'];
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(invoiceInput({ withProviderHandoff }));
+    expect(result.channelResults.email).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+});

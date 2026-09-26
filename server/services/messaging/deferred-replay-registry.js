@@ -249,12 +249,53 @@ const REGISTRY = {
   },
 
   invoice_send_deferred: {
+    // The row's own recipient is only ever the SMS/App sub-leg's — the
+    // replay re-enters the canonical billing router (billingDeliveryCategory
+    // 'invoice'), which already falls back to the customer's explicit
+    // Email/App selection with no phone, exactly like an immediate send.
+    // A queued row for a phone-less customer's pending App leg (invoice.js
+    // sendViaSMS, Codex round-3 P1 #4963) is queued blank on purpose
+    // (requires_registered_dispatch marks that intent) — the executor's
+    // recipient gate must not read the blank phone as a failed lookup and
+    // park the row on the bounded retry-then-blocked ladder forever.
+    replayWithoutPhone: true,
+    // Pass-through: a phone-less row is marked requires_registered_dispatch,
+    // which dispatchDeferredReplay refuses without a registered hook. Every
+    // row still replays through the executor's default dispatch.
+    async dispatch(meta, defaultDispatch) {
+      return defaultDispatch();
+    },
     async recheck(meta) {
       return invoiceStillCollectible(meta);
     },
-    async finalize(meta) {
+    async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      return finalizeDeferredCompletionSend(meta);
+      const result = await finalizeDeferredCompletionSend(meta);
+      // Codex round-4 P2 (#4963) finding C: a partial_fanout_retry row
+      // (queuePendingChannelReplay, invoice.js) carries neither
+      // mark_invoice_delivery nor bundled_review_request_id/etc, so the
+      // call above is a no-op for it — finalizeDeferredCompletionSend only
+      // stamps SMS-only invoice delivery for the WRAPPER's own pre-existing
+      // completion-send rows (mark_invoice_delivery===true, always sms:true).
+      if (meta.partial_fanout_retry !== true || !meta.invoice_id) return result;
+      // The finalize_only durable-retry rail (scheduler.js, the
+      // claimMeta.finalize_only branch) re-invokes this hook after an
+      // earlier {ok:false} here converted the row for retry — but that
+      // rail's own ctx carries no channelResults/toPhone/body (it only
+      // proves providerMessageId). Fall back to a copy persisted on the
+      // row's OWN metadata below, or this retry would silently no-op
+      // through the now-inert finalizeDeferredCompletionSend call above
+      // instead of actually finishing the stamp/re-queue.
+      const channelResults = ctx.channelResults || meta.replay_channel_results || null;
+      if (!channelResults) return result;
+      const toPhone = ctx.toPhone || meta.replay_to_phone || '';
+      const body = ctx.body || meta.replay_body || '';
+      await persistReplayChannelResultsIfNeeded(meta, ctx, channelResults, toPhone, body);
+      const stamped = await stampPartialFanoutDelivery(meta, channelResults);
+      if (!stamped.ok) return stamped;
+      return requeuePartialFanoutIfPending(meta, channelResults, {
+        toPhone, body, smsLogId: ctx.smsLogId, customerId: meta.customer_id || ctx.customerId || null,
+      });
     },
     durableFinalize: true,
   },
@@ -1488,6 +1529,96 @@ async function contactSlotStillAuthorized(meta, label) {
     return { eligible: true };
   } catch (err) {
     return failClosed(label, meta.scheduled_service_id, err);
+  }
+}
+
+// Durability seam for the finalize_only retry rail (scheduler.js), whose
+// own ctx carries no channelResults/toPhone/body — persisted once (best
+// effort; a failure here just means that retry path won't recover them,
+// logged) so a later invocation with only { retry: true, smsLogId } can
+// still find everything it needs on the row's own metadata.
+async function persistReplayChannelResultsIfNeeded(meta, ctx, channelResults, toPhone, body) {
+  if (!ctx.channelResults || !ctx.smsLogId || meta.replay_channel_results) return;
+  try {
+    await db('sms_log').where({ id: ctx.smsLogId }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('replay_channel_results', ?::jsonb, 'replay_to_phone', ?::text, 'replay_body', ?::text)", [JSON.stringify(channelResults), toPhone || '', body || '']),
+    });
+  } catch (err) {
+    logger.warn(`[deferred-replay] could not persist replay channelResults for invoice ${meta.invoice_id} (finalize_only retry would lose them): ${err.message}`);
+  }
+}
+
+// Stamp the channel(s) THIS replay's own dispatch actually accepted (never
+// the stale snapshot from when the row was queued).
+async function stampPartialFanoutDelivery(meta, channelResults) {
+  const { legAccepted } = require('../invoice');
+  const emailAccepted = legAccepted(channelResults.email);
+  const smsOrAppAccepted = legAccepted(channelResults.sms) || legAccepted(channelResults.push);
+  if (!emailAccepted && !smsOrAppAccepted) return { ok: true };
+  try {
+    // A voided invoice is never re-stamped, even if a delayed replay landed.
+    await db('invoices').where({ id: meta.invoice_id }).whereNot({ status: 'void' }).update({
+      ...(emailAccepted ? { email_sent_at: new Date() } : {}),
+      ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
+      updated_at: new Date(),
+    });
+    return { ok: true };
+  } catch (err) {
+    logger.warn(`[deferred-replay] partial-fanout replay stamp failed for invoice ${meta.invoice_id}: ${err.message}`);
+    return { ok: false };
+  }
+}
+
+// Codex round-4 P2 (#4963) pre-push audit, finding C continued: the REPLAY
+// itself can only partially succeed — e.g. it accepts Text while Email is
+// still retryable/held. Without this, the executor sees smsResult.sent:
+// true, calls finalize, gets ok:true, and discharges the row — the
+// still-outstanding channel is silently dropped with no further retry ever
+// queued. Same rules as the initial send (invoice.js's InvoiceService.
+// pendingBillingLeg): an uncertain leg never requeues; a retryable/
+// deferred one queues ONE new row, capped at 5 attempts.
+async function requeuePartialFanoutIfPending(meta, channelResults, { toPhone, body, smsLogId, customerId } = {}) {
+  const InvoiceService = require('../invoice');
+  const { pendingChannel, uncertainChannels, retryableLegs } = InvoiceService.pendingBillingLeg(channelResults);
+  if (!pendingChannel) return { ok: true };
+  // Codex round-4 P1 pre-push audit: an uncertain leg used to win outright
+  // (pendingBillingLeg's old single-winner shape) and block requeuing a
+  // DIFFERENT, genuinely retryable sibling — every uncertain leg is now
+  // logged by name (it is never retried; queuePendingChannelReplay excludes
+  // it from the replay via replaySkipChannels) and every retryable/deferred
+  // leg is queued regardless of what else is pending.
+  for (const uncertainChannel of uncertainChannels) {
+    logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${uncertainChannel} leg outcome uncertain — not requeued (no double-send)`);
+  }
+  if (!retryableLegs.length) {
+    if (!uncertainChannels.length) {
+      const [channel, leg] = pendingChannel;
+      logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${channel} leg permanently blocked (${leg?.code}) — surfaced only, not requeued`);
+    }
+    return { ok: true };
+  }
+  const [, representativeRetryableLeg] = retryableLegs[0];
+  const attempt = (Number(meta.partial_fanout_attempt) || 1) + 1;
+  if (attempt >= 5) {
+    logger.error(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id} exhausted retries (5 attempts) — ${retryableLegs.map(([ch]) => ch).join(', ')} leg(s) still pending, needs operator review`);
+    return { ok: true };
+  }
+  try {
+    // The row this finalize call is settling (smsLogId) can still read
+    // 'sending'/'scheduled' at this exact moment (durable-finalize's own
+    // retry-only conversion runs AFTER this returns) — exclude it by id so
+    // the dedupe check inside queuePendingChannelReplay can never "adopt"
+    // it as if a fresh retry already existed and skip queuing a genuine one.
+    const queueOutcome = await InvoiceService.queuePendingChannelReplay({
+      invoiceId: meta.invoice_id, customerId, toPhone, body,
+      scheduledFor: InvoiceService.scheduledForPendingLeg(representativeRetryableLeg),
+      originalBlockCode: representativeRetryableLeg.code, channelResults,
+      previousSkipChannels: meta.replaySkipChannels, attempt, excludeSmsLogId: smsLogId || null,
+    });
+    return queueOutcome?.queued ? { ok: true } : { ok: false };
+  } catch (err) {
+    logger.warn(`[deferred-replay] partial-fanout re-queue failed for invoice ${meta.invoice_id}: ${err.message}`);
+    return { ok: false };
   }
 }
 
