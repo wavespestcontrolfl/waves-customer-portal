@@ -1554,7 +1554,14 @@ function bareNotConfirmedBookingCoversCall(item, mine, places) {
 function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const categories = requestedServiceTokens(item);
   if (!categories.length) {
-    if (item.reason_code !== 'not_confirmed' || intentRule(item)) return false;
+    // The snapshot's OWN field, never intentRule()'s lookup: intentRule
+    // returns null for a valid intent the table simply has no booking rule
+    // for (complaint_or_callback, cancellation_request) as much as for a
+    // genuinely absent one, and a card that snapshotted one of THOSE has
+    // asked something specific — it must keep failing closed on the strict
+    // path below (codex pre-push finding, 2026-09-26), not fall into the
+    // no-ask bypass.
+    if (item.reason_code !== 'not_confirmed' || requestAsk(item)?.requested_service_intent) return false;
     return bareNotConfirmedBookingCoversCall(item, mine, places);
   }
   // Parent rows only: neither a follow-up child (parent_service_id) nor a

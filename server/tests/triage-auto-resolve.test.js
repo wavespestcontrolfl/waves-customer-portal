@@ -1296,6 +1296,15 @@ describe('evidence helpers', () => {
     const withIntent = cardAt(CARD_AT, {}).payload;
     withIntent.scheduling_window.requested_service_intent = 'preventative_one_time';
     expect(bookingCoversRequest({ ...card, payload: withIntent }, [bareBooking({})], { singleProperty: true, places })).toBe(false);
+    // A requested_service_intent value with no entry in INTENT_RULES
+    // (complaint_or_callback, cancellation_request) still asked something
+    // specific — intentRule() returning null for it must NOT be read as
+    // "no ask at all" and fall into the bypass (codex pre-push P1).
+    for (const unmapped of ['complaint_or_callback', 'cancellation_request']) {
+      const unmappedPayload = cardAt(CARD_AT, {}).payload;
+      unmappedPayload.scheduling_window.requested_service_intent = unmapped;
+      expect(bookingCoversRequest({ ...card, payload: unmappedPayload }, [bareBooking({})], { singleProperty: true, places })).toBe(false);
+    }
 
     // ── Negatives ──────────────────────────────────────────────────────
     // Booking created 8+ days after the card → outside
