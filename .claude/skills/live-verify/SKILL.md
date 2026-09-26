@@ -110,10 +110,16 @@ worktree's private database. If that setup is not possible, run the base on
 rung 2 and say so. For a bug fix, the base must show the bug. For a new
 capability, record "not on base" and verify the end state instead.
 
-When the base run ends, including when it fails, run `npm run qa:cleanup`
-and `npm run worktree:stop` inside the base worktree, then
-`git worktree remove --force .tmp/live-verify/base` from the head
-worktree. A later run can then recreate it at a new merge-base.
+Right after each base run, including a failed one, copy its non-secret
+evidence (screenshots, traces, `report.json`; never `fixture.json` or other
+credential files) into `.tmp/live-verify/<head-sha>/base/` in the head
+worktree, then run `npm run qa:cleanup` and `npm run worktree:stop` in the
+base worktree. Keep the base worktree between runs: it holds the context
+and private QA database that `qa:cleanup` deliberately retains. A later run
+moves it with `git -C .tmp/live-verify/base checkout --detach <new
+merge-base>` and runs `npm ci` there only if the lockfile changed. Removing
+it and recreating it would provision a second database and orphan the
+first.
 
 ## Patch-id
 
