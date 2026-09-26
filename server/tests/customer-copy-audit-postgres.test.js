@@ -6,6 +6,7 @@ const sms = require('../models/migrations/20260926120000_customer_copy_audit_sms
 const email = require('../models/migrations/20260926120100_customer_copy_audit_email');
 const automations = require('../models/migrations/20260926120200_customer_copy_audit_automations');
 const r1 = require('../models/migrations/20260926120300_customer_copy_audit_codex_r1');
+const r3 = require('../models/migrations/20260926120400_customer_copy_audit_codex_r3');
 const baseline = require('./fixtures/customer-copy-audit-email-baseline.json');
 
 const connection = process.env.COPY_AUDIT_TEST_DATABASE_URL;
@@ -176,5 +177,17 @@ postgres('customer copy audit migrations on PostgreSQL', () => {
     expect(await trx('email_template_versions').where({ template_id: template.id, status: 'active' })).toHaveLength(1);
     await r1.down(trx);
     expect((await trx('email_templates').where({ id: template.id }).first()).active_version_id).toBe(v120100);
+  }));
+
+  test('codex r3: the service-request text is rewritten over 120000 output only', async () => inRollback(async (trx) => {
+    const [[key, before, after]] = r3._SWAPS;
+    const [original] = sms._SWAPS.filter(([k]) => k === key);
+    await trx('sms_templates').insert({ template_key: key, name: 'S', category: 'custom', body: original[1] });
+    await trx('sms_template_variants').insert({ template_key: key, variant_key: 'custom', body: 'Administrator copy' });
+    await sms.up(trx);
+    expect((await trx('sms_templates').where({ template_key: key }).first()).body).toBe(before);
+    await r3.up(trx);
+    expect((await trx('sms_templates').where({ template_key: key }).first()).body).toBe(after);
+    expect((await trx('sms_template_variants').where({ template_key: key }).first()).body).toBe('Administrator copy');
   }));
 });

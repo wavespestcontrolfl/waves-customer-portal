@@ -3,7 +3,14 @@ const {
   gratitudeTimingReason, QUIET_WINDOW_MS, MAX_REPLY_AGE_MS,
 } = require('../services/sms-gratitude');
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
-const { _SWAPS: SMS_COPY_AUDIT_SWAPS } = require('../models/migrations/20260926120000_customer_copy_audit_sms');
+const { _SWAPS: SMS_COPY_AUDIT_R0 } = require('../models/migrations/20260926120000_customer_copy_audit_sms');
+const { _SWAPS: SMS_COPY_AUDIT_R3 } = require('../models/migrations/20260926120400_customer_copy_audit_codex_r3');
+// Original body -> the body customers finally get, after later rounds'
+// superseding swaps.
+const SMS_COPY_AUDIT_SWAPS = SMS_COPY_AUDIT_R0.map(([key, before, after]) => {
+  const later = SMS_COPY_AUDIT_R3.find(([k, from]) => k === key && from === after);
+  return [key, before, later ? later[2] : after];
+});
 
 const received = '2030-01-10T15:00:00.000Z';
 const inbound = { id: 'in-1', direction: 'inbound', body: 'Thank you Adam', createdAt: received, mediaCount: 0 };
