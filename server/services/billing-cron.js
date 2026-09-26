@@ -107,7 +107,10 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
       metadata: JSON.stringify({ ...metadata,
         notificationEventKey: sendResult.notificationEventKey || metadata.notificationEventKey,
         entry_point: 'billing_receipt_deferred',
-        payment_id: paymentId, customer_id: customer.id, replay_purpose: 'payment_receipt',
+        // No customer_id here: a customer merge repoints sms_log.customer_id
+        // and payments.customer_id but can't rewrite this JSON, and the
+        // scheduler prefers a metadata customer_id over the row's.
+        payment_id: paymentId, replay_purpose: 'payment_receipt',
         original_block_code: sendResult.code,
         refresh_customer_phone: true, resolve_from_by_customer: true,
       }),

@@ -277,6 +277,16 @@ describe('deferred-replay registry', () => {
     })).toEqual({ eligible: true });
   });
 
+  test.each([
+    ['an object', { pending_refund_key: 'refund_pay-1_0' }],
+    ['a JSON string', JSON.stringify({ pending_refund_key: 'refund_pay-1_0' })],
+  ])('billing receipt replay holds for retry while a refund is unresolved (metadata as %s)', async (_label, metadata) => {
+    db.mockReturnValueOnce(firstChain({ status: 'paid', refund_amount: null, refund_status: null, metadata }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: false, reason: 'refund-unresolved', retryable: true });
+  });
+
   test('billing receipt replay suppresses for a deleted customer', async () => {
     db.mockReturnValueOnce(firstChain({ status: 'paid' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1', deleted_at: new Date() }));

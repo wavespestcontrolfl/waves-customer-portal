@@ -677,6 +677,17 @@ const REGISTRY = {
           .first();
         if (!payment) return { eligible: false, reason: 'payment-missing' };
         if (payment.status !== 'paid') return { eligible: false, reason: `payment-${payment.status}` };
+        // StripeService.refund persists metadata.pending_refund_key before
+        // calling Stripe and keeps it if the ledger update fails after the
+        // money moved. Until it's reconciled the refund outcome is unknown:
+        // hold the receipt and retry rather than send or drop it.
+        let paymentMeta = payment.metadata || {};
+        if (typeof paymentMeta === 'string') {
+          try { paymentMeta = JSON.parse(paymentMeta); } catch { paymentMeta = {}; }
+        }
+        if (paymentMeta.pending_refund_key) {
+          return { eligible: false, reason: 'refund-unresolved', retryable: true };
+        }
         // A partial refund keeps status 'paid' and records itself in
         // refund_amount / refund_status (stripe.js refund paths). Any refund
         // activity makes the frozen full-charge receipt wrong (Codex r1 on

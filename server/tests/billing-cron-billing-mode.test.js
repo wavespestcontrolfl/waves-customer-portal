@@ -241,6 +241,9 @@ describe('processMonthlyBilling — payment_receipt replay holds (#4843 r7)', ()
       refresh_customer_phone: true, resolve_from_by_customer: true,
     });
     expect(meta.attempt_payment_id).toBeUndefined();
+    // The owner lives only on sms_log.customer_id, which a customer merge
+    // repoints; a metadata copy would go stale and win in the scheduler.
+    expect(meta.customer_id).toBeUndefined();
   });
 
   test('a non-hold receipt-send failure still throws (caught and logged, no scheduled row)', async () => {
