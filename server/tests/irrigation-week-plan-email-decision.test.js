@@ -205,7 +205,8 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     // gh-r35: a plan that misses the cutoff at the queue transition is withheld AND the pre-plan
     // check-in still goes out in THIS run (the Monday cron is the only scheduled run).
     expect(sweep).toMatch(/let result = await dispatch\(\);[\s\S]*?if \(result\.aborted && windowClosedAtQueue\) \{[\s\S]*?summary\.plan\.window_closed \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*decision = buildWeeklyEmailDecision\(\{ \.\.\.decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false \}\);\s*snapshotArgs = null;\s*windowClosedAtQueue = false;[\s\S]*?result = await dispatch\(\);\s*\}/);
-    expect(lib).toMatch(/\.where\(\{ id: message\.id, status: 'queued', send_attempt_token: sendAttemptToken \}\)\s*\.update\(\{ status: 'failed', error_message: reason/);
+    // email-template-library.test.js exercises onQueued=false and verifies that
+    // abort writes retain the current attempt and pending-phase fence, with no send.
     // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
     // …an UNREADABLE renewal (null after retries) is counted claim_error and logged, never claimed_elsewhere (hook P1 on 45beb0731).
     expect(sweep).toMatch(/if \(result\.aborted\) \{[\s\S]*?if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*return;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*return;\s*\}/);
