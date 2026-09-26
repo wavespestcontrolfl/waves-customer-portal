@@ -303,30 +303,29 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
     expect(isAuthorizedWdoArrangerBooking(past)).toBe(true);
   });
 
-  test('the booking write refuses an arranger booking whose agreed ET day has passed', () => {
-    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-29' })).toBe(true);
-  });
-
-  test('a future agreed day still books', () => {
-    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-25' })).toBe(false);
-  });
-
-  describe('same ET day (clock pinned)', () => {
-    // 2026-09-28 13:30 EDT = 17:30Z.
+  describe('arrangerSlotElapsed (clock pinned to 2026-09-28 13:30 EDT)', () => {
     beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-28T17:30:00Z') }); });
     afterAll(() => { jest.useRealTimers(); });
 
+    test('an agreed ET day that has already passed is refused', () => {
+      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-27', windowStart: '16:00' })).toBe(true);
+    });
+
     test('a same-day slot whose start has passed on the ET wall clock is refused (codex #4890 r7 P1)', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-28' })).toBe(true);
+      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00' })).toBe(true);
     });
 
     test('a later same-day slot still books', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '16:00', todayET: '2026-09-28' })).toBe(false);
+      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '16:00' })).toBe(false);
     });
-  });
 
-  test('bookings that did not need the arranger rule are untouched by this guard', () => {
-    expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-29' })).toBe(false);
+    test('a future agreed day still books', () => {
+      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-29', windowStart: '10:00' })).toBe(false);
+    });
+
+    test('bookings that did not need the arranger rule are untouched by this guard', () => {
+      expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-27', windowStart: '10:00' })).toBe(false);
+    });
   });
 
   test('the spelled-out WDO service name is recognized (codex #4890 r7 P2)', () => {

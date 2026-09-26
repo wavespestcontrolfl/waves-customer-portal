@@ -1037,9 +1037,10 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
 // row gets) is before today's ET date, or it is today and its window start
 // (HH:MM) has passed (codex #4890 r5/r6/r7). Uses the shared
 // sameDayWindowElapsed so the cutoff matches every other mover.
-function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null, todayET = etDateString(new Date()) }) {
+function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null }) {
   if (!authorized || !scheduledDate) return false;
-  if (String(scheduledDate) < String(todayET)) return true;
+  // One clock for both halves: sameDayWindowElapsed reads the real ET "today".
+  if (String(scheduledDate) < etDateString(new Date())) return true;
   return sameDayWindowElapsed(scheduledDate, windowStart);
 }
 
