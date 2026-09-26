@@ -20,6 +20,7 @@ MRR: $X (+Y%)
 Revenue MTD: $X
 Active: X customers (+X this mo)
 At-risk: X (name highest-value critical)
+Ops 7d: resp 64m (tgt 60), completion 78% (tgt 85)
 Ads: CPA $X | ROAS Xx
 Reviews: X.X★ (X total, X unresponded)
 Content: X published, X decaying
@@ -27,14 +28,22 @@ SEO: backlinks +X
 ⚠️ any anomalies
 — Waves BI Agent"
 
+OPS 7D LINE (required, every briefing):
+- get_operations_snapshot returns kpis: an array of { metric, label, last7, last30, target, lowerIsBetter, tone } comparing the rolling last 7 days to a rolling 30-day baseline (kpiWindow explains the exact windows — this is NOT "last week vs the week before"; never describe it that way).
+- Build one "Ops 7d: ..." line listing up to 4 kpis whose tone is 'bad' or 'warn', worst first, each as "<label short> <last7><unit> (tgt <target>)" (e.g. "resp 64m (tgt 60)", "completion 78% (tgt 85)").
+- If no kpi is 'bad' or 'warn', the line is exactly "Ops 7d: all on target".
+- This line is never dropped. If the SMS is running long, trim the content/SEO line(s) first, then the ads line — never drop MRR, revenue MTD, active customers, at-risk, reviews, or the Ops 7d line.
+
 ANALYSIS RULES:
 - Compare every metric to last week AND last month
 - Flag anything >15% change as noteworthy
-- SMS: only 6-8 most actionable numbers + anomalies
-- Always include: MRR, revenue MTD, active customers, at-risk, reviews
+- SMS: only 6-8 most actionable numbers + anomalies + the required Ops 7d line
+- Always include: MRR, revenue MTD, active customers, at-risk, reviews, Ops 7d
 - Use ↑↓ arrows, not words
 - Name specific customers for critical issues
 - Running experiments (get_experiment_results): one line each at the end of the content & SEO section; "too early" until the readiness note says otherwise
+
+SAVED REPORT — operations_section (save_weekly_report): list EVERY kpi from get_operations_snapshot's kpis array, one per line — label, last7 value, the last30 baseline, the target (or "no target set"), and the tone — plus the rest of the operations narrative (completion rate, unassigned, weather). This is the durable record; the SMS only surfaces the outliers.
 
 Save a detailed report to the dashboard after sending the SMS.`,
 
@@ -64,7 +73,7 @@ Save a detailed report to the dashboard after sending the SMS.`,
     {
       type: 'custom',
       name: 'get_operations_snapshot',
-      description: `Get this week's operations: services scheduled vs completed, completion rate, unassigned count, services by tech, tomorrow's schedule with weather forecast, and any services flagged for reschedule due to weather.`,
+      description: `Get this week's operations: services scheduled vs completed, completion rate, unassigned count, services by tech, tomorrow's schedule with weather forecast, and any services flagged for reschedule due to weather. Also returns "kpis": completion_rate, callback_rate, response_speed_min, lead_conversion, stops_per_hour, revenue_per_man_hour, gross_margin, ar_days, retention_pct, and collection_rate, each as { metric, label, last7, last30, target, lowerIsBetter, tone } — last7 is the rolling 7-day value, last30 is the rolling 30-day baseline (see "kpiWindow" for the exact wording — never call this "last week vs the week before"), target/tone come from the owner's kpi_targets (tone is 'good'/'warn'/'bad'/null). Required for the SMS's "Ops 7d" line and the saved report's operations_section.`,
       input_schema: { type: 'object', properties: {} },
     },
 
@@ -140,7 +149,7 @@ Save a detailed report to the dashboard after sending the SMS.`,
           summary: { type: 'string', description: 'Executive summary (2-3 sentences)' },
           revenue_section: { type: 'string', description: 'Full revenue analysis' },
           customer_section: { type: 'string', description: 'Customer base analysis' },
-          operations_section: { type: 'string', description: 'Operations analysis' },
+          operations_section: { type: 'string', description: 'Operations analysis, including every kpi from get_operations_snapshot.kpis (label, last7, last30 baseline, target, tone) — not just the ones that made the SMS' },
           ads_section: { type: 'string', description: 'Google Ads analysis' },
           reviews_section: { type: 'string', description: 'Reviews analysis' },
           content_seo_section: { type: 'string', description: 'Content & SEO analysis' },

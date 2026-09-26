@@ -18,6 +18,81 @@ function mondayThisWeek() { return etWeekStart(); }
 
 const { DRAFT_REPLY_PREFIX, whereNeedsRealReply: whereNeedsRealReviewReply } = require('./review-reply/draft-prefix');
 const { getExperimentResultsSummary } = require('./intelligence-bar/growthbook-tools');
+const { SNAPSHOT_METRICS, toFiniteOrNull } = require('./kpi-snapshot');
+const { DEFAULT_KPI_TARGETS, kpiTargetTone } = require('../../shared/kpi-targets.cjs');
+
+// Ops KPIs for the Weekly BI Briefing: last 7 days vs a rolling 30-day
+// baseline vs the owner's kpi_targets — the SAME metrics, accessor paths
+// (SNAPSHOT_METRICS), defaults, and tone rule (shared/kpi-targets.cjs) the
+// /admin dashboard tiles use, so the SMS can never disagree with a tile.
+const OPERATIONS_KPI_KEYS = [
+  'completion_rate', 'callback_rate', 'response_speed_min', 'lead_conversion',
+  'stops_per_hour', 'revenue_per_man_hour', 'gross_margin', 'ar_days',
+  'retention_pct', 'collection_rate',
+];
+const OPERATIONS_KPI_LABELS = {
+  completion_rate: 'Completion rate (%)',
+  callback_rate: 'Callback rate (%)',
+  response_speed_min: 'Response speed (min)',
+  lead_conversion: 'Lead conversion (%)',
+  stops_per_hour: 'Stops per hour',
+  revenue_per_man_hour: 'Revenue per man-hour ($)',
+  gross_margin: 'Gross margin (%)',
+  ar_days: 'AR days',
+  retention_pct: 'Retention (%)',
+  collection_rate: 'Collection rate (%)',
+};
+const SNAPSHOT_GETTERS_BY_METRIC = new Map(SNAPSHOT_METRICS);
+
+// Ops KPI targets: a kpi_targets row wins over DEFAULT_KPI_TARGETS, same
+// precedence as the client's resolveTargetDef — but read here directly since
+// resolveTargetDef itself stays client-only. A failed table read degrades to
+// the defaults, exactly as the dashboard does when its /admin/kpi-targets
+// fetch fails, so the briefing's tone still matches the tiles.
+async function loadOperationsKpiTargets() {
+  try {
+    const rows = await db('kpi_targets').select('metric', 'target', 'amber_band_pct', 'lower_is_better');
+    const byMetric = {};
+    for (const r of rows) {
+      byMetric[r.metric] = {
+        target: parseFloat(r.target),
+        lowerIsBetter: !!r.lower_is_better,
+        amberBandPct: r.amber_band_pct == null ? 10 : parseFloat(r.amber_band_pct),
+      };
+    }
+    return byMetric;
+  } catch (err) {
+    logger.warn(`[bi-agent] kpi_targets read failed, ops KPIs fall back to the default targets: ${err.message}`);
+    return {};
+  }
+}
+
+async function buildOperationsKpis() {
+  // Lazy require (like the forecast-analyzer require below) — admin-dashboard.js
+  // is a large route module and this tool needs only the one already-exported
+  // computeCoreKpis accessor, not a load-time dependency on it.
+  const { computeCoreKpis } = require('../routes/admin-dashboard');
+  const [k7, k30, storeTargets] = await Promise.all([
+    computeCoreKpis('last_7'),
+    computeCoreKpis('last_30'),
+    loadOperationsKpiTargets(),
+  ]);
+  return OPERATIONS_KPI_KEYS.map((metric) => {
+    const getter = SNAPSHOT_GETTERS_BY_METRIC.get(metric);
+    const last7 = getter ? toFiniteOrNull(getter(k7)) : null;
+    const last30 = getter ? toFiniteOrNull(getter(k30)) : null;
+    const def = storeTargets[metric] || DEFAULT_KPI_TARGETS[metric] || null;
+    return {
+      metric,
+      label: OPERATIONS_KPI_LABELS[metric],
+      last7,
+      last30,
+      target: def?.target ?? null,
+      lowerIsBetter: def?.lowerIsBetter ?? null,
+      tone: def ? kpiTargetTone(last7, def) : null,
+    };
+  });
+}
 
 async function executeBITool(toolName, input) {
   switch (toolName) {
@@ -138,6 +213,20 @@ async function executeBITool(toolName, input) {
       const total = parseInt(weekServices?.total || 0);
       const completed = parseInt(weekServices?.completed || 0);
 
+      // Ops KPIs: last 7 days vs a rolling 30-day baseline vs owner targets.
+      // computeCoreKpis has no historical-window replay, so this is a rolling
+      // "as of today" comparison — never described as "last week vs the week
+      // before" (see kpiWindow below).
+      let kpis = [];
+      try {
+        kpis = await buildOperationsKpis();
+      } catch (err) {
+        logger.warn(`[bi-agent] operations KPI computation failed: ${err.message}`);
+        kpis = OPERATIONS_KPI_KEYS.map((metric) => ({
+          metric, label: OPERATIONS_KPI_LABELS[metric], last7: null, last30: null, target: null, lowerIsBetter: null, tone: null,
+        }));
+      }
+
       return {
         servicesThisWeek: total,
         completedThisWeek: completed,
@@ -146,6 +235,11 @@ async function executeBITool(toolName, input) {
         unassigned: parseInt(unassigned?.count || 0),
         tomorrowRescheduleCount: tomorrowForecast?.needsReschedule?.length || 0,
         tomorrowWeather: tomorrowForecast?.needsReschedule?.length > 0 ? 'Weather impact expected' : 'Clear',
+        kpis,
+        kpiWindow: {
+          last7: 'rolling 7 days ending today (ET)',
+          baseline: 'rolling 30 days ending today (ET)',
+        },
       };
     }
 
