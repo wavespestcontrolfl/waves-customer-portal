@@ -727,6 +727,29 @@ const TwilioService = {
         };
       }
 
+      // A missing recipient is only ever legitimate for a push-only leg —
+      // send-customer-message.js's App-only billing leg calls sendSMS(null,
+      // …, { explicitPushOnly: true }) precisely because the customer has no
+      // phone, and PushRouting.attemptPushFirst below tolerates `to: null`
+      // by design. Any other caller reaching here with no `to` would
+      // otherwise fall through every guard/handoff step below and hand
+      // Twilio's SDK a `to: null` request it cannot fulfill — a wasted API
+      // call, not a customer send, but refused here rather than left to a
+      // provider-boundary failure downstream.
+      if (!to && !options.explicitPushOnly) {
+        logger.warn(
+          `[twilio] Cannot send SMS — no recipient (messageType=${options.messageType || "n/a"}, bodyLen=${body?.length || 0})`,
+        );
+        return {
+          success: false,
+          sid: null,
+          blocked: true,
+          guardBlocked: true,
+          code: "MISSING_RECIPIENT",
+          error: "SMS recipient is required",
+        };
+      }
+
       const { isEnabled } = require("../config/feature-gates");
       if (!isEnabled("twilioSms")) {
         logger.info(
