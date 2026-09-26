@@ -85,7 +85,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
-const { ledgerCall } = require('../services/llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -2384,6 +2384,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
       if (toolUses.length === 0) {
         finalResponse = textBlocks.map(t => t.text).join('\n');
+        // A terminal turn with neither a tool call nor usable text (a
+        // thinking-only or refused reply) answers nothing — the `!finalResponse`
+        // fallback further down still serves the operator a message, but that
+        // guard cannot tell this leg's own row apart from one where an
+        // earlier round correctly used a tool; flag it on the response that
+        // actually produced it.
+        if (!finalResponse.trim()) ledgerCallRejected(response, 'invalid_output');
         break;
       }
 

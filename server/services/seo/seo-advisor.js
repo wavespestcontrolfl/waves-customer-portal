@@ -29,6 +29,23 @@ const ADVISOR_TIMEOUT_MS = 10 * 60 * 1000;
 let TwilioService;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
+// storeReport writes `grade` with no fallback (an undefined value there is
+// an undefined DB binding — Knex throws, storeReport's own try/catch
+// swallows it, and the weekly report is silently never persisted) and the
+// list fields feed `.length` / iteration; the SMS summary reads grade and
+// overall_assessment straight off the object. The old validate only checked
+// "object, not array" — a reply like `{}` passed it and produced exactly
+// that silent no-op. Same shape as tax-advisor.js's isUsableTaxReport.
+const SEO_REPORT_OBJECT_LISTS = ['recommendations', 'page2_opportunities', 'declining_alerts', 'gbp_insights', 'technical_issues', 'mobile_insights'];
+const GRADES = new Set(['A', 'B', 'C', 'D', 'F']);
+function isUsableSeoReport(report) {
+  if (!report || typeof report !== 'object' || Array.isArray(report)) return false;
+  if (!GRADES.has(report.grade)) return false;
+  if (typeof report.overall_assessment !== 'string' || !report.overall_assessment.trim()) return false;
+  if (report.wins != null && !Array.isArray(report.wins)) return false;
+  return SEO_REPORT_OBJECT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
+}
+
 class SEOAdvisor {
   async generateWeeklyReport() {
     logger.info('Running weekly SEO Advisor...');
@@ -205,8 +222,14 @@ Analyze and provide specific, prioritized recommendations.`,
       }, {
         // The dispatcher's loose parse accepts any JSON value; the old
         // utils/llm-json parser accepted only a non-array object. Keep that
-        // contract: a wrongly shaped answer is a rejected leg, not a stored row.
-        validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
+        // contract: a wrongly shaped answer is a rejected leg, not a stored
+        // row. Beyond shape, every field storeReport/sendSummary actually
+        // read must be present and usable (isUsableSeoReport) — see its
+        // comment.
+        validate: (result) => {
+          if (!result.json || typeof result.json !== 'object' || Array.isArray(result.json)) return 'not_an_object';
+          return isUsableSeoReport(result.json) ? null : 'schema_invalid';
+        },
       });
 
       // An unparseable or wrongly shaped answer is a rejected leg inside the
@@ -311,3 +334,4 @@ Analyze and provide specific, prioritized recommendations.`,
 }
 
 module.exports = new SEOAdvisor();
+module.exports.isUsableSeoReport = isUsableSeoReport;

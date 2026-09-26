@@ -88,6 +88,28 @@ function callbackNumberCoachingNote(v2Extraction, contactPhone) {
   return CALLBACK_NUMBER_COACHING_NOTE;
 }
 
+// Every field the csr_call_scores insert (~L305-329) writes straight from
+// the model's answer, with no fallback. The old validator only checked
+// "object, not array" (codex r1-r9) — a reply missing e.g. total_score, or
+// carrying a string where a number belongs, passed that check and then blew
+// up on the DB insert deep inside a try/catch the caller reads back as
+// "scored: false", with the ledger row already marked a success (Codex r10
+// on #4884). Pure/testable.
+const CSR_SCORE_NUMERIC_FIELDS = [
+  'total_score', 'core_score', 'rescue_score',
+  'control_score', 'warmth_score', 'clarity_score', 'objection_handling_score', 'closing_strength_score',
+  'lead_quality_score',
+];
+function isUsableCsrScore(score) {
+  if (!score || typeof score !== 'object' || Array.isArray(score)) return false;
+  if (CSR_SCORE_NUMERIC_FIELDS.some((f) => typeof score[f] !== 'number' || !Number.isFinite(score[f]))) return false;
+  if (typeof score.call_outcome !== 'string' || !score.call_outcome.trim()) return false;
+  // JSON.stringify(undefined) IS undefined — an insert of that column value
+  // is exactly the undefined-binding case this whole check exists to catch.
+  if (score.point_details === undefined || typeof score.point_details !== 'object' || score.point_details === null || Array.isArray(score.point_details)) return false;
+  return true;
+}
+
 class CSRCoach {
 
   /**
@@ -271,7 +293,12 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
       // The dispatcher's loose parse accepts any JSON value; the old
       // utils/llm-json parser accepted only a non-array object. Keep that
       // contract: a wrongly shaped answer is a rejected leg, not a stored row.
-      validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
+      // Beyond shape, every field the insert below actually writes must be
+      // present and correctly typed (isUsableCsrScore) — see its comment.
+      validate: (result) => {
+        if (!result.json || typeof result.json !== 'object' || Array.isArray(result.json)) return 'not_an_object';
+        return isUsableCsrScore(result.json) ? null : 'schema_invalid';
+      },
     });
 
     if (!res.ok) {
@@ -606,3 +633,4 @@ module.exports.csrScoringApplies = csrScoringApplies;
 module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;
 module.exports.callbackNumberCoachingNote = callbackNumberCoachingNote;
 module.exports.CALLBACK_NUMBER_COACHING_NOTE = CALLBACK_NUMBER_COACHING_NOTE;
+module.exports.isUsableCsrScore = isUsableCsrScore;

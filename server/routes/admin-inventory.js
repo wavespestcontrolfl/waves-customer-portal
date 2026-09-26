@@ -1841,6 +1841,22 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
   if (!mappings.length && responseText.trim()) {
     ledgerCallRejected(msg, 'invalid_json');
     logger.warn(`[auto-map] No parseable mappings in AI response for ${vendor.name}`);
+  } else if (mappings.length) {
+    // A non-empty `mappings` array with only garbage entries — no productId
+    // among the requested products, or `found` missing/non-boolean — passes
+    // parseAutoMapResponse, but the lookup below (`proposals.find(...)`)
+    // resolves to nothing for every product: functionally identical to an
+    // empty batch, yet recorded a success (Codex r10 on #4884). Flag it only
+    // when NOT ONE entry is usable; a genuinely partial batch (some products
+    // omitted, e.g. the model found matches for only some) is by design —
+    // an omitted product has no proposal and simply stays retryable in the
+    // next batch, so that is not itself a ledger failure.
+    const requestedIds = new Set(products.map((p) => String(p.id)));
+    const usable = mappings.filter((m) => m && requestedIds.has(String(m.productId)) && typeof m.found === 'boolean');
+    if (!usable.length) {
+      ledgerCallRejected(msg, 'schema_invalid');
+      logger.warn(`[auto-map] AI response had no usable mappings (bad productId/found) for ${vendor.name}`);
+    }
   }
   return mappings;
 }
@@ -3731,6 +3747,7 @@ router.post('/ai-price-lookup/bulk', async (req, res, next) => {
 router._test = {
   parseAutoMapResponse,
   buildAutoMapRow,
+  aiProposeVendorMappings,
   calculateMappingConfidenceCap,
   findOpenLoginDiscoveryConnection,
   hasTerminalLoginDiscoveryResult,

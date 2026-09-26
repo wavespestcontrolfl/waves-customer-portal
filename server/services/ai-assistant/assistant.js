@@ -19,7 +19,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MODEL = require('../../config/models').FLAGSHIP;
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 // Prompt-cache breakpoint (same pattern as admin-intelligence-bar.js). Applied
 // to a shallow copy of the messages array at call time — never to the array we
@@ -216,6 +216,13 @@ class WavesAssistant {
         if (toolUses.length === 0) {
           // No tools — just a text response
           finalReply = textBlocks.map(t => t.text).join('');
+          // A terminal turn with neither a tool call nor usable text (a
+          // thinking-only or refused reply) is this exact call answering
+          // nothing — the loop-exhausted guard below still catches it and
+          // serves the canned reply, but that guard cannot tell this leg's
+          // own row apart from one where every earlier turn correctly used
+          // a tool; flag it here on the response that actually produced it.
+          if (!finalReply.trim()) ledgerCallRejected(response, 'invalid_output');
           break;
         }
 

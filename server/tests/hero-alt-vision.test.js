@@ -5,10 +5,13 @@ jest.mock('../services/logger', () => ({
 }));
 
 const mockDispatch = jest.fn();
-jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args) }));
+const mockRejectCall = jest.fn();
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args), rejectCall: (...args) => mockRejectCall(...args) }));
 
 const MODELS = require('../config/models');
 const { describeHeroForAlt, sanitizeAlt } = require('../services/content/hero-alt-vision');
+
+beforeEach(() => mockRejectCall.mockClear());
 
 const PNG_BUFFER = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -221,6 +224,30 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER })).toMatchObject({ ok: true, checked: true });
   });
 
+  // Codex r10-class gap on #4884: neither ask() dispatch had a `validate`
+  // hook, so a JSON-parseable-but-wrong-shape answer (missing technicians)
+  // was discarded and treated as "nothing to flag" (fail-open) while the
+  // ledger row stayed a recorded success — exactly the class this whole
+  // ledger exists to catch.
+  test('an unusable (unchecked) verdict flags the ledger row; a clean or a failed-verdict answer does not', async () => {
+    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
+    const unusable = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(unusable.checked).toBe(false);
+    expect(mockRejectCall).toHaveBeenCalledTimes(1);
+    expect(mockRejectCall).toHaveBeenCalledWith(expect.objectContaining({ ok: true }), 'invalid_output');
+
+    mockRejectCall.mockClear();
+    const clean = await screen();
+    expect(clean.ok).toBe(true);
+    expect(mockRejectCall).not.toHaveBeenCalled();
+
+    mockRejectCall.mockClear();
+    const violation = await screen({ waves_logo_elsewhere: ['van door'] });
+    expect(violation.ok).toBe(false);
+    expect(violation.checked).toBe(true);
+    expect(mockRejectCall).not.toHaveBeenCalled();
+  });
+
   test('without the allowance the uniform logo is still a violation (a logo-free generation must not carry one)', async () => {
     mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES'], logos_or_brand_marks: ['Waves logo on cap'], forbidden_scenes: [], notes: '' }));
     const r = await screenGeneratedImage({ buffer: PNG_BUFFER });
@@ -429,10 +456,33 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     }
   });
 
+  // Codex r10-class gap on #4884: an unusable van answer (JSON-parseable,
+  // wrong shape) was discarded fail-open with no ledger flag on the leg
+  // that actually produced it — the van leg's own dispatch result, distinct
+  // from the main screen's.
+  test('an unusable van answer flags the ledger row for the van leg specifically; a usable one (any verdict) does not', async () => {
+    const r = await screen({ vanAnswer: { van_count: 1.5, van: van() } });
+    expect(r.checked).toBe(false);
+    expect(mockRejectCall).toHaveBeenCalledTimes(1);
+    expect(mockRejectCall).toHaveBeenCalledWith(expect.objectContaining({ ok: true }), 'invalid_output');
+
+    mockRejectCall.mockClear();
+    expect((await withVan({ body: 'mercedes_sprinter' })).ok).toBe(false); // a real, usable failing verdict
+    expect(mockRejectCall).not.toHaveBeenCalled();
+
+    mockRejectCall.mockClear();
+    expect((await screen()).ok).toBe(true);
+    expect(mockRejectCall).not.toHaveBeenCalled();
+  });
+
   test('either dispatch failing fails the screen open', async () => {
     mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? { ok: false, reason: 'timeout' } : answer(CLEAN_MAIN)));
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
     mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer({ van_count: 1, van: van() }) : { ok: false, reason: 'timeout' }));
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
+    // A dispatch that itself failed (res.ok:false) is not a parse-shape
+    // problem — the dispatcher's own chain already files that leg's
+    // failure; this call must not double-flag it.
+    expect(mockRejectCall).not.toHaveBeenCalled();
   });
 });

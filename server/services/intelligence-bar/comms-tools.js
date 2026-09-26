@@ -20,7 +20,7 @@ const {
   manualSmsDeliveryState,
 } = require('../messaging/send-manual-customer-sms');
 const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -923,6 +923,11 @@ Return ONLY the SMS text, nothing else.`
   }), { laneId: 'ib_tools' });
 
   const draft = anthropicText(msg);
+  // An empty/refusal answer (a thinking-only or refused reply has no .text)
+  // renders as a blank draft the human silently never sends — recorded a
+  // success with nothing usable produced, the same gap this call ledger
+  // exists to catch on every other draft lane.
+  if (!draft.trim()) ledgerCallRejected(msg, 'invalid_output');
 
   return {
     draft: true,

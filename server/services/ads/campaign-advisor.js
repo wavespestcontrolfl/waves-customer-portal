@@ -30,6 +30,24 @@ function adsClientConfigured() {
   } catch { return false; }
 }
 
+// storeReport writes `grade` with no fallback (an undefined value there is
+// an undefined DB binding — Knex throws, storeReport's own try/catch
+// swallows it, and the daily report is silently never persisted) and the
+// list fields feed `.length` / iteration in storeReport and
+// normalizeRecommendations; the SMS summary reads grade and
+// overall_assessment straight off the object. The old validate only checked
+// "object, not array" — a reply like `{}` passed it and produced exactly
+// that silent no-op. Same shape as seo-advisor.js's isUsableSeoReport.
+const ADS_REPORT_OBJECT_LISTS = ['recommendations', 'waste_alerts', 'scaling_opportunities', 'capacity_warnings', 'seo_insights'];
+const AD_GRADES = new Set(['A', 'B', 'C', 'D', 'F']);
+function isUsableAdsReport(advice) {
+  if (!advice || typeof advice !== 'object' || Array.isArray(advice)) return false;
+  if (!AD_GRADES.has(advice.grade)) return false;
+  if (typeof advice.overall_assessment !== 'string' || !advice.overall_assessment.trim()) return false;
+  if (advice.insights != null && !Array.isArray(advice.insights)) return false;
+  return ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
+}
+
 class CampaignAdvisor {
   async generateDailyAdvice() {
     logger.info('Running AI Campaign Advisor...');
@@ -235,8 +253,14 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
       }, {
         // The dispatcher's loose parse accepts any JSON value; the old
         // utils/llm-json parser accepted only a non-array object. Keep that
-        // contract: a wrongly shaped answer is a rejected leg, not a stored row.
-        validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
+        // contract: a wrongly shaped answer is a rejected leg, not a stored
+        // row. Beyond shape, every field storeReport/sendSummary actually
+        // read must be present and usable (isUsableAdsReport) — see its
+        // comment.
+        validate: (result) => {
+          if (!result.json || typeof result.json !== 'object' || Array.isArray(result.json)) return 'not_an_object';
+          return isUsableAdsReport(result.json) ? null : 'schema_invalid';
+        },
       });
 
       // An unparseable or wrongly shaped answer is a rejected leg inside the
@@ -483,3 +507,4 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
 }
 
 module.exports = new CampaignAdvisor();
+module.exports.isUsableAdsReport = isUsableAdsReport;

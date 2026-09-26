@@ -13,6 +13,21 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const anthropic = new Anthropic();
 
+// A reply of {"total":"unknown",...} is a non-null, truthy string that slips
+// past a bare `== null` check, and then wins `amount = parsedInvoice?.total
+// || parseFloat(...) || 0` below (the string "unknown" is truthy) — no
+// crash, `amount > 0` is just false on a NaN-ish comparison, so the expense
+// is silently skipped ("no_amount") while the call is recorded a success
+// (Codex r10 on #4884). `total`, when present, must be usable as a number —
+// a plain finite number, or a strict numeric string (the only string shape
+// `amount > 0` and the numeric `expenses.amount` column downstream actually
+// coerce correctly).
+function isUsableInvoiceTotal(total) {
+  if (total == null) return true;
+  if (typeof total === 'number') return Number.isFinite(total);
+  return typeof total === 'string' && /^-?\d+(\.\d+)?$/.test(total.trim());
+}
+
 function parseClaudeJson(text) {
   try {
     const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -91,6 +106,7 @@ async function processVendorInvoice(email, classification) {
       parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
       if (!parsedInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
       else if (typeof parsedInvoice !== 'object' || Array.isArray(parsedInvoice)
+        || !isUsableInvoiceTotal(parsedInvoice.total)
         || (parsedInvoice.total == null && !parsedInvoice.invoice_number)
         || (parsedInvoice.line_items != null && !Array.isArray(parsedInvoice.line_items))) ledgerCallRejected(parseResponse, 'schema_invalid');
 
@@ -180,4 +196,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal };

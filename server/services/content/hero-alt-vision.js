@@ -19,7 +19,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { dispatchWithFallback } = require('../llm/call');
+const { dispatchWithFallback, rejectCall } = require('../llm/call');
 
 // Alt-text conventions: concrete subject first, no "image of"/"photo of"
 // preamble, one plain sentence sized for screen readers and image search.
@@ -517,6 +517,15 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     }
     const parsed = parseScreen(res.text, { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()), requirePlacements: allowUniformLogo });
     const vanAnswer = vanRes ? parseVanScreen(vanRes.text) : { van: null };
+    // Neither leg has a `validate` hook on its own dispatchWithFallback call
+    // (both run together, and a call is JSON-parseable-but-wrong-shape —
+    // e.g. `readable_text` missing — which the adapter's own empty_json
+    // check never catches). An unusable answer here is discarded and
+    // silently treated as "nothing to flag" (fail-open, the image is
+    // accepted unchecked) — exactly the shape the ledger must not read as a
+    // successful check (Codex r10-class gap on #4884).
+    if (!parsed) rejectCall(res, 'invalid_output');
+    if (vanRes && !vanAnswer) rejectCall(vanRes, 'invalid_output');
     if (!parsed || !vanAnswer) {
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
