@@ -16,7 +16,7 @@
  * same fallback rule as glassEstimateCopyFor).
  *
  * Truth scope (mirrors the glass packs — no new claims):
- * - Callbacks / 90-day / no-contract lines render ONLY for the recurring
+ * - Callbacks / money-back / no-contract lines render ONLY for the recurring
  *   residential lanes that already make those claims on the estimate page
  *   (pest, lawn, mosquito, tree & shrub, palm injection).
  * - rodent, termite (the service-lines lane folds bait AND the one-time
@@ -62,9 +62,10 @@ const FAQ_PRICE =
 // produces — pest/lawn/tree_shrub their own, palm injection folds into the
 // tree & shrub report (its visits are documented on that report). The
 // REPORT tours state the recurring-terms benefits on camera (callbacks /
-// no-contract / 90-day), so ONLY packs carrying RECURRING_TERMS_BENEFIT
-// may reference one — bundle/mosquito/rodent/termite/commercial/unknown
-// get empty slots and the renderer drops the blocks (v2 owner round
+// no-contract / the retired 90-day money-back wording), so ONLY packs
+// carrying RECURRING_TERMS_BENEFIT may reference one —
+// bundle/mosquito/rodent/termite/commercial/unknown get empty slots and
+// the renderer drops the blocks (v2 owner round
 // 2026-07-23: benefit-forward re-cut). The APP tour (static block in the
 // 20260723300000 migration, all categories) is deliberately TERMS-NEUTRAL
 // on camera — its claims are app facts (visits/reports/reschedule; Auto
@@ -223,8 +224,8 @@ const PACKS = {
   // One-time-only quotes (structural: no recurring dollars anywhere on the
   // estimate) carry NONE of the recurring-terms promises — #2969 built the
   // terms-neutral one-time hero for exactly this reason (30-day callback,
-  // not unlimited callbacks / 90-day MBG), and the report-tour videos state
-  // the recurring terms on camera, so the video slots stay empty. Claims
+  // not unlimited callbacks / the money-back guarantee), and the report-tour
+  // videos state the recurring terms on camera, so the video slots stay empty. Claims
   // echo the shipped one-time hero ("One visit, priced from your actual
   // property") and the unknown pack's documentation line only.
   one_time: {
