@@ -589,13 +589,13 @@ describe('normalizeIntakeResult', () => {
     expect(out.ready_for_quote).toBe(false);
   });
 
-  test('a pet ingestion in the visitor message gets the veterinary script', () => {
+  test('a pet ingestion in the visitor message adds the veterinary script', () => {
     const out = scrubUnsafeClaims(
       { reply: 'The product is not safe to consume. Get professional help immediately.', intent: 'question', service_keys: [], ready_for_quote: true },
       'My dog swallowed some bait',
     );
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
-    expect(out.reply).not.toContain('911');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.intent).toBe('emergency');
   });
 
@@ -664,10 +664,13 @@ describe('normalizeIntakeResult', () => {
     expect(out.intent).toBe('question');
   });
 
-  test('"I think my dog swallowed bait" gets only the veterinary script', () => {
-    const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I think my dog swallowed bait');
+  test.each([
+    'I think my dog swallowed bait',
+    'My dog and I both swallowed some pesticide.',
+  ])('a pet in the emergency adds vet copy and never drops the human script: %s', (context) => {
+    const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
-    expect(out.reply).not.toContain('911');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
   test('a pet ingestion plus a human emergency gets both scripts', () => {
@@ -850,11 +853,11 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out.ready_for_quote).toBe(false);
   });
 
-  test('chain miss on a pet ingestion → veterinary script, not the human 911 script', async () => {
+  test('chain miss on a pet ingestion → veterinary script alongside the human script', async () => {
     dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'My dog swallowed some bait' });
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
-    expect(out.reply).not.toContain('911');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.intent).toBe('emergency');
     expect(out.ready_for_quote).toBe(false);
     expect(out.source).toBe('fallback');
@@ -879,6 +882,14 @@ describe('processIntakeMessage provider ladder', () => {
     const out = await processIntakeMessage({ message: 'My child ate pesticide granules' });
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.reply).toContain('1-800-222-1222');
+  });
+
+  test('chain miss on mixed person + pet ingestion keeps 911 and Poison Control', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
+    const out = await processIntakeMessage({ message: 'My dog and I both swallowed some pesticide.' });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+    expect(out.reply).toMatch(/veterinarian/);
   });
 
   test('chain miss on a Spanish emergency → emergency-safe fallback', async () => {

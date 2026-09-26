@@ -436,8 +436,6 @@ const HUMAN_EMERGENCY_DIRECTION_RE = /(?:\+?1[-.\s]?)?\(?800\)?[-.\s]?222[-.\s]?
 // direction to a vet.
 const VET_DIRECTION_RE = /\b(?:call|contact|see|consult|visit|reach|phone|ask|go\s+to|get\s+\S+(?:\s+\S+)?\s+to|take\s+\S+(?:\s+\S+)?\s+to|rush\s+\S+(?:\s+\S+)?\s+to)\s+(?:a\s+|an\s+|your\s+|the\s+)?(?:nearest\s+|local\s+|closest\s+|emergency\s+)?(?:vets?|veterinarian|veterinary\s+(?:clinic|hospital|office|er|emergency)|animal\s+(?:hospital|er|emergency\s+(?:clinic|hospital|room)))\b|\b(?:animal|pet)\s+poison\s+(?:control|helpline|hotline)|\b(?:llame|lleve|consulte|contacte|acuda|vaya)\b[^.?!]{0,25}?\b(?:veterinari[oa]|hospital\s+veterinario|cl[ií]nica\s+veterinaria)\b/i;
 const PET_SUBJECT_RE = /\b(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
-const PET_PATIENT_RE = /\b(?:my|our|the|his|her|their)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b[^.?!]{0,25}?\b(?:swallow\w*|ingest\w*|ate|eaten|lick\w*|got\s+into|(?:was|got|is|has\s+been)\s+(?:stung|bit|bitten)|vomit\w*|throw\w*\s+up|seiz\w*|drool\w*|(?:is|seems|got)\s+sick)\b|\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten)\s+by\s+(?:my|our|the)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b|\bmi\s+(?:perr|gat|mascota|cachorr)\w*\s+[^.?!]{0,25}?(?:trag|comi|vomit|ingiri)\w*/i;
-const PERSON_SUBJECT_RE = /\b(?:someone|somebody|kids?|child|children|son|daughter|baby|toddler|infant|husband|wife|mom|dad|grand\w+|hij[oa]s?|beb[eé]|ni[ñn][oa]s?|esposo|esposa|alguien|yo)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
 const POISON_CONTROL_LINE = ' If someone swallowed a product, call Poison Control at 1-800-222-1222. / Si alguien ingirió un producto, llame a Control de Envenenamientos al 1-800-222-1222.';
@@ -460,23 +458,16 @@ function emergencyGuidance(result, contextText = '') {
   // gets the emergency script even if the model's reply names no direction —
   // and who it happened to picks the script ("My dog swallowed bait" → vet;
   // "My son swallowed bait" → 911 + Poison Control).
-  // Patients are decided clause by clause, from the emergency-bearing clauses
-  // only — an unrelated earlier pet (or person) mention must not change the
-  // script, and "My dog swallowed bait. I cannot breathe." needs both.
+  // A visitor-described emergency ALWAYS keeps the human script — it is
+  // worded conditionally ("If anyone is having a medical reaction…"), and
+  // deciding that a pet is the only patient kept dropping it for real people
+  // ("My dog and I both swallowed…"). A pet in an emergency-bearing clause
+  // adds the veterinary script on top; an unrelated earlier pet mention
+  // does not.
   const visitorEmergency = looksLikeEmergency(context);
-  const found = context.split(/(?<=[.!?])\s+|\n+/).filter((c) => looksLikeEmergency(c));
-  const clauses = found.length ? found : (visitorEmergency ? [context] : []);
-  // Human guidance is dropped for a clause only when the animal is plainly
-  // the patient ("My dog swallowed bait") — a pet mention alone ("My leg is
-  // swelling after a dog bite") keeps it; an ambiguous clause gets both.
-  // A direct medical symptom (EMERGENCY_RE: can't breathe, unconscious,
-  // chest pain…) always keeps the human script, even beside a pet
-  // ("My dog swallowed bait and I cannot breathe") — the human script is
-  // dropped only when a pet eating something is the clause's sole evidence.
-  const humanClause = clauses.some((c) => EMERGENCY_RE.test(c)
-    || !(PET_PATIENT_RE.test(c) && !PERSON_SUBJECT_RE.test(c)));
-  const petClause = clauses.some((c) => PET_SUBJECT_RE.test(c));
-  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || humanClause;
+  const clauses = context.split(/(?<=[.!?])\s+|\n+/).filter((c) => looksLikeEmergency(c));
+  const petClause = (clauses.length ? clauses : (visitorEmergency ? [context] : [])).some((c) => PET_SUBJECT_RE.test(c));
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || visitorEmergency;
   const vet = VET_DIRECTION_RE.test(folded) || petClause;
   if (!(result.intent === 'emergency' || human || vet)) return null;
   const ingestion = POISON_MENTION_RE.test(folded) || INGESTION_RE.test(context) || EAT_EXPOSURE_RE.test(context);
