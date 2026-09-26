@@ -1737,148 +1737,172 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // saved-method rails (already churned, customer-level billing already
   // off) — reported separately from churnWoundDownCount below.
   let railsRepairedCount = 0;
-  for (const customerId of customerIds) {
-    const before = await db('customers').where('id', customerId).first();
-    if (!before) {
-      errors.push({ customer_id: customerId, error: 'Customer not found' });
-      continue;
-    }
-    // Same live-customer bar as every other IB customer writer (pre-push
-    // r11 P1): a soft-deleted/merged row must not be edited, fanned out,
-    // or emailed by the per-row branch.
-    if (before.deleted_at) {
-      errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
-      continue;
-    }
-    let emailSync = null;
-    let rowLaneStamp = null;
-    let rowRailsRepairedOnly = false;
-    try {
-      await db.transaction(async (trx) => {
-        // Membership-affecting writes join the customer-comms serialization
-        // (codex #3426 r6 P2) — same rule as the single-edit path: comms
-        // lock BEFORE this row's lock. Per-row transactions each hold one
-        // key, so no cross-row ordering concern on this branch.
-        // Prefs advisory lock FIRST (global order: prefs advisory → comms →
-        // customers row) — an address row in the bulk update reaches the
-        // fan-out's move stamp (codex #3565 gh-r39).
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['property-preferences', String(customerId)],
-        );
-        if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
-          await lockCustomerComms(trx, customerId);
-        }
-        // Same row-lock serialization AND locked liveness re-assert as the
-        // single-edit path (GH r10 / pre-push r11 P1).
-        const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first();
-        if (!lockedBefore || lockedBefore.deleted_at) {
-          const err = new Error('customer_no_longer_live');
-          err.customerNoLongerLive = true;
-          throw err;
-        }
-        const lockedMerged = { ...lockedBefore, ...clean };
-        // ADMIN-BUG-R10 (round 3): a bulk edit that combines a churn move
-        // with an address/email field takes THIS per-row branch instead of
-        // the fast CASE path above, and this branch has its own per-row
-        // before-state (lockedBefore) — so it gets the identical guard, via
-        // the same shared helper, rather than silently skipping it. Runs on
-        // EVERY write of pipeline_stage='churned' (not gated on
-        // lockedBefore.pipeline_stage !== 'churned'), so a re-save of
-        // Churned combined with an address/email edit self-heals a pre-fix
-        // residue row too. churnGuardForRow winds billing down itself
-        // through the canonical cancellation-processor.js write.
-        if (clean.pipeline_stage === 'churned') {
-          const { churnGuardOrRepair } = require('../customer-lifecycle-guard');
-          const decision = await churnGuardOrRepair(trx, customerId, lockedBefore);
-          if (decision.blocked) {
-            const err = new Error(decision.error);
-            err.churnBlocked = true;
-            throw err;
-          }
-          rowRailsRepairedOnly = !!decision.railsRepairedOnly;
-        }
-        await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
-        if (emailSubmitted && clean.email) {
-          // Serialization ONLY — no claimant refusal (r23): shared
-          // household addresses are supported (20260417000010); see
-          // updateCustomer.
-        }
-        // Implied-monthly stamp (#3140) — same rule as updateCustomer, but
-        // decided per row against a NEW update object: `clean` is shared
-        // across the loop, so mutating it would leak one row's stamp onto
-        // every later row.
-        rowLaneStamp = require('../billing-lane').impliedMonthlyStampForWrite(lockedBefore, lockedMerged);
-        await trx('customers').where('id', customerId).update(
-          rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
-        );
-        if (clean.monthly_rate !== undefined
-          && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
-            !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
-          // Same changed-rate-only ledger sync as the other branches
-          // (codex #3245 r2/r6).
-          await require('../plan-rate-ledger')
-            .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_bulk_update' });
-        }
-        if (addressSubmitted) {
-          // Coords cleared atomically with the address/move-stamp write (gh-r46).
-          await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
-          await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
-          await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
-        }
-        if (emailSubmitted) {
-          emailSync = await require('../customer-email-fanout').propagateCustomerEmailChange(
-            { before: lockedBefore, after: lockedMerged, source: 'Intelligence Bar bulk_update_customers' }, trx,
-          );
-        }
-      });
-    } catch (e) {
-      if (e && e.customerNoLongerLive) {
+  const addressGeocodes = [];
+  const geocodedCustomerIds = new Set();
+  try {
+    for (const customerId of customerIds) {
+      const before = await db('customers').where('id', customerId).first();
+      if (!before) {
+        errors.push({ customer_id: customerId, error: 'Customer not found' });
+        continue;
+      }
+      // Same live-customer bar as every other IB customer writer (pre-push
+      // r11 P1): a soft-deleted/merged row must not be edited, fanned out,
+      // or emailed by the per-row branch.
+      if (before.deleted_at) {
         errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
         continue;
       }
-      if (e && e.churnBlocked) {
-        errors.push({ customer_id: customerId, error: e.message, churn_blocked: true });
-        continue;
+      let emailSync = null;
+      let rowLaneStamp = null;
+      let rowRailsRepairedOnly = false;
+      try {
+        await db.transaction(async (trx) => {
+          // Membership-affecting writes join the customer-comms serialization
+          // (codex #3426 r6 P2) — same rule as the single-edit path: comms
+          // lock BEFORE this row's lock. Per-row transactions each hold one
+          // key, so no cross-row ordering concern on this branch.
+          // Prefs advisory lock FIRST (global order: prefs advisory → comms →
+          // customers row) — an address row in the bulk update reaches the
+          // fan-out's move stamp (codex #3565 gh-r39).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['property-preferences', String(customerId)],
+          );
+          if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+            await lockCustomerComms(trx, customerId);
+          }
+          // Same row-lock serialization AND locked liveness re-assert as the
+          // single-edit path (GH r10 / pre-push r11 P1).
+          const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first();
+          if (!lockedBefore || lockedBefore.deleted_at) {
+            const err = new Error('customer_no_longer_live');
+            err.customerNoLongerLive = true;
+            throw err;
+          }
+          const lockedMerged = { ...lockedBefore, ...clean };
+          // ADMIN-BUG-R10 (round 3): a bulk edit that combines a churn move
+          // with an address/email field takes THIS per-row branch instead of
+          // the fast CASE path above, and this branch has its own per-row
+          // before-state (lockedBefore) — so it gets the identical guard, via
+          // the same shared helper, rather than silently skipping it. Runs on
+          // EVERY write of pipeline_stage='churned' (not gated on
+          // lockedBefore.pipeline_stage !== 'churned'), so a re-save of
+          // Churned combined with an address/email edit self-heals a pre-fix
+          // residue row too. churnGuardForRow winds billing down itself
+          // through the canonical cancellation-processor.js write.
+          if (clean.pipeline_stage === 'churned') {
+            const { churnGuardOrRepair } = require('../customer-lifecycle-guard');
+            const decision = await churnGuardOrRepair(trx, customerId, lockedBefore);
+            if (decision.blocked) {
+              const err = new Error(decision.error);
+              err.churnBlocked = true;
+              throw err;
+            }
+            rowRailsRepairedOnly = !!decision.railsRepairedOnly;
+          }
+          await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
+          if (emailSubmitted && clean.email) {
+            // Serialization ONLY — no claimant refusal (r23): shared
+            // household addresses are supported (20260417000010); see
+            // updateCustomer.
+          }
+          // Implied-monthly stamp (#3140) — same rule as updateCustomer, but
+          // decided per row against a NEW update object: `clean` is shared
+          // across the loop, so mutating it would leak one row's stamp onto
+          // every later row.
+          rowLaneStamp = require('../billing-lane').impliedMonthlyStampForWrite(lockedBefore, lockedMerged);
+          await trx('customers').where('id', customerId).update(
+            rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
+          );
+          if (clean.monthly_rate !== undefined
+            && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
+              !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
+            // Same changed-rate-only ledger sync as the other branches
+            // (codex #3245 r2/r6).
+            await require('../plan-rate-ledger')
+              .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_bulk_update' });
+          }
+          if (addressSubmitted) {
+            // Coords cleared atomically with the address/move-stamp write (gh-r46).
+            await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
+            await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
+            await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
+          }
+          if (emailSubmitted) {
+            emailSync = await require('../customer-email-fanout').propagateCustomerEmailChange(
+              { before: lockedBefore, after: lockedMerged, source: 'Intelligence Bar bulk_update_customers' }, trx,
+            );
+          }
+        });
+      } catch (e) {
+        if (e && e.customerNoLongerLive) {
+          errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+          continue;
+        }
+        if (e && e.churnBlocked) {
+          errors.push({ customer_id: customerId, error: e.message, churn_blocked: true });
+          continue;
+        }
+        if (e && e.code === '23505') {
+          errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
+          continue;
+        }
+        throw e;
       }
-      if (e && e.code === '23505') {
-        errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
-        continue;
+      const { pendingConfirmation: rowPendingConfirmation, heldNewsletterResume: rowHeldNewsletterResume } = emailSync || {};
+      if (rowHeldNewsletterResume) {
+        // Deferred held-newsletter DOI, post-commit — same contract as the
+        // single-row paths (r32: the bulk branch dropped the resume, leaving
+        // corrected customers' newsletter holds parked until stale reclaim).
+        require('../lead-first-touch-resume').resumeHeldNewsletterPostCommit(rowHeldNewsletterResume)
+          .catch((err) => logger.error(`[ib] deferred held-newsletter resume failed (bulk): ${err.code || err.name || 'resume_failed'}`));
       }
-      throw e;
+      if (rowPendingConfirmation) {
+        // Post-commit DOI re-send, exactly as the single-edit path — the
+        // bearer token never rides into the tool result.
+        require('../customer-email-fanout').resendPendingConfirmation(rowPendingConfirmation)
+          .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
+      }
+      if (addressSubmitted) {
+        // lat/lng cleared in-transaction (gh-r46). Collect every guarded
+        // geocode so its coordinate + primary-property commit completes before
+        // one coalesced route-quality refresh. The coordinator below stays
+        // detached from this confirmed write request.
+        addressGeocodes.push(require('../geocoder').regeocodeCustomerAddressGuarded(
+          customerId,
+          { scheduleQualityCustomerIds: geocodedCustomerIds },
+        ).catch(() => null));
+      }
+      if (rowLaneStamp) perRowLaneStampIds.push(customerId);
+      // Reaching here means the per-row transaction committed — a blocked
+      // churnGuardForRow throws churnBlocked above and lands in `errors`
+      // instead. Codex #4715 r4 P2: a railsRepairedOnly row (already churned,
+      // customer-level billing already off) never touched active/
+      // autopay_enabled/next_charge_date this write — counted separately from
+      // a real wind-down.
+      if (clean.pipeline_stage === 'churned') {
+        if (rowRailsRepairedOnly) railsRepairedCount += 1;
+        else churnWoundDownCount += 1;
+      }
+      count += 1;
     }
-    const { pendingConfirmation: rowPendingConfirmation, heldNewsletterResume: rowHeldNewsletterResume } = emailSync || {};
-    if (rowHeldNewsletterResume) {
-      // Deferred held-newsletter DOI, post-commit — same contract as the
-      // single-row paths (r32: the bulk branch dropped the resume, leaving
-      // corrected customers' newsletter holds parked until stale reclaim).
-      require('../lead-first-touch-resume').resumeHeldNewsletterPostCommit(rowHeldNewsletterResume)
-        .catch((err) => logger.error(`[ib] deferred held-newsletter resume failed (bulk): ${err.code || err.name || 'resume_failed'}`));
+  } finally {
+    // A later row can fail after earlier address transactions have committed
+    // and started geocoding. Always drain those starts and refresh their
+    // successful coordinate commits once, without lengthening the confirmed
+    // bulk edit request or racing the coordinate writes.
+    if (addressGeocodes.length) {
+      void Promise.allSettled(addressGeocodes)
+        .then(async () => {
+          if (geocodedCustomerIds.size) {
+            await require('../scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+              customerIds: [...geocodedCustomerIds],
+            });
+          }
+        })
+        .catch((err) => logger.error(`[ib] deferred bulk route-quality refresh failed: ${err.code || err.name || 'refresh_failed'}`));
     }
-    if (rowPendingConfirmation) {
-      // Post-commit DOI re-send, exactly as the single-edit path — the
-      // bearer token never rides into the tool result.
-      require('../customer-email-fanout').resendPendingConfirmation(rowPendingConfirmation)
-        .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
-    }
-    if (addressSubmitted) {
-      // lat/lng cleared in-transaction (gh-r46) — guarded re-geocode also
-      // mirrors the primary property and refreshes route-quality warnings.
-      void require('../geocoder').regeocodeCustomerAddressGuarded(customerId)
-        .catch(() => {});
-    }
-    if (rowLaneStamp) perRowLaneStampIds.push(customerId);
-    // Reaching here means the per-row transaction committed — a blocked
-    // churnGuardForRow throws churnBlocked above and lands in `errors`
-    // instead. Codex #4715 r4 P2: a railsRepairedOnly row (already churned,
-    // customer-level billing already off) never touched active/
-    // autopay_enabled/next_charge_date this write — counted separately from
-    // a real wind-down.
-    if (clean.pipeline_stage === 'churned') {
-      if (rowRailsRepairedOnly) railsRepairedCount += 1;
-      else churnWoundDownCount += 1;
-    }
-    count += 1;
   }
   logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
   notifyBulkLaneStamps(perRowLaneStampIds);

@@ -35,7 +35,14 @@ jest.mock('../services/customer-address-fanout', () => ({
 }));
 jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: jest.fn(() => Promise.resolve({ lat: 27.1, lng: -82.4 })),
-  regeocodeCustomerAddressGuarded: jest.fn(() => Promise.resolve({ lat: 27.1, lng: -82.4 })),
+  regeocodeCustomerAddressGuarded: jest.fn((customerId, { scheduleQualityCustomerIds } = {}) => Promise.resolve()
+    .then(() => {
+      if (scheduleQualityCustomerIds) scheduleQualityCustomerIds.add(customerId);
+      return { lat: 27.1, lng: -82.4 };
+    })),
+}));
+jest.mock('../services/scheduling/quality-after-change', () => ({
+  refreshScheduleQualityAfterChange: jest.fn(() => Promise.resolve()),
 }));
 // Churn billing disarm disclosure (GitHub Codex #4684 r4): churnGuardOrRepair
 // itself (its live-visit/prepay-term/pending-invoice checks and its call
@@ -52,6 +59,7 @@ const db = require('../models/db');
 const customerProperties = require('../services/customer-properties');
 const addressFanout = require('../services/customer-address-fanout');
 const geocoder = require('../services/geocoder');
+const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
 const { churnGuardOrRepair } = require('../services/customer-lifecycle-guard');
 const { executeTool } = require('../services/intelligence-bar/tools');
 
@@ -172,10 +180,86 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
   expect(addressFanout.propagateCustomerAddressChange).toHaveBeenCalledTimes(2);
   // stale coords cleared, re-geocode kicked off for each row
   expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ latitude: null, longitude: null }));
-  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith('cust-a');
-  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith('cust-b');
+  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith(
+    'cust-a',
+    { scheduleQualityCustomerIds: expect.any(Set) },
+  );
+  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith(
+    'cust-b',
+    { scheduleQualityCustomerIds: expect.any(Set) },
+  );
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
   expect(customerProperties.syncPrimaryCoordsFromCustomer).not.toHaveBeenCalled();
+  await new Promise(setImmediate);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: ['cust-a', 'cust-b'] });
+});
+
+test('bulk address geocodes stay detached and refresh route quality once after all settle', async () => {
+  const rowA = { ...baseRow, id: 'cust-a' };
+  const rowB = { ...baseRow, id: 'cust-b' };
+  db.__qb.first
+    .mockResolvedValueOnce(rowA)
+    .mockResolvedValueOnce(rowA)
+    .mockResolvedValueOnce(rowB)
+    .mockResolvedValueOnce(rowB);
+  let resolveA;
+  let resolveB;
+  const pendingA = new Promise((resolve) => { resolveA = resolve; });
+  const pendingB = new Promise((resolve) => { resolveB = resolve; });
+  geocoder.regeocodeCustomerAddressGuarded
+    .mockImplementationOnce((customerId, { scheduleQualityCustomerIds }) => pendingA.then(() => {
+      scheduleQualityCustomerIds.add(customerId);
+      return { lat: 27.1, lng: -82.4 };
+    }))
+    .mockImplementationOnce((customerId, { scheduleQualityCustomerIds }) => pendingB.then(() => {
+      scheduleQualityCustomerIds.add(customerId);
+      return { lat: 27.1, lng: -82.4 };
+    }));
+
+  await expect(executeTool('bulk_update_customers', {
+    customer_ids: ['cust-a', 'cust-b'],
+    updates: { city: 'Parrish' },
+  })).resolves.toMatchObject({ success: true, updated_count: 2 });
+  expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
+
+  resolveA();
+  await new Promise(setImmediate);
+  expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
+  resolveB();
+  await new Promise(setImmediate);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: ['cust-a', 'cust-b'] });
+});
+
+test('a later bulk row failure still flushes route quality for an earlier successful geocode', async () => {
+  const rowA = { ...baseRow, id: 'cust-a' };
+  const rowB = { ...baseRow, id: 'cust-b' };
+  db.__qb.first
+    .mockResolvedValueOnce(rowA)
+    .mockResolvedValueOnce(rowA)
+    .mockResolvedValueOnce(rowB);
+  const laterFailure = new Error('synthetic later-row failure');
+  db.transaction
+    .mockImplementationOnce(async (cb) => cb(db))
+    .mockRejectedValueOnce(laterFailure);
+  let resolveA;
+  const pendingA = new Promise((resolve) => { resolveA = resolve; });
+  geocoder.regeocodeCustomerAddressGuarded.mockImplementationOnce((customerId, { scheduleQualityCustomerIds }) => pendingA.then(() => {
+    scheduleQualityCustomerIds.add(customerId);
+    return { lat: 27.1, lng: -82.4 };
+  }));
+
+  await expect(executeTool('bulk_update_customers', {
+    customer_ids: ['cust-a', 'cust-b'],
+    updates: { city: 'Parrish' },
+  })).resolves.toEqual({ error: laterFailure.message });
+  expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
+
+  resolveA();
+  await new Promise(setImmediate);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: ['cust-a'] });
 });
 
 describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684 r4)', () => {
