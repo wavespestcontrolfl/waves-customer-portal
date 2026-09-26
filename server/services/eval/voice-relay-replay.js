@@ -1881,9 +1881,13 @@ function summarize(results, { judge = false } = {}) {
   // null (not 0) with zero rounds carrying usage — no evidence either way,
   // never read as "no cache hits ever".
   summary.usage.cacheHitRate = summary.usage.rounds ? summary.usage.cacheReadRounds / summary.usage.rounds : null;
-  // Token totals are only complete when no model round was rejected — a
-  // rejected round's spend is real but unreported (a lower bound, not a total).
-  summary.usage.complete = summary.usage.incompleteRounds === 0;
+  // Token totals are only complete when no model round was rejected (its
+  // spend is real but unreported) AND every successful round carried a
+  // usage block — the same rule the benchmark runner applies (Codex
+  // pre-push on #4946), so the standalone eval never reads complete when
+  // the runner would not.
+  summary.usage.missingUsageRounds = Math.max(0, (summary.modelRounds || 0) - summary.usage.rounds);
+  summary.usage.complete = summary.usage.incompleteRounds === 0 && summary.usage.missingUsageRounds === 0;
   return summary;
 }
 
@@ -1902,8 +1906,11 @@ function summaryLine(summary = {}) {
     summary.usage && summary.usage.rounds
       ? `tokens(in=${summary.usage.input_tokens}/out=${summary.usage.output_tokens}/cacheRead=${summary.usage.cached_input_tokens}/cacheWrite=${summary.usage.cache_write_tokens}) cacheHitRate=${summary.usage.cacheHitRate == null ? 'n/a' : `${(summary.usage.cacheHitRate * 100).toFixed(1)}%`} (${summary.usage.rounds} round(s) with usage)`
       : null,
-    summary.usage && summary.usage.incompleteRounds
-      ? `usage INCOMPLETE: ${summary.usage.incompleteRounds} rejected round(s) spent unreported tokens (totals are a lower bound)`
+    summary.usage && !summary.usage.complete && (summary.usage.incompleteRounds || summary.usage.missingUsageRounds)
+      ? `usage INCOMPLETE: ${[
+        summary.usage.incompleteRounds ? `${summary.usage.incompleteRounds} rejected/unparseable round(s)` : null,
+        summary.usage.missingUsageRounds ? `${summary.usage.missingUsageRounds} successful round(s) with no usage block` : null,
+      ].filter(Boolean).join(', ')} (totals are a lower bound)`
       : null,
   ];
   return segments.filter(Boolean).join(' ');

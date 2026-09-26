@@ -138,6 +138,20 @@ describe('voice relay eval — per-round Anthropic usage threading (cache-hit lo
     expect(replay.summarize([result]).usage.complete).toBe(false);
   });
 
+  // Codex pre-push on #4946: successful rounds with no usage block at all make
+  // the standalone eval summary incomplete too (same rule as the runner).
+  test('successful rounds without a usage block mark the eval summary incomplete', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('robocall');
+    script.push(say('This looks like a recording.'), say('Take care.'));
+    const result = await replay.runScenario(scenario);
+    const summary = replay.summarize([result]);
+    expect(summary.modelRounds).toBeGreaterThan(0);
+    expect(summary.usage.missingUsageRounds).toBe(summary.modelRounds);
+    expect(summary.usage.complete).toBe(false);
+    expect(replay.summaryLine(summary)).toMatch(/successful round\(s\) with no usage block/);
+  });
+
   test('a scripted message with no usage block at all (most of this harness\'s own tests) contributes nothing and never divides by zero', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('robocall');
