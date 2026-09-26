@@ -230,10 +230,9 @@ async function followedUpIds(conn, rows) {
 
 // How far back a promise can have been made and still fall due inside the
 // window: the 24-hour window plus the longest span one hour of open office
-// time can take — overnight, a weekend of closures, a holiday run (a 7:30 PM
-// promise before Christmas Eve is not due until the 26th). A week covers any
-// closure run the office calendar has held; selectMissed decides the rest.
-const LOOKBACK_MS = WINDOW_MS + 7 * 24 * 60 * 60 * 1000;
+// time can take — the same 60-day horizon staffedDeadline itself supports,
+// so no closure run the office calendar can hold hides a current miss.
+const LOOKBACK_MS = WINDOW_MS + 60 * 24 * 60 * 60 * 1000;
 
 async function listOpenWaves(now) {
   const all = [];
@@ -302,8 +301,8 @@ function lastScheduledTick(now) {
   return parseETDateTime(`${today}T${String(hour).padStart(2, '0')}:${String(floored).padStart(2, '0')}`);
 }
 
-// Whether the pager is actually working: its last success is no older than
-// its most recent scheduled tick (plus slack for a slow run). The daily
+// Whether the pager is actually working: its latest settled scheduled tick
+// succeeded. The daily
 // watchdog defers to the pager only while this holds — a pager that keeps
 // failing hands its promises straight back.
 async function pagerHealthy(conn, now = new Date()) {
@@ -314,8 +313,10 @@ async function pagerHealthy(conn, now = new Date()) {
   // Judged against the last tick that has had time to FINISH: at 8:00 AM the
   // opening tick is still running (the watchdog fires at the same minute),
   // so it is measured against last night's 8:45 PM tick, not today's.
+  // That tick must itself have succeeded (a success finishes after its tick
+  // starts) — an earlier success never covers a tick that failed or never ran.
   const settled = lastScheduledTick(new Date(now.getTime() - 10 * 60 * 1000));
-  return Number.isFinite(last) && last >= settled.getTime() - 20 * 60 * 1000;
+  return Number.isFinite(last) && last >= settled.getTime();
 }
 
 async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
@@ -385,7 +386,11 @@ async function runInner({ now = new Date() } = {}) {
     .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body');
   const meta = (latest && (typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : latest.metadata)) || {};
   const shown = latest && !meta.emptied ? (meta.missed_commitment_ids || []).map(String) : [];
-  const carried = liveCandidates.filter((r) => (unverified.has(r.call_log_id)) && shown.includes(String(r.id)));
+  // A promise held over this way still drops off when later activity
+  // (booking, connected call, staff text) independently proves follow-up.
+  const heldOver = liveCandidates.filter((r) => unverified.has(r.call_log_id) && shown.includes(String(r.id)));
+  const heldFollowed = await followedUpIds(db, heldOver).catch(() => new Set());
+  const carried = heldOver.filter((r) => !heldFollowed.has(r.id));
   const onList = [...missed, ...carried].sort((a, b) => a.sla_due_at - b.sla_due_at);
   // Publish in ONE transaction that first locks and reloads every listed
   // promise: if staff changed any of them since the scan (a new deadline,
@@ -403,7 +408,7 @@ async function runInner({ now = new Date() } = {}) {
       || stamp(byId.get(String(r.id)).updated_at) !== stamp(r.updated_at)).length;
     // Follow-up evidence lives in other tables (visits, calls, texts) that
     // this lock does not fence: re-check it now, after the lock.
-    if (!changed) changed = (await followedUpIds(trx, missed)).size;
+    if (!changed) changed = (await followedUpIds(trx, onList)).size;
     if (changed) {
       logger.info(`[followup-sla] ${changed} listed promise(s) changed during the tick — list left for the next tick`);
       return;

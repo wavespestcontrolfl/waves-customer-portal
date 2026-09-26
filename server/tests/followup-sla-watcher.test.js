@@ -336,7 +336,7 @@ test('the scan asks only for promises that can fall due inside the window, so a 
   listOpenCommitments.mockResolvedValue([]);
   await runFollowUpSlaWatcher({ now: NOW });
   const { activeSince } = listOpenCommitments.mock.calls[0][1];
-  expect(NOW.getTime() - activeSince.getTime()).toBe((24 + 7 * 24) * 60 * 60 * 1000);
+  expect(NOW.getTime() - activeSince.getTime()).toBe((24 + 60 * 24) * 60 * 60 * 1000);
 });
 
 test('only a booking someone made counts — generated series children (top-up, seeded follow-ups) do not', async () => {
@@ -437,6 +437,9 @@ describe('pagerHealthy — judged against the pager schedule', () => {
   test('a success at or after the latest tick (minus slack) is healthy; an older one, or none, is not', async () => {
     healthAt(et('20:46').toISOString());
     expect(await pagerHealthy(db, et('06:00', '2026-09-27'))).toBe(true);
+    // The 20:45 tick never ran: a 20:30 success does not cover it.
+    healthAt(et('20:31').toISOString());
+    expect(await pagerHealthy(db, et('23:00'))).toBe(false);
     healthAt(et('14:00').toISOString());
     expect(await pagerHealthy(db, et('06:00', '2026-09-27'))).toBe(false);
     healthAt(null);
@@ -480,4 +483,12 @@ test('an in-place rewrite stores admin text emoji-stripped, like a fresh post', 
   listOpenCommitments.mockResolvedValue([row('a', { customer_first_name: 'Test\u{1F41B}' })]);
   await runFollowUpSlaWatcher({ now: NOW });
   expect(updates[0].patch.body).not.toMatch(/\u{1F41B}/u);
+});
+
+test('a held-over promise whose call cannot be verified still drops off when later activity proves follow-up', async () => {
+  mockDb({ standingRow: posted(['b']), activity: { sms_log: true } });
+  listOpenCommitments.mockResolvedValue([row('b', { call_log_id: 'call-b' })]);
+  refreshFulfillment.mockResolvedValue({ failed: 1 });
+  await expect(runFollowUpSlaWatcher({ now: NOW })).rejects.toThrow('verification incomplete');
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
