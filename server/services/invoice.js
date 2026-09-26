@@ -132,10 +132,21 @@ function parseInvoiceLineItems(raw) {
   return [];
 }
 
-async function explicitBillingAppSelected(customerId, category) {
+// Whether a phone-less customer's explicit billing-category selection still
+// has a channel the canonical router can reach without a phone number. App
+// (push) has always qualified. includeEmail additionally admits Email — only
+// for the invoice-send entry point, whose explicit billing Email leg
+// (send-customer-message.js billingEmailLeg / invoice.js
+// billingEmailPreSendCheck) resolves its own recipient from the customer
+// row, never from `to`. The OTHER caller (sendReceipt) stays App-only
+// (includeEmail defaults false, byte-identical): it has no Email leg to
+// route this scenario into.
+async function explicitBillingAppSelected(customerId, category, { includeEmail = false } = {}) {
   if (!customerId) return false;
   const prefs = await db("notification_prefs").where({ customer_id: customerId }).first();
-  return explicitBillingChannels(prefs || {}, category)?.includes("push") === true;
+  const channels = explicitBillingChannels(prefs || {}, category);
+  if (!Array.isArray(channels)) return false;
+  return channels.includes("push") || (includeEmail && channels.includes("email"));
 }
 
 // Fail-closed: does the invoice carry ANY positive charge beyond the covered base
@@ -4959,8 +4970,13 @@ const InvoiceService = {
       .first();
     let canRouteWithoutPhone = false;
     try {
+      // includeEmail: the explicit billing Email leg (below,
+      // billingEmailPreSendCheck) resolves its recipient from the customer
+      // row, exactly like the App leg already did — a phone-less customer
+      // who explicitly selected Email must reach the fan-out too, not throw
+      // here before it ever runs.
       canRouteWithoutPhone = !customer?.phone
-        && await explicitBillingAppSelected(customer?.id, "invoice");
+        && await explicitBillingAppSelected(customer?.id, "invoice", { includeEmail: true });
     } catch (prefsErr) {
       const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
       if (restored) await reverseSmsCreditOnFailure();
@@ -5124,29 +5140,57 @@ const InvoiceService = {
       };
     }
 
+    // The fan-out's per-leg truth (dispatchBillingChannels' channelResults,
+    // keyed 'email'/'push'/'sms'), set once sendResult is known below and
+    // read by finalizeInvoiceAfterSms (both its happy-path call inside the
+    // try block and its retry call in the catch, which has no access to a
+    // try-scoped `const sendResult`). undefined/null means no explicit
+    // billing-channel fan-out ran at all (legacy single-channel SMS path,
+    // or hasEmailLeg's own nested SMS/App-only leg) — that is definitionally
+    // an SMS/App send, matching the byte-identical fallback below.
+    let acceptedChannelResults = null;
     // Post-delivery finalize, extracted so the delivered-SMS recovery in the
     // catch below can retry it once after a transient DB failure.
-    const finalizeInvoiceAfterSms = () => whereSendClaimOwned(
-      db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
-      invoice.send_claim_token,
-    ).update(allowClaimed && hasEmailLeg ? {
-      // The combined owner finalizes only after every selected sidecar has
-      // either started durably or completed. Keep its claim retryable while
-      // recording this accepted Text/App leg so an Email retry skips it.
-      sms_sent_at: new Date(),
-      updated_at: new Date(),
-    } : {
-        status: db.raw(
-          "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
-        ),
-        sent_at: new Date(),
+    const finalizeInvoiceAfterSms = () => {
+      // Stamp each channel's OWN durable delivery evidence (the same
+      // convention invoice-email.js's markEmailDelivered and this same
+      // update already use for sms_sent_at) rather than always recording an
+      // accepted Email-only leg as if it were SMS. Text and App share
+      // sms_sent_at exactly as before (billing-channel-routing.js's fan-out
+      // never gives App its own channelResults.push AND channelResults.sms
+      // both accepted in the same dispatch, so this never double-stamps
+      // for one leg). No fan-out at all (acceptedChannelResults null) is
+      // definitionally the plain SMS path — byte-identical to before.
+      const emailAccepted = acceptedChannelResults?.email?.sent === true;
+      const smsOrAppAccepted = acceptedChannelResults
+        ? (acceptedChannelResults.sms?.sent === true || acceptedChannelResults.push?.sent === true)
+        : true;
+      return whereSendClaimOwned(
+        db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
+        invoice.send_claim_token,
+      ).update(allowClaimed && hasEmailLeg ? {
+        // The combined owner finalizes only after every selected sidecar has
+        // either started durably or completed. Keep its claim retryable while
+        // recording this accepted Text/App leg so an Email retry skips it.
+        // hasEmailLeg always excludes Email from THIS call's own fan-out
+        // (billing-channel-routing.js selectedLegs), so acceptedChannelResults
+        // never carries an accepted email leg here — sms_sent_at is correct.
         sms_sent_at: new Date(),
-        scheduled_send_at: null,
-        scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
-        scheduled_request_review: false,
-        scheduled_review_delay_minutes: null,
         updated_at: new Date(),
-      });
+      } : {
+          status: db.raw(
+            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+          ),
+          sent_at: new Date(),
+          ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
+          ...(emailAccepted ? { email_sent_at: new Date() } : {}),
+          scheduled_send_at: null,
+          scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
+          scheduled_request_review: false,
+          scheduled_review_delay_minutes: null,
+          updated_at: new Date(),
+        });
+    };
     // Keep a direct SMS's episode identity through post-delivery bookkeeping.
     // A retry can finish that work when PostgreSQL committed the finalize but
     // the acknowledgement was lost; a later explicit resend may supersede the
@@ -5275,6 +5319,9 @@ const InvoiceService = {
           }
         },
       });
+      // Available to the catch block's retry call too (declared outside the
+      // try block) — see finalizeInvoiceAfterSms above.
+      acceptedChannelResults = sendResult.channelResults || null;
 
       if (!sendResult.sent) {
         logger.warn(

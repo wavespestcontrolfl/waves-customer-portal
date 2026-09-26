@@ -288,6 +288,159 @@ describe('invoice SMS provider handoff', () => {
     expect(captured.ok).not.toBe(true);
   });
 
+  // Codex round-1 findings on PR #4963. P1: a phone-less customer whose
+  // explicit invoice-channel selection includes Email must reach the
+  // fan-out (the billing Email leg now resolves its own recipient from the
+  // customer row, exactly like the pre-existing App/push leg) instead of
+  // throwing "Customer has no phone number" before sendCustomerMessage is
+  // ever called. P2: the fan-out's per-leg channelResults must stamp
+  // email_sent_at for an accepted Email leg and sms_sent_at only for an
+  // accepted Text/App leg — never sms_sent_at for an Email-only send.
+  describe('Codex #4963 round 1: phone-less Email routing + per-channel delivery stamps', () => {
+    test('a phone-less customer with an explicit Email selection reaches the fan-out instead of throwing', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+        if (table === 'customers') {
+          return query({ first: { id: 'cust-1', first_name: 'Pat', phone: null, email: 'pat@example.invalid' } });
+        }
+        if (table === 'notification_prefs') return query({ first: { customer_id: 'cust-1', invoice_channels: ['email'] } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted',
+        channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } },
+      }));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ to: null });
+    });
+
+    test('a phone-less customer with no explicit billing-channel selection still throws (legacy, unchanged)', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: null } });
+        // No notification_prefs row at all — explicitBillingChannels resolves
+        // null (no explicit selection), the same legacy shape as today.
+        if (table === 'notification_prefs') return query({ first: undefined });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .rejects.toThrow('Customer has no phone number');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a phone-less customer with only App (push) explicitly selected still reaches the fan-out (byte-identical to before)', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: null } });
+        if (table === 'notification_prefs') return query({ first: { customer_id: 'cust-1', invoice_channels: ['push'] } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted',
+        channelResults: { push: { sent: true, deliveryOutcome: 'accepted' } },
+      }));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('an Email-only accepted send stamps email_sent_at, not sms_sent_at', async () => {
+      const invoiceQueries = [];
+      db.mockImplementation((table) => {
+        if (table === 'invoices') {
+          const q = query({ first: invoiceReads.shift() || invoice });
+          invoiceQueries.push(q);
+          return q;
+        }
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted',
+        channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } },
+      }));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+
+      const deliveryStamp = invoiceQueries.flatMap((q) => q.update.mock.calls.map(([change]) => change))
+        .find((change) => change.sent_at);
+      expect(deliveryStamp).toBeTruthy();
+      expect(deliveryStamp).toEqual(expect.objectContaining({ email_sent_at: expect.any(Date) }));
+      expect(deliveryStamp).not.toHaveProperty('sms_sent_at');
+    });
+
+    test('an Email+Text accepted send stamps both email_sent_at and sms_sent_at', async () => {
+      const invoiceQueries = [];
+      db.mockImplementation((table) => {
+        if (table === 'invoices') {
+          const q = query({ first: invoiceReads.shift() || invoice });
+          invoiceQueries.push(q);
+          return q;
+        }
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: true, deliveryOutcome: 'accepted' },
+        },
+      }));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+
+      const deliveryStamp = invoiceQueries.flatMap((q) => q.update.mock.calls.map(([change]) => change))
+        .find((change) => change.sent_at);
+      expect(deliveryStamp).toEqual(expect.objectContaining({
+        email_sent_at: expect.any(Date), sms_sent_at: expect.any(Date),
+      }));
+    });
+
+    test('an SMS-only accepted send stays byte-identical: stamps sms_sent_at, not email_sent_at', async () => {
+      const invoiceQueries = [];
+      db.mockImplementation((table) => {
+        if (table === 'invoices') {
+          const q = query({ first: invoiceReads.shift() || invoice });
+          invoiceQueries.push(q);
+          return q;
+        }
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+      withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+
+      const deliveryStamp = invoiceQueries.flatMap((q) => q.update.mock.calls.map(([change]) => change))
+        .find((change) => change.sent_at);
+      expect(deliveryStamp).toEqual(expect.objectContaining({ sms_sent_at: expect.any(Date) }));
+      expect(deliveryStamp).not.toHaveProperty('email_sent_at');
+    });
+  });
+
   test('blocks the provider handoff when the linked visit was cancelled during preparation', async () => {
     const cancelled = { ...invoice, scheduled_service_id: 'svc-cancelled' };
     invoiceReads = [cancelled, cancelled, cancelled];
