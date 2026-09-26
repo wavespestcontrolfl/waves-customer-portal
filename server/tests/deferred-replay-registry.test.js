@@ -575,6 +575,87 @@ describe('deferred-replay registry', () => {
     });
   });
 
+  test.each([
+    [{ status: 'paid' }, true],
+    [{ status: 'refunded' }, false],
+    [{ status: 'disputed' }, false],
+    [{ status: 'canceled' }, false],
+    [{ status: 'failed' }, false],
+    [null, false],
+  ])('billing receipt replay checks the payment is still paid: %j', async (payment, eligible) => {
+    const q = firstChain(payment);
+    db.mockReturnValueOnce(q);
+    if (eligible) db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toMatchObject({ eligible });
+    expect(q.where).toHaveBeenCalledWith({ id: 'pay-1', customer_id: 'cust-1' });
+  });
+
+  test.each([
+    ['a partial refund amount', { status: 'paid', refund_amount: '12.50' }],
+    ['a pending refund', { status: 'paid', refund_amount: 0, refund_status: 'pending' }],
+    ['a succeeded refund', { status: 'paid', refund_amount: null, refund_status: 'succeeded' }],
+  ])('billing receipt replay suppresses after %s on a still-paid payment', async (_label, payment) => {
+    db.mockReturnValueOnce(firstChain(payment));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: false, reason: 'payment-refunded' });
+  });
+
+  test.each([
+    ['never refunded (NULL refund columns)', { status: 'paid', refund_amount: null, refund_status: null }],
+    ['a failed refund that returned nothing', { status: 'paid', refund_amount: 0, refund_status: 'failed' }],
+    ['a canceled refund', { status: 'paid', refund_amount: '0.00', refund_status: 'canceled' }],
+  ])('billing receipt replay stays eligible when %s', async (_label, payment) => {
+    db.mockReturnValueOnce(firstChain(payment));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1', deleted_at: null }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: true });
+  });
+
+  test.each([
+    ['an object', { pending_refund_key: 'refund_pay-1_0' }],
+    ['a JSON string', JSON.stringify({ pending_refund_key: 'refund_pay-1_0' })],
+  ])('billing receipt replay holds for retry while a refund is unresolved (metadata as %s)', async (_label, metadata) => {
+    db.mockReturnValueOnce(firstChain({ status: 'paid', refund_amount: null, refund_status: null, metadata }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: false, reason: 'refund-unresolved', retryable: true });
+  });
+
+  test('billing receipt replay holds for retry when payment metadata is unreadable', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'paid', refund_amount: null, refund_status: null, metadata: '{not json' }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: false, reason: 'refund-state-unreadable', retryable: true });
+  });
+
+  test('billing receipt replay suppresses for a deleted customer', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'paid' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1', deleted_at: new Date() }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: false, reason: 'customer-unavailable' });
+  });
+
+  test('billing receipt replay retains its retry on a database outage', async () => {
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toMatchObject({ eligible: false, retryable: true });
+  });
+
+  test('billing_receipt_deferred replays without a phone and dispatches through the default sender', async () => {
+    const { dispatchDeferredReplay, replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
+    expect(replaysWithoutPhone('billing_receipt_deferred')).toBe(true);
+    const fallback = jest.fn(async () => ({ sent: true }));
+    await expect(dispatchDeferredReplay('billing_receipt_deferred', { requires_registered_dispatch: true }, fallback))
+      .resolves.toEqual({ sent: true });
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
   test('unregistered entry points are inert', async () => {
     expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
     expect(await finalizeDeferredReplay('some_future_unregistered_deferred', {}, {})).toBeNull();

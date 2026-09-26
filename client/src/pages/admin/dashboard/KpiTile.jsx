@@ -6,7 +6,8 @@ import {
   KpiRing,
   Sparkline,
 } from "../../../components/dashboard/charts";
-import { kpiTargetTone, resolveTargetDef } from "./kpi-targets";
+import { kpiTargetTone } from "@kpi-targets";
+import { resolveTargetDef } from "./kpi-targets";
 
 // Below this sample size a rate is noise, not signal — fade the tile and say
 // so. Mirrors capital-allocation's MIN_CONFIDENT_CUSTOMERS small-N fade.
