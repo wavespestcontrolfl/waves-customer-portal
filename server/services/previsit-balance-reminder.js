@@ -34,6 +34,8 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
+const { explicitBillingChannels } = require('./billing-delivery-channels');
+const { sendReminderChannels } = require('./billing-reminder-delivery');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
 const EMAIL_TEMPLATE_KEY = 'billing.previsit_balance';
@@ -328,6 +330,105 @@ async function runSweep({ now = new Date() } = {}) {
         .whereNull('balance_reminder_sent_at')
         .update({ balance_reminder_sent_at: new Date() });
       if (!claimed) { skipped++; continue; }
+
+      // Explicit per-channel billing delivery choice (PR #4843 router core).
+      // A stored choice is enforced whether or not GATE_BILLING_NOTIFICATION_
+      // CHANNELS is live (same read-side contract as balance-reminder.js's
+      // latePaymentCheck) — a lookup failure degrades to null (no explicit
+      // choice), which is the exact same path as "never set one".
+      let notifPrefs = null;
+      try {
+        notifPrefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
+      } catch (prefsErr) {
+        logger.warn(`[previsit-balance] notification_prefs lookup failed for customer ${visit.customer_id}: ${prefsErr.message}`);
+      }
+      const explicitChannels = explicitBillingChannels(notifPrefs || {}, 'billing');
+
+      if (explicitChannels !== null) {
+        // One episode per appointment (stable across a released-claim
+        // retry): the key is deterministic from the visit alone, so a rerun
+        // under the SAME eventKey resumes the same reservation set instead
+        // of opening a new one (billing-reminder-delivery.js's
+        // reminderProgress finds it by customer_id + source + this key).
+        const eventKey = `previsit-balance:${visit.id}`;
+        const result = await sendReminderChannels({
+          customerId: visit.customer_id,
+          invoiceId: null, // aggregate balance rail, no single target invoice (rail-guard.js)
+          source: 'previsit_balance_reminder',
+          purpose: 'balance_reminder',
+          eventKey,
+          channels: explicitChannels,
+          metadata: { scheduled_service_id: visit.id, amount },
+          send: async (channel, ledger) => {
+            if (channel === 'email') {
+              const AccountMembershipEmail = require('./account-membership-email');
+              return AccountMembershipEmail.sendPrevisitBalanceReminder({
+                customerId: visit.customer_id,
+                amount: `$${amount.toFixed(2)}`,
+                serviceType: visit.service_type || 'service',
+                visitDate: friendlyVisitDate(visit.scheduled_date),
+                billingUrl: BILLING_PORTAL_URL,
+                idempotencyKey: `${EMAIL_TEMPLATE_KEY}:${visit.id}`,
+              });
+            }
+            const body = await renderSmsTemplate(TEMPLATE_KEY, {
+              first_name: visit.first_name || 'there',
+              amount: amount.toFixed(2),
+              service_type: visit.service_type || 'service',
+              visit_date: friendlyVisitDate(visit.scheduled_date),
+              billing_url: BILLING_PORTAL_URL,
+            });
+            if (!body) {
+              return {
+                sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_UNAVAILABLE',
+                reason: 'template rendered empty (inactive or missing)',
+              };
+            }
+            return sendCustomerMessage({
+              to: visit.phone,
+              body,
+              channel,
+              audience: 'customer',
+              purpose: 'billing',
+              customerId: visit.customer_id,
+              entryPoint: 'previsit_balance_reminder',
+              // Explicit routing already decided the channel set — never the
+              // legacy hasEmailLeg suppression heuristic (balance-reminder.js's
+              // sendExplicitLatePaymentReminder contract).
+              hasEmailLeg: true,
+              metadata: {
+                original_message_type: 'balance_reminder',
+                billingDeliveryCategory: 'billing',
+                notificationEventKey: eventKey,
+                billingDeliveryLeg: channel,
+                scheduled_service_id: visit.id,
+                amount,
+                ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
+                ...(channel === 'push' ? { appOnly: true } : {}),
+              },
+            });
+          },
+        });
+        // A delivered leg landed: count it sent and keep the claim (a
+        // sibling leg may still be pending/held — sendReminderChannels
+        // tracks that per channel, never inferred from this one outcome).
+        if (result.deliveredNow.length) { sent++; continue; }
+        // Nothing delivered. Only release the claim while the episode is
+        // still open (a replay hold, an uncertain outcome, or a transient
+        // policy/provider denial) so the NEXT sweep retries the same
+        // pending leg(s) under the same eventKey. A COMPLETE episode with
+        // nothing delivered means every leg resolved terminally (e.g. no
+        // email address, Email not selected) — that is settled, not a
+        // reason to keep churning the claim daily forever.
+        if (!result.complete) {
+          await db('scheduled_services')
+            .where({ id: visit.id })
+            .update({ balance_reminder_sent_at: null })
+            .catch(() => {});
+        }
+        skipped++;
+        continue;
+      }
 
       // The email sidecar routes through billing prefs + the billing
       // recipient (Codex r10 P1). Declare the email leg to the SMS channel
