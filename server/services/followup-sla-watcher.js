@@ -147,8 +147,8 @@ function contactPhone(row) {
 // Where evidence may start: after the promise's call ENDED (promisedAt) —
 // a text sent mid-call is not a follow-up. Pager rows are untouched, so no
 // staff renewal can move this boundary.
-// Which of these promises show follow-up the proof does not model, in
-// three queries however many rows (the check also runs under the publishing
+// Which of these promises show follow-up the proof does not close on its
+// own, in four queries however many rows (the check also runs under the publishing
 // lock): a booking someone made, a call that reached the customer, or a text
 // a staff member typed. Evidence counts only after the promise's call ENDED
 // (promisedAt) and is matched by customer — or, for a caller with no
@@ -197,6 +197,16 @@ async function followedUpIds(conn, rows) {
     .where('message_type', 'manual').whereNotNull('admin_user_id')
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .select('customer_id', 'to_phone', 'created_at');
+  // A quote delivered to the customer rather than linked to this call: the
+  // canonical proof records it as an association hint on the promise
+  // (fulfillment kind estimate_sent, status still open) — its ownership rules
+  // (customer FK, lead mirror, caller phone) are the Owed queue's own.
+  const quoteIds = scoped.filter((x) => x.r.kind === 'send_estimate').map((x) => x.r.id);
+  const hints = quoteIds.length ? await conn('call_commitments').whereIn('id', quoteIds).select('id', 'fulfillment') : [];
+  for (const h of hints) {
+    const f = typeof h.fulfillment === 'string' ? JSON.parse(h.fulfillment) : h.fulfillment;
+    if (f?.kind === 'estimate_sent') done.add(h.id);
+  }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
     : !rec.customer_id && phoneKey(rec.to_phone) === phoneKey(x.phone));
@@ -289,7 +299,11 @@ function lastScheduledTick(now) {
 async function pagerHealthy(conn, now = new Date()) {
   const row = await conn('job_health').where({ job_name: 'followup-sla-watcher' }).first('last_success_at');
   const last = row?.last_success_at ? new Date(row.last_success_at).getTime() : NaN;
-  return Number.isFinite(last) && last >= lastScheduledTick(now).getTime() - 20 * 60 * 1000;
+  // Judged against the last tick that has had time to FINISH: at 8:00 AM the
+  // opening tick is still running (the watchdog fires at the same minute),
+  // so it is measured against last night's 8:45 PM tick, not today's.
+  const settled = lastScheduledTick(new Date(now.getTime() - 10 * 60 * 1000));
+  return Number.isFinite(last) && last >= settled.getTime() - 20 * 60 * 1000;
 }
 
 // The takeover sweep's scope: promises that aged off the pager's list within
@@ -379,18 +393,16 @@ async function runInner({ now = new Date() } = {}) {
     // The same transaction posts the new list and retires the old posts, so
     // the single rolling alert never splits into two unread copies.
     await db.transaction(async (trx) => {
-      const locked = missed.length
-        ? await trx('call_commitments').whereIn('id', missed.map((r) => r.id)).forUpdate().select('id', 'status', 'human_state', 'updated_at')
-        : [];
+      // Every staff action on a promise (dismiss, snooze, edit, close) moves
+      // its updated_at, so a status + updated_at comparison catches them all.
+      const locked = await trx('call_commitments').whereIn('id', missed.map((r) => r.id)).forUpdate().select('id', 'status', 'updated_at');
       const byId = new Map(locked.map((f) => [String(f.id), f]));
-      const stamp = (v) => (v ? new Date(v).getTime() : null);
-      changed = missed.filter((r) => {
-        const f = byId.get(String(r.id));
-        return !f || f.status !== 'open' || f.human_state === 'dismissed' || stamp(f.updated_at) !== stamp(r.updated_at);
-      }).length;
+      const stamp = (v) => new Date(v || 0).getTime();
+      changed = missed.filter((r) => byId.get(String(r.id))?.status !== 'open'
+        || stamp(byId.get(String(r.id)).updated_at) !== stamp(r.updated_at)).length;
       // Follow-up evidence lives in other tables (visits, calls, texts) that
       // this lock does not fence: re-check it now, after the lock.
-      if (!changed && missed.length) changed = (await followedUpIds(trx, missed)).size;
+      if (!changed) changed = (await followedUpIds(trx, missed)).size;
       if (changed) {
         logger.info(`[followup-sla] ${changed} listed promise(s) changed during the tick — list left for the next tick`);
         return;
@@ -404,28 +416,30 @@ async function runInner({ now = new Date() } = {}) {
       const fresh = ids.filter((id) => !shown.includes(id));
       const title = `${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`;
       const body = `Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${missed.map((r) => `• ${describe(r)}`).join('\n')}`;
-      if (!ids.length) {
-        if (latest && !meta.emptied) {
-          await trx('notifications').where({ id: latest.id })
-            .update({ read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) });
-        }
-      } else if (fresh.length) {
+      if (fresh.length) {
         const key = `${ROLLING_KEY}:${now.toISOString()}`;
         const notif = await NotificationService.notifyAdmin('alert', title, body, {
           link: '/admin/communications#tab=owed', dedupeKey: key, bell: true, trx,
           metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
         });
-        if (!(notif && notif.id && !notif.suppressed)) return;
+        if (!notif?.id || notif.suppressed) return;
         await trx('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
           .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
           .whereRaw("metadata->>'dedupeKey' <> ?", [key]).update({ read_at: now });
         alerted = fresh.length;
-      } else if (ids.length !== shown.length || latest.title !== title || latest.body !== body) {
-        // Items dropped off, or a listed promise's details changed (a
-        // reprocessed call): rewrite in place, read state kept.
-        await trx('notifications').where({ id: latest.id })
-          .update({ title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) });
+        return;
       }
+      // No new miss: keep the standing post true without re-ringing it —
+      // emptied → read and flagged (a returning miss posts fresh); fewer
+      // items or changed details → rewritten in place, read state kept.
+      if (!shown.length) return;
+      const patch = ids.length
+        ? { title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
+        : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
+      // Same items, same words: nothing to write (an emptied patch carries no
+      // title, so it never matches).
+      if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length) return;
+      await trx('notifications').where({ id: latest.id }).update(patch);
     });
   }
   return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: missed.length, alerted, changed, unverified: unverified.size };

@@ -83,7 +83,7 @@ describe('selectMissed', () => {
 // { table, calls: [[method, ...args]] } so a test can assert what was asked,
 // and `first`/`select`/`update` answer from the scenario given to mockDb.
 let log = [];
-function mockDb({ activity = {}, call = null, standingRow = null, settled = [], lockedStamp = {} } = {}) {
+function mockDb({ activity = {}, call = null, standingRow = null, settled = [], lockedStamp = {}, hints = {} } = {}) {
   log = [];
   const updates = [];
   db.raw = (sql) => sql;
@@ -120,6 +120,10 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
         const phones = entry.calls.filter(([m, sql]) => m === 'whereRaw' && /right\(regexp_replace/.test(sql)).flatMap(([, , v]) => v);
         return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z' })),
           ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z' }))];
+      }
+      if (table === 'call_commitments' && cols.includes('fulfillment')) {
+        const ids = entry.calls.filter(([m]) => m === 'whereIn').flatMap(([, , v]) => v);
+        return ids.filter((id) => hints[id]).map((id) => ({ id, fulfillment: hints[id] }));
       }
       if (table === 'call_commitments') {
         const ids = argsOf('call_commitments', 'whereIn').flatMap(([, v]) => v);
@@ -440,4 +444,17 @@ test('takeoverIds: only promises that aged off the list within the last hour', a
     row('longGone', { call_started_at: et('09:00', '2026-09-25').toISOString() }), // due 10:00 yesterday
   ], NOW);
   expect([...owned]).toEqual(['justAged']);
+});
+
+test('a quote delivered to the customer (the proof\'s association hint) counts as follow-up', async () => {
+  mockDb({ hints: { q: JSON.stringify({ kind: 'estimate_sent', strength: 'association' }) } });
+  listOpenCommitments.mockResolvedValue([row('q', { kind: 'send_estimate', call_started_at: et('13:00').toISOString() })]);
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('at the 8:00 AM opening tick the pager is judged against last night\'s 8:45 PM run, not the run still in progress', async () => {
+  db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => ({ last_success_at: et('20:46', '2026-09-26').toISOString() }); return q; });
+  expect(await pagerHealthy(db, et('08:00', '2026-09-27'))).toBe(true);
+  expect(await pagerHealthy(db, et('08:05', '2026-09-27'))).toBe(true);
 });
