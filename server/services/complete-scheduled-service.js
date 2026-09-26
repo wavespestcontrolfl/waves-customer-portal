@@ -11167,11 +11167,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const held = lookupFailed
         ? 'This visit\'s add-ons could not be checked against its invoice'
         : 'This visit\'s add-ons need the office\'s attention and the office alert could not be recorded';
+      const heldError = released
+        ? `${held} — the closeout is saved but NOT finalized. Retry the closeout.`
+        : `${held} — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`;
+      // Literal codes: the admin client resumes every committed-but-not-
+      // finalized 503 by code (COMPLETION_RESUME_OWED_CODES), and its
+      // contract test reads each code off these objects.
+      if (lookupFailed) {
+        return ({ status: 503, body: {
+          error: heldError,
+          code: 'annual_prepay_addons_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
       return ({ status: 503, body: {
-        error: released
-          ? `${held} — the closeout is saved but NOT finalized. Retry the closeout.`
-          : `${held} — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
-        code: lookupFailed ? 'annual_prepay_addons_lookup_failed' : 'annual_prepay_addons_alert_failed',
+        error: heldError,
+        code: 'annual_prepay_addons_alert_failed',
         ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
         serviceRecordId: record.id,
       } });

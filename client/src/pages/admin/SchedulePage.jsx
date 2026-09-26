@@ -1223,6 +1223,8 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "unminted_setup_fee_lookup_failed",
   "terminal_invoice_manual_billing_alert_failed",
   "unminted_setup_fee_alert_failed",
+  "annual_prepay_addons_alert_failed",   // annual-prepay add-ons office alert not recorded
+  "annual_prepay_addons_lookup_failed",  // annual-prepay add-ons unreadable against the visit's invoice
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
