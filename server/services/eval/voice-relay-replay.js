@@ -87,6 +87,7 @@ const CHECKS = Object.freeze([
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes', 'tool_input_includes',
   'end_session_called', 'no_model_text_before_tool',
   'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of', 'tools_called_at_most',
+  'tool_not_called_before_turn',
   // The named spoken-content checks (voice-relay-spoken-checks): one
   // implementation per prohibition, shared by every scenario that carries it.
   ...Object.keys(SPOKEN_CHECK_RUNNERS),
@@ -322,15 +323,28 @@ const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
-// A regex list, or the same list graded from a caller turn onward —
+// A regex list, or the same list graded over a caller-turn window —
 // { patterns: [...], fromTurn: 2 } skips what Sandy said before the caller's
-// second turn: a barge-in correction supersedes the read-back it cut.
+// second turn (a barge-in correction supersedes the read-back it cut);
+// { patterns: [...], toTurn: 3 } stops after the caller's third turn;
+// fromTurn and toTurn may combine into a range. { patterns: [...], onTurn: 2 }
+// scopes to EXACTLY that one caller turn (e.g. grading only the reply to a
+// backchannel that must not derail the intake) and cannot combine with
+// fromTurn/toTurn.
 const regexList = (v) => {
   if (Array.isArray(v)) return regexPatterns(v);
-  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn: <caller turn> }';
-  const unknown = Object.keys(v).find((k) => k !== 'patterns' && k !== 'fromTurn');
-  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn)`;
-  if (!Number.isInteger(v.fromTurn) || v.fromTurn < 1) return 'fromTurn must be a caller turn number (1 is the first)';
+  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn?, toTurn?, onTurn? }';
+  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'toTurn', 'onTurn'].includes(k));
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, toTurn, onTurn)`;
+  if (v.onTurn != null) {
+    if (v.fromTurn != null || v.toTurn != null) return 'onTurn cannot combine with fromTurn or toTurn';
+    if (!Number.isInteger(v.onTurn) || v.onTurn < 1) return 'onTurn must be a caller turn number (1 is the first)';
+  } else {
+    if (v.fromTurn == null && v.toTurn == null) return 'value must set fromTurn, toTurn, or onTurn';
+    if (v.fromTurn != null && (!Number.isInteger(v.fromTurn) || v.fromTurn < 1)) return 'fromTurn must be a caller turn number (1 is the first)';
+    if (v.toTurn != null && (!Number.isInteger(v.toTurn) || v.toTurn < 1)) return 'toTurn must be a caller turn number (1 is the first)';
+    if (v.fromTurn != null && v.toTurn != null && v.toTurn < v.fromTurn) return 'toTurn must be >= fromTurn';
+  }
   return regexPatterns(v.patterns);
 };
 const CHECK_VALUE_RULES = Object.freeze({
@@ -363,6 +377,20 @@ const CHECK_VALUE_RULES = Object.freeze({
     if (unknown) return `unknown tool "${unknown}"`;
     const bad = Object.entries(v).find(([, n]) => !Number.isInteger(n) || n < 0);
     return bad ? `${bad[0]}: max calls must be a non-negative integer` : null;
+  },
+  // A turn-scoped prohibition: `tool` must never be CALLED (any attempt,
+  // rejected or not — an early guess is the violation even if the fixture
+  // refused it) before caller turn `turn`. The sibling of
+  // `tools_called_at_most`'s per-scenario ceiling: a cap alone cannot say
+  // WHICH call was premature, only that too many happened.
+  tool_not_called_before_turn: (knownTools) => (v) => {
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn> }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'turn'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, turn)`;
+    if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
+    if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
+    if (!Number.isInteger(v.turn) || v.turn < 1) return 'turn must be a caller turn number (1 is the first)';
+    return null;
   },
   ...SPOKEN_CHECK_VALUE_RULES,
 });
@@ -1275,6 +1303,15 @@ const CHECK_RUNNERS = Object.freeze({
     const over = Object.entries(value).map(([n, max]) => [n, calledNames.filter((c) => c === n).length, max]).filter(([, count, max]) => count > max);
     return over.length ? ['fail', over.map(([n, count, max]) => `${n} called ${count}× (max ${max})`).join(', ')] : ['pass', Object.entries(value).map(([n, max]) => `${n} ≤ ${max}`).join(', ')];
   },
+  // Every CALL counts, not just a validly-answered one: an early guess at
+  // `tool` is the violation this check exists to catch even when the
+  // fixture rejected it for missing/invalid arguments.
+  tool_not_called_before_turn(value, record) {
+    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn);
+    return early.length
+      ? ['fail', `${value.tool} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
+      : ['pass', `${value.tool} never called before caller turn ${value.turn}`];
+  },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
   tools_performed_include(value, record, { performedNames }) {
@@ -1360,10 +1397,19 @@ const CHECK_RUNNERS = Object.freeze({
 });
 
 // The patterns and the speech they grade: every utterance, or — for
-// { patterns, fromTurn } — only what Sandy said from that caller turn on.
+// { patterns, fromTurn, toTurn, onTurn } — only what Sandy said in that
+// caller-turn window (onTurn is an exact single turn; fromTurn/toTurn are an
+// inclusive range, either end optional).
 function spokenScope(value, { spoken, utterances }) {
   if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
-  return { sources: value.patterns, spoken: utterances.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}` };
+  const { fromTurn, toTurn, onTurn } = value;
+  if (onTurn != null) {
+    return { sources: value.patterns, spoken: utterances.filter((u) => u.turn === onTurn).map((u) => u.text), scope: ` on caller turn ${onTurn}` };
+  }
+  const filtered = utterances.filter((u) => (fromTurn == null || u.turn >= fromTurn) && (toTurn == null || u.turn <= toTurn));
+  const scope = fromTurn != null && toTurn != null ? ` from caller turn ${fromTurn} to ${toTurn}`
+    : fromTurn != null ? ` from caller turn ${fromTurn}` : ` through caller turn ${toTurn}`;
+  return { sources: value.patterns, spoken: filtered.map((u) => u.text), scope };
 }
 
 function firstRegexHit(sources, spoken) {

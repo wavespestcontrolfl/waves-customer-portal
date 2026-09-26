@@ -44,6 +44,12 @@ const fs = require('fs');
 const SCRIPT_PATH = path.join(__dirname, 'run-voice-relay-eval.js');
 const DEFAULT_TRIALS = 3;
 const CHILD_TIMEOUT_MS = 60 * 60 * 1000; // one hour per trial — generous; the eval's own child ceiling is 8h for the whole fixture
+// The full set of flags this runner understands (see the file header's
+// usage examples). An unrecognized flag — a typo like --onyl or --trail — is
+// a usage error caught here, before any child process runs, rather than
+// silently doing nothing (parseArgs accepts any --key=value) or running the
+// wrong condition set for hours before anyone notices the typo.
+const SUPPORTED_OPTIONS = new Set(['candidate-model', 'trials', 'only', 'judge', 'out']);
 
 function parseArgs(argv) {
   return Object.fromEntries(
@@ -72,20 +78,39 @@ function buildConditions(candidateModel) {
   ];
 }
 
+// A Williams (balanced Latin square) design for exactly 4 conditions: these
+// 4 orders (as index permutations of the natural buildConditions() order)
+// give every ordered pair of DISTINCT conditions exactly one immediate
+// adjacency across the 4 orders — first-order carryover balance, not just
+// "every condition gets every slot once" (a plain cyclic rotation keeps
+// each condition's neighbor fixed across trials — current-stream always
+// follows current-block — which a Latin square does not fix). Trial counts
+// that are not a multiple of 4 leave a residual imbalance — see
+// docs/sandy-benchmark.md "Interleaving, rotation, and why there is no
+// cold/warm label" for the recommendation to run multiples of 4.
+const WILLIAMS_ORDER_INDEXES = Object.freeze([
+  [0, 1, 3, 2],
+  [1, 2, 0, 3],
+  [2, 3, 1, 0],
+  [3, 0, 2, 1],
+]);
+
 /**
- * Latin-square-style rotation of the condition list by trial index: trial 0
- * runs them in their natural order, trial 1 starts from the second
- * condition and wraps, and so on — every condition gets every "slot"
- * (including first) across enough trials, so no one condition systematically
- * absorbs whatever a fixed first-run slot costs (e.g. any provider-side
- * warm-up). The set of conditions run in a trial is unchanged; only their
- * order is.
+ * Reorders the condition list by trial index using the Williams design
+ * above (cycling every 4 trials): the SET of conditions run in a trial is
+ * unchanged, only their order. Falls back to a plain cyclic rotation for any
+ * condition count other than 4 — buildConditions() always returns exactly 4,
+ * so this branch is defensive only, never exercised today.
  */
 function rotateConditions(conditions, trial) {
   const n = conditions.length;
   if (!n) return conditions;
-  const offset = ((trial % n) + n) % n;
-  return [...conditions.slice(offset), ...conditions.slice(0, offset)];
+  if (n !== 4) {
+    const offset = ((trial % n) + n) % n;
+    return [...conditions.slice(offset), ...conditions.slice(0, offset)];
+  }
+  const order = WILLIAMS_ORDER_INDEXES[((trial % 4) + 4) % 4];
+  return order.map((i) => conditions[i]);
 }
 
 /**
@@ -187,7 +212,16 @@ function percentile(sorted, p) {
 }
 
 function summarizeCondition(id, runs) {
-  const completed = runs.filter((r) => r.ranOk);
+  const ranOk = runs.filter((r) => r.ranOk);
+  // A model-mismatch run (see runOnce's modelMismatch / checkModelStamp) is
+  // missing data, not a clean pass: its resolved session silently ran a
+  // DIFFERENT model than the candidate condition requested, so none of its
+  // numbers — latency, judge counts, scenario totals — are evidence about
+  // the model actually asked for. Excluded from `completed` (and so from
+  // every aggregate below) and from `completedRuns`; counted separately as
+  // `modelMismatchRuns`, same as a crash or an inconclusive run.
+  const completed = ranOk.filter((r) => r.modelMismatch !== true);
+  const modelMismatchRuns = ranOk.filter((r) => r.modelMismatch === true).length;
   const inconclusiveRuns = runs.filter((r) => r.inconclusive);
   const crashedRuns = runs.filter((r) => !r.ranOk && !r.inconclusive);
   const durations = completed.map((r) => r.result.summary?.durationMs).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
@@ -206,11 +240,6 @@ function summarizeCondition(id, runs) {
   const sumAttempts = (key) => attemptSummaries.reduce((n, s) => n + (s[key] || 0), 0);
   const retriedRuns = completed.filter((r) => (r.result.attempts || []).length > 1).length;
   const flakyRuns = completed.filter((r) => r.result.flaky === true).length;
-  // A candidate run whose resolved session model didn't match what was
-  // requested (see runOnce's modelMismatch) — never rolled into
-  // completedRuns/crashedRuns; a benchmark that silently re-ran the current
-  // model under the "candidate" label is missing data, not a clean pass.
-  const modelMismatchRuns = completed.filter((r) => r.modelMismatch === true).length;
   // Every attempt's summary carries `judged` / `judgeFallbacks` / `judgeErrors`
   // (voice-relay-replay.js's `summarize()` output, unstripped by
   // `compactAttempt` — see call site), so these three sum cleanly across every
@@ -223,6 +252,16 @@ function summarizeCondition(id, runs) {
   const judgedCount = sumAttempts('judged');
   const judgeFallbackCount = sumAttempts('judgeFallbacks');
   const judgeErrorCount = sumAttempts('judgeErrors');
+  // The same final-attempt population judgePassCountFinalAttemptOnly draws
+  // its numerator from (a result with `judge.ok` and a verdict at all — pass
+  // or fail), so a naturalness RATE can be computed as
+  // judgePassCountFinalAttemptOnly / judgedCountFinalAttemptOnly without
+  // mixing it with the attempt-summed judgedCount above, which is a
+  // different, larger sample (every attempt, not just the final one).
+  const judgedCountFinalAttemptOnly = completed.reduce(
+    (n, r) => n + (r.result.results || []).filter((s) => s && s.judge && s.judge.ok === true && s.judge.verdict).length,
+    0,
+  );
   const judgePassCountFinalAttemptOnly = completed.reduce(
     (n, r) => n + (r.result.results || []).filter((s) => s && s.judge && s.judge.ok && s.judge.verdict && s.judge.verdict.pass === true).length,
     0,
@@ -255,9 +294,6 @@ function summarizeCondition(id, runs) {
     // scenarioAttemptSamples below for the true per-scenario denominator.
     attemptCount: attemptSummaries.length,
     scenarioAttemptSamples,
-    // Kept identical to scenarioAttemptSamples, same value, for anything
-    // still reading the pre-existing name.
-    scenarioSamples: scenarioAttemptSamples,
     scenarioPasses: sumAttempts('passed'),
     scenarioFailures: sumAttempts('failed'),
     replayErrors: sumAttempts('replayErrors'),
@@ -265,6 +301,7 @@ function summarizeCondition(id, runs) {
     judgedCount,
     judgeFallbackCount,
     judgeErrorCount,
+    judgedCountFinalAttemptOnly,
     judgePassCountFinalAttemptOnly,
     // durationMs here is the TEXT-REPLAY harness's own end-to-end wall clock
     // for the SELECTED final attempt only (real Anthropic API calls, no
@@ -284,6 +321,13 @@ function summarizeCondition(id, runs) {
  */
 async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execFile, scriptPath = SCRIPT_PATH, timeoutMs = CHILD_TIMEOUT_MS, log = () => {} } = {}) {
   const ARGS = parseArgs(argv);
+  const unknownOptions = Object.keys(ARGS).filter((k) => !SUPPORTED_OPTIONS.has(k));
+  if (unknownOptions.length) {
+    throw new Error(
+      `unknown option${unknownOptions.length > 1 ? 's' : ''}: ${unknownOptions.map((k) => `--${k}`).join(', ')} `
+      + `(supported: ${[...SUPPORTED_OPTIONS].map((k) => `--${k}`).join(', ')})`,
+    );
+  }
   if (!ARGS['candidate-model'] || ARGS['candidate-model'] === true) {
     throw new Error(
       "--candidate-model is required (e.g. --candidate-model=claude-haiku-4-5-20251001). "
@@ -385,7 +429,7 @@ if (require.main === module) {
         condition: c.condition, trials: c.trials, completed: c.completedRuns,
         inconclusive: c.inconclusiveRuns, crashed: c.crashedRuns, modelMismatch: c.modelMismatchRuns, retried: c.retriedRuns,
         scenarios: c.scenarioAttemptSamples, passed: c.scenarioPasses, failed: c.scenarioFailures, critical: c.criticalMisses,
-        judged: c.judgedCount, judgePass: `${c.judgePassCountFinalAttemptOnly} (final attempt only)`, judgeFallback: c.judgeFallbackCount,
+        judged: c.judgedCount, judgePass: `${c.judgePassCountFinalAttemptOnly}/${c.judgedCountFinalAttemptOnly} (final attempt only)`, judgeFallback: c.judgeFallbackCount,
         'durationMs p50': c.durationMsMedian, 'durationMs p90': c.durationMsP90 ?? 'n/a (n<3)',
       })));
       process.exitCode = exitCode;

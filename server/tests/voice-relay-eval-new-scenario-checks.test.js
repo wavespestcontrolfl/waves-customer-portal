@@ -100,6 +100,104 @@ describe('mid-thought-pause — tools_called_include can fail', () => {
   });
 });
 
+describe('mid-thought-pause — a premature turn-1 capture_lead fails, even with a correct later capture', () => {
+  test('capture_lead guessed on the unfinished turn-1 fragment, then a correct capture on turn 2 ⇒ both real critical checks fail', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-thought-pause');
+    const atMost = scenario.expect.find((e) => e.check === 'tools_called_at_most');
+    const notBefore = scenario.expect.find((e) => e.check === 'tool_not_called_before_turn');
+    expect(atMost).toBeTruthy();
+    expect(atMost.value).toEqual({ capture_lead: 1 });
+    expect(atMost.severity).toBe('critical');
+    expect(notBefore).toBeTruthy();
+    expect(notBefore.value).toEqual({ tool: 'capture_lead', turn: 2 });
+    expect(notBefore.severity).toBe('critical');
+
+    // Turn 1 is an unfinished fragment with no usable info (fixture turns[0])
+    // — the bug: the model guesses at a capture anyway (toolUse, then a `say`
+    // to close out turn 1's model rounds). Turn 2 then supplies the real
+    // details and the model captures again, correctly this time (toolUse +
+    // say closes turn 2). Turn 3 is a plain ack.
+    script.push(
+      toolUse('capture_lead', { call_summary: 'Caller paused mid-thought' }),
+      say('Take your time.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp problem out back',
+        first_name: 'Priya',
+        last_name: 'Fenn',
+        address_line1: '210 Oak Terrace',
+        city: 'Nokomis',
+        email: 'priya.fenn@example.com',
+      }, 't2'),
+      say('Thanks, a Waves team member will follow up.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [atMost, notBefore] });
+
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls.filter((t) => t.name === 'capture_lead')).toHaveLength(2);
+    const atMostCheck = result.checks.find((c) => c.check === 'tools_called_at_most');
+    const notBeforeCheck = result.checks.find((c) => c.check === 'tool_not_called_before_turn');
+    expect(atMostCheck.status).toBe('fail');
+    expect(atMostCheck.detail).toMatch(/capture_lead called 2× \(max 1\)/);
+    expect(notBeforeCheck.status).toBe('fail');
+    expect(notBeforeCheck.detail).toMatch(/capture_lead called on caller turn 1, before turn 2/);
+    expect(result.status).toBe('fail');
+  });
+
+  test('a SOLE premature turn-1 capture (never retried on turn 2) still fails tool_not_called_before_turn even though it never exceeds the max-1 cap', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-thought-pause');
+    const notBefore = scenario.expect.find((e) => e.check === 'tool_not_called_before_turn');
+    expect(notBefore).toBeTruthy();
+
+    // Exactly ONE capture_lead call total, but placed on turn 1's unfinished
+    // fragment — tools_called_at_most (max 1) alone would pass this; the
+    // turn-scoped prohibition is what actually catches it. toolUse keeps
+    // turn 1's model rounds going, so a `say` is needed to close it out.
+    script.push(
+      toolUse('capture_lead', { call_summary: 'Caller paused mid-thought' }),
+      say('Got it, thanks for that.'),
+      say('Noted.'),
+      say('You too, bye now.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [notBefore] });
+
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls.filter((t) => t.name === 'capture_lead')).toHaveLength(1);
+    const check = result.checks.find((c) => c.check === 'tool_not_called_before_turn');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('capture_lead called only once, after turn 2, passes both real checks', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-thought-pause');
+    const atMost = scenario.expect.find((e) => e.check === 'tools_called_at_most');
+    const notBefore = scenario.expect.find((e) => e.check === 'tool_not_called_before_turn');
+
+    script.push(
+      say('Take your time.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp problem out back',
+        first_name: 'Priya',
+        last_name: 'Fenn',
+        address_line1: '210 Oak Terrace',
+        city: 'Nokomis',
+        email: 'priya.fenn@example.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [atMost, notBefore] });
+
+    expect(result.error).toBeUndefined();
+    expect(result.checks.find((c) => c.check === 'tools_called_at_most').status).toBe('pass');
+    expect(result.checks.find((c) => c.check === 'tool_not_called_before_turn').status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
 describe('backchannel-vs-explicit-correction — capture_lead_input_includes can fail on WRONG data, not just a missing call', () => {
   test('capture_lead is called validly, but with the pre-correction address ⇒ the real critical check fails, and blocks the scenario', async () => {
     mockSdk();
@@ -143,6 +241,112 @@ describe('backchannel-vs-explicit-correction — capture_lead_input_includes can
     // the kind of miss that must block the run, not just lower its quality
     // score), so this lone miss is now BLOCKING for the aggregate scenario
     // status (see scenarioStatus/`blocking` in voice-relay-replay.js).
+    expect(result.status).toBe('fail');
+  });
+});
+
+describe('backchannel-vs-explicit-correction — spoken_never_matches (onTurn: 2) can fail on treating the backchannel as a restart cue', () => {
+  test('Sandy asks the caller to repeat/restart in response to a bare "Mm-hmm" ⇒ the real critical check fails, even though she recovers by turn 4', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('backchannel-vs-explicit-correction');
+    const onTurnChecks = scenario.expect.filter((e) => e.check === 'spoken_never_matches' && e.value && e.value.onTurn === 2);
+    expect(onTurnChecks).toHaveLength(1);
+    const realCheck = onTurnChecks[0];
+    expect(realCheck.severity).toBe('critical');
+
+    // Turn 1: ack, no tool. Turn 2 (the bare backchannel "Mm-hmm"): the bug —
+    // Sandy treats it as a cue to restart the intake, instead of continuing
+    // through the backchannel unchanged. Turn 3 (the real fixture's own
+    // barge-in, unmodified) cuts off whatever Sandy is still saying at the
+    // halfway word mark — the harness grades only what was actually HEARD,
+    // never the full planned text — so the restart cue is padded with
+    // trailing filler to land inside that first half. Turn 3's correction
+    // and turn 4 (email + capture) both go fine afterward — she recovers
+    // with the right, corrected address, but the turn-2 restart cue already
+    // broke this check (see the Codex finding this test exists to pin: a
+    // model that restarts on turn 2 then recovers must still fail).
+    script.push(
+      say('Sure, go ahead.'),
+      say('Start over, one moment, sorry about that.'),
+      say('Got it, noted.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp nest under the eaves',
+        first_name: 'Carlos',
+        last_name: 'Nunez',
+        address_line1: '88B Palm Harbor Drive',
+        city: 'Venice',
+        email: 'carlos.nunez@example.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/start over/i);
+    expect(check.detail).toMatch(/on caller turn 2/);
+    expect(result.status).toBe('fail');
+  });
+
+  test('a plain continuation through the backchannel, with the barge-in correction honored later, passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('backchannel-vs-explicit-correction');
+    const onTurnChecks = scenario.expect.filter((e) => e.check === 'spoken_never_matches' && e.value && e.value.onTurn === 2);
+    const realCheck = onTurnChecks[0];
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      say('Sure, go ahead.'),
+      say('Mm-hmm, go on.'),
+      say('Got it, noted.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp nest under the eaves',
+        first_name: 'Carlos',
+        last_name: 'Nunez',
+        address_line1: '88B Palm Harbor Drive',
+        city: 'Venice',
+        email: 'carlos.nunez@example.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+
+  test('re-asking a field the caller already gave (their name) on turn 2 also fails the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('backchannel-vs-explicit-correction');
+    const onTurnChecks = scenario.expect.filter((e) => e.check === 'spoken_never_matches' && e.value && e.value.onTurn === 2);
+    const realCheck = onTurnChecks[0];
+    expect(realCheck).toBeTruthy();
+
+    // Same halfway-cutoff mechanic as the sibling test above: the re-ask
+    // phrase is padded with trailing filler so it lands inside what the
+    // barge-in actually leaves "heard".
+    script.push(
+      say('Sure, go ahead.'),
+      say("What's your name, one moment please."),
+      say('Got it, noted.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp nest under the eaves',
+        first_name: 'Carlos',
+        last_name: 'Nunez',
+        address_line1: '88B Palm Harbor Drive',
+        city: 'Venice',
+        email: 'carlos.nunez@example.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('fail');
     expect(result.status).toBe('fail');
   });
 });

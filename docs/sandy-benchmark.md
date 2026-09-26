@@ -88,11 +88,20 @@ of every condition before the next trial of any condition — matching the
 brief's "interleave repeated trials" instruction rather than blocking all of
 condition A's trials before condition B's (which would confound any
 time-of-day or provider-load drift with the model/renderer comparison).
-WITHIN a trial, the four conditions' own order is rotated Latin-square-style
-by trial index (`rotateConditions`): trial 0 runs them in their natural
-order, trial 1 starts from the second condition and wraps, and so on, so no
-one condition systematically runs first across every trial (and thus
-systematically absorbs whatever a fixed first-run slot costs).
+WITHIN a trial, the four conditions' own order is rotated using a Williams
+(balanced Latin square) design by trial index (`rotateConditions`, 4 fixed
+orders cycling every 4 trials): every condition takes every "slot" (including
+first) across the 4 orders, AND every ordered pair of distinct conditions is
+an immediate adjacency exactly once across those 4 orders (first-order
+carryover balance) — a plain cyclic rotation only gives the first property; a
+fixed neighbor (e.g. `current-stream` always immediately following
+`current-block`) would still let a carryover effect from one condition's own
+model/renderer settle systematically onto the same neighbor every trial.
+**Run trial counts in multiples of 4** to keep this balance exact; a trial
+count that is not a multiple of 4 leaves a residual imbalance (the partial
+final cycle repeats a prefix of the 4 orders, so a few adjacencies land more
+than once while others land zero times) — still far better than a fixed
+order, but not perfectly balanced.
 
 Every run's `cacheHypothesis` field is always `"unknown"` — never a
 cold/warm label by trial position. Two reasons: rotation above already
@@ -144,7 +153,12 @@ without anyone noticing). A condition with any `modelMismatchRuns > 0` — see
 `summarizeCondition`'s per-condition field — makes the whole benchmark's exit
 code non-zero, the same as a crash or an inconclusive run: a candidate
 comparison that silently tested the wrong model is missing data, not a
-result.
+result. A model-mismatch run is also EXCLUDED from `completedRuns` and from
+every aggregate `summarizeCondition` computes (latency percentiles, judge
+counts, `scenarioAttemptSamples`/`scenarioPasses`/`scenarioFailures`/
+`criticalMisses`) — never folded into a clean condition's numbers, the same
+way a crashed or inconclusive run already was. It is counted only in
+`modelMismatchRuns` and carried in the per-run `runs[]` detail.
 
 ### Retry accounting
 
@@ -175,27 +189,32 @@ it can be larger than `completedRuns × scenarios`. Report
 one more per retried trial) and is never itself multiplied by
 scenarios-per-attempt; `attemptCount` was named `attemptSamples` before this
 PR, which invited exactly that confusion (reading it as if it already were
-the scenario-level denominator it never was). `scenarioSamples` is kept as an
-alias of `scenarioAttemptSamples`, identical value, for anything still
-reading the pre-existing name.
+the scenario-level denominator it never was). There is no `scenarioSamples`
+alias — migrate any reader still using that pre-existing name to
+`scenarioAttemptSamples` directly (same-PR code carries no compat shim per
+AGENTS.md's "no compat shims for code changed in the same PR").
 
-**Judge aggregates, and the one figure that is final-attempt-only**: with
+**Judge aggregates, and the two figures that are final-attempt-only**: with
 `--judge`, `judgedCount` / `judgeFallbackCount` / `judgeErrorCount` sum
 across every attempt of every trial, same as the scenario counts above
 (`voice-relay-replay.js`'s `summarize()` output survives unstripped into each
-attempt's compact summary). A judge PASS count does not: no attempt summary
-carries a pass/fail split, only the FINAL (selected) attempt's full
-`results[].judge.verdict.pass` does, so `judgePassCountFinalAttemptOnly` is
-computed from the final attempt only, across trials — never summed with the
-others, and labeled by name as such. Report it next to `judgedCount` from the
-final attempt's trials, not as a rate over the full `judgedCount` sum, since
-the two draw from different sample sizes.
+attempt's compact summary). A judge PASS/FAIL split does not sum this way: no
+attempt summary carries one, only the FINAL (selected) attempt's full
+`results[]` does, so `judgePassCountFinalAttemptOnly` (a result with
+`judge.ok` and `verdict.pass === true`) and `judgedCountFinalAttemptOnly` (a
+result with `judge.ok` and ANY verdict, pass or fail) are both computed from
+the same final-attempt population, across trials — never summed with the
+attempt-summed figures above, and labeled by name as such. Compute the
+naturalness RATE as `judgePassCountFinalAttemptOnly /
+judgedCountFinalAttemptOnly` — never as a rate over the attempt-summed
+`judgedCount`, since that draws from a different (larger) sample size.
 
 ## What text replay measures vs. what needs a sandbox call
 
 | | Text replay (`eval:voice-relay` / the runner above) | Real sandbox call |
 |---|---|---|
-| Model behavior: tool correctness, unauthorized actions, false completion, duplicate effects, sandbox suppression | **Yes** — every deterministic `expect` check | Only observable after the fact, from the stored transcript |
+| Model behavior: tool correctness, unauthorized actions, false completion, duplicate effects | **Yes** — every deterministic `expect` check | Only observable after the fact, from the stored transcript |
+| Sandbox write suppression (`SANDBOX_DRY_RUN_TOOLS`) | **No — requires a real sandbox call.** `voice-relay-replay.js`'s `newConversation()` never constructs `RelayConversation` with `sandbox: true` (see the "Important" note above), so `SANDBOX_DRY_RUN_TOOLS` never engages in a text-replay run — there is nothing here that can pass or fail on it, and none of the five new scenario families' `expect` blocks exercise it either | **Yes — the only source.** Dial the sandbox number and confirm no lead/ticket/booking write landed |
 | Task accuracy / naturalness | Yes, via the deterministic checks plus the optional judge | Yes, and closer to what a caller experiences |
 | Cost | Yes — real Anthropic token usage per scenario | Yes, plus the ConversationRelay/Twilio per-minute cost |
 | Model-side latency (time to first token, total model round time) | Yes, real — `run-voice-relay-eval.js` makes genuine API calls; `record.durationMs` (whole-scenario wall clock) and `modelRounds` are the only fields the harness currently surfaces (see "Metrics to report" below) | Yes, with full per-turn breakdown (`relay-transcript.js`'s `summarizeTurnStats`) |
@@ -245,20 +264,31 @@ alone:
   API calls, not a per-turn first-token breakdown; get that from a real
   sandbox call.
 - **Task accuracy**: `scenarioPasses` / `scenarioAttemptSamples`, and
-  separately `criticalMisses` (an unauthorized action, a false completion, a
-  duplicate effect, or a sandbox-suppression breach — see the five new
-  scenario families' `expect` blocks for exactly what is checked).
+  separately `criticalMisses` (an unauthorized action, a false completion, or
+  a duplicate effect — see the five new scenario families' `expect` blocks
+  for exactly what is checked). Sandbox write suppression is NOT among these:
+  the text-replay harness never constructs a `sandbox: true` session, so it
+  cannot exercise or verify `SANDBOX_DRY_RUN_TOOLS` at all — see "What text
+  replay measures vs. what needs a sandbox call" above.
 - **Naturalness**: the optional judge's verdict (`--judge`) — `judgedCount` /
   `judgeFallbackCount` / `judgeErrorCount` sum across every attempt, but
-  `judgePassCountFinalAttemptOnly` is drawn from the final attempt only (see
-  "Judge aggregates" above); report a judge pass RATE over the final
-  attempt's own `judgedCount` for that trial, never over the full summed
-  `judgedCount` — advisory either way, never used to override a critical
-  deterministic miss.
-- **Cost**: sum of Anthropic token usage across the run (not currently
-  aggregated by the runner or the harness — read it from
-  `llm_dispatch_log` if `GATE_LLM_CALL_LEDGER` is on in the environment the
-  run used, or from the Anthropic console for a manual run).
+  `judgePassCountFinalAttemptOnly` and `judgedCountFinalAttemptOnly` are both
+  drawn from the same final-attempt population (see "Judge aggregates"
+  above); report the naturalness RATE as `judgePassCountFinalAttemptOnly /
+  judgedCountFinalAttemptOnly`, never over the attempt-summed `judgedCount`
+  — advisory either way, never used to override a critical deterministic miss.
+- **Cost**: sum of Anthropic token usage across the run. Sandy's own model
+  calls (`relay-conversation.js`'s `anthropic.messages.stream`, which
+  `voice-relay-replay.js` calls into unmodified for the replay) go straight
+  to the Anthropic SDK and are NOT recorded in `llm_dispatch_log` — that
+  ledger is written only by calls that go through
+  `server/services/llm/call.js` / `deep.js`, which Sandy's conversation loop
+  never uses, gate on or off. Read actual spend from the Anthropic console /
+  billing usage for the run's time window instead. The ONE exception: with
+  `--judge`, the optional judge call does go through a ledgered
+  `TEXT_POLICIES` lane, so `llm_dispatch_log` may hold judge-call rows for a
+  run if `GATE_LLM_CALL_LEDGER` was on — never the conversation's own model
+  spend.
 
 **Zero observed failures in a small sample is not proof of zero risk.**
 Report the sample size next to every rate.
@@ -270,8 +300,11 @@ A candidate (model, renderer, or the combination) wins **only if** it:
 1. Preserves every required capability and policy behavior the current
    configuration passes today — no new critical miss, no regression on any
    scenario the baseline currently passes, including the five new families'
-   unauthorized-action / false-completion / duplicate-effect / sandbox-
-   suppression checks.
+   unauthorized-action / false-completion / duplicate-effect checks. Sandbox
+   write suppression is a separate, real-sandbox-call verification (see
+   "What text replay measures vs. what needs a sandbox call" above) — it is
+   not, and cannot be, part of this text-replay comparison, and its absence
+   here is not evidence either way about a candidate's sandbox behavior.
 2. Is not slower in a way that matters for the actual bottleneck — per the
    original snapshot's own finding, model think-time (~1.9s to first token),
    not the render/transport step, was the dominant latency cost before the

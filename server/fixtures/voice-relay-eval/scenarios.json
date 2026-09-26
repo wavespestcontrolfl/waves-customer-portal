@@ -4268,7 +4268,15 @@
     {
      "check": "tools_called_at_most",
      "value": {
-      "capture_lead": 2
+      "capture_lead": 1
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "capture_lead",
+      "turn": 2
      },
      "severity": "critical"
     }
@@ -4378,6 +4386,18 @@
        "(?<!\\b(?:not|from|instead of|rather than)\\s)\\b(?:88|eighty[- ]eight)\\s+palm\\b"
       ],
       "fromTurn": 3
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_never_matches",
+     "value": {
+      "patterns": [
+       "\\b(?:start(?:ing)? over|from the (?:top|beginning)|say (?:that|it) again|repeat (?:that|yourself|it)|come again|one more time|could you repeat that)\\b",
+       "\\bwhat(?:'s| is| was) your (?:name|address)\\b",
+       "\\bcan (?:i|we) get your (?:name|address)(?: again)?\\b"
+      ],
+      "onTurn": 2
      },
      "severity": "critical"
     }
