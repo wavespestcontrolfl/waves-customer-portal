@@ -482,6 +482,109 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     expect(row.notice_30_undelivered_escalated_at).toBeNull();
   });
 
+  // Codex #4921 pre-push P1 (class fix), real SQL: the combined send's late
+  // record for the OTHER rung never lands on top of that rung's on-time
+  // witness, and every pass consults persisted acceptance evidence before
+  // deciding a witness or ringing "not delivered".
+  function mockSendSide() {
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(), classifyDeliveryCertainty: jest.fn() }));
+    jest.doMock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
+    jest.doMock('../services/account-membership-email', () => ({
+      sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn(), findAcceptedTermiteRenewalReminder: jest.fn(async () => null),
+    }));
+    jest.doMock('../services/cancellation-resolution', () => ({ cancelFlowV2Enabled: jest.fn(() => true) }));
+    const notifyAdmin = jest.fn().mockResolvedValue({ id: 'n' });
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+    return notifyAdmin;
+  }
+  async function migrateThrough108(db) {
+    for (const file of [...MIGRATION_FILES_101_TO_107, '20260926000108_termite_annual_notice_undelivered_escalated_columns']) {
+      await require(`../models/migrations/${file}`).up(db);
+    }
+  }
+  const lateBells = (notifyAdmin, daysOut) => notifyAdmin.mock.calls
+    .filter((c) => c[1] === 'Termite annual renewal notice went out late' && c[3]?.metadata?.days_out === daysOut);
+
+  test('stampTermNoticeWitness (combined): the other rung is recorded late ONLY when it has no record at all — never on top of its on-time witness', async () => {
+    const { db } = fixture;
+    await migrateThrough108(db);
+    jest.doMock('../models/db', () => db);
+    const notifyAdmin = mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    const base = {
+      customer_id: randomUUID(), term_start: '2025-11-10', term_end: '2026-11-10', status: 'renewal_pending',
+      annual_plan_version: 'v3', installation_anchored_at: new Date('2025-11-10T12:00:00Z'),
+    };
+    const onTime45 = new Date('2026-09-26T16:00:00Z');
+    const [withWitness] = await db('annual_prepay_terms').insert({ ...base, notice_45_sent_at: onTime45, notice_30_claimed_at: new Date() }).returning('*');
+    const [withNothing] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), notice_30_claimed_at: new Date() }).returning('*');
+    const at28 = new Date('2026-10-13T16:00:00Z');
+
+    await _private.stampTermNoticeWitness(withWitness, 30, at28, { alsoRecordMissedRung: 45 });
+    await _private.stampTermNoticeWitness(withNothing, 30, at28, { alsoRecordMissedRung: 45 });
+
+    const a = await db('annual_prepay_terms').where({ id: withWitness.id }).first();
+    expect(a.notice_45_sent_at).toEqual(onTime45);
+    expect(a.notice_45_late_sent_at).toBeNull();
+    expect(a.notice_30_late_sent_at).toEqual(at28);
+    expect(a.notice_30_claimed_at).toBeNull();
+    const b = await db('annual_prepay_terms').where({ id: withNothing.id }).first();
+    expect(b.notice_45_late_sent_at).toEqual(at28);
+    expect(b.notice_30_late_sent_at).toEqual(at28);
+    // One late-45 bell: for the term that genuinely had no 45 record.
+    expect(lateBells(notifyAdmin, 45).map((c) => c[3].metadata.annual_prepay_term_id)).toEqual([withNothing.id]);
+  });
+
+  test('checkAndSend: an accepted notice whose witness write failed is recovered from messaging_audit_log — before the send (44 days out) AND before the missed-notice bell (at term_end) — with no text, no email and no bell', async () => {
+    const { db } = fixture;
+    await migrateThrough108(db);
+    await db.raw(`CREATE TABLE messaging_audit_log (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id uuid, channel text, provider text, blocked_code text,
+      provider_message_id text, sent_at timestamptz, metadata jsonb
+    )`);
+    jest.doMock('../models/db', () => db);
+    const notifyAdmin = mockSendSide();
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const AccountMembershipEmail = require('../services/account-membership-email');
+
+    const base = {
+      term_start: '2025-11-09', status: 'active', annual_plan_version: 'v3', installation_anchored_at: new Date('2025-11-09T12:00:00Z'),
+    };
+    // 44 days out, its 45 accepted on time yesterday (witness write failed).
+    const [open44] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), term_end: '2026-11-09' }).returning('*');
+    // At term_end, both rungs accepted on time earlier (both witness writes failed).
+    const [atEnd] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), term_end: '2026-09-26', status: 'renewal_pending' }).returning('*');
+    const sms = (term, daysOut, sentAt, c) => ({
+      customer_id: term.customer_id, channel: 'sms', provider: 'twilio', blocked_code: null,
+      provider_message_id: `SM${c.repeat(32)}`, sent_at: sentAt,
+      metadata: JSON.stringify({ original_message_type: 'termite_annual_renewal_notice', annual_prepay_term_id: term.id, days_out: daysOut }),
+    });
+    const accepted45 = new Date('2026-09-25T16:00:00Z');
+    await db('messaging_audit_log').insert([
+      sms(open44, 45, accepted45, 'a'),
+      sms(atEnd, 45, new Date('2026-08-12T16:00:00Z'), 'b'),
+      sms(atEnd, 30, new Date('2026-08-27T16:00:00Z'), 'c'),
+    ]);
+
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' });
+
+    const r1 = await db('annual_prepay_terms').where({ id: open44.id }).first();
+    expect(r1.notice_45_sent_at).toEqual(accepted45);
+    expect(r1.notice_45_late_sent_at).toBeNull();
+    expect(r1.notice_45_undelivered_escalated_at).toBeNull();
+    const r2 = await db('annual_prepay_terms').where({ id: atEnd.id }).first();
+    expect(r2.notice_45_sent_at).toEqual(new Date('2026-08-12T16:00:00Z'));
+    expect(r2.notice_30_sent_at).toEqual(new Date('2026-08-27T16:00:00Z'));
+    expect(r2.notice_missed_escalated_at).toBeNull();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('termiteLateNoticeEscalationCandidates and termiteMissedNoticeEscalationCandidates run without a "column does not exist" error against the fully-migrated schema, and select the right rows', async () => {
     const { db } = fixture;
     for (const file of [

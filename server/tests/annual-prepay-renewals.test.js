@@ -2628,7 +2628,7 @@ describe('annual prepay renewal helpers', () => {
       expect(stampQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.anything() }));
     });
 
-    test('with NO earlier acceptance, a day-44 send is still recorded late (the deduped time is the only thing trusted)', async () => {
+    test('with NO earlier acceptance, a day-44 send is still recorded late (the witness follows the real provider acceptance time)', async () => {
       pinTermiteToday();
       jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
       const stampQuery = query();
@@ -2644,19 +2644,20 @@ describe('annual prepay renewal helpers', () => {
       });
       renderSmsTemplate.mockResolvedValue('rendered termite sms');
       sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
-      // A fresh (non-deduped) send: any sentAt on it is ignored.
-      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true, messageId: 'sg-2', sentAt: DAY45.toISOString() });
+      // A fresh send accepted today (day 44).
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true, messageId: 'sg-2', sentAt: '2026-09-27T16:00:00Z' });
 
       await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).resolves.toMatchObject({ sent: true });
       expect(stampQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.any(Date) }));
       expect(stampQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.anything() }));
     });
 
-    test('originalEmailAcceptance trusts only a deduped, valid, non-future sentAt', () => {
+    test('originalEmailAcceptance trusts the provider acceptance time (deduped or fresh) only when valid and not in the future', () => {
       pinTermiteToday();
       expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: '2026-09-26T14:00:00Z' })).toEqual(new Date('2026-09-26T14:00:00Z'));
       expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: new Date('2026-09-25T10:00:00Z') })).toEqual(new Date('2026-09-25T10:00:00Z'));
-      expect(_private.originalEmailAcceptance({ ok: true, sentAt: '2026-09-26T14:00:00Z' })).toBeNull();
+      expect(_private.originalEmailAcceptance({ ok: true, sentAt: '2026-09-26T14:00:00Z' })).toEqual(new Date('2026-09-26T14:00:00Z'));
+      expect(_private.originalEmailAcceptance({ ok: true })).toBeNull();
       expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: null })).toBeNull();
       expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: 'not a date' })).toBeNull();
       expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: '2026-09-28T00:00:00Z' })).toBeNull();
@@ -2688,14 +2689,16 @@ describe('annual prepay renewal helpers', () => {
           query({ returning: [refreshed] }),
           query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
           releaseQuery,
-          // day 44
+          // day 44: refresh, then the RECOVERY claim + stamp (no customer
+          // read, no render, no send)
           query({ returning: [refreshed] }),
           query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
           stampQuery,
         ],
-        customers: [query({ first: customerRow }), query({ first: customerRow })],
-        // day 45: nothing accepted yet; day 44: the day-45 SMS is on file.
-        messaging_audit_log: [query({ first: undefined }), auditProbe],
+        customers: [query({ first: customerRow })],
+        // day 45: nothing accepted yet (pre-claim + under-claim probes);
+        // day 44: the day-45 SMS is on file.
+        messaging_audit_log: [query({ first: undefined }), query({ first: undefined }), auditProbe],
       });
       renderSmsTemplate.mockResolvedValue('rendered termite sms');
       sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}` });
@@ -2775,13 +2778,32 @@ describe('annual prepay renewal helpers', () => {
     test.each([
       ['the SMS audit lookup', 'sms'],
       ['the email lookup', 'email'],
-    ])('a lookup ERROR in %s aborts: nothing is sent or stamped, the claim is released, and the error surfaces for a retry next run', async (_label, which) => {
+    ])('a lookup ERROR in %s before the claim aborts: nothing is claimed, sent or stamped, and the error surfaces for a retry next run', async (_label, which) => {
       pinTermiteToday();
       jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
-      const releaseQuery = query();
+      const claimQuery = query({ returning: [{ ...refreshed, status: 'renewal_pending' }] });
       const auditProbe = query();
       if (which === 'sms') auditProbe.first = jest.fn(async () => { throw new Error('audit read failed'); });
       else AccountMembershipEmail.findAcceptedTermiteRenewalReminder.mockRejectedValueOnce(new Error('email read failed'));
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), claimQuery],
+        messaging_audit_log: [auditProbe],
+      });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).rejects.toThrow(/read failed/);
+      expect(claimQuery.update).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+      expect(lateBellCalls()).toHaveLength(0);
+    });
+
+    test('a lookup ERROR re-checked UNDER the claim releases the claim and sends nothing', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
+      const releaseQuery = query();
+      const underClaimProbe = query();
+      underClaimProbe.first = jest.fn(async () => { throw new Error('audit read failed'); });
       setDbQueues({
         scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
         annual_prepay_terms: [
@@ -2790,10 +2812,10 @@ describe('annual prepay renewal helpers', () => {
           releaseQuery,
         ],
         customers: [query({ first: customerRow })],
-        messaging_audit_log: [auditProbe],
+        messaging_audit_log: [query({ first: undefined }), underClaimProbe],
       });
 
-      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).rejects.toThrow(/read failed/);
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).rejects.toThrow('audit read failed');
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
       expect(releaseQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_claimed_at: null, status: 'active' }));
@@ -2823,6 +2845,130 @@ describe('annual prepay renewal helpers', () => {
       await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).resolves.toEqual({ sent: true, termId: 'term-recover' });
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(stampQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.any(Date) }));
+    });
+
+    // Codex #4921 pre-push P1 (combined path): with BOTH rungs due, the 45's
+    // own acceptance evidence is consulted before the combined send is
+    // chosen — never recorded late on top of an on-time acceptance.
+    test('day 45: 45 SMS accepted on time, stamp fails; resumes at 28 days out with both rungs due: notice_45_sent_at stamped at the day-45 time, the 30 sent on its own, no late-45 bell', async () => {
+      pinTermiteToday();
+      const releaseQuery = query();
+      const claim45 = query({ returning: [{ ...refreshed, status: 'renewal_pending' }] });
+      const stamp45 = query();
+      const refreshed30 = { ...refreshed, status: 'renewal_pending', notice_45_sent_at: DAY45 };
+      const stamp30 = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} }), query({ first: null })],
+        annual_prepay_terms: [
+          // day 45: refresh, claim, release after the failed stamp
+          query({ returning: [refreshed] }),
+          query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
+          releaseQuery,
+          // day 28: 45 recovery claim + stamp; then the 30's refresh, claim, stamp
+          claim45,
+          stamp45,
+          query({ returning: [refreshed30] }),
+          query({ returning: [{ ...refreshed30, notice_30_claimed_at: new Date() }] }),
+          stamp30,
+        ],
+        customers: [query({ first: customerRow }), query({ first: customerRow })],
+        messaging_audit_log: [
+          query({ first: undefined }), query({ first: undefined }), // day 45: nothing on file yet
+          query({ first: { sent_at: DAY45 } }), // day 28: the 45's accepted SMS
+          query({ first: undefined }), query({ first: undefined }), // the 30: none (pre-claim + under-claim)
+        ],
+        customer_interactions: [query()],
+      });
+      renderSmsTemplate.mockResolvedValue('rendered termite sms');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', sentAt: DAY45.toISOString() });
+      db.transaction.mockImplementationOnce(async () => { throw new Error('stamp write failed'); });
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).rejects.toThrow('stamp write failed');
+      expect(releaseQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_claimed_at: null }));
+
+      jest.setSystemTime(new Date('2026-10-13T16:00:00Z')); // 28 days before 2026-11-10
+      const now28 = new Date('2026-10-13T16:00:00Z');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', sentAt: now28.toISOString() });
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+      await expect(_private.processTermiteNoticeObligations(termFields, '2026-10-13')).resolves.toMatchObject({ sent: true });
+
+      expect(stamp45.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45, notice_45_claimed_at: null }));
+      // The 30 went out on its own — once, as the 30-day rung, never combined.
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      expect(sendCustomerMessage.mock.calls[1][0].metadata).toMatchObject({ days_out: 30 });
+      expect(stamp30.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_late_sent_at: now28 }));
+      expect(stamp30.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.anything() }));
+      expect(NotificationService.notifyAdmin.mock.calls
+        .filter((c) => c[1] === 'Termite annual renewal notice went out late' && c[3]?.metadata?.days_out === 45)).toHaveLength(0);
+    });
+
+    test('both rungs due and BOTH already accepted: both witnesses stamped from their own evidence, nothing sent', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-10-13T16:00:00Z'));
+      const day30 = new Date('2026-10-11T15:00:00Z'); // exactly 30 days before 2026-11-10 (ET)
+      const stamp45 = query();
+      const stamp30 = query();
+      const refreshed30 = { ...refreshed, status: 'renewal_pending', notice_45_sent_at: DAY45 };
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [
+          query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }), stamp45,
+          query({ returning: [refreshed30] }),
+          query({ returning: [{ ...refreshed30, notice_30_claimed_at: new Date() }] }), stamp30,
+        ],
+        messaging_audit_log: [query({ first: { sent_at: DAY45 } }), query({ first: { sent_at: day30 } })],
+      });
+
+      await expect(_private.processTermiteNoticeObligations(termFields, '2026-10-13')).resolves.toMatchObject({ sent: true, recovered: true });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+      expect(stamp45.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45 }));
+      expect(stamp30.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_sent_at: day30 }));
+    });
+
+    test('both rungs due and NO evidence for the 45: the combined send still runs (30 sent, 45 recorded late in the same transaction)', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-10-13T16:00:00Z'));
+      const stamp30 = query();
+      const missed45 = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [
+          query({ returning: [refreshed] }),
+          query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
+          stamp30,
+          missed45, // same transaction: the 45's late record
+        ],
+        customers: [query({ first: customerRow })],
+        customer_interactions: [query()],
+      });
+      renderSmsTemplate.mockResolvedValue('rendered termite sms');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted' });
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+      await expect(_private.processTermiteNoticeObligations(termFields, '2026-10-13')).resolves.toMatchObject({ sent: true });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(stamp30.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_late_sent_at: expect.any(Date) }));
+      expect(missed45.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.any(Date) }));
+      // The combined late-45 record is guarded on the 45 having NO record at
+      // all — neither late nor its own on-time witness.
+      expect(missed45.whereNull).toHaveBeenCalledWith('notice_45_late_sent_at');
+      expect(missed45.whereNull).toHaveBeenCalledWith('notice_45_sent_at');
+    });
+
+    test('recoveredBeforeEscalation: true when a rung is recovered from evidence; a lookup ERROR fails toward escalating (false), never throws', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
+      const stamp = query();
+      const erroring = query();
+      erroring.first = jest.fn(async () => { throw new Error('audit read failed'); });
+      setDbQueues({
+        annual_prepay_terms: [query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }), stamp],
+        messaging_audit_log: [query({ first: { sent_at: DAY45 } }), erroring],
+      });
+
+      await expect(_private.recoveredBeforeEscalation(termFields, 45)).resolves.toBe(true);
+      expect(stamp.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45 }));
+      await expect(_private.recoveredBeforeEscalation(termFields, 45)).resolves.toBe(false);
     });
 
     test('priorTermiteNoticeAcceptance returns the EARLIEST of SMS and email, and ignores a future or invalid time', async () => {

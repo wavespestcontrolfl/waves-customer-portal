@@ -277,7 +277,7 @@ async function sendTemplate({
     });
 
     return result.sent
-      ? { ok: true, messageId: result.message?.provider_message_id || null }
+      ? { ok: true, messageId: result.message?.provider_message_id || null, sentAt: result.message?.sent_at || null }
       : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
   } catch (err) {
     await logLifecycleEmailAttempt({
