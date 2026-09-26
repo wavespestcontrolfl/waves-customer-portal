@@ -174,7 +174,11 @@ function classifyFrame(event, data) {
     const stop = stopReasonFromEvent(data);
     if (stop?.type === 'requires_action') return { kind: 'requires_action', eventIds: stop.event_ids || [] };
     if (stop?.type === 'end_turn') return { kind: 'other', end: true };
-    // retries_exhausted, budget_reached, or an unknown stop reason
+    // The session's own budget ran out: record the ledger's budget code
+    // (agent-control/taxonomy.js FAILURE_RULES), never an unclassified code
+    // the ledger would file as broken infrastructure (Codex r9).
+    if (stop?.type === 'budget_reached') return { kind: 'failed', failure: 'budget_exhausted' };
+    // retries_exhausted, or an unknown stop reason
     return { kind: 'failed', failure: `session_idle_${stop?.type || 'unknown'}` };
   }
   if (isSessionTerminal(event, data)) return { kind: 'other', end: true };
@@ -316,9 +320,6 @@ const BIAgent = {
     const executeToolUse = async (toolUseId, toolName, toolInput) => {
       remainingMs(sessionId, deadline); // no tool starts after the deadline
       resolvedToolUseIds.add(toolUseId);
-      if (++toolCalls > MAX_TOOL_CALLS) {
-        throw Object.assign(new Error(`session ${sessionId} exceeded ${MAX_TOOL_CALLS} tool calls`), { code: 'max_tool_calls' });
-      }
       if (completedSideEffects.has(toolName)) {
         return { toolResult: { skipped: true, reason: `${toolName} already completed in this briefing` }, threw: false };
       }
@@ -326,6 +327,11 @@ const BIAgent = {
       // asks: it must not text the owner or use up the week's briefing text.
       if (opts.skipSMS && toolName === 'send_briefing_sms') {
         return { toolResult: { skipped: true, reason: 'This run is report-only; do not send the SMS.' }, threw: false };
+      }
+      // The cap counts calls that run a tool. Repeats answered above run
+      // nothing and are bounded by the run deadline instead (Codex r9).
+      if (++toolCalls > MAX_TOOL_CALLS) {
+        throw Object.assign(new Error(`session ${sessionId} exceeded ${MAX_TOOL_CALLS} tool calls`), { code: 'max_tool_calls' });
       }
       notify('pulling', `Tool: ${toolName}`);
       logger.info(`[bi-agent] Tool: ${toolName}`);

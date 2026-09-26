@@ -581,10 +581,25 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(recorded()).toMatchObject({ failure: 'session_idle_retries_exhausted' });
   });
 
-  it('an idle with budget_reached is a failed run (session_idle_budget_reached)', async () => {
+  it('an idle with budget_reached is a failed run recorded as the ledger\'s budget class (budget_exhausted, Codex r9)', async () => {
     global.fetch = fetchFor([idle('budget_reached'), text('never read')]);
-    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_idle_budget_reached' });
-    expect(recorded()).toMatchObject({ failure: 'session_idle_budget_reached' });
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'budget_exhausted' });
+    expect(recorded()).toMatchObject({ failure: 'budget_exhausted' });
+    expect(jest.requireActual('../services/agent-control/taxonomy').classifyFailure(recorded().failure)).toBe('budget');
+  });
+
+  it('repeats of a completed side effect never count toward the tool-call cap (Codex r9)', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => (name === 'send_briefing_sms' ? { sent: true } : { ok: true }));
+    const ids = Array.from({ length: 35 }, (_, i) => `sms-${i}`);
+    global.fetch = fetchFor([
+      ...ids.map(id => customToolUse(id, 'send_briefing_sms')),
+      idle('requires_action', ids),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.smsSent).toBe(true);
+    expect(recorded()).toMatchObject({ failure: null });
   });
 
   it('more than 25 stream events in one run no longer fails (the old max-events cap is gone)', async () => {
