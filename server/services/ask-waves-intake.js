@@ -149,7 +149,7 @@ function looksLikeEmergency(text) {
 // Bare "poison" / "allergic" are not on this list — "do you
 // use rat poison?" and "I'm allergic to bees, can you treat a nest?" are
 // ordinary pest questions; poisoning needs an ingestion or "poisoned" cue.
-const EMERGENCY_OVERRIDE_TERM_RE = /\b(?:(?:call|called|calling|dial|dialed|need|needs)\s+911|can'?t\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|(?:he|she|they|i|someone|my\s+\w+|child|son|daughter|kid|baby)\s+(?:has\s+|just\s+|already\s+)?passed\s+out|unconscious|inconsciente|desmay\w*|poisoned|poisoning|envenenad\w*|envenenamiento|(?:swallowed|ate|drank|ingested|licked|got\s+into)\s+(?:some\s+|the\s+|your\s+)?(?:rat\s+)?(?:poison|bait|pesticide|chemicals?)|(?:comi[óo]|trag[óo]|bebi[óo]|se\s+comi[óo]|ingiri[óo]|lami[óo])\s+(?:un\s+poco\s+de\s+|el\s+|la\s+|los\s+|las\s+)?(?:veneno|pesticida|cebo|qu[íi]mico)|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/gi;
+const EMERGENCY_OVERRIDE_TERM_RE = /\b(?:(?:call|called|calling|dial|dialed|need|needs)\s+911|(?:can'?t|cannot|can\s+not)\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|(?:he|she|they|i|someone|my\s+\w+|child|son|daughter|kid|baby)\s+(?:has\s+|just\s+|already\s+)?passed\s+out|unconscious|inconsciente|desmay\w*|poisoned|poisoning|envenenad\w*|envenenamiento|(?:swallowed|ate|drank|ingested|licked|got\s+into)\s+(?:some\s+|the\s+|your\s+)?(?:rat\s+)?(?:poison|bait|pesticide|chemicals?)|(?:comi[óo]|trag[óo]|bebi[óo]|se\s+comi[óo]|ingiri[óo]|lami[óo])\s+(?:un\s+poco\s+de\s+|el\s+|la\s+|los\s+|las\s+)?(?:veneno|pesticida|cebo|qu[íi]mico)|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/gi;
 // Only a negation that directly governs the term voids it ("not having an
 // allergic reaction", "no signs of anaphylaxis", "isn't an emergency").
 // Anything looser fails open on real emergencies ("No, he can't breathe",
@@ -178,14 +178,18 @@ function reactionIsAffirmed(t) {
 
 // Only the clause that carries the sting counts — "…I don't know if I should
 // call" later in the message must not void a real sting.
+// True when the clause containing position `index` is a hypothetical (the
+// conditional leads the clause) or a past event ("last year", "hace un año").
+function clauseIsHypotheticalOrPast(t, index) {
+  const start = Math.max(t.lastIndexOf('.', index), t.lastIndexOf(';', index), t.lastIndexOf('!', index), t.lastIndexOf('?', index)) + 1;
+  const nextStop = t.slice(index).search(/[.;!?]/);
+  const clause = t.slice(start, nextStop === -1 ? t.length : index + nextStop);
+  const lead = t.slice(start, index);
+  return CONDITIONAL_RE.test(lead) || PAST_EVENT_RE.test(clause);
+}
 function stingClauseIsHypotheticalOrPast(t) {
   const m = BITE_STING_RE.exec(t);
-  if (!m) return false;
-  const start = Math.max(t.lastIndexOf('.', m.index), t.lastIndexOf(';', m.index), t.lastIndexOf('!', m.index), t.lastIndexOf('?', m.index)) + 1;
-  const nextStop = t.slice(m.index).search(/[.;!?]/);
-  const clause = t.slice(start, nextStop === -1 ? t.length : m.index + nextStop);
-  const lead = t.slice(start, m.index);
-  return CONDITIONAL_RE.test(lead) || PAST_EVENT_RE.test(clause);
+  return m ? clauseIsHypotheticalOrPast(t, m.index) : false;
 }
 const PERSONAL_CUE_RE = /\b(?:i|i['’]m|me|my|we|our|us|he|she|his|her|they|their|son|daughter|child|kid|baby|husband|wife|mom|dad|mi|mis|mijo|mija|hijo|hija|ni[ñn]o|ni[ñn]a|esposo|esposa|beb[ée])\b/i;
 
@@ -202,7 +206,9 @@ function looksLikeEmergencyOverride(text) {
     // "I don't have an EpiPen" is missing medication, not an absent symptom.
     if (/^epi\s?pen$/i.test(m[0])) return true;
     const before = t.slice(Math.max(0, m.index - 40), m.index);
-    if (!EMERGENCY_OVERRIDE_NEGATION_RE.test(before)) return true;
+    // Same clause-scoped hypothetical/past exclusions as the sting path ("If
+    // my dog ate rat poison, what should I do?", "…anaphylaxis last year…").
+    if (!EMERGENCY_OVERRIDE_NEGATION_RE.test(before) && !clauseIsHypotheticalOrPast(t, m.index)) return true;
   }
   return false;
 }

@@ -637,6 +637,21 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out.source).toBe('openai');
   });
 
+  test.each([
+    'If my dog ate rat poison, what should I do?',
+    'My son had anaphylaxis last year, can you remove the wasp nest?',
+  ])('a hypothetical or past direct emergency term keeps the model answer: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out.source).not.toBe('emergency_override');
+  });
+
+  test('"My child cannot breathe" overrides on its own (no sting cue)', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message: 'My child cannot breathe' });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
   test('a hypothetical sting question is not a current emergency', async () => {
     dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
     const out = await processIntakeMessage({ message: 'If my child gets stung, can swelling happen?' });
