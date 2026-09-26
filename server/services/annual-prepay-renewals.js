@@ -5792,14 +5792,21 @@ async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
 // - a different decision already on file is never overwritten;
 // - only a paid, live term (ACTIVE_STATUSES) — an unpaid payment_pending
 //   plan has nothing to renew yet;
-// - an ORIGINAL term still awaiting installation: a decided term is
-//   excluded from installation anchoring (termite-annual-activation.js), so
-//   declining now would strand the coverage year on its provisional dates.
-//   The customer can still decline by email or in writing (agreement v3).
-function termiteDeclineBlockedReason(term) {
+// - strictly BEFORE the renewal date (agreement v3: "decline renewal at any
+//   time before the renewal date") — a term ending today has already
+//   reached its renewal date, so it is `term_ended`, not declinable.
+// `today` defaults to the ET calendar day so a caller inside an existing
+// transaction can still pass the same `today` it resolved once itself.
+// Online decline is available BEFORE installation too (codex round-1 P1,
+// reversing the earlier "paid, installed plan only" restriction) —
+// anchorTermToInstallation / anchorInstalledTerms (termite-annual-
+// activation.js) now anchor a decided-lapse original term the same as an
+// undecided one, so a decline no longer strands the coverage year.
+function termiteDeclineBlockedReason(term, today = etDateString()) {
   if (term.renewal_decision) return 'already_decided';
   if (!ACTIVE_STATUSES.includes(term.status)) return 'not_active';
-  if (coverageAwaitsInstallation(term)) return 'awaiting_installation';
+  const termEnd = dateOnly(term.term_end);
+  if (!termEnd || termEnd <= today) return 'term_ended';
   return null;
 }
 
@@ -5821,16 +5828,16 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
       .first('*');
     if (!term) return { ok: false, reason: termId ? 'not_found' : 'no_term' };
 
-    const termEnd = dateOnly(term.term_end);
-    if (!termEnd || termEnd < today) {
-      return { ok: false, reason: 'term_ended', termId: term.id, termEnd };
-    }
+    // Idempotent replay first — a term already decided-lapse (cancelled +
+    // renewal_decision 'cancel') answers the same success shape even once
+    // its term_end has since passed, rather than a confusing term_ended.
     if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
       return declineResultFromRow(term, { alreadyDeclined: true });
     }
-    const blocked = termiteDeclineBlockedReason(term);
+    const blocked = termiteDeclineBlockedReason(term, today);
     if (blocked === 'already_decided') return { ok: false, reason: blocked, decision: term.renewal_decision, termId: term.id };
     if (blocked === 'not_active') return { ok: false, reason: blocked, status: term.status, termId: term.id };
+    if (blocked === 'term_ended') return { ok: false, reason: blocked, termId: term.id, termEnd: dateOnly(term.term_end) };
     if (blocked) return { ok: false, reason: blocked, termId: term.id };
 
     const decided = await recordDecision({

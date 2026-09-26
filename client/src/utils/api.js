@@ -785,8 +785,14 @@ export class ApiClient {
     return this.request('/property/termite-annual-plan');
   }
 
-  declineTermiteAnnualPlanRenewal() {
-    return this.request('/property/termite-annual-plan/decline', { method: 'POST' });
+  // termId selects which overlapping term to decline (multi-property
+  // accounts can carry more than one termite annual term) — omit it and
+  // the server falls back to the single-term legacy behavior.
+  declineTermiteAnnualPlanRenewal(termId) {
+    return this.request('/property/termite-annual-plan/decline', {
+      method: 'POST',
+      body: JSON.stringify(termId ? { termId } : {}),
+    });
   }
 
   updatePropertyPreferences(data) {

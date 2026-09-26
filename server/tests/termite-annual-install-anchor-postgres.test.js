@@ -343,6 +343,44 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
   });
 
+  // Codex round-1 P1: online decline is now available BEFORE installation
+  // (reversing the earlier "paid, installed plan only" restriction) — the
+  // decided-lapse original term (status 'cancelled', renewal_decision
+  // 'cancel') still needs its already-paid coverage year anchored once the
+  // installation happens; only the FUTURE renewal was refused.
+  test('a term the customer declined to renew BEFORE installation still anchors once the installation completes', async () => {
+    const { sweep, createTermForAnnualPrepay, db } = load();
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+    const install = await addVisit(db, { scheduled_date: '2026-10-14' });
+
+    const counts = await sweep();
+
+    expect(counts).toMatchObject({ anchorScanned: 1, anchored: 1, anchorFailed: 0 });
+    expect(createTermForAnnualPrepay).toHaveBeenCalledTimes(1);
+    const term = await readTerm(db);
+    expect(term.installation_anchored_at).toBeInstanceOf(Date);
+    expect(term.installation_anchor_visit_id).toBe(install.id);
+    // The decision itself is untouched by the anchor — only the coverage
+    // window moved.
+    expect(term.status).toBe('cancelled');
+    expect(term.renewal_decision).toBe('cancel');
+  });
+
+  // A void/refund 'cancelled' term (renewal_decision NULL — never a customer
+  // decline) never had coverage happen and must never be anchored, even if
+  // a termite bait/station visit later gets recorded on the account.
+  test('a refunded/voided term (cancelled, no renewal decision) is never anchored', async () => {
+    const { sweep, createTermForAnnualPrepay, db } = load();
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: null });
+    await addVisit(db, { scheduled_date: '2026-10-14' });
+
+    const counts = await sweep();
+
+    expect(counts).toMatchObject({ anchorScanned: 0, anchored: 0 });
+    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+    expect((await readTerm(db)).installation_anchored_at).toBeNull();
+  });
+
   test('a moved window that would overlap another live annual term is refused with a bell — nothing moves, retried later', async () => {
     const { sweep, createTermForAnnualPrepay, notifyAdmin, db } = load();
     await addVisit(db, { scheduled_date: '2026-10-14' });

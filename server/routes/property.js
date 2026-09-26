@@ -630,15 +630,29 @@ router.get('/termite-bond', async (req, res, next) => {
 });
 
 // GET /api/property/termite-annual-plan — the authenticated customer's own
-// CURRENT termite annual plan term (My Plan tab renewal card): renewal date
-// (term_end), renewal fee (prepay_amount), and whether a decline is already
-// on file. Dark behind termiteAnnualPlanSelectionEnabled() — the SAME
-// GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 pair
-// declineTermiteAnnualRenewal itself re-checks at write time (feature-gates.js:
-// "also requires GATE_CANCEL_FLOW_V2 for online nonrenewal") — gate-off and
-// no-term both answer 200 {available:false}; the client renders nothing.
-// Read-only: no row lock, no write. "Current" mirrors the service's own
-// resolution (annual_plan_version IS NOT NULL, soonest term_end >= today).
+// APPLICABLE termite annual plan terms (My Plan tab renewal card(s)):
+// renewal date (term_end), renewal fee (prepay_amount), and whether a
+// decline is already on file, for EVERY term still worth showing — a
+// multi-property account can carry more than one overlapping termite annual
+// term (docs/design/DECISIONS.md), each with its own independent renewal
+// and its own decline control (codex round-1 P1). Dark behind
+// termiteAnnualPlanSelectionEnabled() — the SAME GATE_TERMITE_ANNUAL_PLAN +
+// GATE_CANCEL_FLOW_V2 pair declineTermiteAnnualRenewal itself re-checks at
+// write time (feature-gates.js: "also requires GATE_CANCEL_FLOW_V2 for
+// online nonrenewal") — gate-off and no-term both answer 200
+// {available:false}; the client renders nothing.
+// Read-only: no row lock, no write. Ordered by term_end ascending (soonest
+// renewal first). A term whose renewal date has already passed today is no
+// longer offered — its row simply stops matching the term_end >= today
+// filter, the same edge the write side (declineTermiteAnnualRenewal /
+// termiteDeclineBlockedReason) treats as `term_ended`.
+// Status filter keeps active/renewal_pending/payment_pending (an unpaid
+// payment_pending term still shows — see canDecline below — but only a
+// paid, live term is declinable) PLUS the decided-lapse shape (cancelled +
+// renewal_decision 'cancel', still covered through term_end) — and drops
+// every other terminal shape: a refund/void 'cancelled' row with
+// renewal_decision NULL, 'refunded', or 'canceled' never had its coverage
+// happen and is never shown here (codex round-1 P2).
 const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { declineTermiteAnnualRenewal, termiteDeclineBlockedReason } = require('../services/annual-prepay-renewals');
@@ -650,28 +664,35 @@ router.get('/termite-annual-plan', async (req, res, next) => {
       return res.json({ available: false, reason: 'disabled' });
     }
     const today = etDateString();
-    const term = await db('annual_prepay_terms')
+    const rows = await db('annual_prepay_terms')
       .where({ customer_id: req.customerId })
       .whereNotNull('annual_plan_version')
       .where('term_end', '>=', today)
+      .where(function applicableTermState() {
+        this.whereIn('status', ['active', 'renewal_pending', 'payment_pending'])
+          .orWhere(function decidedLapse() {
+            this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+          });
+      })
       .orderBy('term_end', 'asc')
-      .first('id', 'term_end', 'prepay_amount', 'status', 'renewal_decision', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
-    if (!term) {
+      .select('id', 'term_end', 'prepay_amount', 'status', 'renewal_decision', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
+    if (!rows.length) {
       return res.json({ available: false, reason: 'no_term' });
     }
-    const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
-    return res.json({
-      available: true,
-      term: {
+    const terms = rows.map((term) => {
+      const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
+      return {
         id: term.id,
         termEnd: dateOnlyString(term.term_end),
         prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
         declined,
         // The write side's own eligibility (decision on file, unpaid, or
-        // awaiting installation) — never offer a decline the POST refuses.
-        canDecline: !declined && !termiteDeclineBlockedReason(term),
-      },
+        // the renewal date already passed) — never offer a decline the
+        // POST refuses. Same `today` this request already resolved.
+        canDecline: !declined && !termiteDeclineBlockedReason(term, today),
+      };
     });
+    return res.json({ available: true, terms });
   } catch (err) {
     next(err);
   }
@@ -690,13 +711,19 @@ const DECLINE_REFUSAL_MESSAGES = {
   term_ended: 'This plan’s renewal window has already passed.',
   already_decided: 'A renewal decision is already on file for this plan.',
   not_active: 'This plan is not currently eligible to decline renewal.',
-  awaiting_installation: 'Your stations have not been installed yet. To cancel before installation, email or write to us.',
   conflict: 'Something changed while we were saving this. Please refresh and try again.',
 };
 
 router.post('/termite-annual-plan/decline', async (req, res, next) => {
   try {
-    const result = await declineTermiteAnnualRenewal({ customerId: req.customerId });
+    // A body-supplied termId picks WHICH of a multi-property account's
+    // overlapping terms to decline — it can never target another
+    // customer's term: declineTermiteAnnualRenewal always re-matches it
+    // against customer_id = req.customerId (never trusted from the body)
+    // AND annual_plan_version IS NOT NULL. No termId keeps the legacy
+    // single-current-term behavior.
+    const termId = (typeof req.body?.termId === 'string' && req.body.termId) || null;
+    const result = await declineTermiteAnnualRenewal({ customerId: req.customerId, termId });
     if (!result.ok) {
       const status = (result.reason === 'disabled' || result.reason === 'no_term' || result.reason === 'not_found') ? 404 : 409;
       const error = DECLINE_REFUSAL_MESSAGES[result.reason] || 'This request could not be completed.';

@@ -2350,18 +2350,45 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     expect(termSelectQuery.where).toHaveBeenCalledWith('term_end', '>=', '2026-09-26');
   });
 
-  test('refuses an ORIGINAL term still awaiting installation (a decided term could never be install-anchored) — no write, no bell', async () => {
+  // Codex round-1 P1: online decline is available BEFORE installation too
+  // (reverses the earlier "paid, installed plan only" restriction) — the
+  // ORIGINAL term's installation_anchored_at being NULL no longer blocks
+  // the decline. termite-annual-activation.js's anchor now tolerates the
+  // resulting decided-lapse shape (its own suite covers that half).
+  test('declines an ORIGINAL term still awaiting installation — no longer blocked, records normally', async () => {
     const termRow = {
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
       status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
     };
-    setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
+    const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
+    const termQueue = [query({ first: termRow }), query({ returning: [decidedRow] })];
+    setDbQueues({
+      annual_prepay_terms: termQueue,
+      activity_log: [query()],
+      customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+    });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', today: '2026-09-26' });
 
-    expect(result).toMatchObject({ ok: false, reason: 'awaiting_installation', termId: 'term-1' });
+    expect(result).toEqual({
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
+    });
     const NotificationService = require('../services/notification-service');
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
+  test('refuses once the renewal date itself has arrived — equality counts as ended, not merely a lower term_end', async () => {
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3',
+      status: 'active', renewal_decision: null, term_end: '2026-09-26', prepay_amount: '450.00',
+    };
+    setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
+      customerId: 'cust-1', today: '2026-09-26',
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'term_ended', termId: 'term-1', termEnd: '2026-09-26' });
   });
 
   test('is idempotent — a repeat call on an already-declined term returns the same result and writes nothing new', async () => {

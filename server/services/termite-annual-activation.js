@@ -801,6 +801,35 @@ async function retryUndeliveredInvoices({ conn, limit, counts }) {
 // the anchored dates.
 const ANCHORABLE_TERM_STATUSES = ['payment_pending', 'active'];
 
+// Codex round-1 P1 (reverses the earlier "paid, installed plan only"
+// online-decline restriction): a customer can decline renewal online
+// BEFORE their termite installation happens (annual-prepay-renewals.js
+// termiteDeclineBlockedReason no longer blocks on coverageAwaitsInstallation).
+// That decided-lapse original term (status 'cancelled', renewal_decision
+// 'cancel', installation_anchored_at still NULL) must still anchor to its
+// installation once it completes — the coverage year the customer already
+// paid for is untouched by the decline, only the FUTURE renewal is refused.
+// An anchorable term is either:
+//   - undecided and paid/live (renewal_decision IS NULL, status IN
+//     ANCHORABLE_TERM_STATUSES) — the ordinary case, or
+//   - the decided-lapse shape above.
+// A void/refund 'cancelled' row (renewal_decision IS NULL) is neither shape
+// and is never anchored — its coverage never happened.
+function isAnchorableTermState(term) {
+  if (term?.renewed_from_term_id) return false;
+  if (term?.status === 'cancelled' && term?.renewal_decision === 'cancel') return true;
+  return !term?.renewal_decision && ANCHORABLE_TERM_STATUSES.includes(term?.status);
+}
+
+function whereAnchorableTermState(builder, alias) {
+  return builder.where(function anchorableTermState() {
+    this.where(`${alias}.status`, 'cancelled').andWhere(`${alias}.renewal_decision`, 'cancel')
+      .orWhere(function undecidedAndLive() {
+        this.whereNull(`${alias}.renewal_decision`).whereIn(`${alias}.status`, ANCHORABLE_TERM_STATUSES);
+      });
+  });
+}
+
 // The termite program's installation visit, by the same service-type rule
 // termite-program-agreement.js's scheduledStartDate uses to find the
 // program start: a termite service naming the bait or the stations.
@@ -885,7 +914,7 @@ async function anchorTermToInstallation({ termId, conn = db }) {
     await lockAndAssertNoAnnualPrepayOverlap(trx, peek.customer_id, null, true, '');
     const term = await trx('annual_prepay_terms').where({ id: termId }).forUpdate().first();
     if (!term || term.installation_anchored_at) return { skipped: 'already_anchored' };
-    if (term.renewed_from_term_id || term.renewal_decision || !ANCHORABLE_TERM_STATUSES.includes(term.status)) {
+    if (!isAnchorableTermState(term)) {
       return { skipped: 'not_original_term' };
     }
     if (await trx('annual_prepay_terms').where({ renewed_from_term_id: term.id }).first('id')) return { skipped: 'renewed' };
@@ -948,8 +977,7 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
       .where('e.annual_plan_activation_status', 'activated')
       .whereNull('apt.installation_anchored_at')
       .whereNull('apt.renewed_from_term_id')
-      .whereNull('apt.renewal_decision')
-      .whereIn('apt.status', ANCHORABLE_TERM_STATUSES)
+      .modify((qb) => whereAnchorableTermState(qb, 'apt'))
       .whereExists(function completedInstallation() {
         whereInstallationVisitForPlan(
           this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),

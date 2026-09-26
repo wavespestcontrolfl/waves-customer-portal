@@ -203,16 +203,29 @@ async function annualPrepayForCustomer(customerId) {
   if (!customerId) return null;
   const hasTable = await db.schema.hasTable('annual_prepay_terms').catch(() => false);
   if (!hasTable) return null;
+  const today = etDateString();
   const term = await db('annual_prepay_terms as apt')
     .leftJoin('invoices as inv', 'apt.prepay_invoice_id', 'inv.id')
     .where('apt.customer_id', customerId)
-    .whereIn('apt.status', ['active', 'renewal_pending', 'payment_pending'])
+    // Codex round-1 P2: a decided-lapse term (status 'cancelled' AND
+    // renewal_decision 'cancel', still covered through term_end — e.g. a
+    // termite annual plan declined online, slice 6a) keeps the paid-through
+    // badge showing until its term_end, same as every other live status.
+    // A void/refund 'cancelled' row (renewal_decision NULL) is excluded
+    // either way — its coverage never happened.
+    .where(function applicableStatus() {
+      this.whereIn('apt.status', ['active', 'renewal_pending', 'payment_pending'])
+        .orWhere(function decidedLapse() {
+          this.where('apt.status', 'cancelled').andWhere('apt.renewal_decision', 'cancel').andWhere('apt.term_end', '>=', today);
+        });
+    })
     .orderByRaw(`
       CASE apt.status
         WHEN 'active' THEN 1
         WHEN 'renewal_pending' THEN 2
         WHEN 'payment_pending' THEN 3
-        ELSE 4
+        WHEN 'cancelled' THEN 4
+        ELSE 5
       END
     `)
     .orderBy('apt.term_end', 'desc')
@@ -649,3 +662,4 @@ router.delete('/account', authenticate, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._private = { annualPrepayForCustomer };

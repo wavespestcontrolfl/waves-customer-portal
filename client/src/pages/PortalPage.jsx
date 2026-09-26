@@ -10958,10 +10958,24 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // Active termite bond(s) (GATE_PORTAL_TERMITE_BOND). Fail-soft: no bond
   // or gate off simply renders no card.
   const [planStatus, setPlanStatus] = useState('loading');
-  // Termite annual plan renewal card (slice 6a, GATE_TERMITE_ANNUAL_PLAN +
-  // GATE_CANCEL_FLOW_V2). Fail-soft: no current term or gate off renders no
-  // card. { id, termEnd, prepayAmount, declined, canDecline } | null.
-  const [termiteAnnualPlan, setTermiteAnnualPlan] = useState(null);
+  // Termite annual plan renewal card(s) (slice 6a, GATE_TERMITE_ANNUAL_PLAN
+  // + GATE_CANCEL_FLOW_V2). Gate off or no applicable term renders no card
+  // — but a load FAILURE renders an explicit error + Retry (codex round-1
+  // P1: never silently hidden, distinct from "nothing to show"). A
+  // multi-property account can carry more than one overlapping term, so
+  // this is an array — one card per term, each with its own decline
+  // control: [{ id, termEnd, prepayAmount, declined, canDecline }].
+  const [termiteAnnualPlans, setTermiteAnnualPlans] = useState([]);
+  const [termiteAnnualPlanStatus, setTermiteAnnualPlanStatus] = useState('loading');
+  const loadTermiteAnnualPlan = useCallback(() => {
+    setTermiteAnnualPlanStatus('loading');
+    api.getTermiteAnnualPlan()
+      .then((d) => {
+        setTermiteAnnualPlans(d?.available ? (d.terms || []) : []);
+        setTermiteAnnualPlanStatus('ready');
+      })
+      .catch(() => setTermiteAnnualPlanStatus('error'));
+  }, []);
 
   const loadPlan = useCallback(() => {
     setPlanStatus('loading');
@@ -11001,8 +11015,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
-    api.getTermiteAnnualPlan().then(d => setTermiteAnnualPlan(d?.available ? d.term : null)).catch(() => {});
-  }, [loadPlan, cancelledAccount]);
+    loadTermiteAnnualPlan();
+  }, [loadPlan, cancelledAccount, loadTermiteAnnualPlan]);
 
   const serviceMatches = (svcId, service = {}) => {
     // Server-resolved family wins when present (codex #3591 r58 P1):
@@ -11803,17 +11817,34 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
             </div>
           </section>
 
-          {termiteAnnualPlan && (
+          {termiteAnnualPlanStatus === 'error' && (
+            <section role="alert" data-glass="card" style={{ ...card, padding: 20 }}>
+              <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
+              <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                Your termite annual plan couldn&rsquo;t be loaded. Your coverage is not affected.
+              </div>
+              <button
+                type="button"
+                data-glass-accent=""
+                onClick={loadTermiteAnnualPlan}
+                style={{ ...secondaryButton, marginTop: 14, minHeight: 44 }}
+              >
+                Retry
+              </button>
+            </section>
+          )}
+          {termiteAnnualPlans.map((term) => (
             <TermiteAnnualRenewalCard
-              term={termiteAnnualPlan}
+              key={term.id}
+              term={term}
               card={card}
               sectionTitle={sectionTitle}
               primaryButton={primaryButton}
               secondaryButton={secondaryButton}
               muted={muted}
-              onDeclined={(update) => setTermiteAnnualPlan((prev) => (prev ? { ...prev, ...update } : prev))}
+              onDeclined={(update) => setTermiteAnnualPlans((prev) => prev.map((t) => (t.id === term.id ? { ...t, ...update } : t)))}
             />
-          )}
+          ))}
 
           {tier && tierIdx >= 2 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -11869,8 +11900,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
 
 // Termite annual plan renewal card (My Plan tab, slice 6a). Dark behind
 // GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 (server resolves the gate;
-// this renders only when GET /property/termite-annual-plan answers
-// available:true — see the useEffect that sets termiteAnnualPlan above).
+// one of these renders per applicable term GET /property/termite-annual-plan
+// returns — see loadTermiteAnnualPlan / termiteAnnualPlans above; a
+// multi-property account can carry more than one overlapping term, each
+// with its own independent decline control).
 // Agreement v3: "The customer may decline renewal at any time before the
 // renewal date online through their customer portal ... never only by
 // phone." Coverage through term_end is unaffected either way — the copy
@@ -11891,7 +11924,7 @@ function TermiteAnnualRenewalCard({
     setSubmitting(true);
     setError('');
     try {
-      const result = await api.declineTermiteAnnualPlanRenewal();
+      const result = await api.declineTermiteAnnualPlanRenewal(term.id);
       onDeclined({
         declined: true,
         canDecline: false,
