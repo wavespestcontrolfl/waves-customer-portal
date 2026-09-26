@@ -2334,20 +2334,56 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     err.isOperational = true;
     return err;
   };
+  const INVOICE_FIELDS = ['id', 'customer_id', 'annual_prepay_term_id', 'status', 'paid_at', 'payment_recorded_at', 'credit_applied', 'stripe_payment_intent_id'];
+  // Why removing this flag would double-bill or destroy a decided term, or
+  // null. Read-only, so it runs before anything is touched (the pay-page
+  // triage cancels a live session) and again under the locks.
+  const removalRefusal = async (conn, row) => {
+    if (!row.annual_prepay_term_id) return null;
+    const term = await conn('annual_prepay_terms').where({ id: row.annual_prepay_term_id }).first('status', 'renewal_decision');
+    if (term?.renewal_decision) {
+      return `This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`;
+    }
+    // Money on the invoice itself, not only the term's status: the Stripe
+    // webhook commits the invoice paid before it activates the term (and
+    // survives an activation failure), and a partial or in-flight payment
+    // never activates it. Same evidence the covered-invoice reopen reads.
+    const paymentOnInvoice = ['paid', 'prepaid'].includes(String(row.status || '').toLowerCase())
+      || row.paid_at || row.payment_recorded_at || Number(row.credit_applied) > 0
+      || AnnualPrepayRenewals.ACTIVE_STATUSES.includes(term?.status)
+      || await conn('payments')
+        .whereIn('status', ['paid', 'processing'])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [row.id])
+        .first('id');
+    if (paymentOnInvoice) {
+      return 'This annual prepay has a payment on it, so removing the flag would leave that payment on the invoice while the covered visits are billed again. To end the coverage, refund the invoice — a refund cancels the coverage and returns the money.';
+    }
+    const replacedCharges = await conn('invoices')
+      .where({ status: 'void' })
+      .where('notes', 'like', `%${InvoiceService.prepaySwitchSupersededByMarker(row.id)}%`)
+      .first('id')
+      || await conn('setup_fee_claims').where({ invoice_id: row.id }).where('amount', '>', 0).first('id');
+    if (replacedCharges) {
+      return 'This annual prepay replaced other charges when it was created (an on-site switch or a rodent setup fee). Void the invoice instead — voiding cancels the coverage and restores those charges.';
+    }
+    return null;
+  };
   try {
-    const invoice = await db('invoices')
-      .where({ id: req.params.id })
-      .first('id', 'customer_id', 'stripe_payment_intent_id');
+    const invoice = await db('invoices').where({ id: req.params.id }).first(INVOICE_FIELDS);
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const refusal = await removalRefusal(db, invoice);
+    if (refusal) return res.status(409).json({ error: refusal });
 
-    // Retire an open pay-page session first, the one mechanism apply-credit
-    // and manual payments use: a customer confirming it after coverage is
-    // removed would pay for coverage that no longer exists. Money already
-    // moving, or a session that cannot be verified, refuses. The PI id is
-    // re-checked under the invoice lock below.
+    // Retire an open pay-page session, the one mechanism apply-credit and
+    // manual payments use: a customer confirming it after coverage is removed
+    // would pay for coverage that no longer exists. Money already moving, or a
+    // session that cannot be verified, refuses. Only when there is a flag to
+    // remove; the PI id is re-checked under the invoice lock below.
     const openPiId = invoice.stripe_payment_intent_id || null;
-    const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'removing the annual prepay flag' });
-    if (openPi) return res.status(openPi.status).json({ error: openPi.error });
+    if (invoice.annual_prepay_term_id) {
+      const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'removing the annual prepay flag' });
+      if (openPi) return res.status(openPi.status).json({ error: openPi.error });
+    }
 
     // Visit invoices this term settled as coverage, which the cancel reopens.
     // Settlement stopped their reminders and the reopen skips the re-arm
@@ -2355,50 +2391,31 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     let coveredInvoiceIds = [];
     await db.transaction(async (trx) => {
       // Customer before invoice — the order reverse-prepaid and apply-credit
-      // take, and the cancel below locks the customer too — then read the
+      // take, and the cancel below locks the customer too — then re-read the
       // invoice under its own lock: a payment landing on it waits for us.
       await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate()
-        .first('customer_id', 'annual_prepay_term_id', 'status', 'paid_at', 'payment_recorded_at', 'credit_applied', 'stripe_payment_intent_id');
-      if (!locked || locked.customer_id !== invoice.customer_id) {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first(INVOICE_FIELDS);
+      if (!locked || locked.customer_id !== invoice.customer_id
+        || locked.annual_prepay_term_id !== invoice.annual_prepay_term_id) {
         throw refuse('This invoice changed while the annual prepay flag was being removed — retry.');
       }
       // A customer opened a NEW payment session after the triage above.
       if ((locked.stripe_payment_intent_id || null) !== openPiId) {
         throw refuse('A new payment session started for this invoice — retry removing the annual prepay flag.');
       }
+      const lockedRefusal = await removalRefusal(trx, locked);
+      if (lockedRefusal) throw refuse(lockedRefusal);
       const termId = locked.annual_prepay_term_id;
-      if (termId) {
-        const term = await trx('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision');
-        if (term?.renewal_decision) {
-          throw refuse(`This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`);
-        }
-        // Money on the invoice itself, not only the term's status: the Stripe
-        // webhook commits the invoice paid before it activates the term (and
-        // survives an activation failure), and a partial or in-flight payment
-        // never activates it. Same evidence the covered-invoice reopen reads.
-        const paymentOnInvoice = ['paid', 'prepaid'].includes(String(locked.status || '').toLowerCase())
-          || locked.paid_at || locked.payment_recorded_at || Number(locked.credit_applied) > 0
-          || AnnualPrepayRenewals.ACTIVE_STATUSES.includes(term?.status)
-          || await trx('payments')
-            .whereIn('status', ['paid', 'processing'])
-            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [invoice.id])
-            .first('id');
-        if (paymentOnInvoice) {
-          throw refuse('This annual prepay has a payment on it, so removing the flag would leave that payment on the invoice while the covered visits are billed again. To end the coverage, refund the invoice — a refund cancels the coverage and returns the money.');
-        }
-        const replacedCharges = await trx('invoices')
-          .where({ status: 'void' })
-          .where('notes', 'like', `%${InvoiceService.prepaySwitchSupersededByMarker(invoice.id)}%`)
-          .first('id')
-          || await trx('setup_fee_claims').where({ invoice_id: invoice.id }).where('amount', '>', 0).first('id');
-        if (replacedCharges) {
-          throw refuse('This annual prepay replaced other charges when it was created (an on-site switch or a rodent setup fee). Void the invoice instead — voiding cancels the coverage and restores those charges.');
-        }
-      }
+      // The invoice survives as an ordinary one: drop the triaged (now
+      // cancelled) session with the flag, or every edit refuses it as a live
+      // payment.
       await trx('invoices')
         .where({ id: invoice.id })
-        .update({ annual_prepay_term_id: null, updated_at: new Date() });
+        .update({
+          annual_prepay_term_id: null,
+          ...(termId && openPiId ? { stripe_payment_intent_id: null } : {}),
+          updated_at: new Date(),
+        });
       if (termId) {
         coveredInvoiceIds = await trx('invoices')
           .where({ annual_prepay_covered_term_id: termId, status: 'prepaid' })

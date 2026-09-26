@@ -176,6 +176,25 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect(res.status).toBe(200);
     expect(require('../services/stripe').cancelPaymentIntent).toHaveBeenCalledWith('pi_synthetic_open', expect.anything());
     expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('cancelled');
+    // The surviving invoice drops the cancelled session, so it stays editable.
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('stripe_payment_intent_id')).stripe_payment_intent_id).toBeNull();
+  });
+
+  test('a refused removal leaves the customer\'s pay-page session alone', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId, stripe_payment_intent_id: 'pi_synthetic_kept' });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+    await trx('setup_fee_claims').insert({ invoice_id: prepayInvoiceId, amount: 99 });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(409);
+    expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(require('../services/stripe').cancelPaymentIntent).not.toHaveBeenCalled();
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('stripe_payment_intent_id')).stripe_payment_intent_id).toBe('pi_synthetic_kept');
   });
 
   test('removing the flag from an unpaid prepay runs the canonical cancel: prior billing mode back, covered invoice owed again, open visits released', async () => {
