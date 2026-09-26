@@ -3520,15 +3520,22 @@ router.post('/call-status', async (req, res) => {
           status,
           duration_seconds: duration,
           updated_at: new Date(),
-          // codex #4919 finding D (round-5 P1 fix): the row may have been
+          // codex #4919 finding D (round-6 P1 fix): the row may have been
           // inserted earlier by a non-terminal event (no provider_ended_at
           // stamped then, per the gate above) — completion landing HERE,
           // on an already-existing row, is where it gets written. Merged
           // into existing metadata, never a wholesale overwrite (COALESCE
-          // keeps every other key); omitted entirely on a non-terminal
-          // event, preserving the same late/retried-callback protection
-          // `status`/`duration` above already apply.
-          ...(providerEndedAt ? {
+          // keeps every other key); omitted on a non-terminal event
+          // (providerEndedAt itself is null then), same as before — AND
+          // omitted when `status !== CallStatus`, meaning nextCallStatus
+          // REJECTED this event's status (a late busy/failed/no-answer
+          // callback the SAME precedence rule already keeps from rolling a
+          // completed call's status/duration backward — see nextCallStatus's
+          // "completed is absorbing" comment). Without this check a late
+          // terminal callback for an already-completed call would keep its
+          // correct status/duration but still clobber the real completion's
+          // provider_ended_at with this stale event's own, later Timestamp.
+          ...(providerEndedAt && status === CallStatus ? {
             metadata: trx.raw(
               "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
               [JSON.stringify({ provider_ended_at: providerEndedAt })],

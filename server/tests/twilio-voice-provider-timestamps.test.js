@@ -47,6 +47,42 @@ describe('parseProviderTimestamp — defensive parsing, invalid/missing omitted'
   });
 });
 
+// codex #4919 finding D round-6 P1: reproduces the /call-status
+// existing-row UPDATE path's write CONDITION directly (providerEndedAt &&
+// status === CallStatus) against the router's own exported
+// nextCallStatus/TERMINAL_CALL_STATUSES, so the "completed is absorbing"
+// precedence this update must respect is proven against the real
+// precedence function, not a re-implementation of it.
+describe('the existing-row metadata write condition respects nextCallStatus precedence (codex #4919 finding D round-6 P1)', () => {
+  const { nextCallStatus, TERMINAL_CALL_STATUSES, parseProviderTimestamp } = voiceRouter._test;
+
+  function wouldWriteProviderEndedAt(existingStatus, CallStatus, Timestamp) {
+    const providerEndedAt = TERMINAL_CALL_STATUSES.has(CallStatus) ? parseProviderTimestamp(Timestamp) : null;
+    const status = nextCallStatus(existingStatus, CallStatus);
+    return Boolean(providerEndedAt && status === CallStatus);
+  }
+
+  test('a LATE terminal callback for an ALREADY-completed call must NOT overwrite provider_ended_at — completed is absorbing', () => {
+    expect(wouldWriteProviderEndedAt('completed', 'busy', 'Sat, 26 Sep 2026 20:00:00 +0000')).toBe(false);
+    expect(wouldWriteProviderEndedAt('completed', 'no-answer', 'Sat, 26 Sep 2026 20:00:00 +0000')).toBe(false);
+    expect(wouldWriteProviderEndedAt('completed', 'failed', 'Sat, 26 Sep 2026 20:00:00 +0000')).toBe(false);
+  });
+
+  test('completion arriving on a row a non-terminal event inserted DOES write it', () => {
+    expect(wouldWriteProviderEndedAt('ringing', 'completed', 'Sat, 26 Sep 2026 18:05:00 +0000')).toBe(true);
+    expect(wouldWriteProviderEndedAt('in-progress', 'completed', 'Sat, 26 Sep 2026 18:05:00 +0000')).toBe(true);
+  });
+
+  test('a genuine terminal-to-terminal advance (never completed) still writes it', () => {
+    expect(wouldWriteProviderEndedAt('busy', 'no-answer', 'Sat, 26 Sep 2026 18:05:00 +0000')).toBe(true);
+  });
+
+  test('a non-terminal event never writes it, regardless of the existing status', () => {
+    expect(wouldWriteProviderEndedAt('ringing', 'in-progress', 'Sat, 26 Sep 2026 18:05:00 +0000')).toBe(false);
+    expect(wouldWriteProviderEndedAt('completed', 'in-progress', 'Sat, 26 Sep 2026 18:05:00 +0000')).toBe(false);
+  });
+});
+
 describe('/recording-status recovery insert writes provider_started_at/provider_ended_at (codex #4919 finding D)', () => {
   test('provider_started_at/provider_ended_at are computed from the fetched Call resource, with RecordingStartTime as a start hint ONLY when that fetch failed', () => {
     const anchor = "const twilioCall = (!requestFrom || !requestTo) ? await fetchTwilioCall(primaryCallSid) : null;";
@@ -123,7 +159,7 @@ describe('/call-status fallback inserts write provider_ended_at from Twilio\'s T
   // EARLIER non-terminal event (no provider_ended_at stamped then, per the
   // gate above) must still get it once completion actually lands — on the
   // EXISTING-row update path, not just at insert time.
-  test('the existing-row UPDATE path merges provider_ended_at into metadata via COALESCE, never a wholesale overwrite, and only when providerEndedAt is present', () => {
+  test('the existing-row UPDATE path merges provider_ended_at into metadata via COALESCE, never a wholesale overwrite, and only when providerEndedAt is present AND accepted', () => {
     const handlerAt = processorSrc.indexOf(
       "const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;",
     );
@@ -133,7 +169,13 @@ describe('/call-status fallback inserts write provider_ended_at from Twilio\'s T
     const returnAt = processorSrc.indexOf('return;', existingAt);
     expect(returnAt).toBeGreaterThan(existingAt);
     const section = processorSrc.slice(existingAt, returnAt);
-    expect(section).toContain("...(providerEndedAt ? {");
+    // codex #4919 finding D round-6 P1: gated on status === CallStatus too —
+    // a late busy/failed/no-answer callback for an ALREADY-completed call
+    // has nextCallStatus REJECT its status (the same "completed is
+    // absorbing" precedence rule the status/duration fields above already
+    // respect), and must not clobber the real completion's
+    // provider_ended_at with this stale event's own, later Timestamp.
+    expect(section).toContain("...(providerEndedAt && status === CallStatus ? {");
     expect(section).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
     expect(section).toContain('provider_ended_at: providerEndedAt');
     // status/duration_seconds/updated_at are unconditional; metadata is the
