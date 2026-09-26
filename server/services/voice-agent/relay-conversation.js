@@ -213,6 +213,13 @@ function resolveSessionModel({ sandbox } = {}) {
 
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
+// Only models on MODELS.ANTHROPIC_EFFORT_CAPABLE_RE accept the field; Haiku 4.5
+// and pre-5 Sonnets 400 on it, so a session pinned to one of them (an inbound or
+// sandbox override, or a benchmark candidate) sends no effort at all and stamps
+// null — otherwise every turn of that call errors before a word is spoken.
+function voiceEffortFor(model) {
+  return MODELS.ANTHROPIC_EFFORT_CAPABLE_RE.test(String(model || '')) ? VOICE_EFFORT : null;
+}
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
 // into every call's version record so a renderer change is attributable.
 const RENDERER_VERSION = 'block-v1';
@@ -705,6 +712,7 @@ class RelayConversation {
     const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
     this.model = modelResolution.model;
     this._modelFallbackReason = modelResolution.fallbackReason;
+    this._effort = voiceEffortFor(this.model);
     // PR C: resolved once, pinned for the session — see resolveSessionRenderer
     // and the file header. 'block' is byte-identical to this file's original
     // behavior; only 'stream' runs the new sentence-chunked path below.
@@ -1237,7 +1245,7 @@ class RelayConversation {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: this.model,
       model_fallback_reason: this._modelFallbackReason || null,
-      effort: VOICE_EFFORT,
+      effort: this._effort,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
       tool_schema_sha: this._toolSchemaSha,
@@ -1923,7 +1931,7 @@ class RelayConversation {
       toolMs: 0,
       toolCount: 0,
       rounds: 0,
-      effort: VOICE_EFFORT,
+      effort: this._effort,
       renderer: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : 'block',
       interrupted: false,
       durationUntilInterruptMs: null,
@@ -2915,7 +2923,8 @@ class RelayConversation {
             // air on an open line, and the work here is short receptionist turns
             // driven by tools, not reasoning. `low` is the right end of the
             // ladder for that.
-            output_config: { effort: VOICE_EFFORT },
+            // Omitted entirely for models that reject it (voiceEffortFor).
+            ...(this._effort ? { output_config: { effort: this._effort } } : {}),
             tools: this._tools,
             messages: this.messages,
           },
@@ -3771,4 +3780,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

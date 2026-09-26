@@ -324,3 +324,48 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
     expect(mockStreamCalls[0].model).not.toBe(process.env.VOICE_RELAY_SANDBOX_MODEL);
   });
 });
+
+// Haiku 4.5 (and pre-5 Sonnets) 400 on `output_config.effort`. A session
+// pinned to one through an override must omit the field, or every turn of the
+// call errors before a word is spoken — and the benchmark's candidate arm would
+// score as a total failure.
+describe('effort is sent only to models that accept it', () => {
+  const HAIKU = 'claude-haiku-4-5-20251001';
+
+  // Uses this file's shared stream-capturing @anthropic-ai/sdk mock.
+  async function runOneTurn(callSid) {
+    mockScriptedMessages.push({ content: [{ type: 'text', text: 'Hi there.' }], stop_reason: 'end_turn' });
+    const convo = new RelayConversation({ callSid, from: '+19415551234', send: jest.fn() });
+    await convo._runLoop('hello').catch(() => {});
+    return { convo, sent: mockStreamCalls.slice() };
+  }
+
+  test('voiceEffortFor: low for effort-capable models, null for Haiku 4.5', () => {
+    const { voiceEffortFor } = require('../services/voice-agent/relay-conversation');
+    expect(MODELS.MODEL_CATALOG[HAIKU]).toBeTruthy();
+    expect(voiceEffortFor('claude-sonnet-5')).toBe('low');
+    expect(voiceEffortFor(HAIKU)).toBeNull();
+    expect(voiceEffortFor(undefined)).toBeNull();
+  });
+
+  test('a Haiku 4.5 inbound override sends no output_config and stamps effort null', async () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = HAIKU;
+    const { convo, sent } = await runOneTurn('CA-haiku-effort');
+    expect(convo.model).toBe(HAIKU);
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    for (const p of sent) {
+      expect(p.model).toBe(HAIKU);
+      expect(p).not.toHaveProperty('output_config');
+      expect(p.thinking).toEqual({ type: 'disabled' });
+    }
+    expect(convo._versionStamps().effort).toBeNull();
+  });
+
+  test('the default session still sends effort low', async () => {
+    const { convo, sent } = await runOneTurn('CA-default-effort');
+    expect(MODELS.ANTHROPIC_EFFORT_CAPABLE_RE.test(convo.model)).toBe(true);
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    for (const p of sent) expect(p.output_config).toEqual({ effort: 'low' });
+    expect(convo._versionStamps().effort).toBe('low');
+  });
+});
