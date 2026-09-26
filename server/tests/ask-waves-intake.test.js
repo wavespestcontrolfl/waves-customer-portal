@@ -266,6 +266,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Your dog is going to be fine.', ''],
     ['Sus mascotas van a estar bien.', ''],
     ['Tu perro va a estar bien.', ''],
+    ['This treatment is benign for pets.', ''],
+    ['This pesticide is innocuous around children.', ''],
     ['The EPA allows this pesticide for residential use.', ''],
     ['The EPA permits this product.', ''],
     ['This pesticide is permitted by the EPA.', ''],
@@ -316,6 +318,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Two hours.', 'When can we touch the countertops again?'],
     ['Two hours.', 'How long until it is safe?'],
     ['The technician recommends no entry for 30 minutes.', 'What precautions after the treatment?'],
+    ['The visit has a 30-minute no-entry window.', 'What precautions after the treatment?'],
+    ['The visit requires a 30-minute exclusion period.', 'What precautions after the treatment?'],
     ['Residents may return after 30 minutes.', 'How should I prepare?'],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
@@ -595,6 +599,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
 
   test('"I sprayed my dog with pesticide" gets the veterinary script', () => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I sprayed my dog with pesticide');
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test.each(['My gecko ate pesticide', 'My snake swallowed pesticide', 'My fish were exposed to pesticide'])('a reptile/fish exposure gets the veterinary script: %s', (context) => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
   });
 
@@ -976,6 +985,9 @@ describe('normalizeIntakeResult', () => {
     ['EPA approval is not required for this EPA-exempt product.', ''],
     ['This product does not have EPA approval; it is EPA-exempt.', ''],
     ['The product lacks EPA approval because it is EPA-exempt.', ''],
+    ['EPA registration does not mean approval.', ''],
+    ['EPA approval has not been granted; the product is EPA-registered.', ''],
+    ['EPA-registered is not the same as EPA-approved.', ''],
     ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
     ['Please wait 30 minutes for our dispatcher to call you back.', ''],
     ['Please wait 2 business days for the refund to appear.', ''],
@@ -1936,6 +1948,13 @@ describe('looksLikeEmergency', () => {
     'El pesticida me cayó en los ojos',
     'El insecticida le cayó en la piel a mi hijo',
     'Pesticide splashed me in the eyes',
+    'Pesticide got all over my hands',
+    'My child took poison',
+    'My dog took rat poison',
+    'Mi hijo tomó veneno',
+    "I'm at the hospital",
+    'We are on our way to the hospital now',
+    'My husband is on his way to the hospital',
     'At the hospital after a wasp sting',
     'Going to the hospital now after the treatment',
     'Hospital after a bee sting',
@@ -2007,6 +2026,11 @@ describe('looksLikeEmergency', () => {
     'Do ants bite?\nMy lawn has a rash of brown spots',
     'I used the pesticide and it made the ants sick',
     'The pesticide made the ants sick while I watched',
+    "I can't get into your product page",
+    "I'm sick of seeing ants after the pesticide treatment",
+    'My kids are sick of ants after the treatment',
+    "I need a doctor's office treated for roaches",
+    'We need an ambulance station treated for termites',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
