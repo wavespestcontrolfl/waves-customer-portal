@@ -834,6 +834,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — retry committed route-quality refreshes, including dates
+  // outside the nightly optimizer's six-day band. The durable row claim
+  // fences overlapping ticks/deploys; no second cron lease is needed.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const result = await require('./scheduling/quality-after-change').retryScheduleQualityRefreshes();
+      if (result.processed > 0) {
+        logger.info(`[schedule-quality] retry sweep: processed=${result.processed} succeeded=${result.succeeded} failed=${result.failed}`);
+      }
+      if (result.status === 'failed' || result.failed > 0) {
+        logger.error('[schedule-quality] retry sweep has pending failures');
+      }
+    } catch (err) {
+      logger.error(`[schedule-quality] retry sweep failed (${err.code || 'retry_sweep_error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // HOURLY :20 — geocode backstop. Several customer-create paths never call
   // ensureCustomerGeocoded (and the ones that do swallow transient Google
   // failures), leaving latitude/longitude NULL — which silently drops those
@@ -4048,6 +4065,12 @@ function initScheduledJobs() {
               || ((claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
                 ? claimMeta.consent_basis
                 : undefined),
+            // A deferred billing notice re-enters the same channel routing
+            // its immediate attempt used: the persisted delivery category
+            // and the branded-Email sidecar marker ride along (codex #4833
+            // r3), so an explicit Email / App choice is neither texted nor
+            // double-emailed on the morning replay.
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
@@ -6444,6 +6467,19 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Payment retry failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Payment retry timing stays on the billing cron. This bounded sweep only
+  // materializes Email decisions that were committed with that retry state
+  // but could not be queued during the originating process.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('billing-retry-email-reconcile', async () => {
+        await require('./billing-retry-email-obligation').reconcilePendingNotices({ limit: 50 });
+      });
+    } catch (err) {
+      logger.error(`Billing retry Email reconciliation failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

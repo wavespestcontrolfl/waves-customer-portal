@@ -4,6 +4,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 const PaymentLifecycleEmail = require('../payment-lifecycle-email');
+const { billingChannelAllowed } = require('../billing-delivery-channels');
 
 class PaymentExpiry {
   /**
@@ -262,21 +263,34 @@ class PaymentExpiry {
       try {
         const customer = await db('customers').where({ id: card.customer_id }).first();
         if (!customer) continue;
+        const { daysUntil, expired } = require('../autopay-notifications')
+          .cardExpiryOutlook(card.exp_year, card.exp_month, now);
+        const reminderStage = expired ? 'expired' : (daysUntil <= 7 ? '7_day' : (daysUntil <= 30 ? '30_day' : '60_day'));
+        const notificationEventKey = `payment-expiry:${card.id}:${card.exp_month}:${card.exp_year}:${reminderStage}`;
 
-        const emailPromise = PaymentLifecycleEmail.sendPaymentMethodExpiring({
+        const emailPromise = reminderStage === '60_day' ? Promise.resolve() : PaymentLifecycleEmail.sendPaymentMethodExpiring({
           customerId: card.customer_id,
           paymentMethodId: card.id,
+          reminderStage,
           now,
         }).catch((emailErr) => {
           logger.warn(`Payment expiry email failed for card ${card.id}: ${emailErr.message}`);
         });
 
-        if (!customer.phone) { await emailPromise; continue; }
+        if (!customer.phone) {
+          const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          const routesEmail = reminderStage === '60_day' && billingChannelAllowed(prefs || {}, 'billing', 'email') === true;
+          if (!routesEmail && billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; continue; }
+        }
 
-        // 30-day cooldown per customer
+        // Only an accepted Text for this method and stage starts its cooldown.
+        // App and Email retain their provider event-key deduplication.
+        const cooldownDays = reminderStage === '7_day' ? 7 : 30;
         const recentNotice = await db('sms_log')
           .where({ customer_id: card.customer_id, message_type: 'payment_expiry' })
-          .where('created_at', '>', db.raw("NOW() - INTERVAL '30 days'"))
+          .whereIn('status', ['sent', 'delivered'])
+          .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
+          .where('created_at', '>', db.raw("NOW() - (? * INTERVAL '1 day')", [cooldownDays]))
           .first();
 
         if (recentNotice) { await emailPromise; continue; }
@@ -306,9 +320,12 @@ class PaymentExpiry {
           entryPoint: 'payment_expiry_workflow',
           metadata: {
             original_message_type: 'payment_expiry',
+            billingDeliveryCategory: 'billing',
+            notificationEventKey,
             billing_mode_at_send: require('../billing-lane').resolveBillingLane(customer).mode,
             customerLocationId: customer.location_id,
           },
+          hasEmailLeg: reminderStage !== '60_day',
         });
         if (sendResult.blocked || sendResult.sent === false) {
           throw new Error(`payment expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
@@ -325,10 +342,12 @@ class PaymentExpiry {
           status: 'active',
         });
 
+        const deliveredChannel = ['sms', 'email', 'push'].includes(sendResult.channel)
+          ? sendResult.channel : 'sms';
         await db('customer_interactions').insert({
           customer_id: card.customer_id,
-          interaction_type: 'sms_outbound',
-          channel: 'sms',
+          interaction_type: `${deliveredChannel}_outbound`,
+          channel: deliveredChannel,
           subject: 'Payment method expiry notice',
           body: `Card ****${card.last_four} expires ${expLabel}`,
         });

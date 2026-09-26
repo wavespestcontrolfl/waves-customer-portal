@@ -61,6 +61,30 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
   }
 });
 
+test('a deferred billing notice replays with its delivery category and Email-sidecar marker', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: 'cust-1', message_body: 'Payment problem', message_type: 'payment_failed' },
+    claimMeta: { entry_point: 'stripe_webhook_billing_deferred', billingDeliveryCategory: 'payment_issue',
+      hasEmailLeg: true, notificationEventKey: 'payment-problem:attempt:pay-2:payment_failed', invoice_id: 'inv-1' },
+    toPhone: '+19415550101', purpose: 'payment_failure', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+    SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    Array,
+    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+  });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    hasEmailLeg: true, invoiceId: 'inv-1',
+    metadata: expect.objectContaining({
+      billingDeliveryCategory: 'payment_issue', notificationEventKey: 'payment-problem:attempt:pay-2:payment_failed',
+    }),
+  }));
+});
+
 test('scheduled completion sends the body after the review guard strips its bundled ask', async () => {
   const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
   const start = source.indexOf('const sendReplay = () => {');
@@ -179,15 +203,8 @@ describe('resolveScheduledRecipient', () => {
 });
 
 describe('canReplayBillingWithoutPhone', () => {
-  // The routing slice registers no Email-only replay entry yet; stub the
-  // registry lookup so the scheduler's own rule is exercised in isolation.
-  const registry = require('../services/messaging/deferred-replay-registry');
-  const registered = { entry_point: 'email_only_fixture', requires_registered_dispatch: true,
+  const registered = { entry_point: 'billing_retry_email_deferred', requires_registered_dispatch: true,
     refresh_customer_phone: true, billingDeliveryCategory: 'payment_issue' };
-  beforeEach(() => {
-    jest.spyOn(registry, 'replaysWithoutPhone').mockImplementation((entry) => entry === 'email_only_fixture');
-  });
-  afterEach(() => jest.restoreAllMocks());
 
   test('a registered Email-only replay proceeds without a phone', () => {
     expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '' }, registered)).toBe(true);
@@ -209,7 +226,6 @@ describe('canReplayBillingWithoutPhone', () => {
     expect(canReplayBillingWithoutPhone({ customer_id: null, to_phone: '' }, registered)).toBe(false);
   });
 });
-
 
 describe('scheduledDepositReceiptAllowed', () => {
   afterEach(() => db.mockReset());

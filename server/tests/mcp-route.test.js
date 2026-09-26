@@ -38,7 +38,7 @@ let mockRows = [];
 let mockFirstRow = null;
 let mockRejectWith = null;
 const builders = [];
-const CHAIN_METHODS = ['where', 'whereIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
+const CHAIN_METHODS = ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
 const makeBuilder = (table) => {
   const b = { table };
   CHAIN_METHODS.forEach((m) => { b[m] = jest.fn(() => b); });
@@ -254,6 +254,8 @@ describe('tools', () => {
     expect(toolResult(found.body).name).toBe('General Pest Control (Quarterly)');
     // Retired/archived rows must be excluded — mirrors the service connector.
     expect(builders[0].where).toHaveBeenCalledWith({ service_key: 'pest_general_quarterly', is_active: true, is_archived: false });
+    // Retired-for-sale rows (active only for grandfathered plans) too.
+    expect(builders[0].whereNotIn).toHaveBeenCalledWith('service_key', expect.arrayContaining(['tree_shrub_quarterly']));
 
     mockFirstRow = null;
     const missing = await callTool('get_service', { service_key: 'nope' });

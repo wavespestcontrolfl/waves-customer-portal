@@ -176,6 +176,15 @@ function checkRecruitingBookingVersion(meta, app, stage) {
 }
 
 const REGISTRY = {
+  billing_retry_email_deferred: {
+    // Email-only replay: the row is queued without a phone on purpose, so
+    // the executor's recipient gate must not read its blank phone as a
+    // failed lookup (codex #4803 r5).
+    replayWithoutPhone: true,
+    async dispatch(meta) {
+      return require('../billing-retry-email-obligation').replayPaymentRetryNotice(meta);
+    },
+  },
   lawn_assessment_notification_deferred: {
     async recheck(meta) {
       // The durable descriptor carries the customer identity. Reuse
@@ -1539,6 +1548,7 @@ async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatc
   return defaultDispatch();
 }
 
+// True only for a registered dispatch that never needs a recipient phone.
 function replaysWithoutPhone(entryPoint) {
   return entryFor(entryPoint)?.replayWithoutPhone === true;
 }

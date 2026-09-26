@@ -9,6 +9,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { isDefiniteRejection } = require('./sendgrid-mail');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -351,10 +352,14 @@ async function sendLifecycleTemplate({
       failureReason: err.message,
     });
     logger.error(`[payment-lifecycle-email] ${eventType} failed for ${customer.id}: ${err.message}`);
+    // A definite provider refusal (SendGrid 4xx, 429 included) after handoff
+    // is known not sent: the durable owner may clear its provider-start
+    // marker and retry. Only an unknown post-handoff failure stays uncertain.
+    const deliveryOutcome = providerStarted && !isDefiniteRejection(err) ? 'uncertain' : 'not_sent';
     return { ok: false, error: err.message,
       ...(billingDeliveryCategory ? {
-        deliveryOutcome: providerStarted ? 'uncertain' : 'not_sent',
-        retryable: !providerStarted,
+        deliveryOutcome,
+        retryable: deliveryOutcome === 'not_sent',
         ...(handoffGuardFailed ? { reason: 'pre_provider_handoff_failed' } : {}),
       } : {}),
     };

@@ -1055,7 +1055,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     heading: 'your service is complete!',
     status: allReady ? 'Ready now' : 'Service complete',
     statusTone: allReady ? 'ready' : 'neutral',
-    result: 'Routine service completed. No high-priority issues were noted.',
+    result: 'Service completed. Visit details are below.',
     completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
     detail: data.techVisitCard
       ? ''
@@ -1093,7 +1093,7 @@ function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
   const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
   const rainRow = usingWeeklyRain
     ? ['Rain this week', weeklyRainIn, ' in']
-    : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
+    : ['24 Hr Rainfall', conditions.rain_24h_in, ' in'];
   // No Source row: the provider credit is internal provenance, not customer
   // information (owner directive 2026-08-03 — supersedes the codex #3093/r14
   // crediting rules, which now apply to nothing rendered here).
@@ -1218,8 +1218,9 @@ export function applicationPurpose(app = {}, serviceLine = 'pest') {
     const active = String(app.product?.active_ingredient || '').toLowerCase();
     const hay = `${product} ${category} ${active}`;
     if (/surfactant|adjuvant|wetting/.test(hay)) return 'Spray coverage aid';
-    if (method.includes('drench')) return 'Systemic root-zone treatment';
+    if (/drench|(?:root|soil)[\s_-]*inject/.test(method)) return 'Systemic root-zone treatment';
     if (method.includes('inject')) return 'Trunk injection';
+    if (/herb|weed/.test(category)) return 'Targeted weed treatment';
     if (/fung|azoxy|propiconazole|thiophanate|chlorothalonil|phosphite|phosphonate|copper/.test(hay)) return 'Disease control application';
     if (/insect|mitic|bifen\w*|\w*thrin\b|pyrethroid|spinosad|spinetoram|indoxacarb|imidacloprid|dinotefuran|clothianidin|thiamethoxam|abamectin|spirotetramat|pyriproxyfen|fipronil|acephate|\bigr\b/.test(hay)) return 'Insect & mite control';
     if (/fert|\b\d{1,2}-\d{1,2}-\d{1,2}\b|chelat|micro[\s-]?nutrient/.test(hay)) return 'Plant nutrition application';
@@ -1403,10 +1404,15 @@ export function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') 
 
   if (serviceLine === 'tree_shrub') {
     const isSurfactant = /surfactant|adjuvant|wetting/i.test(`${productName} ${active}`);
+    const isHerbicide = applicationPurpose(app, serviceLine) === 'Targeted weed treatment';
     const isSystemic = method.includes('drench') || method.includes('inject')
       || /dinotefuran|imidacloprid|spirotetramat|systemic/i.test(active);
     if (isSurfactant) {
       details.push(`${productName} is a spray adjuvant, not a pesticide. It lowers the surface tension of the spray so the treatment spreads evenly and holds on waxy leaves, stems, and the protective coatings of pests like scale and mealybugs — improving the coverage and performance of the products it is mixed with.`);
+    } else if (isHerbicide) {
+      const area = String(app.applicationArea || '').trim();
+      const targets = recordedTargetsText(app);
+      details.push(`${productName} was applied in the treated areas recorded for this visit${area ? ` (${area})` : ''}${targets ? ` for the documented targets: ${targets}` : ' for documented weed control'}.`);
     } else if (isSystemic) {
       details.push(`${productName} is a systemic treatment${active ? ` (active ingredient: ${active})` : ''}. It is absorbed into the plant and moved through its vascular system, so sap-feeding pests such as scale, mealybugs, and whiteflies take it in as they feed — including pests concealed under waxy coverings or tucked into branch crotches where contact sprays cannot reach. Systemic protection builds over days to weeks and keeps working between visits.`);
     } else {
@@ -3320,16 +3326,6 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
 // key means no card, never a client-side guess. The CTA books nothing and
 // charges nothing: it records the request and the office follows up (owner
 // sends all customer communications).
-// Per-application price copy is a hard owner rule (AGENTS.md, re-affirmed
-// 2026-07-23): customer-facing estimate surfaces never show "$X/mo" or
-// combined plan totals — the unit is "per application".
-function formatPerApplication(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
-}
-
-
 function CrossSellCard({ data, token, mode }) {
   // idle → sending → sent | failed (failed keeps the button for a retry —
   // the UI may only confirm after the server recorded the request).
@@ -3337,11 +3333,6 @@ function CrossSellCard({ data, token, mode }) {
   const offer = data?.crossSell;
   if (mode !== 'live' || !offer?.serviceKey) return null;
   const option = offer.option || {};
-  const perApplication = formatPerApplication(option.perVisit);
-  // "Parrish, FL" → "Parrish"; missing → headline reads "your home".
-  const city = String(data?.cityState || '').split(',')[0].trim();
-  const cityPhrase = city ? ` in ${city}` : '';
-  const priced = offer.mode === 'priced' && !!offer.option && !!perApplication;
   const handleRequest = async () => {
     if (requestState === 'sending' || requestState === 'sent') return;
     setRequestState('sending');
@@ -3381,23 +3372,6 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
-      {/* Owner copy ruling 2026-08-13: the card is ONE centered headline
-          (price folded in, first name leading) + the button. No eyebrow,
-          cadence, or fine print. start-vs-add stays SERVER-decided (codex
-          #3367 PR r2): a customer with no plan (one-time treatment) must
-          not be told to add to one. */}
-      {/* Owner-dictated copy 2026-08-13: no name, and the bare
-          per-application amount with no unit — a documented owner
-          exception in AGENTS.md ("per application" rule). The number IS
-          the per-application price; the click records a request and the
-          office confirms full per-application terms before anything is
-          scheduled (the click-to-estimate PR moves that confirmation onto
-          the estimate page itself). City rides the report payload. */}
-      <h3>
-        {priced
-          ? `Keep your home${cityPhrase} protected for just ${perApplication}!`
-          : `Your exact ${offer.label.toLowerCase()} quote is one tap away`}
-      </h3>
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -3422,9 +3396,7 @@ function CrossSellCard({ data, token, mode }) {
           >
             {requestState === 'sending'
               ? 'Sending…'
-              : priced
-                ? 'Keep My Home Protected'
-                : `Get my ${offer.label.toLowerCase()} quote`}
+              : 'Request an Estimate'}
           </button>
         )}
       </div>
@@ -5821,7 +5793,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     && (normalizedVisitTimeline.events || []).length > 0;
   // Lawn and tree & shrub reports don't show the per-area Coverage map — the
   // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
-  // hides it too (the "Where we protected" diagram replaces the lettered map).
+  // hides it too; its hero carries any technician-recorded treatment map.
   // A technician-traced satellite map overrides every hide: it is the real
   // photo of THIS property's treated perimeter, which beats any generic
   // diagram (that replacement is the Treatment Zone Mapper's whole point).
@@ -7401,7 +7373,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .applied-products-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          grid-template-columns: 1fr;
           gap: 12px;
         }
         .applied-product-card {
@@ -7735,6 +7707,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              22 here and to 20 in glass-theme.css; both size overrides are gone
              and h3's own 20px carries the rule. Layout only below. */
           margin-bottom: 4px;
+          text-align: center;
+        }
+        .service-report-v1 .referral-card > h2 {
+          /* ReferralShareCard is shared with estimate/portal surfaces. Keep
+             the report headline aligned with its sibling CTA headlines here. */
+          margin-bottom: 4px;
+          font-family: inherit !important;
+          font-size: 20px !important;
+          line-height: 1.2 !important;
+          font-weight: 600 !important;
+          letter-spacing: -0.02em !important;
           text-align: center;
         }
         .cross-sell-price {
@@ -8916,7 +8899,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               token={token}
               mode={mode}
               tracedMap={data.treatmentMap?.traced || null}
-              traceOrNothing={data.pestTraceOrNothing === true}
               /* Pressure trend rides INSIDE the hero (owner 2026-07-30:
                  "merge into one block") — the standalone card below is
                  suppressed whenever this slot is filled. */

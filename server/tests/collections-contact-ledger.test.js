@@ -17,7 +17,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
-const { recordContact, markDelivered } = require('../services/collections/contact-ledger');
+const { recordContact, markDelivered, claimAttempt } = require('../services/collections/contact-ledger');
 
 function insertChain({ returned = [{ id: 'led-1' }] } = {}) {
   const q = {};
@@ -26,6 +26,7 @@ function insertChain({ returned = [{ id: 'led-1' }] } = {}) {
   q.ignore = jest.fn(() => q);
   q.returning = jest.fn(async () => returned);
   q.where = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
   q.first = jest.fn(async () => undefined);
   q.update = jest.fn(async () => 1);
   return q;
@@ -114,4 +115,39 @@ test('markSendFailed merges via jsonb, never replaces from the stale entry snaps
   expect(merged).toEqual({ send_failed: true, stage: 'calls_create', ambiguous_provider_failure: true });
   // The stale snapshot's keys are NOT in the payload — the DB's live value wins.
   expect(merged).not.toHaveProperty('pre_dial');
+});
+
+
+test('keyed delivery attempts distinguish fresh, accepted and ambiguous reservations', async () => {
+  await expect(claimAttempt({ id: 'led-1', metadata: {} })).resolves.toEqual({ allowed: true });
+  await expect(claimAttempt({ id: 'led-1', reused: true, metadata: { delivered: true } }))
+    .resolves.toEqual({ allowed: false, delivered: true });
+  await expect(claimAttempt({ id: 'led-1', reused: true, metadata: {} }))
+    .resolves.toEqual({ allowed: false, held: true });
+  expect(db).not.toHaveBeenCalled();
+});
+
+test('a confirmed failure is cleared atomically before retry and only one retry wins', async () => {
+  const q = insertChain();
+  q.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+  db.mockReturnValue(q);
+  const entry = { id: 'led-1', reused: true, metadata: { send_failed: true } };
+  await expect(claimAttempt(entry)).resolves.toEqual({ allowed: true });
+  await expect(claimAttempt(entry)).resolves.toEqual({ allowed: false, held: true });
+  expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('AND NOT'), [
+    JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }),
+  ]);
+  expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('||'), [JSON.stringify({ send_failed: false })]);
+  // If the accepted retry cannot stamp delivery, its cleared reservation is
+  // ambiguous on the next sweep, not a confirmed failure to repeat.
+  await expect(claimAttempt({ ...entry, metadata: { send_failed: false } }))
+    .resolves.toEqual({ allowed: false, held: true });
+});
+
+test('retry claim write failures propagate before any provider is authorized', async () => {
+  const q = insertChain();
+  q.update.mockRejectedValue(new Error('db unavailable'));
+  db.mockReturnValue(q);
+  await expect(claimAttempt({ id: 'led-1', reused: true, metadata: { send_failed: true } }))
+    .rejects.toThrow('db unavailable');
 });

@@ -133,8 +133,9 @@ function recipientBlock(doc, { recipient, requestedDate }) {
 // Signature block: stamped execution details when signed, or a blank
 // signature line on the review copy.
 function signatureBlock(doc, contract, { signed }) {
-  // Keep the block together — push to a new page if it won't fit.
-  const needed = 96;
+  // Keep the block together — push to a new page if it won't fit. A
+  // countersigned agreement adds one more stamped line below.
+  const needed = contract.countersigned_at ? 130 : 96;
   if (doc.y + needed > FOOTER_TOP - 16) doc.addPage();
 
   let y = doc.y + 10;
@@ -158,11 +159,24 @@ function signatureBlock(doc, contract, { signed }) {
     if (auditBits.length) {
       doc.fontSize(7).font('Helvetica').fillColor(MUTED)
         .text(`Electronically signed · ${auditBits.join(' · ')}`, MARGIN_X, y, { width: CONTENT_W });
+      y += 11;
     }
   } else {
     doc.fontSize(11).font('Helvetica').fillColor('#9AA1B1').text('X ______________________________', MARGIN_X, y);
     y += 18;
     doc.fontSize(9).font('Helvetica').fillColor(MUTED).text('Signature                                   Date', MARGIN_X, y);
+    y += 13;
+  }
+
+  // Certified-operator countersignature — a RECORD step some agreements
+  // (termite annual protection, A-14 owner ruling 2026-09-25) collect after
+  // the customer signs. Never a blank ink line asking for one on the review
+  // or unsigned copy — only stamped once customer_contracts.countersigned_at
+  // is actually set. One blank line before it, per the ruling's wording.
+  if (contract.countersigned_at) {
+    y += 14;
+    doc.fontSize(11).font('Helvetica').fillColor(BODY)
+      .text(`Certified Operator: ${contract.countersigner_name || '—'}, ${formatDate(contract.countersigned_at)}`, MARGIN_X, y, { width: CONTENT_W });
   }
 }
 
