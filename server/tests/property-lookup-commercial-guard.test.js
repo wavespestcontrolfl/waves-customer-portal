@@ -1495,6 +1495,50 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(townhome.stories).toBe(2);
   });
 
+  test('a cached weak-typed row whose satellite read is STACKED gets the unit reset too (codex r1 P1)', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ propertyType: null }),
+      { ...parcelWideAi, structureAttachment: 'STACKED', _structureAttachmentConfidence: 90 },
+      null, null, null, null, unit,
+    );
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.residentialUnitLookup).not.toBeNull();
+    expect(profile.stories).toBe(1);
+    expect(profile.pool).not.toBe('POSSIBLE');
+    expect(profile.estimatedTurfSf || 0).toBe(0);
+  });
+
+  test('an untrusted web-listing "Condo" never clears parcel facts (codex r1 P1)', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ _fieldEvidence: { propertyType: { value: 'Condo', sourceType: 'web', fieldVerify: true } } }),
+      parcelWideAi, null, null, null, null, unit,
+    );
+    expect(profile.residentialUnitLookup).toBeNull();
+    expect(profile.stories).toBe(2);
+    expect(profile.lotSqFt).toBe(8000);
+  });
+
+  test('a trusted 2–4-unit condo parcel: its sqft is the small building\'s, so it is dropped (codex r1 P1)', () => {
+    for (const overrides of [
+      { unitCount: 3, _source: 'county' },
+      { unitCount: 1, _parcel: { residentialUnits: 2 } },
+    ]) {
+      const profile = buildEnrichedProfile(condoRecord(overrides), parcelWideAi, null, null, null, null, unit);
+      expect({ overrides, unit: !!profile.residentialUnitLookup, homeSqFt: profile.homeSqFt })
+        .toEqual({ overrides, unit: true, homeSqFt: 0 });
+    }
+  });
+
+  test('exactly one propertyType flag — a source-conflict warning is replaced, not duplicated (codex r1 P2)', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ _source: 'county', _fieldEvidence: { propertyType: { value: 'Condo', sourceType: 'county', fieldVerify: true } } }),
+      parcelWideAi, null, null, null, null, unit,
+    );
+    const typeFlags = profile.fieldVerifyFlags.filter((f) => f.field === 'propertyType');
+    expect(typeFlags).toHaveLength(1);
+    expect(typeFlags[0].reason).toMatch(/ONE condo unit/);
+  });
+
   test('gate OFF: unit address changes nothing', () => {
     delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
     const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);

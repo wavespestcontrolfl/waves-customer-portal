@@ -1644,12 +1644,30 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // parcel-wide reads (pool, turf, landscape, the building's floors) priced
   // one unit. Unlike the commercial building, a non-aggregated condo record
   // is the unit's own folio/listing, so its sqft IS the unit's and stays.
-  const residentialCondoUnitLookup = !residentialUnitLookup && residentialCondoUnitLookupVerdict({
+  //
+  // The satellite type promotion runs FIRST: a cached row with a weak type
+  // whose stored analysis confidently reads STACKED only becomes a Condo
+  // here, and the verdict must see that Condo (codex r1 P1). Idempotent —
+  // the call site below reuses this result.
+  const earlyAppliedVisionType = residentialUnitLookup ? null : applySatelliteAttachmentType(rc, ai);
+  // Only a Condo label the source-authority guard trusts may clear parcel
+  // facts — a mismatched web listing's "Condo" is the same untrusted signal
+  // detectCategory already ignores (codex r1 P1). A satellite-promoted type
+  // is vision looking at THIS parcel, trusted as the shared-turf gate does.
+  const condoTypeTrusted = recordCommercialSignalTrusted(rc)
+    || String(rc?._fieldEvidence?.propertyType?.sourceType || '').toLowerCase() === 'satellite';
+  const residentialCondoUnitLookup = !residentialUnitLookup && condoTypeTrusted && residentialCondoUnitLookupVerdict({
     address: lookupAddress,
     category: wholePropertyCategory,
     pricingPropertyType: rc?.propertyType ? normalizePricingPropertyType(rc.propertyType) : null,
   });
-  const unitSqFtKept = residentialCondoUnitLookup && !rc?._parcel?.aggregated;
+  // A condo record's sqft is the unit's own folio/listing — unless the
+  // record covers more than one unit: a stacked-association aggregate, or a
+  // trusted 2–4-unit parcel detectCategory keeps RESIDENTIAL, whose sqft is
+  // the whole small building (codex r1 P1).
+  const condoParcelUnits = verifiedUnitCountOf(rc)
+    ?? Math.max(Number(trustedUnitCount(rc)) || 0, Number(rc?._parcel?.residentialUnits) || 0);
+  const unitSqFtKept = residentialCondoUnitLookup && !rc?._parcel?.aggregated && condoParcelUnits < 2;
   const unitLookup = residentialUnitLookup || residentialCondoUnitLookup;
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
   const commercialProfile = category === 'COMMERCIAL';
@@ -1717,7 +1735,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // lookups the route already applied this before the turf cap; the call here
   // is idempotent and covers cache-hit + standalone callers. The rc-null branch
   // can't carry evidence, so it only seeds the displayed type.
-  const appliedVisionType = applySatelliteAttachmentType(rc, ai);
+  const appliedVisionType = earlyAppliedVisionType || applySatelliteAttachmentType(rc, ai);
   const visionPropertyType = appliedVisionType
     || (!rc && !commercialProfile && satelliteAttachmentIsConfident(ai)
       ? propertyTypeFromAttachment(ai)
@@ -1801,6 +1819,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup });
   if (residentialCondoUnitLookup) {
+    // One propertyType flag per profile: win/loss tallies every flag, so a
+    // source-conflict warning on the same field would double-count (codex
+    // r1 P2). The unit explanation carries the confirm-before-pricing ask.
+    for (let i = fieldVerifyFlags.length - 1; i >= 0; i -= 1) {
+      if (fieldVerifyFlags[i]?.field === 'propertyType') fieldVerifyFlags.splice(i, 1);
+    }
     fieldVerifyFlags.push({
       field: 'propertyType',
       reason: `Unit address on a condo record — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}`,
