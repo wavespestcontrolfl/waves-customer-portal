@@ -728,7 +728,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Call me on 2027-01-15', 'Hold off until the 20th', 'Starting the 3rd please call',
     'Please call me in the morning', 'Can you call in the afternoon?', 'Call after work', 'Evenings are best to call', 'Call around lunchtime',
     'Call me in 30 minutes', 'call me in 15 min', 'Give me 20 mins then call', 'Call within 2 hrs', 'Call me in half an hour',
-    'Call in 1-2 hours', 'Call me in a bit', 'Call in a few',
+    'Call in 1-2 hours', 'Call me in a bit', 'Call in a few', 'Call me in about 2 hours', 'Give me like 20 mins then call',
     'Call me over the weekend', 'Anytime through the week', 'Sometime in the next few days', 'At the next visit please call',
     'Call me in a year', 'Contact me within 2 yrs', 'Check back next year', 'Follow up in 6 mos', 'Over the next 2 years please check in',
     'Call early next year', 'Reach out by end of the year'])(
@@ -759,7 +759,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
   test.each(['Please call me back', 'Can you send the estimate?', 'Call me back ASAP', 'Are you still coming?',
     'The sun is burning the lawn, can someone call me?', 'The dog sat on the bait station, please call',
     'Good morning, can someone call me back?', 'Can you call me later?', 'The treatment shortly after failed, please call',
-    'The tech spent 2 hours here and it still failed, call me', 'Had ants all this year, please call'])(
+    'The tech spent 2 hours here and it still failed, call me', 'Had ants all this year, please call',
+    'Please call me about 2 years of invoices', 'The tech was here for like 2 hours and it failed; call me'])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
         .toBe('default_kind');

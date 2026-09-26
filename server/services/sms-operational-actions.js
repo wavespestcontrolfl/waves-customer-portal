@@ -128,7 +128,10 @@ const STATED_TIMING = new RegExp([
   // one unit at a time. Bare "later", "shortly" or "2 hours" are left out:
   // an undated row never bells, so a false match would drop a real
   // follow-up, while a vague "later" only makes the default bell early.
-  String.raw`\b(?:in|within|after|give me|about|like) (?:(?:${COUNT}|half an?|an?(?: half)?|\d+(?:\.\d+)?)\s*(?:-|to|or)?\s*(?:\d+\s*)?)${OFFSET_UNIT}\b`,
+  // "about"/"like"/"around" only qualify an introducer ("in about 2 hours"):
+  // standing alone they describe a topic or history ("about 2 years of
+  // invoices", "here like 2 hours"), not callback timing (Codex #4816 r37).
+  String.raw`\b(?:in|within|after|give me)(?: (?:about|like|around|roughly|maybe))? (?:(?:${COUNT}|half an?|an?(?: half)?|\d+(?:\.\d+)?)\s*(?:-|to|or)?\s*(?:\d+\s*)?)${OFFSET_UNIT}\b`,
   String.raw`\b(?:in|after) (?:a (?:bit|few|while|sec|second|minute|moment)|a little (?:bit|while)|a few)\b`,
   String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month|year)\b)`,
   String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
