@@ -185,21 +185,64 @@ function recoveryInstruction(ledgerId) {
     + 'shape; rebuild --out by hand from those, or re-run with --out once the ledger is reachable again.';
 }
 
+/** True when an entry actually carries committed row changes — the only
+ *  thing that makes it useful for the backup file. */
+function hasChanges(entry) {
+  return (entry.route_order_changes || []).length > 0;
+}
+
+/** Total row changes across a list of per-tech-day entries — the cross-check
+ *  metric collectEntries compares primary against the ledger with. */
+function totalChanges(entries) {
+  return entries.reduce((n, entry) => n + (entry.route_order_changes || []).length, 0);
+}
+
 /** The per-tech-day entries to report/back up: the dry-run plan directly, or
- *  (--execute) a read-back of the ledger row the run just wrote — the
- *  writes have ALREADY COMMITTED by this point, so a read failure here is
- *  reported as `error`, never thrown past the caller (main() still exits
- *  0/1 sensibly and never claims the writes themselves were lost). */
+ *  (--execute) the run's OWN return value — runRouteReorder now carries the
+ *  ACTUAL committed route_order_changes it wrote directly on its result
+ *  (canonicalizeStale mode only: `result.appliedChanges`). That direct
+ *  evidence is PRIMARY and is what the backup is built from; the ledger row
+ *  is read only as a best-effort CROSS-CHECK (it is written from the exact
+ *  same in-memory evidence, so a mismatch here would mean something is
+ *  actually wrong, not a normal race) and, when it agrees, supplies the
+ *  richer per-day reasons/source detail the printed plan shows. A ledger
+ *  insert failure, a read-back failure, or a null ledgerId (codex pre-push
+ *  P1: previously read as "nothing applied" and silently produced an empty
+ *  backup) never blocks the backup as long as `appliedChanges` has it —
+ *  only when NEITHER source has any row changes, despite `result.applied`
+ *  saying tech-days were applied, is this an `error`: the caller refuses to
+ *  write an empty backup and exits nonzero. */
 async function collectEntries(db, execute, result) {
   if (!execute) return { entries: result.plan || [], error: null };
+  const primary = (result.appliedChanges || []).map((entry) => ({
+    date: entry.date, technicianId: entry.technicianId, route_order_changes: entry.changes || [],
+  }));
+  let ledgerEntries = [];
   try {
     const ledgerRow = result.ledgerId
       ? await db('route_optimization_planner_runs').where({ id: result.ledgerId }).first('result')
       : null;
-    return { entries: ledgerRow ? (parseLedgerResult(ledgerRow.result).reorders || []) : [], error: null };
-  } catch (err) {
-    return { entries: [], error: err };
+    ledgerEntries = ledgerRow ? (parseLedgerResult(ledgerRow.result).reorders || []) : [];
+  } catch {
+    ledgerEntries = []; // cross-check only — a read failure never blocks the backup
   }
+  // Only a genuine DISAGREEMENT is worth a warning — primary being simply
+  // absent (an older/unexpected result shape falling back to the ledger
+  // alone) is normal and not a mismatch.
+  if (primary.length > 0 && ledgerEntries.length > 0 && totalChanges(primary) !== totalChanges(ledgerEntries)) {
+    console.error(`Warning: the run's own result reports ${totalChanges(primary)} row change(s) but the ledger reports ${totalChanges(ledgerEntries)} — using the run's own result for the backup.`);
+  }
+  // Primary wins whenever it has anything; the ledger is used only when
+  // primary is empty (an older/unexpected result shape) and the ledger
+  // still has real evidence.
+  const entries = primary.length > 0 ? primary : ledgerEntries;
+  if ((result.applied || 0) > 0 && !entries.some(hasChanges)) {
+    return {
+      entries: [],
+      error: new Error(`runRouteReorder reported ${result.applied} applied tech-day(s) but neither its own result nor the ledger carried any route_order_changes`),
+    };
+  }
+  return { entries, error: null };
 }
 
 /** Prints the plan and (with --out) writes the backup file — or, on any

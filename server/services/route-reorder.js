@@ -1614,7 +1614,22 @@ async function runRouteReorder(opts = {}, conn = db) {
   // A lost ledger row means the promised audit record is missing — the run
   // must surface as an exception, never report green (codex round-13 P1).
   const finalStatus = ledger == null && status === 'completed' ? 'completed_with_errors' : status;
-  return { status: finalStatus, ledgerId: ledger, applied: summary.applied.length, skipped: summary.skipped.length, failed: summary.failed.length };
+  const result = { status: finalStatus, ledgerId: ledger, applied: summary.applied.length, skipped: summary.skipped.length, failed: summary.failed.length };
+  // Canonicalize mode only (gate-off return shape is byte-for-byte
+  // unchanged): the route-order-cleanup script's --out backup needs the
+  // ACTUAL committed evidence, not a ledger row that can fail to insert (or
+  // fail to read back) after the writes above have already committed
+  // (codex pre-push P1 — a null ledgerId there was read as "nothing
+  // applied" and silently wrote an empty backup). This is the run's own
+  // in-memory record of exactly what it wrote, independent of the ledger.
+  if (canonicalizeStaleEnabled) {
+    result.appliedChanges = summary.applied.map((entry) => ({
+      date: entry.date,
+      technicianId: entry.technician_id,
+      changes: entry.route_order_changes || [],
+    }));
+  }
+  return result;
 }
 
 /** The route-order-cleanup script's dry-run contract: one entry per tech-day

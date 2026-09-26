@@ -172,6 +172,65 @@ describe('mode ON — canonicalization', () => {
       { id: 'B', before: null, after: 2 },
     ]));
     expect(RouteOptimizer.optimizeRoute).toHaveBeenCalled();
+    // The route-order-cleanup script's PRIMARY backup evidence: the run's
+    // own return value carries what it committed, independent of the
+    // ledger row (which can fail to insert or fail to read back later).
+    expect(res.appliedChanges).toEqual([
+      { date: DAY, technicianId: 't1', changes: expect.arrayContaining([
+        { id: 'A', before: 2, after: 1 },
+        { id: 'B', before: null, after: 2 },
+      ]) },
+    ]);
+  });
+
+  test('appliedChanges carries the committed evidence even when the ledger insert fails', async () => {
+    // The exact codex P1: a null ledgerId (ledger insert failed AFTER the
+    // route_order writes already committed) must not read as "nothing was
+    // applied" — the run's own appliedChanges is independent of the ledger.
+    db.mockImplementation((table) => {
+      const c = { _table: table };
+      ['where', 'whereIn', 'orderBy', 'limit'].forEach((m) => { c[m] = () => c; });
+      c.select = () => c;
+      c.first = async () => null;
+      c.insert = () => {
+        if (table === 'route_optimization_planner_runs') throw new Error('ledger insert failed');
+        return { returning: async () => [{ id: 'x' }] };
+      };
+      c.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      return c;
+    });
+    stopsByDate[DAY] = [
+      stop('A', { lng: 1, route_order: 2 }),
+      stop('B', { lng: 3, route_order: null }),
+      stop('C', { lng: 2, route_order: 3 }),
+    ];
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(res.ledgerId).toBeNull();
+    expect(res.applied).toBe(1);
+    expect(trxUpdates).toEqual([
+      { id: 'A', route_order: 1 },
+      { id: 'B', route_order: 2 },
+      { id: 'C', route_order: 3 },
+    ]);
+    expect(res.appliedChanges).toEqual([
+      { date: DAY, technicianId: 't1', changes: expect.arrayContaining([
+        { id: 'A', before: 2, after: 1 },
+        { id: 'B', before: null, after: 2 },
+      ]) },
+    ]);
+  });
+
+  test('gate off / mode off never carries appliedChanges — the return shape is byte-for-byte unchanged', async () => {
+    // Same backtracking-but-chronological fixture as the "non-stale day"
+    // test below: distance-inefficient, not stale, clears the floor.
+    stopsByDate[DAY] = [
+      stop('A', { lng: 1, route_order: 2 }),
+      stop('B', { lng: 3, route_order: 1 }),
+      stop('C', { lng: 2, route_order: 3 }),
+    ];
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(1);
+    expect(res).not.toHaveProperty('appliedChanges');
   });
 
   test('a Google order that genuinely beats the baseline is applied, tagged canonicalized: source google', async () => {

@@ -219,13 +219,84 @@ describe('collectEntries', () => {
     expect(await collectEntries(db, true, result)).toEqual({ entries: [], error: null });
   });
 
-  test('a ledger read failure after the writes committed is reported, not thrown', async () => {
+  test('with no primary evidence at all, a ledger read failure IS an error (nothing to fall back on)', async () => {
     const db = jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) }));
-    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0 };
+    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0 }; // no appliedChanges
     const { entries, error } = await collectEntries(db, true, result);
     expect(entries).toEqual([]);
     expect(error).toBeInstanceOf(Error);
-    expect(error.message).toBe('connection lost');
+    expect(error.message).toMatch(/neither its own result nor the ledger/);
+  });
+
+  // ── codex pre-push P1: runRouteReorder can commit changes and then return
+  // ledgerId:null (or the read-back finds no row) — the run's OWN
+  // appliedChanges is the PRIMARY evidence and must save the backup either
+  // way; the ledger is a cross-check only. ──
+  test('a null ledgerId (ledger insert failed) after real writes still builds the backup from appliedChanges', async () => {
+    const db = jest.fn(() => { throw new Error('must not be queried with no ledgerId'); });
+    const result = {
+      status: 'completed', ledgerId: null, applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+    };
+    expect(await collectEntries(db, true, result)).toEqual({
+      entries: [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }],
+      error: null,
+    });
+  });
+
+  test('a ledger read failure with real appliedChanges evidence still builds the backup — no error', async () => {
+    const db = jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+    };
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(error).toBeNull();
+    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }]);
+  });
+
+  test('appliedChanges (primary) wins over the ledger even when the ledger read succeeds', async () => {
+    // Same underlying evidence in practice (both are written from the same
+    // in-memory summary), but this proves precedence, not just fallback.
+    const ledgerReorders = [{ date: '2026-10-05', technician_id: 't1', canonicalized: { reasons: ['gap'], source: 'google' }, route_order_changes: [{ id: 'a', before: 2, after: 1 }] }];
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+    };
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(error).toBeNull();
+    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }]);
+  });
+
+  test('a mismatch between appliedChanges and the ledger prints a warning but still uses appliedChanges', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const ledgerReorders = [{ date: '2026-10-05', technician_id: 't1', route_order_changes: [] }]; // ledger under-counts
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+    };
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(error).toBeNull();
+    expect(entries[0].route_order_changes).toEqual([{ id: 'a', before: 2, after: 1 }]);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/Warning:.*1 row change.*ledger reports 0/));
+    errorSpy.mockRestore();
+  });
+
+  test('both sources genuinely empty with applied > 0 is an error, not a silent empty backup', async () => {
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: [] } }) }) }));
+    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0 }; // no appliedChanges either
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(entries).toEqual([]);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/neither its own result nor the ledger/);
+  });
+
+  test('applied === 0 with no evidence anywhere is NOT an error — there was nothing to back up', async () => {
+    const db = jest.fn(() => ({ where: () => ({ first: async () => null }) }));
+    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 0, skipped: 3, failed: 0 };
+    expect(await collectEntries(db, true, result)).toEqual({ entries: [], error: null });
   });
 });
 
