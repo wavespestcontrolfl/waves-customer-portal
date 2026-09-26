@@ -432,9 +432,13 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // message as its quote, so that wording cannot be tied to it ("I'm away
     // tomorrow. My lockbox code is 1234"): it still rings the bell (Codex
     // #4816 r26/r27).
-    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction' && ['temporary', 'visit_only'].includes(f.duration));
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome)
-      && !temporaryFacts.includes(f));
+    // Keyed on the extractor's label, not on which guard caught the fact
+    // first: a temporary fact is never written, so property ambiguity,
+    // contact authority, a duplicate or mixed topics add nothing for staff
+    // to decide (Codex #4816 r29).
+    const settled = ['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'];
+    const temporaryFacts = facts.filter((f) => !settled.includes(f.outcome) && ['temporary', 'visit_only'].includes(f.duration));
+    const exceptions = facts.filter((f) => !settled.includes(f.outcome) && !temporaryFacts.includes(f));
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
     // grounding filter) are not, on their own, a real exception — only a

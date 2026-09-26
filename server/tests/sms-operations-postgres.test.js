@@ -945,6 +945,19 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test.each([['visit_only', false], ['temporary', false], ['durable', true]])(
+    'Codex #4816 r29: a %s fact caught first by property ambiguity rings the review bell: %s', async (duration, bells) => {
+      // Two active properties: property_ambiguous fires before the temporary check.
+      await mockPg('customer_properties').insert({ customer_id: message.customer_id, address_line1: '200 Example Lane',
+        city: 'Sarasota', zip: '34236', active: true });
+      const twoProperties = await loadMessageContext(mockPg, message);
+      await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration }] }, twoProperties);
+      expect(await mockPg('property_preferences')).toHaveLength(0);
+      expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('property_ambiguous');
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(bells ? 1 : 0);
+    },
+  );
+
   test('Codex #4816 r10: an uncertain-duration fact is not known-temporary — it still rings the review bell', async () => {
     await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'uncertain' }] }, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
