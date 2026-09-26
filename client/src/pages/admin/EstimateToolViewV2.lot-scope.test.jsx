@@ -128,6 +128,50 @@ describe('estimate dimension boxes govern pricing', () => {
     for (const key of ['estimatedTurfSf', 'turfSource', 'countyTurfPriorSf']) expect(corrected[key]).toBeUndefined();
   });
 
+  it('a county-prior turf also goes stale when Home Sq Ft or Stories change — it was built from the footprint too', async () => {
+    enriched = { ...HOUSE, estimatedTurfSf: 6000, turfSource: 'county_prior', countyTurfPriorSf: 6000 };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    selectService('Pest Control');
+    selectService('Lawn Care');
+    await lookUp();
+    expect(screen.getByText(/Using AI/)).toBeInTheDocument();
+    change('Home Sq Ft', '3000');
+    expect(screen.queryByText(/Using AI/)).not.toBeInTheDocument();
+    const profile = await generate();
+    expect(profile.lotSqFt).toBe(9000);
+    expect(profile.estimatedTurfSf).toBeUndefined();
+  });
+
+  it('an AI-copied flea exterior area is re-resolved when its turf goes stale; it never keeps pricing', async () => {
+    enriched = { ...HOUSE, estimatedTurfSf: 6000, turfSource: 'county_prior', countyTurfPriorSf: 6000 };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    selectService('Flea Control Service');
+    await lookUp();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Add exterior flea treatment' }));
+    await generate();
+    expect(lastBody('/calculate-estimate').options).toMatchObject({ fleaExteriorAreaSqFt: 6000, fleaExteriorAreaSource: 'AI_ESTIMATE' });
+    change('Lot Sq Ft', '');
+    await generate();
+    const { options } = lastBody('/calculate-estimate');
+    expect(options.fleaExteriorAreaSource).not.toBe('AI_ESTIMATE');
+    expect(options.fleaExteriorAreaSqFt).not.toBe(6000);
+  });
+
+  it('a refresh that newly finds the development parcel clears an auto-filled bed area, never a typed one', async () => {
+    enriched = { ...HOUSE, estimatedBedAreaSf: 900 };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    selectService('Tree & Shrub');
+    await lookUp();
+    expect(screen.getByLabelText('Bed Area (sq ft)')).toHaveValue(900);
+    enriched = CONDO_ON_DEVELOPMENT_PARCEL;
+    await lookUp();
+    await waitFor(() => expect(screen.getByLabelText('Bed Area (sq ft)')).toHaveValue(null));
+
+    change('Bed Area (sq ft)', '250');
+    await lookUp();
+    await waitFor(() => expect(screen.getByLabelText('Bed Area (sq ft)')).toHaveValue(250));
+  });
+
   it('a cleared Home Sq Ft box clears the footprint too — the lookup\'s own footprint never prices pest', async () => {
     enriched = { ...HOUSE, footprint: 1200, squareFootage: 2400 };
     render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);

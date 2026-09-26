@@ -356,13 +356,36 @@ function adminFetch(path, options = {}) {
 // densities/complexity (turf-factor score), and propertyType (hardscape
 // brackets). Service-specific fields (palms, trenching, Bora-Care, slab,
 // commercial) stay in doGenerate — they don't feed turf.
-// Turf DERIVED from the lookup's lot — the county-prior seed, or a vision
-// read clamped to that parcel — is only as good as that lot. Once the Lot
-// box no longer holds it (cleared or corrected), it neither prices nor
-// displays (codex r1 P1 #4871); a measured turf entry is separate.
-function lotDerivedTurfIsStale(lookupProfile, currentLotSqFt) {
-  return (lookupProfile?.turfSource === "county_prior" || lookupProfile?.turfCappedToParcel === true)
-    && currentLotSqFt !== (Number(lookupProfile?.lotSqFt) || 0);
+// The dimensions the form prices — a blank box is 0 sq ft / 1 story. One
+// definition for the priced profile and every reader that must agree with it.
+function formDimensions(form) {
+  const n = (value, blank) => {
+    const v = parseInt(value, 10);
+    return Number.isFinite(v) ? v : blank;
+  };
+  return { homeSqFt: n(form?.homeSqFt, 0), lotSqFt: n(form?.lotSqFt, 0), stories: n(form?.stories, 1) };
+}
+
+// Which of the lookup's own dimensions the boxes no longer hold (cleared or
+// corrected): the lot, or the building (home sq ft / stories).
+function lookupDimsChanged(lookupProfile, dims) {
+  const lookup = (key, blank) => Number(lookupProfile?.[key]) || blank;
+  return {
+    lot: dims.lotSqFt !== lookup("lotSqFt", 0),
+    building: dims.homeSqFt !== lookup("homeSqFt", 0) || dims.stories !== lookup("stories", 1),
+  };
+}
+
+// Turf DERIVED from the lookup's geometry is only as good as that geometry:
+// the county-prior seed came from the lot, the building footprint and its
+// stories; a vision read clamped to the parcel, from the lot alone. Once the
+// boxes no longer hold those values it neither prices nor displays (codex
+// r1+r2 P1 #4871); a measured turf entry is separate.
+function lookupTurfIsStale(lookupProfile, dims) {
+  const changed = lookupDimsChanged(lookupProfile, dims);
+  if (lookupProfile?.turfSource === "county_prior") return changed.lot || changed.building;
+  if (lookupProfile?.turfCappedToParcel === true) return changed.lot;
+  return false;
 }
 
 function buildTurfRequestProfile(baseProfile, form) {
@@ -375,11 +398,12 @@ function buildTurfRequestProfile(baseProfile, form) {
   // operator cleared prices as cleared (0 sq ft; 1 story, the form's own
   // default). Falling back to the lookup here re-priced a number the form
   // no longer showed.
+  const dims = formDimensions(form);
   const profile = {
     ...baseProfile,
-    homeSqFt: manualNumber(form.homeSqFt, 0),
-    lotSqFt: manualNumber(form.lotSqFt, 0),
-    stories: manualNumber(form.stories, 1),
+    homeSqFt: dims.homeSqFt,
+    lotSqFt: dims.lotSqFt,
+    stories: dims.stories,
     estimatedBedAreaSf: manualNumber(
       form.bedArea,
       Number(baseProfile.estimatedBedAreaSf) || 0,
@@ -394,7 +418,7 @@ function buildTurfRequestProfile(baseProfile, form) {
   // read clamped to that parcel — is only as good as that lot. Once the Lot
   // box no longer holds it (cleared or corrected), it must not price
   // (codex r1 P1 #4871); a measured turf entry is separate and unaffected.
-  if (lotDerivedTurfIsStale(baseProfile, profile.lotSqFt)) {
+  if (lookupTurfIsStale(baseProfile, dims)) {
     delete profile.estimatedTurfSf;
     delete profile.turfSource;
     delete profile.turfCappedToParcel;
@@ -2627,7 +2651,7 @@ export default function EstimateToolViewV2({
       return { area: measured, source: "MEASURED_TURF" };
     }
 
-    const ai = lotDerivedTurfIsStale(enrichedProfile, parseNonNegativeInteger(currentForm.lotSqFt) ?? 0)
+    const ai = lookupTurfIsStale(enrichedProfile, formDimensions(currentForm))
       ? null
       : parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
         parseNonNegativeInteger(satelliteData?.estimatedTurfSf);
@@ -2656,6 +2680,19 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
   }, [resolveFleaExteriorDefault]);
+
+  // An AI_ESTIMATE flea area is a COPY of the lookup turf. When a dimension
+  // edit makes that turf stale, the copy is re-resolved (a measured or
+  // confirmed area is the operator's and stays) — otherwise it kept pricing
+  // after pricing itself dropped the turf (codex r2 P1 #4871).
+  useEffect(() => {
+    setForm((f) => {
+      if (f.fleaExteriorAreaSource !== "AI_ESTIMATE") return f;
+      if (!lookupTurfIsStale(enrichedProfile, formDimensions(f))) return f;
+      const resolved = resolveFleaExteriorDefault({ ...f, fleaExteriorAreaSqFt: "0", fleaExteriorAreaSource: "UNKNOWN" });
+      return { ...f, fleaExteriorAreaSqFt: String(resolved.area), fleaExteriorAreaSource: resolved.source };
+    });
+  }, [form.lotSqFt, form.homeSqFt, form.stories, enrichedProfile]);
 
   const setFleaExteriorZone = useCallback((zone, checked) => {
     setForm((f) => {
@@ -3100,6 +3137,10 @@ export default function EstimateToolViewV2({
           // Record value, else the plat-median estimate for an unassessed
           // vacant parcel (lib/lookupPrefill.js), else empty.
           homeSqFt: f._homeSqFtEdited ? f.homeSqFt : lookupHomeSqFtPrefill(ep),
+          // A lookup that finds the development's parcel withholds its bed
+          // estimate; an AUTO-filled bed area from an earlier lookup of this
+          // address goes too — a typed one stays (codex r2 P2 #4871).
+          ...(lookupLotIsUnitParcel(ep) && !(f._manualFields || []).includes("bedArea") ? { bedArea: "" } : {}),
           // The development's lot (unit_parcel flag) is never prefilled — the
           // flag asks the operator to enter the unit's own area, or the
           // whole property's lot for an association quote.
@@ -4224,9 +4265,10 @@ export default function EstimateToolViewV2({
   const commercialDetected = isCommercialEstimateInput(form);
   const R = E?.results || {};
   const lotSqFtForTurf = parseNonNegativeInteger(form.lotSqFt) ?? 0;
+  const formDims = formDimensions(form);
   // Same staleness rule as the priced profile — the panel never shows a
   // turf number pricing has dropped.
-  const aiTurfSqFt = lotDerivedTurfIsStale(enrichedProfile, lotSqFtForTurf)
+  const aiTurfSqFt = lookupTurfIsStale(enrichedProfile, formDims)
     ? null
     : parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
       parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
@@ -4239,11 +4281,13 @@ export default function EstimateToolViewV2({
     // on the stale-imagery path the profile's lookup-time
     // turfFallbackPreviewSf covers the gap until it answers. The heuristic
     // is only the fail-open fallback for a preview miss.
-    // The stored stale-imagery preview was computed from the lookup's lot —
-    // shown only while the Lot box still holds that lot (codex r1 P1 #4871).
+    // The stored stale-imagery preview was computed from the lookup's
+    // geometry — shown only while the boxes still hold it (codex r1 P1 #4871).
+    const lookupGeometryHeld = !lookupDimsChanged(enrichedProfile, formDims).lot
+      && !lookupDimsChanged(enrichedProfile, formDims).building;
     const enginePreview = parseNonNegativeInteger(
       enginePreviewSf ??
-        (turfUnobservable && lotSqFtForTurf > 0 && lotSqFtForTurf === (Number(enrichedProfile?.lotSqFt) || 0)
+        (turfUnobservable && lotSqFtForTurf > 0 && lookupGeometryHeld
           ? enrichedProfile?.turfFallbackPreviewSf
           : null),
     );
