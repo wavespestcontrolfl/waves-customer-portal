@@ -259,6 +259,12 @@ const REGISTRY = {
     // recipient gate must not read the blank phone as a failed lookup and
     // park the row on the bounded retry-then-blocked ladder forever.
     replayWithoutPhone: true,
+    // Pass-through: a phone-less row is marked requires_registered_dispatch,
+    // which dispatchDeferredReplay refuses without a registered hook. Every
+    // row still replays through the executor's default dispatch.
+    async dispatch(meta, defaultDispatch) {
+      return defaultDispatch();
+    },
     async recheck(meta) {
       return invoiceStillCollectible(meta);
     },

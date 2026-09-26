@@ -2227,15 +2227,15 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // everything selected, and an already-accepted leg (Email) is excluded via
 // hasEmailLeg so it is never re-touched. Retry-idempotent: an existing live
 // row for this invoice is adopted, never duplicated. `toPhone` may be blank
-// for a phone-less customer (sms_log.to_phone is NOT NULL) — the replay's
-// own router still falls back to the customer's explicit Email/App
-// selection exactly like the immediate send does, but the row does not yet
-// carry requires_registered_dispatch (see the comment on that field
-// below) — until PR #4958 lands, a phone-less row falls back to the
-// generic phone-refresh retry ladder in scheduler.js instead of the
-// dedicated no-phone exemption. Runs under `database` (the caller's own
-// transaction when finalizeInvoiceAfterSms calls it, or the plain pool
-// otherwise) so the enqueue commits or fails together with whatever wrote it.
+// for a phone-less customer (sms_log.to_phone is NOT NULL): that row stamps
+// requires_registered_dispatch, and the registry's invoice_send_deferred
+// entry (replayWithoutPhone + a pass-through dispatch) lets the scheduler
+// replay it through the router, which resolves the customer's explicit
+// Email/App selection without a phone. from_phone is a placeholder;
+// resolve_from_by_customer makes the send use the customer's location line.
+// Runs under `database` (the caller's own transaction when
+// finalizeInvoiceAfterSms calls it, or the plain pool otherwise) so the
+// enqueue commits or fails together with whatever wrote it.
 async function queuePendingChannelReplay({
   invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, emailAccepted = false, database = db,
 }) {
@@ -2271,24 +2271,10 @@ async function queuePendingChannelReplay({
       replay_purpose: "payment_link",
       refresh_customer_phone: true,
       resolve_from_by_customer: true,
-      // requires_registered_dispatch is deliberately NOT stamped (Codex
-      // round-3 P1 #4963, pre-push audit): scheduler.js's
-      // dispatchDeferredReplay only calls a registry entry's `dispatch`
-      // hook when one exists — this entry (deferred-replay-registry.js
-      // invoice_send_deferred) has none — and otherwise, ANY row carrying
-      // this marker returns DEFERRED_DISPATCH_UNAVAILABLE forever without
-      // ever calling sendCustomerMessage, phoned or not. PR #4958 (in
-      // flight) changes dispatchDeferredReplay to call
-      // entry.dispatch(claimMeta, defaultDispatch), which main does not do
-      // yet — only once that lands can a phone-less row (toPhone === "")
-      // safely stamp this AND the registry entry gets a pass-through
-      // dispatch(meta, defaultDispatch) { return defaultDispatch(); } so
-      // canReplayBillingWithoutPhone's exemption actually reaches a
-      // dispatcher. Until then, a phone-less pending-App-leg row falls back
-      // to the generic phone-refresh-then-park retry ladder
-      // (resolveScheduledRecipient/canReplayBillingWithoutPhone in
-      // scheduler.js) like any other billing row without the marker — a
-      // phoned row (the common case) was never affected by this at all.
+      // Phone-less rows only: the scheduler replays a blank-phone billing
+      // row only when it carries this AND the entry opts in
+      // (replayWithoutPhone + dispatch). Phoned rows never carry it.
+      ...(toPhone ? {} : { requires_registered_dispatch: true }),
     }),
   });
   return { queued: true, existing: false };

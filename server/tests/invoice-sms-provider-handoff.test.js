@@ -735,12 +735,7 @@ describe('invoice SMS provider handoff', () => {
         refresh_customer_phone: true,
         resolve_from_by_customer: true,
       });
-      // Codex round-3 (pre-push audit): NOT stamped yet on a phoned row —
-      // dispatchDeferredReplay (deferred-replay-registry.js) has no
-      // `dispatch` for invoice_send_deferred, so stamping this marker on
-      // ANY row would return DEFERRED_DISPATCH_UNAVAILABLE forever without
-      // ever calling sendCustomerMessage (see the dedicated phone-less
-      // test below for the same assertion on a blank to_phone).
+      // A phoned row never carries the phone-less replay marker.
       expect(meta.requires_registered_dispatch).toBeUndefined();
       // No explicit nextAllowedAt on a plain retryable — falls back to the
       // ~5-minute default backoff, not immediate and not indefinitely far.
@@ -941,7 +936,7 @@ describe('invoice SMS provider handoff', () => {
       expect(JSON.parse(smsLogInserts[0].metadata).requires_registered_dispatch).toBeUndefined();
     });
 
-    test('a phone-less pending App-leg row is ALSO queued without requires_registered_dispatch for now (PR #4958 not yet merged)', async () => {
+    test('a phone-less pending App-leg row is queued with requires_registered_dispatch so it replays without a phone', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts, customerPhone: null });
       db.mockImplementation(mock);
@@ -959,7 +954,7 @@ describe('invoice SMS provider handoff', () => {
       expect(result).toMatchObject({ sent: true, pendingChannel: 'push', pendingChannelQueued: true });
       expect(smsLogInserts).toHaveLength(1);
       expect(smsLogInserts[0].to_phone).toBe('');
-      expect(JSON.parse(smsLogInserts[0].metadata).requires_registered_dispatch).toBeUndefined();
+      expect(JSON.parse(smsLogInserts[0].metadata).requires_registered_dispatch).toBe(true);
     });
 
     test('a transient queue-insert failure is retried once (via the existing post-delivery-bookkeeping retry) and succeeds', async () => {

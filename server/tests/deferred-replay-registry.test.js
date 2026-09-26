@@ -264,6 +264,15 @@ describe('deferred-replay registry', () => {
     })).toEqual({ eligible: false, reason: 'settled' });
   });
 
+  test('invoice_send_deferred replays without a phone and dispatches through the default sender', async () => {
+    const { dispatchDeferredReplay, replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
+    expect(replaysWithoutPhone('invoice_send_deferred')).toBe(true);
+    const fallback = jest.fn(async () => ({ sent: true }));
+    await expect(dispatchDeferredReplay('invoice_send_deferred', { requires_registered_dispatch: true }, fallback))
+      .resolves.toEqual({ sent: true });
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
   test('unregistered entry points are inert', async () => {
     expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
     expect(await finalizeDeferredReplay('some_future_unregistered_deferred', {}, {})).toBeNull();
