@@ -240,6 +240,16 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(reminderDedupeKeys(notifyAdmin)).toEqual([]);
     });
 
+    test('never nudges an offer already past its 45-day window — it closes in this same run (Codex #4922 r3)', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1) });
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(1) });
+
+      const counts = await sweep();
+      expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(0);
+      expect(counts.signatureExpired).toBe(1);
+    });
+
     test('never nudges while the signing link is still valid', async () => {
       const { sweep, notifyAdmin, db } = load();
       const { estimateId, customerId } = await makeParkedEstimate(db);

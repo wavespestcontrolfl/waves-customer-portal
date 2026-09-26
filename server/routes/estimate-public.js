@@ -26937,6 +26937,12 @@ async function composeEstimateDataPayload(estimate, {
         // derived mode/frequency when null.
         acceptedServiceMode: estimate.accepted_service_mode || null,
         acceptedFrequencyKey: estimate.accepted_frequency_key || null,
+        // Slice 3b: the termite annual offer closed unsigned (the estimate's
+        // status stays 'accepted') — the page must render the honest closed
+        // state on a normal reload, never the "booked" terminal page
+        // (Codex #4922 r3 P1). Present only then, so every other response
+        // stays byte-identical.
+        ...(estimate.annual_plan_activation_status === 'signature_expired' ? { annualPlanOfferClosed: true } : {}),
         // Effective (incl. derived guarantee-only) — the React view's accept
         // copy and payment buttons key off this, and accept resolves the same
         // derived value server-side.

@@ -1136,8 +1136,13 @@ async function retryInstallHandoffs({ conn, limit, counts }) {
 // bell's dedupe record.
 const SIGNATURE_NUDGE_EVENT = 'signature_link_expired_nudged';
 
+// Parked-time evidence for alias `e` (estimates): the JSON parkedAt stamp,
+// falling back to accepted_at — mirrors parkedAtForEstimate in JS.
+const PARKED_AT_SQL = `COALESCE(CASE WHEN (e.annual_plan_deferred_invoice ->> 'parkedAt') ~ '${CASTABLE_ISO_INSTANT}' THEN (e.annual_plan_deferred_invoice ->> 'parkedAt')::timestamptz END, e.accepted_at)`;
+
 async function remindExpiredSignatureLinks({ conn, limit, counts }) {
   try {
+    const abandonCutoff = new Date(Date.now() - ANNUAL_SIGNATURE_ABANDON_DAYS * 24 * 60 * 60 * 1000);
     const candidates = await conn('estimates as e')
       .join('customer_contracts as cc', function annualAgreementForEstimate() {
         this.on(conn.raw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text"))
@@ -1149,6 +1154,10 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
       .join('customers as c', 'c.id', 'cc.customer_id')
       .whereNull('c.deleted_at')
       .where('e.annual_plan_activation_status', 'awaiting_signature')
+      // An offer already past its 45-day window closes in this same run
+      // (expireAbandonedSignatures, right after) — a "resend it" bell would
+      // point staff at an agreement about to be cancelled (Codex #4922 r3).
+      .whereRaw(`${PARKED_AT_SQL} >= ?`, [abandonCutoff])
       .whereNotIn('cc.status', ['signed', 'cancelled', 'voided'])
       .whereNotNull('cc.share_token_expires_at')
       .where('cc.share_token_expires_at', '<', conn.fn.now())
@@ -1357,8 +1366,7 @@ async function expireAbandonedSignatures({ conn, limit, counts }) {
     // accepted_at in SQL exactly like parkedAtForEstimate does in JS (kept
     // in sync deliberately — this WHERE decides the candidate set, the JS
     // helper decides the per-row verdict inside the locked transaction).
-    const isoParkedAt = `(e.annual_plan_deferred_invoice ->> 'parkedAt') ~ '${CASTABLE_ISO_INSTANT}'`;
-    const parkedAtExpr = `COALESCE(CASE WHEN ${isoParkedAt} THEN (e.annual_plan_deferred_invoice ->> 'parkedAt')::timestamptz END, e.accepted_at)`;
+    const parkedAtExpr = PARKED_AT_SQL;
     const candidates = await conn('estimates as e')
       .where('e.annual_plan_activation_status', 'awaiting_signature')
       .whereRaw(`${parkedAtExpr} IS NOT NULL`)
