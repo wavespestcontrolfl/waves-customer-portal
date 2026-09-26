@@ -89,10 +89,11 @@ owner reviewing the stored reports.
 | **wdo_inspection** | Excluded IN CODE (`V1_EXCLUDED_PROJECT_TYPES`, service-completion-profiles.js:15) — FDACS-13645 legal machinery | §4 below |
 | termite_slab_pretreat → pre_treatment_termite_certificate | Same compliance posture as WDO (`COMPANION_EXCLUDED_TYPES`; on-page FBC Certificate of Compliance render) | Follows WDO decision |
 
-Also note `PROJECT_CREATION_KEPT_TYPES` (owner directive 2026-07-04): flea +
-rodent_trapping stay creatable as standalone documentation projects even
-though their appointment completions are typed. Any Projects-UI replacement
-must keep an ad-hoc documentation entry point.
+Also note `PROJECT_CREATION_KEPT_TYPES` (service-completion-profiles.js:34):
+the 2026-07-04 directive kept flea + rodent_trapping creatable as standalone
+documentation projects, but since 2026-07-13 the set is EMPTY — the owner
+retired those ad-hoc lanes, so every fully-typed family completes through the
+appointment flow only. The mechanism stays for a future exemption.
 
 ## 2. Why the project lookup "isn't as pretty" — admin UI current state
 
@@ -115,9 +116,9 @@ shell, and its two-step flow (tech saves draft → admin reviews in ProjectsPage
 auto-send.
 
 What still NEEDS the Projects lane after the stragglers cut over: WDO +
-pre-treat cert (compliance), ad-hoc documentation projects
-(`PROJECT_CREATION_KEPT_TYPES`: flea, rodent_trapping), Phase-3-pending termite
-keys, and read access to historical sent/closed project records.
+pre-treat cert (compliance), Phase-3-pending termite keys (the
+`PROJECT_CREATION_KEPT_TYPES` flea/rodent_trapping ad-hoc lanes were retired
+2026-07-13), and read access to historical sent/closed project records.
 
 **Tech-side flow gap:** `/tech` (TechHomePage) does not open the typed
 completion at all — `typedFindingsNotice()` (TechHomePage.jsx:83-85, branch
@@ -260,8 +261,9 @@ endpoints (`/api/admin/projects/*` unchanged):
 3. **PR C3 — create/capture:** restyle `CreateProjectModal` +
    `ProjectFindingFieldInput` (both themes; the field renderer is shared with
    the typed CompletionPanel — verify both surfaces with ui-verify).
-4. Keep: ad-hoc documentation creation (flea, rodent_trapping), historical
-   record access. Naming can shift from "Projects" to "Jobs"/"One-Time
+4. Keep: historical record access (the flea/rodent_trapping ad-hoc
+   documentation lanes were retired 2026-07-13 — `PROJECT_CREATION_KEPT_TYPES`
+   is empty). Naming can shift from "Projects" to "Jobs"/"One-Time
    Services" if the owner wants — nav label only, no route/file renames.
 5. **PR C4 — tech entry unification (behavior PR, never rides a restyle):**
    TechHomePage stops alert-bouncing typed jobs (§2) — open the same mobile
@@ -274,7 +276,8 @@ PRs), C3 medium (1,558 + 939 lines, two themes), C4 small.
 Note the picker shrinks by itself: `appointmentManagedProjectTypes` already
 removes fully-cutover types from the Create Project Report modal, so after
 Phases A+B the create path naturally reduces to WDO ("New WDO"), pre-treat
-cert, Phase-3-pending termite, and the kept ad-hoc documentation types —
+cert, and Phase-3-pending termite (the kept ad-hoc documentation types were
+retired 2026-07-13) —
 today's 9-type picker (owner screenshot 2026-07-12) is the straggler list in
 UI form.
 
