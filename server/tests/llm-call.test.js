@@ -232,15 +232,6 @@ describe('callAnthropic prompt caching', () => {
     }));
   });
 
-  test("cacheTtl: '1h' sets the one-hour TTL; anything else is the default breakpoint", async () => {
-    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
-    await callAnthropic({ model: FLAGSHIP, system: 'S', text: 'hi', cacheTtl: '1h' });
-    expect(mockAnthropicCreate.mock.calls.at(-1)[0].system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
-    await callAnthropic({ model: FLAGSHIP, system: 'S', text: 'hi', cacheTtl: '2h' });
-    expect(mockAnthropicCreate.mock.calls.at(-1)[0].system[0].cache_control).toEqual({ type: 'ephemeral' });
-    expect(mockAnthropicCreate.mock.calls.at(-1)[0].cacheTtl).toBeUndefined();
-  });
-
   test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on effort-capable models only (next to a json_schema format, or alone)', async () => {
     const MODELS = require('../config/models');
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
@@ -257,11 +248,11 @@ describe('callAnthropic prompt caching', () => {
       expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
       await callAnthropic({ model: 'claude-sonnet-4-6', text: 'hi', jsonMode: false });
       expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
-      for (const noEffort of ['claude-opus-4-20250514', 'claude-opus-4-1-20250805', 'claude-opus-4-1']) {
+      for (const noEffort of ['claude-opus-4-20250514', 'claude-opus-4-1-20250805', 'claude-opus-4-1', 'claude-opus-4-5', 'claude-opus-4-6']) {
         await callAnthropic({ model: noEffort, text: 'hi', jsonMode: false });
         expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
       }
-      for (const withEffort of ['claude-opus-4-5', 'claude-opus-4-7', 'claude-opus-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+      for (const withEffort of ['claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
         await callAnthropic({ model: withEffort, text: 'hi', jsonMode: false });
         expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
       }
@@ -272,25 +263,12 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
   });
 
-  test('dispatchWithFallback forwards cacheTtl from the payload to the Anthropic wire (the previsit brief relies on this)', async () => {
+  test('the wire max_tokens clears always-on thinking on Opus 5+ and is untouched on Opus 4.8', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
-    const policy = { name: 'ttlTest', primary: { provider: 'anthropic', model: FLAGSHIP }, fallback: { provider: 'openai', model: 'x' } };
-    const r = await dispatchWithFallback(policy, { system: 'S', text: 'hi', jsonMode: false, cacheTtl: '1h' });
-    expect(r.ok).toBe(true);
-    expect(mockAnthropicCreate.mock.calls.at(-1)[0].system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
-  });
-
-  test('anthropicEffortConfig is the spread form for direct SDK sites: output_config when pinned + capable, {} otherwise', () => {
-    const MODELS = require('../config/models');
-    expect(MODELS.anthropicEffortConfig('claude-opus-4-8')).toEqual({});
-    MODELS.ANTHROPIC_EFFORT = 'high';
-    try {
-      expect(MODELS.anthropicEffortConfig('claude-opus-4-8')).toEqual({ output_config: { effort: 'high' } });
-      expect(MODELS.anthropicEffortConfig('claude-haiku-4-5-20251001')).toEqual({});
-      expect({ model: 'claude-opus-5-5', ...MODELS.anthropicEffortConfig('claude-opus-5-5'), max_tokens: 1 }).toEqual({ model: 'claude-opus-5-5', output_config: { effort: 'high' }, max_tokens: 1 });
-    } finally {
-      delete MODELS.ANTHROPIC_EFFORT;
-    }
+    await callAnthropic({ model: 'claude-opus-5-5', text: 'hi', jsonMode: false, maxTokens: 200 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].max_tokens).toBe(8192);
+    await callAnthropic({ model: 'claude-opus-4-8', text: 'hi', jsonMode: false, maxTokens: 200 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].max_tokens).toBe(200);
   });
 
   test('MODEL_ANTHROPIC_EFFORT accepts only the five API levels (a typo resolves to undefined, never a 400)', () => {

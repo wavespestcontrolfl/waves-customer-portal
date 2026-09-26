@@ -2484,11 +2484,6 @@ async function generateBriefBody(grounding, deps = {}) {
       // this high-volume summarization lane (codex #3423 r2) — the raise
       // is JSON headroom only, never a reasoning upgrade.
       reasoningEffort: 'none',
-      // The brief runs twice an hour on one fixed system prompt; the default
-      // 5-minute breakpoint expired before every run, so the ledger showed
-      // zero cache reads on this lane (09-25 audit). The 1h TTL's write
-      // premium is paid once per hour; the reads then cost ~0.1x.
-      cacheTtl: '1h',
       ...payload,
     }, opts));
   const attempt = (rejections) => callModel({

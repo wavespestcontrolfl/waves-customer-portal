@@ -9,6 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
 const { anthropicText } = require('../llm/call');
@@ -414,11 +415,8 @@ Address: ${customer.address_line1 || ''}, ${customer.city || ''}`;
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const msg = await anthropic.messages.create({
       model: MODELS.FLAGSHIP,
-      ...MODELS.anthropicEffortConfig(MODELS.FLAGSHIP),
-      // Ceiling, not a target: on an always-thinking model (Opus 5.5) thinking
-      // spends from this budget before the text block, so a tight cap can end
-      // the turn with no text at all (pre-push audit on 9fe5de4f59).
-      max_tokens: 2048,
+      ...anthropicEffortConfig(MODELS.FLAGSHIP),
+      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 800),
       messages: [{
         role: 'user',
         content: `Draft an email reply for Waves Pest Control & Lawn Care.

@@ -14,11 +14,9 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/models', () => ({
+  // Real family patterns, so the anthropic-wire sizing is exercised as in prod.
+  ...jest.requireActual('../config/models'),
   DEEP: 'deep-model',
-  anthropicEffortFor(model) {
-    const pinned = require('../config/models').ANTHROPIC_EFFORT;
-    return pinned && /^claude-opus-(4-[5-9]|[5-9])(?![0-9])|^claude-sonnet-[5-9](?![0-9])|^claude-(fable|mythos)-/.test(String(model || '')) ? pinned : undefined;
-  },
   TEXT_POLICIES: {
     deepAnalysis: {
       name: 'deepAnalysis',
@@ -56,13 +54,20 @@ describe('createDeepMessage', () => {
     }));
   });
 
-  test('string system goes out as one text block with an ephemeral breakpoint (cacheTtl never reaches the wire)', async () => {
+  test('string system goes out as one text block with an ephemeral breakpoint', async () => {
     const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
-    await createDeepMessage(client, { max_tokens: 4096, system: 'SYS', cacheTtl: '1h', messages: [{ role: 'user', content: 'q' }] });
+    await createDeepMessage(client, { max_tokens: 4096, system: 'SYS', messages: [{ role: 'user', content: 'q' }] });
     const req = client.messages.create.mock.calls[0][0];
-    expect(req.system).toEqual([{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral', ttl: '1h' } }]);
-    expect(req.cacheTtl).toBeUndefined();
+    expect(req.system).toEqual([{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral' } }]);
+    expect(req.max_tokens).toBe(4096);
     expect(req.output_config).toBeUndefined();
+  });
+
+  test('the raw path raises max_tokens to the thinking floor only on models that think by default', () => {
+    const { wireParams } = require('../services/llm/deep')._test;
+    expect(wireParams({ max_tokens: 4096, messages: [] }, 'claude-opus-5-5').max_tokens).toBe(8192);
+    expect(wireParams({ max_tokens: 4096, messages: [] }, 'claude-opus-4-8').max_tokens).toBe(4096);
+    expect('max_tokens' in wireParams({ messages: [] }, 'claude-opus-4-8')).toBe(false);
   });
 
   test('a caller-placed cache_control on system blocks is left alone; blocks without one get the breakpoint on the last text block', async () => {

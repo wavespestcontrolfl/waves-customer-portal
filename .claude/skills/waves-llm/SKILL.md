@@ -51,20 +51,29 @@ text block. Read the answer with `anthropicText(response)` from
 `deep.js` — never `content[0].text`. Tool loops push `response.content` back
 whole (thinking blocks included) so the next turn stays valid.
 
-Opus 5.5 readiness (2026-09-25): `MODEL_ANTHROPIC_EFFORT` pins
-`output_config.effort` for the adapter and the DEEP helper (5.5 defaults to
-`medium`, 4.8 to `high`); `thinking: { type: 'disabled' }` and forced
-`tool_choice` any/tool are 400s on 5.5 — only the two VOICE lanes send the
-former (VOICE is Sonnet) and nothing sends the latter. Flip order in the
+Opus 5.5 readiness (2026-09-25): request sizing lives in
+`server/services/llm/anthropic-wire.js`. `anthropicMaxTokens(model, cap)` raises
+a cap to a thinking floor on models that think by default (Opus 5+, Fable,
+Mythos — thinking spends from `max_tokens` ahead of the text block) and leaves
+it alone everywhere else; `anthropicEffortConfig(model)` spreads the
+`MODEL_ANTHROPIC_EFFORT` pin (5.5 defaults to `medium`, 4.8 to `high`) onto
+models that accept every effort level (Opus 4.7+, Sonnet 5+, Fable, Mythos).
+The adapter and the DEEP helper apply both; **a new direct SDK call on an Opus
+tier must too** (`max_tokens: anthropicMaxTokens(MODELS.X, n)` plus
+`...anthropicEffortConfig(MODELS.X)`). `thinking: { type: 'disabled' }` and
+forced `tool_choice` any/tool are 400s on 5.5 — only the two VOICE lanes send
+the former (VOICE is Sonnet) and nothing sends the latter. Flip order in the
 registry header.
 
 ## 2c. Caching
 
 The adapter and the DEEP helper both put an ephemeral breakpoint on the
-system prompt. A lane whose prompt repeats on a cadence longer than five
-minutes passes `cacheTtl: '1h'` (the previsit brief does). Check
-`cached_input_tokens` in `llm_dispatch_log` before and after — prompts under
-the model's cacheable minimum (1024 tokens on Opus/Sonnet) never cache.
+system prompt, so repeat calls inside five minutes read it back at ~0.1x.
+Minimum cacheable prefix: 512 tokens on Opus 5 / 5.5 / Fable, 1024 on Opus 4.8
+and Sonnet 5, 2048 on Opus 4.7, 4096 on Opus 4.5 / 4.6 and Haiku 4.5 — a
+shorter prompt never caches, whatever the TTL (the previsit brief's ~450-token
+prompt is below all of them). Check `cached_input_tokens` in `llm_dispatch_log`
+before and after any caching change.
 
 ## 3. DEEP call sites — the helper is mandatory
 

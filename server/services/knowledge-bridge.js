@@ -26,7 +26,8 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODEL = require('../config/models').FLAGSHIP;
-const { ROUTES, anthropicEffortConfig } = require('../config/models');
+const { ROUTES } = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { dispatch, anthropicText } = require('./llm/call');
 
 // ══════════════════════════════════════════════════════════════
@@ -54,7 +55,7 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
     const response = await client.messages.create({
       model: MODEL,
       ...anthropicEffortConfig(MODEL),
-      max_tokens: maxTokens,
+      max_tokens: anthropicMaxTokens(MODEL, maxTokens),
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });

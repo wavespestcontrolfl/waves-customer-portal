@@ -3,6 +3,7 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
 const { anthropicText } = require('../llm/call');
@@ -56,10 +57,8 @@ async function processVendorInvoice(email, classification) {
 
       const parseResponse = await anthropic.messages.create({
         model: MODELS.FLAGSHIP,
-        ...MODELS.anthropicEffortConfig(MODELS.FLAGSHIP),
-        // Ceiling, not a target — see comms-tools.js: thinking spends from this
-        // budget on an always-thinking model, so 1024 could end with no text.
-        max_tokens: 2048,
+        ...anthropicEffortConfig(MODELS.FLAGSHIP),
+        max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1024),
         messages: [{
           role: 'user',
           content: [
