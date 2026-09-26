@@ -254,6 +254,7 @@ import useAdminBookmarkMeta from './hooks/useAdminBookmarkMeta';
 import useAdminViewport from './hooks/useAdminViewport';
 import { isAdminPath } from './lib/adminBookmarkMeta';
 import AdminTabRedirect from './components/admin/AdminTabRedirect';
+import AdminDetailRedirect from './components/admin/AdminDetailRedirect';
 import { isNativeApp } from './native/platform';
 import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
@@ -664,6 +665,9 @@ export default function App() {
           <Route path="/visit/:token" element={<Suspense fallback={<div />}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
+          {/* Bank-verification texts/emails linked /billing, which the portal
+              never routed — send those to the Billing tab. */}
+          <Route path="/billing" element={<Navigate to="/?tab=billing" replace />} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
@@ -717,12 +721,14 @@ export default function App() {
             <Route path="customers" element={<Suspense fallback={<RouteFallback label="Loading customers..." />}><AdminCustomersPage /></Suspense>} />
             <Route path="customers/new" element={<Suspense fallback={<RouteFallback label="Loading customer form..." />}><AdminCustomersPage /></Suspense>} />
             <Route path="customers/duplicates" element={<Suspense fallback={<RouteFallback label="Loading duplicates..." />}><AdminDuplicateCustomersPage /></Suspense>} />
+            <Route path="customers/:id" element={<AdminDetailRedirect to="/admin/customers" queryKey="customerId" />} />
             <Route path="pipeline" element={<Suspense fallback={<RouteFallback label="Loading pipeline..." />}><AdminPipelinePage /></Suspense>} />
             {/* Legacy Pipeline entry routes preserve notifications/bookmarks but
                 no longer mount duplicate copies of EstimatesPageV2. */}
             <Route path="estimates" element={<AdminTabRedirect to="/admin/pipeline" tab="estimates" preserveTabs={['leads', 'estimates', 'new', 'pricing']} />} />
             <Route path="agent-estimate" element={<Suspense fallback={<div style={{color:'#71717a',padding:40}}>Loading Agent Estimate...</div>}><AdminAgentEstimatePage /></Suspense>} />
             <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<RouteFallback label="Loading proposal..." />}><AdminCommercialProposalPage /></Suspense>} />
+            <Route path="estimates/:id" element={<AdminDetailRedirect to="/admin/pipeline" queryKey="estimateId" tab="estimates" />} />
             {/* /admin/dispatch is now the canonical dispatcher surface
                 — Board tab (phase 2 v1) + Schedule tab (existing
                 DispatchPageV2). /admin/schedule still works (redirects
@@ -794,6 +800,7 @@ export default function App() {
               )}
             />
             <Route path="invoices" element={<Suspense fallback={<RouteFallback label="Loading invoices..." />}><AdminInvoicesPage /></Suspense>} />
+            <Route path="invoices/:id" element={<AdminDetailRedirect to="/admin/invoices" queryKey="invoice" />} />
             <Route path="billing-recovery" element={<Suspense fallback={<RouteFallback label="Loading billing recovery..." />}><BillingRecoveryPage /></Suspense>} />
             <Route path="payers" element={<Suspense fallback={<RouteFallback label="Loading payers..." />}><PayersPage /></Suspense>} />
             <Route path="inventory" element={<Suspense fallback={<RouteFallback label="Loading inventory..." />}><AdminInventoryPage /></Suspense>} />

@@ -8743,7 +8743,7 @@ async function handleEstimateView(req, res, next) {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${proposalPriceLabel(estimate)}`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${proposalPriceLabel(estimate)}`, { icon: '\u{1F4CB}', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
@@ -12341,7 +12341,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             'billing',
             'Recurring accept: saved-card Auto Pay enrollment skipped',
             'A recurring accept auto-satisfied with a saved card, but the accept resolved a different customer than the card owner — Auto Pay was NOT enrolled. Review the account and re-add a payment method or the visits will invoice unprotected.',
-            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id, savedMethodRowId: recurringCardPolicy.savedMethodRowId } },
+            { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: estimate.id, savedMethodRowId: recurringCardPolicy.savedMethodRowId } },
           ).catch(() => {});
           throw Object.assign(new Error('saved-method owner mismatch'), { alreadyAlerted: true });
         }
@@ -12368,7 +12368,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             'billing',
             'Recurring accept: saved-card Auto Pay enrollment refused',
             `A recurring accept auto-satisfied with a saved card but enrollment was refused (${enrollment.reason}) — re-add a payment method or the visits will invoice unprotected.`,
-            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id, reason: enrollment.reason } },
+            { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: estimate.id, reason: enrollment.reason } },
           ).catch(() => {});
         }
       } catch (err) {
@@ -12379,7 +12379,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             'billing',
             'Recurring accept: saved-card Auto Pay enrollment failed',
             `A recurring accept auto-satisfied with a saved card but enrollment errored (${err.message}) — re-add a payment method or the visits will invoice unprotected.`,
-            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id } },
+            { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: estimate.id } },
           ).catch(() => {});
         }
       }
@@ -12523,7 +12523,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // bell:true — an office exception that must ring under the
               // admin bell policy, exactly like the converter's deferred
               // per-application bell it stands in for.
-              { link: `/admin/customers/${customerId}`, bell: true, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
+              { link: `/admin/customers?customerId=${customerId}`, bell: true, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
             );
             // Fired = a ROW exists. notifyAdmin resolves null on a failed
             // create and a truthy { id: null, suppressed: true } sentinel on
@@ -13389,7 +13389,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 : prepayAutoCharge.reason === 'authentication_required'
                   ? 'The card requires customer authentication (3DS), which an off-session charge cannot complete — the intent was canceled and the recovery sweep will deliver the pay link so the customer can authenticate by paying online.'
                   : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
-          { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
+          { link: invoiceId ? `/admin/invoices?invoice=${invoiceId}` : customerId ? `/admin/customers?customerId=${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       } else if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {
         // The booking stands with a card on file but the year isn't
@@ -13398,7 +13398,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           'billing',
           'Annual prepay accepted — auto-charge did not complete',
           `Prepay invoice ${prepayAutoCharge.status === 'skipped' ? 'was not auto-charged' : 'auto-charge failed'} (${prepayAutoCharge.reason || 'declined'}). Card on file is saved; the pay link ${prepayAutoCharge.status === 'skipped' && prepayAutoCharge.reason === 'payer_billed' ? 'routes to the payer' : 'is being sent to the customer'} — follow up if it goes unpaid.`,
-          { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
+          { link: invoiceId ? `/admin/invoices?invoice=${invoiceId}` : customerId ? `/admin/customers?customerId=${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       }
       // Resolve the durable job stamp with the in-flow outcome — the
@@ -14354,7 +14354,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
         await NotificationService.notifyAdmin('estimate',
           `Tier upgrade: ${estimate.customer_name}`,
           `Selected ${selectedTier} (was ${previousTier}) \u2014 $${monthlyTotal}/mo`,
-          { icon: '\u2B06\uFE0F', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
+          { icon: '\u2B06\uFE0F', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id } }
         );
       } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
     }
@@ -16400,9 +16400,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // row-existence oracle; docs/public-route-contracts.md). The admin
     // extension keeps extendEstimate's explicit 409.
     {
-      const { gatedSendAuthorityPredicateApplies } = require('../services/pricing-authority-gate');
       const { extensionDeliverableUnderGate } = require('../services/estimate-extension');
-      if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
+      if (!(await extensionDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
@@ -16490,7 +16489,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
         // office must hear about every self-serve grant). Under
         // GATE_ADMIN_BELL_POLICY a suppression would return a truthy
         // sentinel that the retry/claim logic below reads as delivered.
-        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
+        { icon: '⏳', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
       );
       const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
       if (!autoNotification) {
@@ -16546,7 +16545,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       // bell: true — here the notification IS the deliverable: a policy
       // suppression's truthy sentinel would keep the 24h claim and 201
       // "request sent" with nothing delivered to anyone.
-      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
+      { icon: '⏳', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
     );
     if (!notification) {
       await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })
@@ -16785,7 +16784,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       const reasonSuffix = customerReason
         ? ` \u2014 ${customerReason.decline_reason}${customerReason.competitor_name ? ` (${customerReason.competitor_name}${customerReason.competitor_price != null ? ` at $${customerReason.competitor_price}` : ''})` : ''}`
         : '';
-      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo${reasonSuffix}`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason: customerReason?.disposition || null } });
+      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo${reasonSuffix}`, { icon: '\u274C', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason: customerReason?.disposition || null } });
     } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
 
     res.json({ success: true });
@@ -25661,8 +25660,8 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // row — or group link — the shared verdict refuses answers the family's
     // generic 404, before either provider path.
     {
-      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
-      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      const { estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (!(await estimateDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
@@ -27242,7 +27241,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           'estimate',
           `Estimate viewed: ${estimate.customer_name}`,
           `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
-          { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
+          { icon: '\u{1F4CB}', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
         );
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }

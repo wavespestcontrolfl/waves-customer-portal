@@ -752,7 +752,7 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
         'billing',
         'Card number heard on a recorded call',
         'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
-        { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
+        { link: call.customer_id ? `/admin/customers?customerId=${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
       );
       // Alert DELIVERED — only now mark it, so a failed/interrupted send
       // retries on the next quarantine/recovery touch (round-17 P2).
@@ -2216,7 +2216,7 @@ async function retirePriceAgreedEstimatorBell({
   }
   try {
     const { notify: notifyEstimator } = require('./estimator-engine');
-    const link = customerId ? `/admin/customers/${customerId}` : '/admin/communications';
+    const link = customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications';
     const priceLabel = formatAgreedPriceLabel(callAgreedPrice);
     const promised = callQuotePromised === true;
     await notifyEstimator({
@@ -14491,7 +14491,7 @@ const CallRecordingProcessor = {
           'Quote promised on call — send it',
           `${callerName}: the agent promised to send a quote (${servicesText}${propertyCount > 1 ? `, ${propertyCount} properties` : ''}). Send it before end of day — no lead is tracking this promise.`,
           {
-            link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
+            link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications',
             metadata: {
               customerId: customerId || null,
               callSid: call.twilio_call_sid,

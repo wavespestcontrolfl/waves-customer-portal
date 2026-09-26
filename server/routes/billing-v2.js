@@ -733,7 +733,7 @@ router.post('/cards', async (req, res, next) => {
         'billing',
         'Card saved without Auto Pay (payer check failed)',
         'A portal card save skipped Auto Pay enrollment because the payer-routing check failed (fail closed) — the customer was asked to retry; enroll manually if this recurs.',
-        { link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
+        { link: `/admin/customers?customerId=${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
       ).catch(() => {});
       return res.status(409).json({
         error: 'Payment method saved, but Auto Pay could not be enabled — please try again.',
@@ -745,7 +745,7 @@ router.post('/cards', async (req, res, next) => {
         'billing',
         'Card saved without Auto Pay (payer-billed)',
         'A portal card save skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
-        { link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
+        { link: `/admin/customers?customerId=${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
       ).catch(() => {});
       return res.json({
         success: true,
@@ -786,7 +786,7 @@ router.post('/cards', async (req, res, next) => {
         'billing',
         'Card saved without Auto Pay (payer-billed)',
         'A portal card save skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
-        { link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
+        { link: `/admin/customers?customerId=${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
       ).catch(() => {});
       return res.json({
         success: true,

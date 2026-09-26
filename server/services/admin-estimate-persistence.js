@@ -2601,7 +2601,8 @@ const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
 // re-saves it through the engine and then extends it.
 function expiredRowRecoverableUnderGate(row) {
   const gate = require('./pricing-authority-gate');
-  return gate.gatedSendAuthorityPredicateApplies() && !gate.rowPassesGatedSendAuthority(row || {});
+  return (gate.gatedSendAuthorityPredicateApplies() && !gate.rowPassesGatedSendAuthority(row || {}))
+    || !gate.rowClearOfLegacyAutofillHold(row || {});
 }
 
 function estimateReviseBlock(estimate, estimateData, now = new Date()) {
