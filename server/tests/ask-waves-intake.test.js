@@ -153,6 +153,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Usually about 30 minutes.', 'How long after treatment can I re-enter?'],
     ['You can return indoors 30 minutes after treatment.', ''],
     ['Normalmente unos 30 minutos.', '¿Cuánto tiempo después del tratamiento puedo volver a entrar?'],
+    ['Keep pets off the lawn for 30 minutes after treatment.', 'How long should pets stay off the lawn after treatment?'],
+    ['Wait an hour before letting the dog out after the spray.', ''],
+    ['Mantenga a las mascotas fuera del césped por 30 minutos después del tratamiento.', ''],
   ])('a duration answering a re-entry question is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });

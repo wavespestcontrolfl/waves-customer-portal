@@ -268,7 +268,7 @@ const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w
 // word anywhere in the reply ("se seca en dos horas", "tarda veintidós
 // minutos en secarse", "puede volver en media hora").
 const ES_DURATION_RE = /\b(?:minutos?|horas?|min|mins|hrs?|h)\b\.?/i;
-const ES_DRY_OR_REENTRY_RE = /\b(?:sec[oa]s?|seca(?:r|rse|do|da)?|se\s+seca|volver|regresar|entrar|reingres\w*|salir|re-?entrada)\b/i;
+const ES_DRY_OR_REENTRY_RE = /\b(?:sec[oa]s?|seca(?:r|rse|do|da)?|se\s+seca|volver|regresar|entrar|reingres\w*|salir|re-?entrada|esper\w*|evit\w*|mant[eé]n\w*\s+(?:\w+\s+){0,3}(?:fuera|alejad\w*)|lejos|antes\s+de\s+(?:dejar|permitir|caminar|salir))\b/i;
 const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(t) };
 // Spanish duration matches need the same treatment context as English
 // ("Puede volver a entrar al portal en dos horas" is not a re-entry claim).
@@ -277,7 +277,7 @@ const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES
 // inside after 30 minutes.") — only with treatment context in the reply or
 // the visitor's words, so an appointment-window reply isn't caught.
 const EN_DURATION_RE = /\b(?:minutes?|mins?|hours?|hrs?)\b/i;
-const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|return(?:ing)?\s+(?:indoors|inside|outside|home|in|to)|back\s+in(?:side|doors)?|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
+const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|(?:keep|stay|kept)\s+(?:\w+\s+){0,3}(?:off|away|out|inside|indoors)|wait(?:ing)?|avoid\w*|before\s+(?:letting|walking|going|allowing|touching)|return(?:ing)?\s+(?:indoors|inside|outside|home|in|to)|back\s+in(?:side|doors)?|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
 const INTAKE_EPA_APPROVED_ES_RE = /\baprobad[oa]s?\s+por\s+la\s+epa\b|\bepa[-\s]+approved\b|\bapproved\s+by\s+(?:the\s+)?epa\b/i;
 
 // In a pest-control chat a pronoun or missing subject ("Yes, it's completely
