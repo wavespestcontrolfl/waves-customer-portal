@@ -59,7 +59,7 @@ const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:
 // A past-tense treatment question ("Were chemicals applied around my cats?",
 // "Why did you spray near my dogs' beds?") asks about the application, not
 // re-entry — unless it also asks about safety or going back out.
-const REENTRY_ASK_RE = /\b(safe|okay|ok|fine|alright|when\s+can|can\s+(?:i|we|they|he|she|my)|go\s+(?:out|back|in)|let\s+(?:my|the|them))\b/;
+const REENTRY_ASK_RE = /\b(safe|okay|ok|fine|alright|harm\w*|hurt\w*|danger\w*|toxic|poison\w*|sick|when\s+can|can\s+(?:i|we|they|he|she|my)|go\s+(?:out|back|in)|let\s+(?:my|the|them))\b/;
 function isReentryIntent(q) {
   if (SCHEDULED_RETURN_RE.test(q)) return false;
   const askedAboutApplication = TREATMENT_QUESTION_RE.test(q) && PAST_TENSE_RE.test(q) && !REENTRY_ASK_RE.test(q);
@@ -593,7 +593,9 @@ function questionRoutingRules({
     {
       // A pressure/score question with only the generic "used" ("What is the
       // pressure score used for?") belongs to the trend answer.
-      test: (q) => TREATMENT_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q)
+      // Appointment wording only outranks treatment in a future/scheduling
+      // sense; "What was applied at my last appointment?" is a past question.
+      test: (q) => TREATMENT_QUESTION_RE.test(q) && (!APPOINTMENT_RE.test(q) || PAST_TENSE_RE.test(q) || /\b(?:last|today'?s?|previous)\b/.test(q))
         && !(TREND_CORE_RE.test(q) && !/\b(?:products?|spray\w*|appl\w*|treat\w*|chemicals?|baits?)\b/.test(q)),
       // "Is the treatment working?" asks about results, not what was applied.
       answer: (q) => (EFFECTIVENESS_RE.test(q) ? answerTrend({ data }) : answerAppliedToday({ data })),

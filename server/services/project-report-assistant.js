@@ -177,7 +177,9 @@ function answerProjectReportQuestion({ question, project, payload, intent }) {
   }
   // Future cue on either side of the treatment verb ("When will you treat?",
   // "Will you treat next week?", "Are you applying next week?").
-  if (!/\b(was|were|did|have you|has)\b/.test(q)
+  // Past tense only vetoes when it governs the treatment ("was it treated",
+  // "did you spray") — not an introductory "I was wondering when…".
+  if (!/\b(?:was|were|did|have\s+you|has)\s+(?:you\s+|it\s+|they\s+|the\s+\w+\s+)?(?:treat|spray|appl)\w*|\b(?:treated|sprayed|applied)\b/.test(q)
     && /\b(treat\w*|spray\w*|appl\w*)\b/.test(q)
     && /\b(when|next|again|upcoming|will\s+you|going\s+to)\b/.test(q)) {
     return answerNextVisit({ project, payload });

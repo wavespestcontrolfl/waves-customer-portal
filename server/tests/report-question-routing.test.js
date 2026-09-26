@@ -46,6 +46,11 @@ describe('project report — every shipped chip answers its own category (AW-06)
     expect(answerProjectReportQuestion({ question, project, payload })).toMatch(/Seal the gap at the rear wall/i);
   });
 
+  test('"I was wondering when you will treat again" goes to the next visit', () => {
+    expect(answerProjectReportQuestion({ question: 'I was wondering when you will treat again', project, payload }))
+      .toMatch(/Nothing further is scheduled|scheduled for/i);
+  });
+
   test.each([
     'Will you treat next week?',
     'Are you applying next week?',
@@ -405,6 +410,21 @@ describe('service report — every shipped chip answers its own category (AW-06)
     'I was curious when you will spray again',
   ])('an unrelated past verb does not cancel a future treatment cue: %s', (question) => {
     expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Your next appointment is/);
+  });
+
+  test.each([
+    'What was applied at my last appointment?',
+    "Which product did you use at today's appointment?",
+  ])('a past-appointment treatment question returns the applied products: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Sources used: this service report/);
+  });
+
+  test.each([
+    'Did the treatment harm my pets?',
+    'Were dangerous chemicals applied near my cats?',
+  ])('hazard wording keeps a past treatment question on pet safety: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData }))
+      .toBe(answerServiceReportQuestion({ question: 'When can my pets go back out?', data: pestData }));
   });
 
   test('"When is my next treatment after today?" goes to the appointment', () => {
