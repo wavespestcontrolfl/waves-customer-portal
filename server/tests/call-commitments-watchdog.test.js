@@ -41,7 +41,8 @@ beforeEach(() => {
       ? [...new Map((await Promise.all(listOpenCommitments.mock.results.map((r) => r.value))).flat().map((r) => [r.id, r])).values()].filter((r) => ids.includes(r.id)) : [];
     return q;
   });
-  isEnabled.mockReturnValue(true);
+  // The one-hour follow-up pager is off unless a test turns it on.
+  isEnabled.mockImplementation((gate) => gate !== 'followupSlaAlerts');
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n1' });
 });
 
@@ -173,4 +174,62 @@ test('nothing overdue → quiet', async () => {
   listOpenCommitments.mockResolvedValue([row('c', { due_at: new Date(NOW.getTime() + 3600000).toISOString() })]);
   expect(await runCallCommitmentsWatchdog({ now: NOW })).toEqual({ skipped: false, scanned: 1, overdue: 0, alerted: 0, unverified: 0 });
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('while the follow-up pager is live, a callback still on its 24-hour list is left to it — no overdue bell', async () => {
+  // Promise at 2026-09-05 10:00 ET (14:00Z, ended then) → SLA due 11:00 ET,
+  // inside the pager's window at NOW (11:00 ET). The legacy implicit
+  // deadline (end of the call's ET day) is irrelevant while the pager owns it.
+  listOpenCommitments.mockResolvedValue([row('owned', { due_at: null, source: 'ai', call_started_at: '2026-09-05T13:30:00Z', created_at: '2026-09-05T13:30:00Z' })]);
+  isEnabled.mockReturnValue(true);
+  const sla = require('../services/followup-sla-watcher');
+  const spy = jest.spyOn(sla, 'slaOwnedIds').mockResolvedValue(new Set(['owned']));
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValue(true);
+  const result = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(spy).toHaveBeenCalled();
+  expect(result.overdue).toBe(0);
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  spy.mockRestore();
+  healthy.mockRestore();
+});
+
+test('a pager that is not succeeding hands its promises straight back — the watchdog pages them', async () => {
+  isEnabled.mockReturnValue(true);
+  listOpenCommitments.mockResolvedValue([row('owned')]);
+  const sla = require('../services/followup-sla-watcher');
+  const spy = jest.spyOn(sla, 'slaOwnedIds').mockResolvedValue(new Set(['owned']));
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValue(false);
+  const catchUp = jest.spyOn(sla, 'runFollowUpSlaWatcher').mockRejectedValue(new Error('pager down'));
+  const result = await runCallCommitmentsWatchdog({ now: NOW });
+  // One catch-up run was attempted first; it failed, so this watchdog covers.
+  expect(catchUp).toHaveBeenCalledTimes(1);
+  catchUp.mockRestore();
+  expect(spy).not.toHaveBeenCalled();
+  expect(result.overdue).toBe(1);
+  spy.mockRestore();
+  healthy.mockRestore();
+});
+
+test('a failing pager ownership check never fails the watchdog — it simply does not defer', async () => {
+  isEnabled.mockReturnValue(true);
+  listOpenCommitments.mockResolvedValue([row('owned')]);
+  const sla = require('../services/followup-sla-watcher');
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockRejectedValue(new Error('job_health unavailable'));
+  const result = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(result.overdue).toBe(1);
+  healthy.mockRestore();
+});
+
+test('a pager that has not run its latest tick (just switched on) gets a catch-up run, then the watchdog defers to it', async () => {
+  isEnabled.mockReturnValue(true);
+  listOpenCommitments.mockResolvedValue([row('owned')]);
+  const sla = require('../services/followup-sla-watcher');
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  const catchUp = jest.spyOn(sla, 'runFollowUpSlaWatcher').mockResolvedValue({ skipped: false });
+  const owned = jest.spyOn(sla, 'slaOwnedIds').mockResolvedValue(new Set(['owned']));
+  const result = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(catchUp).toHaveBeenCalledTimes(1);
+  expect(result.overdue).toBe(0);
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  healthy.mockRestore(); catchUp.mockRestore(); owned.mockRestore();
 });

@@ -1116,6 +1116,17 @@ function phoneWhere(builder, column, phone) {
   builder.whereRaw(`regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') IN (?, ?)`, [key, `1${key}`]);
 }
 
+// phoneWhere for many numbers at once (the follow-up pager's batched
+// evidence read): the same digits rule, one IN list.
+function phoneWhereAny(builder, column, phones, { or = false } = {}) {
+  const keys = [...new Set((phones || []).map(phoneDigits).filter(Boolean))];
+  const method = or ? 'orWhereRaw' : 'whereRaw';
+  if (!keys.length) { builder[method]('false'); return builder; }
+  const values = keys.flatMap((k) => [k, `1${k}`]);
+  builder[method](`regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') IN (${values.map(() => '?').join(', ')})`, values);
+  return builder;
+}
+
 function windowEnd(after) {
   return new Date(after.getTime() + ASSOCIATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 }
@@ -1655,6 +1666,10 @@ async function resolveFulfillment(conn, commitment, call) {
         .where("created_at", ">", after)
         .where("created_at", "<=", until)
         .whereNotIn("status", ["cancelled", "canceled"])
+        // A booking someone made: never a child the system generated on its
+        // own (the nightly series top-up, a booking's seeded follow-ups).
+        .whereNull("recurring_parent_id")
+        .whereNull("parent_service_id")
         .orderBy("created_at", "asc")
         .first("id", "created_at", "scheduled_date", "status");
       return visit ? { kind: "appointment_booked", record_type: "scheduled_service", record_id: visit.id, matched_at: visit.created_at, strength: "association", basis: `visit_booked_for_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
@@ -1961,7 +1976,7 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // callback cards (deadline, default owner, audit row) as they read; every
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
-async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date() } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -1986,6 +2001,13 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
       if (kind) b.where('cc.kind', kind);
       scopeCommitmentRows(b, { customerId, leadId, leadSid });
       if (!includeHints) b.whereNull('cc.fulfillment');
+      // activeSince (the follow-up pager): only promises made, dated or
+      // snoozed since then — a large historical backlog must not page
+      // recent work out of the scan.
+      if (activeSince) b.where(function recent() {
+        this.where('cl.created_at', '>=', activeSince).orWhere('cc.created_at', '>=', activeSince)
+          .orWhere('cc.due_at', '>=', activeSince).orWhere('cc.snoozed_until', '>=', activeSince);
+      });
     })
     // Overdue first — by the SAME rule isOverdue applies (the stated due
     // time, else the per-kind implicit deadline, in the past) — then
@@ -2597,6 +2619,8 @@ module.exports = {
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,
+  phoneDigits,
+  phoneWhereAny,
   whereEstimateCustomerOwnership,
   handedOffWithin,
   handoffOrder,

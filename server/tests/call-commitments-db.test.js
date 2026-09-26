@@ -319,6 +319,23 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(proof).toBeNull();
   });
 
+  test('a same-customer visit fulfils schedule_visit only when someone booked it — a generated series child never does', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const [cust] = await db('customers').insert({ first_name: 'Series', phone: '+15555550177' }).returning('id');
+    cleanup.customerIds.push(cust.id);
+    const [parent] = await db('scheduled_services').insert({ scheduled_date: '2026-09-01', service_type: 'General Pest Control', status: 'completed', customer_id: cust.id, created_at: new Date(call.created_at.getTime() - 7 * 24 * 60 * 60 * 1000) }).returning('id');
+    cleanup.visitIds.push(parent.id);
+    // The nightly top-up's child of an existing series, created after the call.
+    const [child] = await db('scheduled_services').insert({ scheduled_date: '2026-12-01', service_type: 'General Pest Control', status: 'pending', customer_id: cust.id, recurring_parent_id: parent.id, created_at: new Date(Date.now() - 60 * 1000) }).returning('id');
+    cleanup.visitIds.push(child.id);
+    expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: cust.id })).toBeNull();
+    // A booking someone actually made still counts.
+    const [booked] = await db('scheduled_services').insert({ scheduled_date: '2026-10-01', service_type: 'General Pest Control', status: 'pending', customer_id: cust.id, created_at: new Date(Date.now() - 30 * 1000) }).returning('id');
+    cleanup.visitIds.push(booked.id);
+    expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: cust.id }))
+      .toMatchObject({ kind: 'appointment_booked', record_id: booked.id, strength: 'association' });
+  });
+
   test('an invoice on the visit booked from this call counts only when paid AFTER the call', async () => {
     const call = await db('call_log').where({ id: callId }).first();
     const [visit] = await db('scheduled_services').insert({ scheduled_date: '2026-09-11', service_type: 'General Pest Control', status: 'completed', source_call_log_id: callId }).returning('id');
@@ -717,6 +734,21 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(byLeadWithRelay.map((r) => r.description).sort()).toEqual(['implicit overdue (old call, no due)', 'relay reuse']);
     // The fixture call from the earlier tests is not this customer's.
     expect(all.some((r) => r.call_log_id === call.id)).toBe(false);
+
+    // activeSince (the one-hour follow-up pager): only promises made, dated
+    // or snoozed since then — the 10-day-old call's undated report drops out.
+    const recent = await cc.listOpenCommitments(db, { party: 'waves', customerId: cust.id, activeSince: new Date(Date.now() - 2 * 24 * 3600 * 1000) });
+    expect(recent.map((r) => r.description).sort()).toEqual(['due tomorrow', 'stated overdue']);
+    // …and each row carries every field followup-sla-watcher reads.
+    for (const r of recent) {
+      expect(r).toEqual(expect.objectContaining({
+        id: expect.anything(), call_log_id: newCall, party: 'waves', status: 'open', source: expect.any(String),
+        human_state: null, updated_at: expect.anything(), direction: 'inbound', from_phone: '+15555550188',
+        to_phone: OUR_NUMBER, customer_id: cust.id, customer_first_name: 'Owed', call_started_at: expect.any(Date),
+      }));
+      expect(r).toHaveProperty('snoozed_until');
+      expect(r).toHaveProperty('due_at');
+    }
   });
 
   test('buildCallOutcomes: the paid total covers every later paid invoice, not just the capped list', async () => {

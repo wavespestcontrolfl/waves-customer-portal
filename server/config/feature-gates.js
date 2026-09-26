@@ -1428,6 +1428,12 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  // One-hour follow-up pager (owner ruling 2026-09-26): a promise made on a
+  // call (callback, quote, a time to come out) is due within one hour of
+  // 8 AM–8 PM ET time; a missed one rings one bell, and a standing bell lists
+  // everything missed in the last 24 hours. Internal only. Needs
+  // callCommitments. Off → no-op. See services/followup-sla-watcher.js.
+  followupSlaAlerts: process.env.GATE_FOLLOWUP_SLA_ALERTS === 'true',
   // Call reschedule apply: a matched existing customer's agent-committed move
   // of a visit already on the books (V2 reschedule_requested + confirmed
   // start) is applied to that visit through the rebooker, the access note
