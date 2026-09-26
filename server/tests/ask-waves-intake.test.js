@@ -258,6 +258,12 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Our safest pesticide for children.', ''],
     ['This spray is non toxic.', ''],
     ['The product is non hazardous to pets.', ''],
+    ['Your dog should be fine.', ''],
+    ['Your pets will be okay.', ''],
+    ['Your children should be all right.', ''],
+    ['The EPA allows this pesticide for residential use.', ''],
+    ['The EPA permits this product.', ''],
+    ['This pesticide is permitted by the EPA.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -300,6 +306,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Return after 30 minutes.', 'How should I prepare?'],
     ['Vacate for two hours.', 'How long should we vacate?'],
     ['Leave the house for 2 hours.', ''],
+    ['Two hours.', 'When can I walk my dog outside again?'],
+    ['At 4 PM.', 'When can my baby crawl on the floor again?'],
+    ['Two hours.', 'When can we touch the countertops again?'],
     ['Residents may return after 30 minutes.', 'How should I prepare?'],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
@@ -515,6 +524,21 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
   test('"didn\'t eat the bait, but he licked it" keeps the dog as the patient (vet script)', () => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, "My dog didn't eat the bait, but he licked it");
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test('a leading-no care denial is not escalated', () => {
+    const out = scrubUnsafeClaims({ reply: 'This treatment is completely safe. No medical care is needed.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
+    expect(out.reply).toMatch(/label directions/);
+  });
+
+  test.each(['No daña.', 'No causa daño.', 'No representa riesgo.'])('a terse Spanish hazard denial gets the Spanish replacement: %s', (reply) => {
+    expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Mascotas?').reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test('"he ate some lunch" beside a sting adds no Poison Control line', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'A wasp stung my child and his hand is swelling, but he ate some lunch');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toContain('1-800-222-1222');
   });
 
   test.each([
@@ -1927,6 +1951,9 @@ describe('looksLikeEmergency', () => {
     "My cat didn't collapse after treatment",
     "My dog wasn't shaking after the pesticide treatment",
     "My child hasn't been vomiting since the spray",
+    'My dog is not sick after the pesticide treatment',
+    "My child wasn't ill after treatment",
+    'Do ants bite?\nMy lawn has a rash of brown spots',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
