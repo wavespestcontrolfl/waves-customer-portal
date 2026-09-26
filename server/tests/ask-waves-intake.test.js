@@ -638,6 +638,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
   });
 
+  test('"out of danger" after an ingestion gets the emergency script', () => {
+    const out = normalizeIntakeResult({ reply: 'Your child is out of danger.', intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
   test.each(['Your child should be fine.', 'It should be okay.'])('a reassuring reply to an emergency turn gets the emergency script: %s', (reply) => {
     const out = normalizeIntakeResult({ reply, intent: 'emergency', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
@@ -963,6 +968,9 @@ describe('normalizeIntakeResult', () => {
     ['They can deliver a painful bite.', 'Are black widows dangerous?'],
     ['Yes.', 'Are wasps dangerous?'],
     ['No.', 'Are chinch bugs harmful to this lawn?'],
+    ['No.', 'Will it hurt when a wasp stings?'],
+    ['No.', 'Does it hurt when ants bite?'],
+    ['No.', 'Is it dangerous if the spider bites?'],
     ['Sí.', '¿Es peligrosa la viuda negra?'],
     ['Para evitar mosquitos, vacíe el agua estancada 2 veces por semana.', ''],
     ['Evite programar 2 citas para el mismo día.', ''],
@@ -1958,6 +1966,9 @@ describe('looksLikeEmergency', () => {
     'Got poisoned',
     'Poisoned by the spray, what do I do?',
     'I think I got poisoned',
+    'My baby sucked on rat poison',
+    'The ambulance took my husband to the hospital',
+    'Paramedics took him to the hospital',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2039,6 +2050,8 @@ describe('looksLikeEmergency', () => {
     'We need an ambulance station treated for termites',
     '¿Cuánto cuesta quitar las ratas envenenadas?',
     'Are the rats poisoned by the bait yet?',
+    'My child ate dinner after the lawn treatment',
+    'My dog ate dinner next to the bait station',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
