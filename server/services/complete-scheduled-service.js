@@ -1678,6 +1678,33 @@ function normalizeCompletionTextArray(value, limit = 20) {
   return out;
 }
 
+function completedProtocolActionScopes(actions, scopeEntries, serviceLine) {
+  const completedActions = new Set(actions);
+  return (Array.isArray(scopeEntries) ? scopeEntries : [])
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const scope = String(entry.scope || '').toLowerCase();
+      if (scope !== 'interior' && scope !== 'exterior') return null;
+      const label = normalizeCompletionTextArray([entry.label])[0];
+      // Scope metadata cannot establish work absent from the completed actions.
+      if (!label || !completedActions.has(label)) return null;
+      // Only governed non-spray actions can waive drying. Never trust a
+      // client exemption on a spray or arbitrary legacy action.
+      const nonDryingAction = (serviceLine === 'pest' && [
+        'Applied gel bait in the recorded locations.',
+        'Applied dust to the recorded accessible voids.',
+      ].includes(label)) || (['tree_shrub', 'palm'].includes(serviceLine)
+        && label === 'Completed the documented trunk application.');
+      return {
+        label,
+        scope,
+        treatmentApplied: entry.treatmentApplied === true,
+        ...(nonDryingAction ? { dryDown: false } : {}),
+      };
+    })
+    .filter(Boolean);
+}
+
 function taggedCompletionNoteLines(notes, tags) {
   const tagSet = new Set(tags.map((tag) => tag.toLowerCase()));
   return String(notes || '')
@@ -3592,27 +3619,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Specialty preset lanes replace this list with server-derived metadata
     // once the lane resolves below — the client-supplied scope/treatmentApplied
     // is never persisted for them.
-    let reportProtocolActionScopes = (Array.isArray(protocolActionScopesCompleted) ? protocolActionScopesCompleted : [])
-      .map((entry) => {
-        if (!entry || typeof entry !== 'object') return null;
-        const scope = String(entry.scope || '').toLowerCase();
-        if (scope !== 'interior' && scope !== 'exterior') return null;
-        const label = String(entry.label || '').trim() || null;
-        // Only governed non-spray actions can waive drying. Never trust a
-        // client exemption on a spray or arbitrary legacy action.
-        const nonDryingAction = (reportServiceLine === 'pest' && [
-          'Applied gel bait in the recorded locations.',
-          'Applied dust to the recorded accessible voids.',
-        ].includes(label)) || (['tree_shrub', 'palm'].includes(reportServiceLine)
-          && label === 'Completed the documented trunk application.');
-        return {
-          label,
-          scope,
-          treatmentApplied: entry.treatmentApplied === true,
-          ...(nonDryingAction ? { dryDown: false } : {}),
-        };
-      })
-      .filter(Boolean);
+    let reportProtocolActionScopes = completedProtocolActionScopes(
+      reportProtocolActions, protocolActionScopesCompleted, reportServiceLine,
+    );
     const submittedObservations = normalizeCompletionTextArray(
       Array.isArray(observations) ? observations : [],
     );
@@ -13463,6 +13472,7 @@ module.exports = {
   completionUsesReportLane,
   completionSmsWithheldForMissingReportToken,
   completionStructuredObservationAllowlist,
+  completedProtocolActionScopes,
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
   parseCompletionReviewDelayMinutes,

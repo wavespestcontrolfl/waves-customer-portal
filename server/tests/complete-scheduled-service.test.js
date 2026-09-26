@@ -32,6 +32,7 @@ const {
   completionSmsDefiniteRejectionError,
   definiteRejectionMarkerFromAttemptError,
   completionStructuredObservationAllowlist,
+  completedProtocolActionScopes,
 } = require('../services/complete-scheduled-service');
 const completionObservationCatalog = require('../../shared/service-completion-observations.json');
 const lawnConditionCatalog = require('../../shared/lawn-condition-findings.json');
@@ -84,6 +85,28 @@ beforeEach(() => {
 
 const complete = (body = {}, overrides = {}) => completeScheduledService({
   serviceId: SERVICE_ID, body, actor, ...overrides,
+});
+
+describe('completed action scope authority', () => {
+  test.each([
+    ['pest', 'Applied gel bait in the recorded locations.'],
+    ['pest', 'Applied dust to the recorded accessible voids.'],
+    ['tree_shrub', 'Completed the documented trunk application.'],
+  ])('non-drying %s scope must belong to a completed action: %s', (line, label) => {
+    const scope = { label, scope: 'exterior', treatmentApplied: true, dryDown: false };
+    expect(completedProtocolActionScopes([], [scope], line)).toEqual([]);
+    expect(completedProtocolActionScopes(['Inspected the property.'], [scope], line)).toEqual([]);
+    expect(completedProtocolActionScopes([label], [scope], line))
+      .toEqual([{ label, scope: 'exterior', treatmentApplied: true, dryDown: false }]);
+  });
+
+  test('matching spray scopes cannot claim a client-supplied drying exemption', () => {
+    const label = 'Applied a perimeter spray.';
+    expect(completedProtocolActionScopes([label], [
+      { label, scope: 'exterior', treatmentApplied: true, dryDown: false },
+      { label: 'Unrecorded spray.', scope: 'interior', treatmentApplied: true },
+    ], 'pest')).toEqual([{ label, scope: 'exterior', treatmentApplied: true }]);
+  });
 });
 
 describe('customer-safe routine completion observations', () => {
