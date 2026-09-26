@@ -10,6 +10,7 @@ import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from './__fixtures__/mosquito-report-v2.json';
 import termiteReportV2 from './__fixtures__/termite-report-v2.json';
 import pestReportV2 from './__fixtures__/pest-report-v2.json';
+import treeShrubReportV2 from './__fixtures__/tree-shrub-report-v2.json';
 
 // Full-render guards for the lawn service report. V2 is THE lawn report
 // (owner ruling 2026-07-09, LAWN_REPORT_V2 flag retired): the server builds
@@ -1025,11 +1026,43 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
 });
 
 
+describe('Governed routine observations without generated report copy', () => {
+  it.each([
+    ['pest dashboard', pestReportV2, 'Live pest activity was visible in an inspected exterior area.', false],
+    ['legacy pest summary', pestReportV2, 'Live pest activity was visible in an inspected exterior area.', true],
+    ['tree dashboard', treeShrubReportV2, 'Yellow foliage was visible; the cause was not confirmed.', false],
+  ])('renders exact governed observations once in the %s', async (_name, fixture, observation, legacy) => {
+    const payload = structuredClone(fixture);
+    payload.summary = 'The recorded visit details are available below.';
+    payload.summarySource = 'deterministic';
+    if (payload.pestReportV2) payload.pestReportV2.aiSummary = null;
+    if (legacy) payload.pestReportV2 = null;
+    payload.protocol = {
+      structuredObservations: [observation, observation, 'Internal custom technician note.', 'Thin turf was visible in the inspected area.'],
+    };
+
+    renderReport(payload);
+
+    const finding = await screen.findByText(observation);
+    expect(document.getElementById('visit-summary')).toContainElement(finding);
+    expect(screen.getAllByText(observation)).toHaveLength(1);
+    expect(document.body.textContent).not.toContain('Internal custom technician note.');
+    expect(document.body.textContent).not.toContain('Thin turf was visible in the inspected area.');
+  });
+});
+
 describe('Consolidated lawn report', () => {
   it('keeps the lawn summary once and omits the separate inspection card', async () => {
     const payload = structuredClone(lawnReportV2);
     payload.reportV2.photoSummary = 'Lawn health is up 2 points since your first assessment.';
-    payload.protocol = { structuredObservations: ['Leaf spotting consistent with gray leaf spot was observed. Location: Back yard.', 'Unreviewed raw technician note'], actions: ['Tested irrigation coverage'] };
+    payload.protocol = {
+      structuredObservations: [
+        'Leaf spotting consistent with gray leaf spot was observed. Location: Back yard.',
+        'Thin turf was visible in the inspected area.',
+        'Unreviewed raw technician note',
+      ],
+      actions: ['Tested irrigation coverage'],
+    };
     renderReport(payload);
     await waitFor(() => expect(document.getElementById('visit-summary')?.textContent).toContain(payload.reportV2.photoSummary));
     const text = document.body.textContent;
@@ -1037,8 +1070,30 @@ describe('Consolidated lawn report', () => {
     expect(document.getElementById('lawn-field-findings')).toBeNull();
     expect(screen.getAllByText(payload.protocol.structuredObservations[0])).toHaveLength(1);
     expect(document.getElementById('visit-summary')).toContainElement(screen.getByText(payload.protocol.structuredObservations[0]));
+    expect(document.getElementById('visit-summary')).toContainElement(screen.getByText(payload.protocol.structuredObservations[1]));
     expect(text).not.toContain('Unreviewed raw technician note');
     expect(text).not.toContain('Lawn Health Documentation');
     expect(text).not.toContain("Why these products were selected for today's service.");
+  });
+
+  it('keeps a callback summary for governed catalog findings and hides custom text', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.isCallback = true;
+    payload.reserviceGateOn = true;
+    payload.summarySource = 'technician_report';
+    payload.typedReport = { todaysResult: { bodySource: 'technician_report' } };
+    payload.lawnAssessment = null;
+    payload.protocol = {
+      structuredObservations: [
+        'Standing water was visible in the lawn.',
+        'Internal callback note that is not customer-safe.',
+      ],
+    };
+
+    renderReport(payload);
+
+    const finding = await screen.findByText(payload.protocol.structuredObservations[0]);
+    expect(document.getElementById('visit-summary')).toContainElement(finding);
+    expect(document.body.textContent).not.toContain(payload.protocol.structuredObservations[1]);
   });
 });
