@@ -74,7 +74,8 @@ const mockDb = jest.fn(table => {
 mockDb.transaction = jest.fn(async callback => callback(mockDb));
 mockDb.raw = (sql, bindings) => ({ sql, bindings });
 jest.mock('../models/db', () => mockDb);
-const { executeLeadTool } = require('../services/lead-response-tools');
+const { executeLeadTool, stripTrailingSignature } = require('../services/lead-response-tools');
+const { LEAD_RESPONSE_AGENT_CONFIG } = require('../services/lead-response-agent-config');
 const context = { leadId: '00000000-0000-4000-8000-000000000001', customerId: '00000000-0000-4000-8000-000000000002', sessionId: 'session-1', toolUseId: 'tool-1' };
 beforeEach(() => {
   jest.clearAllMocks();
@@ -307,4 +308,45 @@ test.each(['SMS_OPTED_OUT', 'LEAD_SUBJECT_CHANGED'])('deterministic %s does not 
   expect(result.error).toBeUndefined();
   expect(result.failed).toBeUndefined();
   expect(mockPipeline).not.toHaveBeenCalled();
+});
+
+
+// Owner ruling 2026-09-26: customer texts are never signed.
+describe('lead texts carry no sign-off', () => {
+  test.each([
+    ['Talk soon. — Adam, Waves Pest Control', 'Talk soon.'],
+    ['Talk soon! - Adam', 'Talk soon!'],
+    ['Talk soon!\nAdam, Waves Pest Control', 'Talk soon!'],
+    ['See you Thursday. —Waves Pest Control', 'See you Thursday.'],
+    ['Got it! — Adam — Waves Pest Control', 'Got it!'],
+    ['Talk soon!\n— Adam\nWaves Pest Control', 'Talk soon!'],
+  ])('strips the trailing sign-off from %j', (input, expected) => {
+    expect(stripTrailingSignature(input)).toBe(expected);
+  });
+
+  test.each([
+    'Hello! Waves Pest Control here. We got your request.',
+    'Thanks for choosing Waves Pest Control',
+  ])('keeps the company name when it is not a sign-off: %j', (input) => {
+    expect(stripTrailingSignature(input)).toBe(input);
+  });
+
+  test('the SMS actually sent is the stripped text', async () => {
+    mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+    await executeLeadTool('send_lead_response', { message: 'Ants are very treatable this time of year. — Adam, Waves Pest Control' }, context);
+    expect(mockMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Ants are very treatable this time of year.' }));
+  });
+
+  test('a message that is only a sign-off is refused before anything is sent', async () => {
+    expect(await executeLeadTool('send_lead_response', { message: '— Adam, Waves Pest Control' }, context))
+      .toMatchObject({ error: expect.any(String), validationError: true });
+    expect(mockMessage).not.toHaveBeenCalled();
+  });
+
+  test('the agent prompt forbids signing and the send tool no longer asks for it', () => {
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).not.toMatch(/always sign/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/NO SIGNATURE: never sign/);
+    const sendTool = LEAD_RESPONSE_AGENT_CONFIG.tools.find(t => t.name === 'send_lead_response');
+    expect(sendTool.input_schema.properties.message.description).not.toMatch(/signed as/i);
+  });
 });

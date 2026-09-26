@@ -52,7 +52,7 @@ const LEAD_AGENT_ENVIRONMENT_ID = process.env.LEAD_AGENT_ENVIRONMENT_ID || proce
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
 
-async function apiCall(method, path, body) {
+async function apiCall(method, path, body, signal) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
@@ -62,6 +62,7 @@ async function apiCall(method, path, body) {
       'content-type': 'application/json',
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     const err = await res.text();
@@ -70,8 +71,16 @@ async function apiCall(method, path, body) {
   return res.json();
 }
 
-async function sendSessionEvents(sessionId, events) {
-  return apiCall('POST', `/sessions/${sessionId}/events`, { events });
+// Every events POST is bounded by the run's deadline: a stalled request must
+// not keep processLead() pending past it.
+async function sendSessionEvents(sessionId, events, deadline) {
+  const signal = AbortSignal.timeout(remainingMs(sessionId, deadline));
+  try {
+    return await apiCall('POST', `/sessions/${sessionId}/events`, { events }, signal);
+  } catch (err) {
+    if (signal.aborted) throw deadlineError(sessionId, deadline);
+    throw err;
+  }
 }
 
 const DEFAULT_LEAD_AGENT_TIMEOUT_MS = 180000;
@@ -88,6 +97,26 @@ function leadAgentTimeoutMs() {
 // Mirrors server/services/content/agents/agent-dispatcher.js's deadlineError.
 function deadlineError(sessionId, deadline) {
   return Object.assign(new Error(`session ${sessionId} timed out at its ${new Date(deadline).toISOString()} deadline`), { code: 'session_timeout' });
+}
+
+function remainingMs(sessionId, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw deadlineError(sessionId, deadline);
+  return remaining;
+}
+
+// A local tool call cannot be cancelled, but the run stops waiting for it at
+// the deadline and starts no further tool after it.
+async function withinDeadline(promise, sessionId, deadline) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(deadlineError(sessionId, deadline)), remainingMs(sessionId, deadline));
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Opens the SSE connection and returns it unread. Callers must open the
@@ -119,7 +148,7 @@ async function openSessionStream(sessionId, deadline) {
     const err = await res.text();
     throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
-  return { sessionId, deadline, res, timer };
+  return { sessionId, deadline, res, timer, controller };
 }
 
 // Consumes an already-opened stream (see openSessionStream) against a
@@ -195,6 +224,7 @@ const LeadResponseAgent = {
     let failure = null;
     // Set only by a terminal event: any other stream exit is a failure.
     let sessionEnded = false;
+    let openedStream = null;
     try {
       const session = await apiCall('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
@@ -208,12 +238,12 @@ const LeadResponseAgent = {
       // Open the stream first — the kickoff message is posted only once the
       // SSE connection is live, so no early event is emitted before we're
       // listening for it.
-      const openedStream = await openSessionStream(sessionId, deadline);
+      openedStream = await openSessionStream(sessionId, deadline);
 
       await sendSessionEvents(sessionId, [{
         type: 'user.message',
         content: [{ type: 'text', text: prompt }],
-      }]);
+      }], deadline);
 
       let report = '';
       let toolsExecuted = [];
@@ -221,7 +251,9 @@ const LeadResponseAgent = {
       const criticalFailures = [];
 
       for await (const { event, data } of readOpenedStream(openedStream)) {
-        if (event === 'assistant' || event === 'text') {
+        // Agent text arrives as `agent.message` (content blocks); the SSE
+        // `event:` line may be absent, so the JSON `type` is authoritative.
+        if (event === 'assistant' || event === 'text' || event === 'agent.message' || data?.type === 'agent.message') {
           if (data.text) report += data.text;
           if (data.content) {
             for (const block of data.content) {
@@ -241,6 +273,7 @@ const LeadResponseAgent = {
           const toolUseId = data.id;
           const toolContext = { leadId: lead.leadId, customerId: lead.customerId, sessionId, toolUseId };
 
+          remainingMs(sessionId, openedStream.deadline); // no tool starts after the deadline
           logger.info(`[lead-agent] Tool: ${toolName}`);
 
           let toolResult;
@@ -255,12 +288,12 @@ const LeadResponseAgent = {
           if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
             logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Queueing draft for human review.`);
             try {
-              const queued = await executeLeadTool('queue_for_adam', {
+              const queued = await withinDeadline(executeLeadTool('queue_for_adam', {
                 lead_id: lead.leadId,
                 customer_id: lead.customerId,
                 reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Please review and follow up.`,
                 draft_response: toolInput.message || '',
-              }, toolContext);
+              }, toolContext), sessionId, openedStream.deadline);
               if (queued?.queued !== true) throw new Error(queued?.error || 'Draft was not saved');
               toolResult = {
                 ...queued,
@@ -277,6 +310,7 @@ const LeadResponseAgent = {
                 actionTaken = 'auto_send_suppressed_queued';
               }
             } catch (err) {
+              if (err?.code === 'session_timeout') throw err;
               toolResult = { error: `Human-review queue failed: ${err.message}` };
               failed = true;
               logger.error(`[lead-agent] Human-review queue failed: ${err.message}`);
@@ -289,7 +323,7 @@ const LeadResponseAgent = {
             if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
           } else {
             try {
-              toolResult = await executeLeadTool(toolName, toolInput, toolContext);
+              toolResult = await withinDeadline(executeLeadTool(toolName, toolInput, toolContext), sessionId, openedStream.deadline);
               if (isToolFailure(toolResult)) {
                 failed = true;
                 toolError = toolResult.error || 'tool returned error';
@@ -310,6 +344,7 @@ const LeadResponseAgent = {
                 if (toolName === 'queue_for_adam' && toolResult?.queued === true) actionTaken = 'queued_for_adam';
               }
             } catch (err) {
+              if (err?.code === 'session_timeout') throw err;
               toolResult = { error: `Tool failed: ${err.message}` };
               failed = true;
               toolError = err.message;
@@ -336,7 +371,7 @@ const LeadResponseAgent = {
             custom_tool_use_id: toolUseId,
             content: [{ type: 'text', text: JSON.stringify(toolResult) }],
             ...(failed ? { is_error: true } : {}),
-          }]);
+          }], openedStream.deadline);
         }
 
         // session.status_idle is NOT terminal on its own (it arrives with
@@ -376,6 +411,13 @@ const LeadResponseAgent = {
       // Non-fatal — the webhook already sent a basic auto-reply as fallback
       return null;
     } finally {
+      // Close the SSE connection on every exit — including a kickoff POST
+      // that failed before the stream was ever read (a no-op once the reader
+      // has already finished).
+      if (openedStream) {
+        clearTimeout(openedStream.timer);
+        openedStream.controller.abort();
+      }
       // Call ledger (never throws): one session row with the session's token
       // usage, written however the session ends — a stream that throws still
       // consumed tokens — carrying this runner's own outcome. No session id =

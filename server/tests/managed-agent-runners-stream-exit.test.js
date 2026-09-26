@@ -256,4 +256,76 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(kickoffIndex).toBeGreaterThan(-1);
     expect(streamIndex).toBeLessThan(kickoffIndex);
   });
+
+  it('agent.message content blocks become the returned report, even when the SSE event line is absent', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', content: [{ type: 'text', text: 'Lead ' }, { type: 'text', text: 'handled.' }] } },
+      idle('end_turn'),
+    ]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'Lead handled.' });
+  });
+
+  // Frames arrive without advancing the fake clock, then the stream stays
+  // open: only the real-time deadline timers (tool wait, POST signal) can
+  // end these runs — the per-frame deadline check never fires.
+  function openStreamBody(frames) {
+    const enc = new TextEncoder();
+    const chunks = frames.map(({ event, data }) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    return {
+      getReader: () => ({
+        read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : new Promise(() => {})),
+        cancel: async () => {},
+        releaseLock() {},
+      }),
+    };
+  }
+  function fetchWithOpenStream({ frames = [], onEventsPost }) {
+    const seen = {};
+    const fetchMock = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return onEventsPost(opts);
+      seen.streamSignal = opts.signal;
+      return Promise.resolve({ ok: true, status: 200, body: openStreamBody(frames) });
+    });
+    return { fetchMock, seen };
+  }
+
+  it('a tool that never returns ends the run at the deadline — session_timeout, no tool result sent', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    mockExecuteLeadTool.mockImplementation(() => new Promise(() => {}));
+    const { fetchMock } = fetchWithOpenStream({
+      frames: [{ event: 'agent.custom_tool_use', data: { id: 'tool-1', name: 'get_lead_details', input: {} } }],
+      onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+    const toolResultPosts = fetchMock.mock.calls
+      .filter(([, opts = {}]) => opts.method === 'POST' && String(opts.body || '').includes('user.custom_tool_result'));
+    expect(toolResultPosts).toHaveLength(0);
+  });
+
+  it('an events POST that hangs is cut off at the deadline, and the open stream is closed', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: (opts) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+    expect(seen.streamSignal.aborted).toBe(true);
+  });
+
+  it('a kickoff POST that fails closes the already-open stream', async () => {
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: () => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(seen.streamSignal.aborted).toBe(true);
+    expect(recorded().failure).toBeTruthy();
+  });
 });
