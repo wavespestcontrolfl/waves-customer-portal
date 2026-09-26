@@ -36,6 +36,20 @@ describe('stripTrailingSignature', () => {
     ['See you Tuesday. Warm regards, Adam', 'See you Tuesday.'],
     ['Ants are active now. With gratitude,\nAdam B.', 'Ants are active now.'],
     ['Kind regards,\nAdam', ''],
+    ['Your next visit is Tuesday. - Adam \u{1F44B}\u{1F3FD}', 'Your next visit is Tuesday.'],
+    ['Your next visit is Tuesday. - Adam \u{1F1FA}\u{1F1F8}', 'Your next visit is Tuesday.'],
+    ['See you then! - Adam \u{1F44D}\u{1F3FD}\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}', 'See you then!'],
+    ['See you then! - Adam \u{1F468}\u200D\u{1F469}\u200D\u{1F467} #\uFE0F\u20E3', 'See you then!'],
+    ['Your visit is Tuesday. - Virginia', 'Your visit is Tuesday.'],
+    ['Talk soon. Thanks, Virginia', 'Talk soon.'],
+    ['"We\'ll see you Tuesday. - Adam"', "We'll see you Tuesday."],
+    ["'See you Tuesday. - Adam'", 'See you Tuesday.'],
+    ["'We'll see you Tuesday. - Adam'", "We'll see you Tuesday."],
+    ["'See you Tuesday.' - Adam", 'See you Tuesday.'],
+    ['"See you Tuesday. - Adam" \u{1F30A}', 'See you Tuesday.'],
+    ['""Gold plan" covers ants. - Adam"', '"Gold plan" covers ants.'],
+    ['"Quarterly" means every three months. - Adam', '"Quarterly" means every three months.'],
+    ['"— Adam, Waves Pest Control"', ''],
   ])('strips the trailing sign-off from %j', (input, expected) => {
     expect(stripTrailingSignature(input)).toBe(expected);
   });
@@ -55,6 +69,16 @@ describe('stripTrailingSignature', () => {
     // Direct address to a customer named Adam is content, not a sign-off.
     'Confirmed. See you Tuesday, Adam.',
     'Please call us, Adam.',
+    // Two separate quoted phrases at the edges are not a wrapper.
+    '"Quarterly" means every three months, not "monthly"',
+    '"Sounds good"',
+    "'Gold' covers ants, not 'termites'",
+    // A lone name or company as the last sentence can answer the one before.
+    'Who will be coming? Adam.',
+    'Which company is this? Waves Pest Control.',
+    // A label/value layout answers the customer; it is not a sign-off.
+    'Your technician is:\nAdam',
+    'The charge appears as:\nWaves Pest Control',
   ])('keeps text that is not a sign-off: %j', (input) => {
     expect(stripTrailingSignature(input)).toBe(input);
   });

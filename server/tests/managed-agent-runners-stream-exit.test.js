@@ -190,7 +190,8 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
       { event: 'tool_use', data: { id: 'send-1', name: 'send_lead_response', input: { message: 'Synthetic draft' } } },
       { event: 'done', data: {} },
     ]);
-    expect(await run(load(path))).toMatchObject({ actionTaken: queued.failed ? null : 'auto_send_suppressed_queued' });
+    // The saved draft is reported, but never as a clean hand-off while its owner alert failed (#4179).
+    expect(await run(load(path))).toMatchObject({ actionTaken: queued.failed ? 'auto_send_suppressed_queued_unalerted' : 'auto_send_suppressed_queued' });
     const events = global.fetch.mock.calls.flatMap(([, options]) => JSON.parse(options.body || '{}').events || []);
     const result = events.find(event => event.custom_tool_use_id === 'send-1');
     expect(Boolean(result.is_error)).toBe(Boolean(queued.failed));
@@ -397,8 +398,9 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
       leadTool('tool-3', 'send_lead_response', { message: 'Text' }),
       idle('end_turn'),
     ]);
-    await run(load(path));
+    const result = await run(load(path));
     expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam_unalerted' });
   });
 
   it('a final agent.message carrying end_turn collects its text AND ends the run', async () => {
