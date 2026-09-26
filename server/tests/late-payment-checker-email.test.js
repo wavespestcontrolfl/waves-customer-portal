@@ -157,7 +157,9 @@ describe('late-payment checker email sidecar', () => {
       to: '+19415550101',
       body: 'sms body for late_payment_14d',
       entryPoint: 'late_payment_checker',
-      metadata: expect.objectContaining({ original_message_type: 'late_payment' }),
+      metadata: expect.objectContaining({
+        original_message_type: 'late_payment', collections_ledger_id: 'led-1',
+      }),
     }));
     expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalledWith(expect.objectContaining({
       customer,
@@ -360,6 +362,7 @@ describe('late-payment checker email sidecar', () => {
     const pending = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
     expect(pending).toMatchObject({ pendingEmail: true, channel: channel === 'push' ? 'app' : 'sms', tierDays: 14 });
     expect(sendCustomerMessage.mock.calls[0][0].metadata.billingDeliveryLeg).toBe(channel);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.collections_ledger_id).toBe('led-1');
     expect(sendCustomerMessage.mock.calls[0][0].channel).toBe(channel);
     if (channel === 'push') expect(sendCustomerMessage.mock.calls[0][0].metadata.appOnly).toBe(true);
 

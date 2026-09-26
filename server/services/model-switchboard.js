@@ -63,7 +63,7 @@ const SELECTORS = [
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
   { key: 'OPENAI_REPORT_WRITER', env: 'MODEL_OPENAI_REPORT_WRITER', description: 'Reports + high-stakes backup (Sol)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup; OpenAI leg of the vision route (Terra)', accepts: { providers: ['openai'], cap: 'vision' } },
-  { key: 'OPENAI_FRONTIER', env: 'MODEL_OPENAI_FRONTIER', description: 'Frontier OpenAI vision — lawn visit assessment backup leg (Astra)', accepts: { providers: ['openai'], cap: 'vision' } },
+  { key: 'OPENAI_FRONTIER', env: 'MODEL_OPENAI_FRONTIER', description: 'Frontier OpenAI vision — lawn visit assessment backup leg and the pest identifier\'s second look (Astra)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_ESTIMATE_VISION', env: 'MODEL_OPENAI_ESTIMATE_VISION', description: 'Estimate satellite/property image fallback (Sol)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_IMAGE_SCREEN', env: 'MODEL_OPENAI_IMAGE_SCREEN', description: 'Generated-image screen (Sol) — blog image text/logo/uniform/van check', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
@@ -92,7 +92,6 @@ const ROUTE_SELECTOR = {
   churnClassify: 'OPENAI_FAST',
   knowledgeAnswer: 'OPENAI_BALANCED',
   estimateAssistant: 'OPENAI_BALANCED',
-  askWaves: 'OPENAI_BALANCED',
   smsDraftDefault: 'SMS_SONNET',
   smsDraftSaveSale: 'SMS_SONNET',
   smsToneRewrite: 'SMS_SONNET',
@@ -104,10 +103,12 @@ const POLICY_SELECTOR = {
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
+  askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
   visionAnalysis: { primary: 'VISION', fallback: 'OPENAI_BALANCED' },
   estimateVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_ESTIMATE_VISION' },
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
+  photoIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
@@ -288,10 +289,11 @@ const LANES = [
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
-  // Sequential ladder, not a fan-out (owner ruling 2026-09-24: no more
-  // Claude+Gemini fan-out): identifyPest's analyzePhoto tries Gemini, then
-  // the prior Gemini, and reaches Claude VISION only when both miss.
-  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-first (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
+  // Sequential ladder, not a fan-out (owner ruling 2026-09-26,
+  // TEXT_POLICIES.photoIdVision): identifyPest's analyzePhoto tries Gemini,
+  // then the prior Gemini, and reaches ChatGPT's best vision model when both
+  // miss OR Gemini is unsure / lists a runner-up of different risk. No Claude.
+  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: P('photoIdVision', 'fallback'), note: `Gemini-first (owner 2026-09-26); OpenAI takes a second look when Gemini misses, scores itself under PHOTO_ID_ESCALATE_BELOW, or lists a runner-up of different risk · ${SHARED_GEMINI_PIN}` }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude
@@ -388,7 +390,7 @@ const LANES = [
   // ── Balanced Q&A ──
   L('estimate_assistant', 'Estimate assistant Q&A', 'estimate-assistant.js', 'qa', R('estimateAssistant'), E('ESTIMATE_ASSISTANT_MODEL', T('WORKHORSE'), { live: true }), { inbound: true }),
   L('knowledge_qa', 'Knowledge-base Q&A', 'knowledge-bridge.js', 'qa', R('knowledgeAnswer'), T('FLAGSHIP')),
-  L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', R('askWaves'), E('ASK_WAVES_MODEL', T('VOICE'), { live: true }), { inbound: true }),
+  L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', P('askWaves', 'primary'), E('ASK_WAVES_MODEL', P('askWaves', 'fallback'), { live: true }), { inbound: true }),
   L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),

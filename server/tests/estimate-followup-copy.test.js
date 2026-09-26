@@ -23,7 +23,7 @@ const {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
 } = require('../services/estimate-followup-copy');
 
 const EMAIL_VAR_KEYS = [
@@ -191,16 +191,20 @@ describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
   };
   const NO_VIDEO = ['mosquito', 'rodent', 'termite', 'commercial', 'bundle', 'unknown'];
 
-  test.each(Object.entries(VIDEO_SLUGS))('%s pack advertises the %s report tour', (category, slug) => {
+  // Retired 2026-09-26: the tours say the 90-day money-back claim on camera
+  // and the owner removed that promise, so no pack links one until a re-cut
+  // flips REPORT_TOUR_VIDEOS_LIVE back on.
+  test('report tours are switched off while they carry the retired 90-day claim', () => {
+    expect(REPORT_TOUR_VIDEOS_LIVE).toBe(false);
+  });
+
+  test.each(Object.entries(VIDEO_SLUGS))('%s pack keeps its %s tour config but emits empty slots while retired', (category, slug) => {
     lanes(category);
     const vars = followupEmailVars({ id: 'e1' });
-    expect(vars.report_video_preview).toBe(
-      `https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour-preview.gif`,
-    );
-    expect(vars.report_video_url).toBe(
-      `https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour.mp4`,
-    );
-    expect(vars.report_video_caption).toMatch(/^Tap to watch/);
+    expect(PACKS[category].video.slug).toBe(slug);
+    expect(vars.report_video_preview).toBe('');
+    expect(vars.report_video_url).toBe('');
+    expect(vars.report_video_caption).toBe('');
   });
 
   test.each(NO_VIDEO)('%s pack emits empty video slots (module drops)', (category) => {

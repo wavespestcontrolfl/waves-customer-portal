@@ -141,9 +141,9 @@ function isVoiceLike(channel) {
 // sequence's touches_sent (only incremented when a channel actually
 // delivered) plus the legacy late-payment-checker's activity_log rows (one
 // per delivered tier; metadata carries the invoice id).
-async function deliveredDunningTouches(invoice) {
+async function deliveredDunningTouches(invoice, database = db) {
   let touches = 0;
-  const seq = await db('invoice_followup_sequences')
+  const seq = await database('invoice_followup_sequences')
     .where({ invoice_id: invoice.id })
     .first('touches_sent');
   if (seq) touches += Number(seq.touches_sent) || 0;
@@ -154,7 +154,7 @@ async function deliveredDunningTouches(invoice) {
   // match never hits — legitimate touches would be ignored and voice cases
   // wrongly denied pilot_insufficient_dunning_history. Parameterized binding
   // (knex.raw eats bare ?s — always the bindings array).
-  const [row] = await db('activity_log')
+  const [row] = await database('activity_log')
     .where({ action: 'late_payment_reminder' })
     .whereRaw("metadata->>'invoiceId' = ?", [String(invoice.id)])
     .count('* as count');
@@ -174,13 +174,13 @@ async function deliveredDunningTouches(invoice) {
   // reminder run share a template_key so a dual-channel run is ONE touch.
   // A missing best-effort stamp under-counts ⇒ voice denied — the safe
   // direction.
-  const [led] = await db('collections_contact_ledger')
+  const [led] = await database('collections_contact_ledger')
     .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoice.id])])
     .whereIn('channel', ['sms', 'email', 'push'])
     .where({ purpose: 'late_payment' })
     .whereIn('source', ['balance_reminder_late_payment_check'])
     .whereRaw("metadata->>'delivered' = 'true'")
-    .select(db.raw("COUNT(DISTINCT COALESCE(metadata->>'template_key', id::text)) as count"));
+    .select(database.raw("COUNT(DISTINCT COALESCE(metadata->>'template_key', id::text)) as count"));
   touches += parseInt(led?.count || 0, 10);
   return touches;
 }
@@ -195,12 +195,13 @@ async function deliveredDunningTouches(invoice) {
 // prove (payer resolve failure) or hit its candidate bound — the survivors
 // then UNDERSTATE the account; a caller presenting the total as definitive
 // (the voice disclosure) must fail closed rather than call it "the total".
-async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
+async function loadEligibleInvoices(customerId, { onIncomplete = null, database = db } = {}) {
   const eligible = await openBalanceInvoices(customerId, {
+    database,
     onResolveFailure: () => { if (onIncomplete) onIncomplete('payer resolve failed'); },
     onTruncation: () => { if (onIncomplete) onIncomplete('candidate bound hit'); },
   });
-  const legacyUnpaid = await db('invoices')
+  const legacyUnpaid = await database('invoices')
     .where({ customer_id: customerId, status: 'unpaid' })
     .whereNull('payer_id')
     .whereNull('payer_statement_id')
@@ -214,7 +215,10 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
       if (seenIds.has(String(row.id))) continue;
       // Same incomplete signal as open-balance (gh r3): a dropped legacy
       // row on a resolve failure must not leave the survivors as "the total".
-      if (await rowIsSelfPayDue(customerId, row, { onResolveFailure: () => { if (onIncomplete) onIncomplete('payer resolve failed'); } })) eligible.push(row);
+      if (await rowIsSelfPayDue(customerId, row, {
+        database,
+        onResolveFailure: () => { if (onIncomplete) onIncomplete('payer resolve failed'); },
+      })) eligible.push(row);
     }
   }
   if (eligible.length) {
@@ -222,7 +226,7 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
     const kept = [];
     for (const inv of eligible) {
       try {
-        if (!(await isDunningStopped(inv.id))) kept.push(inv);
+        if (!(await isDunningStopped(inv.id, database))) kept.push(inv);
       } catch {
         // Excluded — fail closed for outreach; and the survivors are no
         // longer "the total" (hook r5): same incomplete signal.
@@ -235,7 +239,7 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -271,7 +275,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       return result;
     }
 
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) {
       deny('customer_not_found');
       return result;
@@ -296,7 +300,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
     let balanceIncomplete = null;
-    const eligible = await loadEligibleInvoices(customerId, { onIncomplete: (reason) => { balanceIncomplete = reason; } });
+    const eligible = await loadEligibleInvoices(customerId, {
+      database,
+      onIncomplete: (reason) => { balanceIncomplete = reason; },
+    });
     // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
     // extracted so dial-time disclosure shares the SAME authority, codex
     // prb-r1.) Historical rationale for the arms lives on the loader.
@@ -330,7 +337,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     if (!eligible.length && !offLedgerQualifies) deny('no_eligible_balance');
 
     // ── Hard flags ──────────────────────────────────────────────────────
-    const flags = await db('collections_flags')
+    const flags = await database('collections_flags')
       .where({ customer_id: customerId })
       .whereNull('released_at')
       .select('*');
@@ -358,7 +365,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     if (customer.phone) {
       const { toE164 } = require('../../utils/phone');
       const e164 = toE164(customer.phone) || customer.phone;
-      const sup = await db('messaging_suppression')
+      const sup = await database('messaging_suppression')
         .where({ phone: e164, active: true })
         .first('reason');
       if (sup) {
@@ -376,7 +383,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     const windowStart = new Date(now.getTime() - 7 * DAY_MS);
     // Rows stamped never_contacted (a dial rejected before Twilio touched
     // the customer, gh prb-r8) don't consume the frequency windows.
-    let recent = await db('collections_contact_ledger')
+    let recent = await database('collections_contact_ledger')
       .whereRaw("COALESCE(metadata->>'never_contacted', '') <> 'true'")
       .where({ customer_id: customerId })
       .where('occurred_at', '>', windowStart)
@@ -390,7 +397,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // outcome, not machine-answered; NULL outcome/duration rows count. ⭐
     // NULL legs are explicit — bare whereNot skips NULL (SQL three-valued
     // logic, the #2177 voicemail-guard lesson).
-    const liveCall = await db('call_log')
+    const liveCall = await database('call_log')
       .where({ customer_id: customerId, status: 'completed' })
       .where('created_at', '>', windowStart)
       // The collections lane's own non-live outcomes are excluded too (gh
@@ -511,7 +518,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 
           // Touch floor on the ANCHOR invoice until the account-level dunning
           // sequence exists (A2 will expose countAccountTouches).
-          const touches = await deliveredDunningTouches(anchor);
+          const touches = await deliveredDunningTouches(anchor, database);
           if (touches < PILOT_MIN_DUNNING_TOUCHES) deny('pilot_insufficient_dunning_history');
 
           // Microdeposit-blocked invoices (codex r5 P1): the customer
