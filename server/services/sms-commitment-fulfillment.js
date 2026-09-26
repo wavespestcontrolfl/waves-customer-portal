@@ -26,7 +26,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // split out to its own PR (#4816 r7–r13).
 // 6: an unscoped cancel ask needs the customer's sole active property (#4816 r14).
 // 7: inside an open window only an event record grounds a verdict (#4816 r17).
-const FULFILLMENT_POLICY = 7;
+// 8: the unscoped cancel ask's sole property is fixed at request time (#4816 r20).
+const FULFILLMENT_POLICY = 8;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -181,18 +182,6 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
     }
   });
-  // Codex #4816 r14: a cancel ask that never named a property is answered by
-  // a cancellation only when the customer has exactly one active property and
-  // the cancelled visit is at it. With two, a cancellation at property B would
-  // read as the answer to "cancel Thursday's appointment" at property A.
-  if (!commitment.sms_context?.property_id && commitment.kind === 'other'
-    && records.some((row) => row.type === 'visit' && row.status === 'cancelled')) {
-    try {
-      const active = await conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id');
-      const sole = active.length === 1 ? active[0] : null;
-      for (const row of records) if (row.type === 'visit') row.customer_sole_property_id = sole;
-    } catch { failures.push('customer_properties'); }
-  }
   const unlinked = records.filter((row) => row.type === 'estimate' && !row.property_id);
   if (unlinked.length) {
     try {
@@ -255,8 +244,12 @@ function scopedToProperty(record, commitment) {
     // ruling 2026-09-24). A cancellation needs the customer's sole active
     // property: it is the one outcome that leaves the asked-about visit
     // booked when it lands at the wrong property.
+    // The sole property is the one recorded when the text arrived (Codex
+    // #4816 r14/r20): a request made while the customer had two properties
+    // stays ambiguous even if one is deactivated later.
     if (commitment.kind === 'other' && record.status === 'cancelled') {
-      return !!record.customer_sole_property_id && record.property_id === record.customer_sole_property_id;
+      const sole = commitment.sms_context?.sole_property_id;
+      return !!sole && record.property_id === sole;
     }
     return true;
   }

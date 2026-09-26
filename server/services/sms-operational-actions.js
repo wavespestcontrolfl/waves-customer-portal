@@ -94,6 +94,21 @@ const TEMPORARY_INSTRUCTION = new RegExp([
   String.raw`\b\d{4}-\d{2}-\d{2}\b`,
 ].join('|'), 'i');
 
+// Codex #4816 r20: relative or calendar timing the customer stated ("call me
+// tomorrow", "this afternoon", "Friday", "mid Oct", "in 2 days") is still
+// stated timing when the extractor leaves due_text empty; it must not be
+// replaced by a per-kind default that could ring before that period.
+const STATED_TIMING = new RegExp([
+  String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month)|later (?:today|this week)|end of (?:the )?(?:day|week|month)|eod|eow)\b`,
+  String.raw`\b${WEEKDAY}`,
+  String.raw`\bin (?:${COUNT}|half an?) (?:hours?|days?|weeks?|months?)\b`,
+  String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month)\b)`,
+  String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
+  String.raw`\b(?:${ORDINAL_DAY}|\d{1,2}) (?:of )?${MONTH}\b`,
+  String.raw`\b(?:on|by|before|after|around) the ${ORDINAL_DAY}\b`,
+  String.raw`\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b`,
+].join('|'), 'i');
+
 // A negated or uncertain report does not establish an active system or a
 // pet on site (next-stop alerts treat any pet_details as a pet). Keep these
 // as review exceptions before the shared write, whatever the model labelled.
@@ -302,7 +317,7 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // extractor could not resolve to a clock instant: leave it undated rather
   // than manufacture a per-kind deadline that contradicts what was said
   // (Codex #4816 r1). The row still closes on evidence; it never bells.
-  if (item.due_text || item.timing_unverified) return { due_at: null, due_basis: null };
+  if (item.due_text || item.timing_unverified || STATED_TIMING.test(item.quote || '')) return { due_at: null, due_basis: null };
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
@@ -362,8 +377,12 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         due_basis: dueBasis, source: 'ai', extractor_version: VERSION,
         evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
           speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
+        // The customer's only active property when the text arrived: an
+        // unscoped cancel ask is answered only by a cancellation there, never
+        // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
-          property_ambiguous: !propertyId, customer_id: customer.id, source_at: message.created_at },
+          property_ambiguous: !propertyId, sole_property_id: properties.length === 1 ? properties[0].id : null,
+          customer_id: customer.id, source_at: message.created_at },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -566,6 +585,14 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
 // watermark advances only to the activity this read actually saw (as text,
 // keeping microseconds), never to the tick time, so a visit write that
 // commits after the read with an earlier timestamp stays unseen (r19).
+// Visit writers stamp their activity with the transaction-start time
+// (job_status_history.transitioned_at defaults to now()), so one that began
+// before a read can commit after it with an earlier timestamp than anything
+// the read saw (Codex #4816 r20). The watermark therefore never passes
+// now - EVENT_COMMIT_GRACE_MS, which outlasts any visit transaction: such a
+// write stays above it. A fresh event is re-scanned for a tick or two until
+// the cap passes it; the verdict cache makes that free of model calls.
+const EVENT_COMMIT_GRACE_MS = 10 * 60 * 1000;
 const UNSEEN_FLOOR = "GREATEST(s.created_at, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, s.created_at))";
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
@@ -707,10 +734,13 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // progress (verify returns the stored failure until then), so it yields
   // its slot rather than pinning the page through an outage; its event stays
   // unseen and it returns once the retry is due.
+  // Least recently stamped first, so a re-scan inside the commit grace never
+  // holds back a row whose event has not been seen at all.
   const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
     .whereRaw("COALESCE((cc.sms_context->'fulfillment_check'->>'retry_after')::timestamptz, '-infinity'::timestamptz) <= ?", [now])
-    .orderBy('cc.id').limit(PAGE)
-    .select('cc.*', conn.raw(`${UNSEEN_VISIT_ACTIVITY}::text AS event_seen_through`, tickBound));
+    .orderByRaw("(cc.sms_context->>'event_seen_at')::timestamptz ASC NULLS FIRST, cc.id").limit(PAGE)
+    .select('cc.*', conn.raw(`LEAST(${UNSEEN_VISIT_ACTIVITY}, ?::timestamptz)::text AS event_seen_through`,
+      [...tickBound, new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
   const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at }) => [id, at]));
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),

@@ -719,6 +719,21 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     expect(resolveDueDeadline({ party: 'customer', kind: 'other', basis: 'request', due_at: null }, at)).toEqual({ due_at: null, due_basis: null });
   });
 
+  test.each(['Can you call me tomorrow?', 'Please send it this afternoon', 'Can someone come out Friday?', 'Schedule me mid Oct',
+    'Call me back in 2 hours', 'Can you come on 10/14?', 'Need someone out by the 15th', 'Send it by end of the week'])(
+    'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
+      expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
+        .toEqual({ due_at: null, due_basis: null });
+    },
+  );
+
+  test.each(['Please call me back', 'Can you send the estimate?', 'Call me back ASAP', 'Are you still coming?'])(
+    'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
+      expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
+        .toBe('default_kind');
+    },
+  );
+
   test('a stated due_at is kept verbatim with due_basis "stated", never replaced by a default', () => {
     const stated = '2040-03-11T09:00:00.000Z';
     expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'promise', due_at: stated }, at))
@@ -839,9 +854,9 @@ describe('fulfillment proof', () => {
   });
 
   test('Codex #4816 r7: a cancellation after the text answers a cancel ask for the model only; it never closes "still coming?"', () => {
-    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+    const ctx = { property_id: null, sole_property_id: 'home', source_at: '2040-03-10T15:00:00Z' };
     const cancelled = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'cancelled', created_at: '2040-03-01T15:00:00Z',
-      property_id: 'home', customer_sole_property_id: 'home',
+      property_id: 'home',
       cancelled_at: '2040-03-11T15:00:00Z', text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status cancelled; cancelled after the request' };
     const cancelAsk = { kind: 'other', description: 'Please cancel my appointment on Thursday', sms_context: ctx };
     expect(admissibleWitness(cancelled, cancelAsk)).toBe(true);
@@ -877,21 +892,22 @@ describe('fulfillment proof', () => {
       .toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
   });
 
-  test('Codex #4816 r14: an unscoped cancel ask is answered only by a cancellation at the customer\'s sole active property', () => {
-    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
-    const cancelAsk = { kind: 'other', description: 'Please cancel Thursday\'s appointment', sms_context: ctx };
+  test('Codex #4816 r14/r20: an unscoped cancel ask is answered only by a cancellation at the sole active property recorded with the request', () => {
+    const ask = (sms_context) => ({ kind: 'other', description: 'Please cancel Thursday\'s appointment',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z', ...sms_context } });
     const cancelled = { id: 'visit-b', ref: 'visit:visit-b', type: 'visit', status: 'cancelled', created_at: '2040-03-01T15:00:00Z',
       property_id: 'property-b', cancelled_at: '2040-03-11T15:00:00Z', text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status cancelled' };
-    // Two active properties: the loader stamps no sole property, so a
-    // cancellation at B cannot answer an ask that may be about A.
-    expect(admissibleWitness({ ...cancelled, customer_sole_property_id: null }, cancelAsk)).toBe(false);
-    expect(admissibleWitness(cancelled, cancelAsk)).toBe(false);
-    // One active property, but the cancelled visit sits at another (inactive) one.
-    expect(admissibleWitness({ ...cancelled, customer_sole_property_id: 'property-a' }, cancelAsk)).toBe(false);
-    expect(admissibleWitness({ ...cancelled, customer_sole_property_id: 'property-b' }, cancelAsk)).toBe(true);
+    // Two active properties when the text arrived (or a row from before the
+    // field existed): no sole property, so a cancellation at B cannot answer
+    // an ask that may be about A.
+    expect(admissibleWitness(cancelled, ask({ sole_property_id: null }))).toBe(false);
+    expect(admissibleWitness(cancelled, ask({}))).toBe(false);
+    // One active property at request time, but the cancelled visit sits at another one.
+    expect(admissibleWitness(cancelled, ask({ sole_property_id: 'property-a' }))).toBe(false);
+    expect(admissibleWitness(cancelled, ask({ sole_property_id: 'property-b' }))).toBe(true);
     // A stated property still scopes the ask directly.
-    expect(admissibleWitness(cancelled, { ...cancelAsk, sms_context: { ...ctx, property_id: 'property-b' } })).toBe(true);
-    expect(admissibleWitness(cancelled, { ...cancelAsk, sms_context: { ...ctx, property_id: 'property-a' } })).toBe(false);
+    expect(admissibleWitness(cancelled, ask({ property_id: 'property-b' }))).toBe(true);
+    expect(admissibleWitness(cancelled, ask({ property_id: 'property-a' }))).toBe(false);
   });
 
   test('Codex #4816 r1: production confirmation/reschedule-link sends are admissible for their kinds', () => {
