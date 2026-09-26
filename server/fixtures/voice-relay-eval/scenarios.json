@@ -2739,7 +2739,7 @@
      "check": "spoken_never_matches",
      "value": {
       "patterns": [
-       "(?<!\\b(?:no|en lugar de|sino|en vez de)\\s)\\b(?:88|ochenta y ocho)\\s+palm\\b"
+       "(?<!\\b(?:no es|no era|ya no es|en lugar de|sino|en vez de|no)\\s)\\b(?:88|ochenta y ocho)\\s+palm\\b"
       ],
       "fromTurn": 3
      },
@@ -5578,7 +5578,7 @@
      "check": "spoken_never_matches",
      "value": {
       "patterns": [
-       "(?<!\\b(?:not|from|instead of|rather than)\\s)\\b(?:88|eighty[- ]eight)\\s+palm\\b"
+       "(?<!\\b(?:it.?s not|it is not|isn.?t|instead of|rather than|not|from)\\s)\\b(?:88|eighty[- ]eight)\\s+palm\\b"
       ],
       "fromTurn": 3
      },

@@ -5533,6 +5533,43 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
   });
 
+  // Codex round-6 P1 (finding C): the negation lookbehind on the stale-
+  // address ban only knew a FIXED "no " (or "sino "/"en vez de "/"en lugar
+  // de ") immediately before the number — an intervening copula ("No ES 88
+  // Palm Harbor Drive, sino 88B...") broke it, so the CORRECT denial-and-
+  // correction sentence false-failed as if the stale address had resurfaced.
+  test.each([
+    ['No es 88 Palm Harbor Drive, sino 88B Palm Harbor Drive.', 'pass'],
+    ['No era 88 Palm Harbor Drive, era 88B Palm Harbor Drive.', 'pass'],
+    ['Ya no es 88 Palm Harbor Drive; ahora es 88B Palm Harbor Drive.', 'pass'],
+    ['Anoté 88B Palm Harbor Drive en lugar de 88 Palm Harbor Drive.', 'pass'],
+    ['El 88 Palm Harbor Drive está registrado.', 'fail'],
+    ['Anoté 88 Palm Harbor Drive. Gracias.', 'fail'],
+  ])('spanish-backchannel-vs-explicit-correction: the stale-address ban is copula-aware, not just "no <value>" (finding C): %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-backchannel-vs-explicit-correction');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'agent', text, turn: 3 }] }));
+    const palmCheck = checks.find((c) => c.check === 'spoken_never_matches');
+    expect(palmCheck).toMatchObject({ severity: 'critical', status });
+  });
+
+  // Mirrored gap in the English original: "isn't"/"it's not" (contraction
+  // forms) never matched the bare "not" trigger the lookbehind required.
+  test.each([
+    ["It isn't 88 Palm Harbor Drive, it's 88B Palm Harbor Drive.", 'pass'],
+    ["It's not 88 Palm Harbor Drive, it's 88B Palm Harbor Drive.", 'pass'],
+    ['Not 88 Palm Harbor Drive, 88B Palm Harbor Drive.', 'pass'],
+    ['I noted 88B Palm Harbor Drive instead of 88 Palm Harbor Drive.', 'pass'],
+    ['The address is 88 Palm Harbor Drive.', 'fail'],
+    ['I noted 88 Palm Harbor Drive. Thanks.', 'fail'],
+  ])('backchannel-vs-explicit-correction: the stale-address ban is copula-aware, not just "not <value>" (finding C): %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'backchannel-vs-explicit-correction');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'agent', text, turn: 3 }] }));
+    const palmCheck = checks.find((c) => c.check === 'spoken_never_matches');
+    expect(palmCheck).toMatchObject({ severity: 'critical', status });
+  });
+
   // Codex round-5 P1: capture_lead_input_includes is a case-insensitive
   // SUBSTRING match, so a near-miss superstring ("188B Palm Harbor Drive",
   // an unrelated house number) or a near-miss with the wrong street type
