@@ -410,6 +410,14 @@ function buildTurfRequestProfile(baseProfile, form) {
     ),
     bedAreaSource: form._manualFields?.includes("bedArea") && parseNonNegativeNumber(form.bedArea) !== undefined
       ? "manual" : baseProfile.bedAreaSource,
+    // Provenance for the server's footprintSizeEstimated flag (primary
+    // review of PR #4840 r7 P2) — an operator who typed into the Home Sq Ft
+    // box has entered or CONFIRMED the size, even when the number they
+    // typed happens to equal the suite's business-type default. The old
+    // server-side check compared the priced value to the default NUMBER,
+    // which stayed "estimated" for a confirmed-equal value; this flag
+    // survives that case because it tracks the EDIT, not the number.
+    _homeSqFtManuallyEdited: !!form._homeSqFtEdited,
   };
   // footprintUnknown (association aggregate, story count unknown): the
   // summed living area over a defaulted story count is NOT a ground-floor
@@ -426,12 +434,23 @@ function buildTurfRequestProfile(baseProfile, form) {
     Number(form.stories) >= 1
   )
     profile.footprintUnknown = false;
+  // Commercial classification follows the FORM, exactly like the pricing
+  // request — a lookup-classified commercial corrected to residential (or
+  // vice versa) must preview through the same branch it will price through
+  // (commercial changes the hardscape model; pre-push P1 #3098). Computed
+  // here (before the suite-footprint rule below) rather than only at the
+  // bottom of this function, since the footprint rule needs it too.
+  const formIsCommercial = isCommercialEstimateInput(form);
   // A suite-sized profile (server/services/commercial-suite-size/): the
   // suite's own footprint is homeSqFt AS-IS — dividing by the BUILDING's
   // story count (profile.stories still reads the building, since a suite
   // has none of its own) would price a 1,400 sq ft suite in a 2-story plaza
-  // as a 700 sq ft footprint.
-  if (baseProfile.suiteSize) {
+  // as a 700 sq ft footprint. Gated on the form STILL being commercial
+  // (primary review of PR #4840 r7 P1) — an operator who corrects a
+  // false-positive suite lookup to residential must get the ordinary
+  // homeSqFt/stories derivation, not the single-story suite rule frozen
+  // from the original (wrong) classification.
+  if (baseProfile.suiteSize && formIsCommercial) {
     profile.footprint = profile.homeSqFt;
   } else if (profile.homeSqFt && profile.footprintUnknown !== true) {
     profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
@@ -454,11 +473,7 @@ function buildTurfRequestProfile(baseProfile, form) {
     form.landscapeComplexity || profile.landscapeComplexity;
   profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
   profile.propertyType = form.propertyType || profile.propertyType;
-  // Commercial classification follows the FORM, exactly like the pricing
-  // request — a lookup-classified commercial corrected to residential (or
-  // vice versa) must preview through the same branch it will price through
-  // (commercial changes the hardscape model; pre-push P1 #3098).
-  const formIsCommercial = isCommercialEstimateInput(form);
+  // formIsCommercial computed earlier, above the suite-footprint rule.
   profile.isCommercial = formIsCommercial;
   profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
   profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
@@ -2193,7 +2208,13 @@ export default function EstimateToolViewV2({
     if (!form.svcTermiteBait || savedId) return;
     const sqft = Number(form.homeSqFt) || 0;
     if (sqft > 0) {
-      const fp = termiteFootprintFromHome(sqft, form.stories, form._suiteSizedLookup);
+      // Gated on the form STILL being commercial (primary review of PR
+      // #4840 r7 P1) — an operator who corrects a false-positive suite
+      // lookup to residential must get the ordinary per-story derivation,
+      // not the single-story suite rule frozen from the original (wrong)
+      // classification.
+      const suiteSized = form._suiteSizedLookup && isCommercialEstimateInput(form);
+      const fp = termiteFootprintFromHome(sqft, form.stories, suiteSized);
       setForm((f) => {
         // footprintUnknown lookup (association aggregate, story count
         // unknown): homeSqFt is the summed living area and stories a
@@ -2215,7 +2236,7 @@ export default function EstimateToolViewV2({
         return { ...f, ...upd, _termiteFootprintAuto: true };
       });
     }
-  }, [form.homeSqFt, form.stories, form.svcTermiteBait, form._suiteSizedLookup]);
+  }, [form.homeSqFt, form.stories, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType]);
 
   useEffect(() => {
     const q = customerSearch.trim();

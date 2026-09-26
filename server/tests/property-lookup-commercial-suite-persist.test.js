@@ -90,10 +90,10 @@ test('a persisting run (default) stamps the SAME suite size onto the cached prop
   expect(savedResult.propertyRecord._commercialSuiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats', unitKey: '102' }));
 });
 
-test('the lookup\'s remaining budget is passed through as an absolute deadline, not the resolver\'s own full per-leg timeout (primary review PR #4840 r5 P2)', async () => {
+test('a non-accuracy-mode lookup passes the remaining budget as an absolute deadline, not the resolver\'s own full per-leg timeout (primary review PR #4840 r5 P2)', async () => {
   const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
   const before = Date.now();
-  await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
+  await performPropertyLookup(ADDRESS, { commercialSuiteSizing: true });
   const after = Date.now();
   expect(resolveCommercialSuiteSize).toHaveBeenCalledTimes(1);
   const deadlineAt = resolveCommercialSuiteSize.mock.calls[0][1].deadlineAt;
@@ -102,6 +102,13 @@ test('the lookup\'s remaining budget is passed through as an absolute deadline, 
   // full timeout on top of everything else this lookup already spent).
   expect(deadlineAt).toBeGreaterThan(before + 40000);
   expect(deadlineAt).toBeLessThanOrEqual(after + 60000);
+});
+
+test('accuracy mode (the admin lookup route\'s own wrapper) omits deadlineAt — every other budgeted stage bypasses the total budget under it too (primary review PR #4840 r7 P2)', async () => {
+  const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
+  await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
+  expect(resolveCommercialSuiteSize).toHaveBeenCalledTimes(1);
+  expect(resolveCommercialSuiteSize.mock.calls[0][1].deadlineAt).toBeUndefined();
 });
 
 test('a type-default guess is NOT pinned to the cache row, so a later lookup can upgrade it', async () => {

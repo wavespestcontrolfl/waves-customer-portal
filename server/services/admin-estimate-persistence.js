@@ -1559,6 +1559,22 @@ function v2FormMarkedCommercial(estimateData) {
   return typeof flag === 'string' && flag.trim().toUpperCase() === 'YES';
 }
 
+// The mirror of v2FormMarkedCommercial (primary review of PR #4840 r7 P2):
+// a FULL V2-form save always carries inputs.isCommercial as an explicit
+// "YES"/"NO" string (it is the form's own classification toggle, present on
+// every save from that tool). A genuinely PARTIAL payload — the class the
+// "never downgrade" rule at buildEstimatePersistenceFields exists to
+// protect — has no reason to carry that exact string at all: it either
+// omits `inputs` entirely or carries a narrower shape without this key. So
+// an explicit "NO" is a positive, low-risk signal that the OPERATOR just
+// corrected this estimate to residential in a full re-save (e.g. after a
+// false-positive commercial-suite lookup), not an unrelated partial edit
+// that merely lacks commercial markers of its own.
+function v2FormMarkedResidential(estimateData) {
+  const flag = estimateData?.inputs?.isCommercial;
+  return typeof flag === 'string' && flag.trim().toUpperCase() === 'NO';
+}
+
 function buildEstimatePersistenceFields(body, context = {}) {
   const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
   if (estimateData) {
@@ -1617,7 +1633,16 @@ function buildEstimatePersistenceFields(body, context = {}) {
     // omitted leaves that column untouched (never downgrades); one row's
     // ONLY path to COMMERCIAL, from either create or revise, is a payload
     // this detector positively reads as commercial.
-    ...(isCommercialEstimateData(estimateData) || v2FormMarkedCommercial(estimateData) ? { category: 'COMMERCIAL' } : {}),
+    //
+    // ONE explicit exception to "never write RESIDENTIAL" (primary review of
+    // PR #4840 r7 P2): a FULL V2-form re-save carrying inputs.isCommercial
+    // === "NO" is the operator DELIBERATELY correcting a row to residential
+    // (e.g. after a false-positive commercial-suite lookup) — that positive
+    // marker, not a genuinely partial payload's mere absence of commercial
+    // signals, is what downgrades the column. See v2FormMarkedResidential.
+    ...(isCommercialEstimateData(estimateData) || v2FormMarkedCommercial(estimateData)
+      ? { category: 'COMMERCIAL' }
+      : (v2FormMarkedResidential(estimateData) ? { category: 'RESIDENTIAL' } : {})),
     // Always emitted: a non-SERVER rewrite RESETS the column to its migration
     // default, so a draft first stamped by a server price can't keep claiming
     // that version after a CLIENT_FALLBACK/quote-required rewrite replaced

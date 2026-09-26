@@ -339,6 +339,67 @@ describe('a tech-verified sqft outranks the suite resolver', () => {
     expect(profile.footprint).toBe(1650);
   });
 
+  // Primary review of PR #4840 r7 P1: a verified squareFootage saved BEFORE
+  // suite scoping existed can be the lookup-prefilled WHOLE-BUILDING figure,
+  // saved as "verified" under the unit address — the residential-unit path
+  // already documents this exact risk for its own unit lookups.
+  test('a LEGACY verified squareFootage that still reads like the whole building is NOT trusted as a suite measurement', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 46031, // unchanged by the "verification" — it's the building's own total
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: {
+          value: 46031, confidence: 'high', sourceType: 'verified',
+          // applyVerifiedOverrides prepends the fresh 'verified' entry but
+          // keeps the prior (pre-verification) evidence right behind it —
+          // here that prior entry is the SAME 46,031 county total, proving
+          // this "verification" never actually re-measured the suite.
+          evidence: [
+            { sourceType: 'verified', value: 46031 },
+            { sourceType: 'county', value: 46031 },
+          ],
+        },
+      },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    // Distrusted — treated like no stamp at all: the resolver runs (a
+    // pending candidate is stashed), never a HIGH-confidence 'verified' size.
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile._commercialSuiteCandidate).toEqual(expect.objectContaining({ buildingSqft: 46031 }));
+    expect(profile.suiteSize).toBeNull();
+    const flag = profile.fieldVerifyFlags.find((f) => f.field === 'squareFootage');
+    expect(flag).toBeDefined();
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/46,031 sq ft is saved on this suite address/);
+    expect(flag.reason).toMatch(/WHOLE BUILDING/);
+  });
+
+  test('a GENUINE suite-sized verified override (clearly below the building total) is trusted', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 1400, // the tech's own on-site suite measurement
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: {
+          value: 1400, confidence: 'high', sourceType: 'verified',
+          // The prior (pre-verification) evidence still shows the building's
+          // real total — proving the verified 1,400 is a genuine correction
+          // to the suite's own size, not a repeat of the building figure.
+          evidence: [
+            { sourceType: 'verified', value: 1400 },
+            { sourceType: 'county', value: 46031 },
+          ],
+        },
+      },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    expect(profile.homeSqFt).toBe(1400);
+    expect(profile._commercialSuiteCandidate).toBeNull();
+    expect(profile.suiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'verified' }));
+    expect(profile.fieldVerifyFlags.find((f) => f.field === 'squareFootage')).toBeUndefined();
+  });
+
   test('a non-aggregated commercial condo keeps its own county folio measurement', () => {
     const record = plazaSuiteRecord({
       squareFootage: 1850,

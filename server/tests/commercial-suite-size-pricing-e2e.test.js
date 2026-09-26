@@ -118,9 +118,34 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
     await routePrivate.applyCommercialSuiteSize(profile);
     expect(profile.suiteSize.source).toBe('suite_type_default');
-    const typed = { ...profile, homeSqFt: 2200, footprint: 2200 };
+    // _homeSqFtManuallyEdited (buildTurfRequestProfile's client-side
+    // provenance stamp) is what clears the flag now, not the priced value
+    // differing from the default (primary review of PR #4840 r7 P2).
+    const typed = { ...profile, homeSqFt: 2200, footprint: 2200, _homeSqFtManuallyEdited: true };
     const v1Input = translateV2CallToV1Input(typed, ['PEST'], { commercialRiskType: 'restaurant_food' });
     expect(v1Input.footprintSizeEstimated).toBeUndefined();
+  });
+
+  test('an operator-CONFIRMED size equal to the default still clears the estimate flag — provenance, not the number, decides (primary review PR #4840 r7 P2)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.suiteSize.source).toBe('suite_type_default');
+    // The operator typed into the Home Sq Ft box and the number they
+    // confirmed happens to equal the type default exactly — a value-based
+    // check would (wrongly) keep this flagged as an estimate forever.
+    const confirmed = { ...profile, _homeSqFtManuallyEdited: true };
+    const v1Input = translateV2CallToV1Input(confirmed, ['PEST'], { commercialRiskType: 'restaurant_food' });
+    expect(v1Input.footprintSizeEstimated).toBeUndefined();
+  });
+
+  test('an untouched default (no edit at all) still flags footprintSizeEstimated (control)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.suiteSize.source).toBe('suite_type_default');
+    const v1Input = translateV2CallToV1Input(profile, ['PEST'], { commercialRiskType: 'restaurant_food' });
+    expect(v1Input.footprintSizeEstimated).toBe(true);
   });
 
   test('a DBPR miss (business-type default) prices LOW and trips the low-confidence delivery gate (primary review PR #4840 r4 P1)', async () => {

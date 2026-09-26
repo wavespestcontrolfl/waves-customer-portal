@@ -118,6 +118,34 @@ describe('buildEstimatePersistenceFields — category', () => {
     expect(fields.category).toBeUndefined();
     expect('category' in fields).toBe(false);
   });
+
+  // Primary review of PR #4840 r7 P2: a FULL revision after correcting a
+  // false-positive commercial-suite lookup to residential must actually
+  // clear the stale COMMERCIAL column — the "never downgrade" rule exists
+  // to protect a genuinely partial payload, not to permanently freeze a
+  // row's category the moment it's ever stamped COMMERCIAL.
+  test('a FULL revision explicitly marked residential (V2 form isCommercial "NO") downgrades a stale COMMERCIAL row to RESIDENTIAL', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: { isCommercial: 'NO', propertyType: 'Single Family', address: '123 Palm Ave' },
+        result: { recurring: { services: [{ service: 'pest', name: 'Pest Control', mo: 45 }] } },
+      },
+    });
+    expect(fields.category).toBe('RESIDENTIAL');
+  });
+
+  test('a genuinely partial payload with no isCommercial marker at all still omits category (never downgrades) — control', () => {
+    // Same shape as the "incremental payload" test above, restated to make
+    // the contrast with the explicit-marker case above explicit: no
+    // inputs.isCommercial key at all (not even "NO") never writes RESIDENTIAL.
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: { inputs: { address: '123 Palm Ave' }, result: { total: 45 } },
+    });
+    expect(fields.category).toBeUndefined();
+    expect('category' in fields).toBe(false);
+  });
 });
 
 describe('shared detector stays strict; YES is read for the category only', () => {
