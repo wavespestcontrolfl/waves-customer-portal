@@ -200,6 +200,64 @@ describe('DBPR fetch failure backoff', () => {
   });
 });
 
+describe('requireWarmCache — the cache-hit fast path never awaits a download (PR #4840 admin lookup)', () => {
+  const { peekDistrictRows, loadDistrictRows, warmDistrictRowsInBackground } = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => _resetCacheForTests());
+
+  test('peekDistrictRows returns null on a cold cache without ever calling fetchText', () => {
+    const fetchText = jest.fn();
+    expect(peekDistrictRows(7)).toBeNull();
+    expect(fetchText).not.toHaveBeenCalled();
+  });
+
+  test('peekDistrictRows returns the rows once loadDistrictRows has warmed the cache', async () => {
+    const text = csv([{ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Location Zip Code': '00000' }]);
+    const fetchText = jest.fn().mockResolvedValue(text);
+    await loadDistrictRows(7, { fetchText, minRows: 1 });
+    const warm = peekDistrictRows(7);
+    expect(Array.isArray(warm)).toBe(true);
+    expect(warm).toHaveLength(1);
+  });
+
+  test('requireWarmCache: a cold cache resolves null immediately and kicks a background warm-up, never awaiting the fetch', async () => {
+    let releaseFetch;
+    const pending = new Promise((resolve) => { releaseFetch = resolve; });
+    const fetchText = jest.fn().mockReturnValue(pending);
+    const result = await resolveViaDbprLicense({
+      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
+    }, { requireWarmCache: true, fetchText, minRows: 1 });
+    expect(result).toBeNull();
+    // The background warm-up DID kick the real fetch (for next time) — this
+    // proves the resolve above returned without waiting on it.
+    expect(fetchText).toHaveBeenCalledTimes(1);
+    releaseFetch(csv([]));
+    await Promise.resolve().then(() => Promise.resolve()); // let the background promise settle before the next test resets the cache
+  });
+
+  test('requireWarmCache: a warm cache resolves the match with zero fetch calls', async () => {
+    const text = csv([{
+      'Location Street Address': '4400 Test Commons Pkwy E #102',
+      'Location Zip Code': '00000',
+      'Business Name': 'TEST TACO SHOP',
+      'Number of Seats or Rental Units': '25',
+    }]);
+    const warmFetch = jest.fn().mockResolvedValue(text);
+    await loadDistrictRows(7, { fetchText: warmFetch, minRows: 1 }); // warm the cache first, same as a prior fresh lookup would
+
+    const fetchText = jest.fn(); // must never be called on the warm path
+    const result = await resolveViaDbprLicense({
+      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
+    }, { requireWarmCache: true, fetchText });
+    expect(result).toEqual(expect.objectContaining({ value: 1400, businessName: 'TEST TACO SHOP' }));
+    expect(fetchText).not.toHaveBeenCalled();
+  });
+
+  test('warmDistrictRowsInBackground never throws even when the fetch rejects', () => {
+    const fetchText = jest.fn().mockRejectedValue(new Error('network down'));
+    expect(() => warmDistrictRowsInBackground(7, { fetchText })).not.toThrow();
+  });
+});
+
 describe('isEligibleDineInLicense', () => {
   const { isEligibleDineInLicense } = require('../services/commercial-suite-size/dbpr-food-license');
   const base = {
@@ -267,7 +325,7 @@ describe('compound designators ("Bldg 9 Unit 204") normalize to the same key on 
 
   test('normalizeUnitValue reduces "Bldg 9 Unit 204" and "BLDG 9 UNIT 204" to the same key', () => {
     expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe(normalizeUnitValue('BLDG 9 UNIT 204'));
-    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9-204');
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('bldg 9 unit 204');
   });
 
   test('the compound designator sits in the street line — the "Bldg 9" prefix must not leak into the street name', () => {
@@ -308,15 +366,22 @@ describe('DBPR row unit in Location Address Line 2, and both phone columns', () 
 describe('compound unit keys keep component boundaries', () => {
   const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
   test('Bldg 9 Unit 204 and Bldg 92 Unit 04 never collide', () => {
-    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9-204');
-    expect(normalizeUnitValue('BLDG 9 UNIT 204')).toBe('9-204');
-    expect(normalizeUnitValue('Bldg 92 Unit 04')).toBe('92-04');
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('bldg 9 unit 204');
+    expect(normalizeUnitValue('BLDG 9 UNIT 204')).toBe('bldg 9 unit 204');
+    expect(normalizeUnitValue('Bldg 92 Unit 04')).toBe('bldg 92 unit 04');
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).not.toBe(normalizeUnitValue('Bldg 92 Unit 04'));
   });
   test('single designators reduce to the bare value; words containing a designator are not mangled', () => {
     expect(normalizeUnitValue('#102')).toBe('102');
     expect(normalizeUnitValue('Suite 102')).toBe('102');
     expect(normalizeUnitValue('Ste. 102')).toBe('102');
-    expect(normalizeUnitValue('Suite WEST-2')).toBe('WEST-2');
+    expect(normalizeUnitValue('Suite WEST-2')).toBe('west-2');
+  });
+  // A building-level license ("Bldg 9") must never match a suite that
+  // happens to share the number ("Suite 9") — a structural designator is
+  // kept in the key, so the two never collide even though both name "9".
+  test('a building designator is not a suite: "Bldg 9" and "Suite 9" produce different keys', () => {
+    expect(normalizeUnitValue('Bldg 9')).not.toBe(normalizeUnitValue('Suite 9'));
   });
 });
 
@@ -339,14 +404,50 @@ describe('Codex r6 DBPR matching', () => {
     expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100222' })).toBe(r2);
     expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000' })).toBeNull();
   });
+  test('joining an in-flight download honors the joiner\'s own timeout (PR #4840 admin lookup budget)', async () => {
+    dbpr._resetCacheForTests();
+    let release;
+    const slow = new Promise((r) => { release = r; });
+    const first = dbpr.loadDistrictRows(7, { fetchText: () => slow });
+    const t0 = Date.now();
+    const joined = await dbpr.loadDistrictRows(7, { timeoutMs: 50 });
+    expect(joined).toEqual([]);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    release('');
+    await first;
+  });
+
+  test('a short-budget caller never shortens the shared download or trips the backoff (Codex #4840 r9 P2)', async () => {
+    dbpr._resetCacheForTests();
+    let release;
+    const slow = new Promise((r) => { release = r; });
+    const fetchText = jest.fn(() => slow);
+    const budgeted = await dbpr.loadDistrictRows(7, { fetchText, timeoutMs: 20, minRows: 1 });
+    expect(budgeted).toEqual([]);
+    expect(fetchText).toHaveBeenCalledWith(expect.any(String), 15000);
+    // The download finishes after that caller gave up; the next lookup
+    // gets the rows instead of a 10-minute backoff.
+    release(csv([{ 'Location Street Address': '1 A St', 'Business Name': 'X' }]));
+    await new Promise((r) => setImmediate(r));
+    const next = await dbpr.loadDistrictRows(7, { fetchText: jest.fn(), minRows: 1 });
+    expect(next.length).toBe(1);
+  });
 });
 
-describe('Codex r7: Spc and Space compare equal', () => {
-  const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
-  test('"Spc 12", "Spc. 12" and "Space 12" all reduce to "12"', () => {
-    expect(normalizeUnitValue('Spc 12')).toBe('12');
-    expect(normalizeUnitValue('Spc. 12')).toBe('12');
-    expect(normalizeUnitValue('Space 12')).toBe('12');
+describe('Codex r7 + #4840 r8: plaza unit words compare equal to Suite', () => {
+  const { normalizeUnitValue, matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
+  test('"Spc 12", "Spc. 12", "Space 12" and "Bay 12" all key like "Suite 12"', () => {
+    for (const u of ['Spc 12', 'Spc. 12', 'Space 12', 'Bay 12', 'BAY 12']) {
+      expect(normalizeUnitValue(u)).toBe(normalizeUnitValue('Suite 12'));
+    }
+  });
+  test('Bldg stays structural: "Bldg 9 Bay 4" matches "Bldg 9 Suite 4", never "Suite 4"', () => {
+    expect(normalizeUnitValue('Bldg 9 Bay 4')).toBe(normalizeUnitValue('Bldg 9 Suite 4'));
+    expect(normalizeUnitValue('Bldg 9 Bay 4')).not.toBe(normalizeUnitValue('Suite 4'));
+  });
+  test('a caller\'s "Suite 12" matches a license row filed as "SPACE 12"', () => {
+    const row = { 'Location Street Address': '4400 TEST COMMONS PKWY E SPACE 12', 'Location Zip Code': '00000' };
+    expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', unit: 'Suite 12', zip: '00000' })).toBe(row);
   });
 });
 

@@ -2,6 +2,7 @@
  * Status events corroborate lifecycle timestamps; a stored timestamp alone
  * may have been inferred by closeout and is not evidence of a real arrival.
  * This reader never trains a model or changes an appointment. */
+const { validate: isUuid } = require('uuid');
 const { etDateString, etParts, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 const { finiteDate, firstFiniteDate, positiveMinutesBetween, positiveNumber } = require('../../utils/service-duration-capture');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
@@ -32,6 +33,25 @@ function boundedMinutes(value) {
 function minuteInET(value) {
   const parts = etParts(value);
   return parts.hour * 60 + parts.minute + parts.second / 60;
+}
+
+// ET wall-clock minutes measured from the service day's midnight: a stamp on
+// a LATER ET date carries +1440 per day (Codex P2, round 8), so a caller
+// taking last completion minus first arrival never sees a visit that
+// crossed midnight as a negative ~23h span. recordedTiming currently only
+// corroborates stamps dated on the service day itself, so today this is
+// always the plain minute of day — the offset keeps the arithmetic right
+// without depending on that rule.
+function minuteOfServiceDay(stamp, serviceDate) {
+  const days = Math.round((Date.parse(`${etDateString(stamp)}T00:00:00Z`) - Date.parse(`${serviceDate}T00:00:00Z`)) / 86400000);
+  return minuteInET(stamp) + (Number.isFinite(days) ? days * 1440 : 0);
+}
+
+// One row's recorded lifecycle arrival/completion as minutes of its service day.
+function lifecycleMinutes(timing, row) {
+  const serviceDate = dateOnly(row.scheduled_date);
+  return { arrival: timing.arrival ? minuteOfServiceDay(timing.arrival, serviceDate) : null,
+    completion: timing.completion ? minuteOfServiceDay(timing.completion, serviceDate) : null };
 }
 
 function recordedTiming(row) {
@@ -75,10 +95,53 @@ function recordedTiming(row) {
     completion: durationEvidence === 'recorded_lifecycle_interval' ? end : null };
 }
 
+const anyStringId = id => typeof id === 'string';
+
+// Every planned stop well-formed and unique. `validId` defaults to the plain
+// string check; getRoutePerformance passes a UUID check (Codex P2) because
+// its plannedIds feed whereIn('id', ...) against the uuid-typed
+// scheduled_services.id — an empty or corrupted id in retained JSONB would
+// otherwise raise 22P02 and fail the whole read. Such a snapshot is refused
+// like any other malformed one, so the route reads as missing a baseline
+// instead of half-measured.
+function validPlannedStops(plannedStops, validId) {
+  const validStops = plannedStops.every(stop => stop && validId(stop.id)
+    && Number.isFinite(stop.serviceMinutes) && stop.serviceMinutes > 0
+    && (stop.arrivalWindow == null || (Number.isFinite(stop.arrivalWindow.startMin)
+      && Number.isFinite(stop.arrivalWindow.endMin) && stop.arrivalWindow.endMin >= stop.arrivalWindow.startMin)));
+  return validStops && new Set(plannedStops.map(stop => stop.id)).size === plannedStops.length;
+}
+
+// Lexicographic rank comparison: the first differing position decides.
+function outranks(rank, previous) {
+  const index = rank.findIndex((value, position) => value !== previous[position]);
+  return index >= 0 && rank[index] > previous[index];
+}
+
+// A snapshot's technician_id must be null or a real UUID (Codex P2, round
+// 11) — the same isUuid validator validPlannedStops already applies to a
+// stop's own id. A bare typeof-string check let a malformed '' through, and
+// `${plan.date}|${plan.technician_id}` (selectPlanningSnapshots' own dedupe
+// key) collapses that the same way routeKey's `technicianId || ''` collapses
+// a genuinely null technician_id downstream (getRoutePerformance,
+// missingBaselineIdsByDate) — a corrupted snapshot could otherwise be read
+// as the real Unassigned route's own saved plan. Its own function (not an
+// inline condition) so it doesn't add another branch to the already-large
+// selectPlanningSnapshots.
+// Snapshots are written per assigned technician route, so a technician_id
+// that is not a UUID (null, '' or garbage) is malformed: reject it rather
+// than let it collide with the unassigned (null-technician) route key or
+// reach the sort's localeCompare.
+function validSnapshotTechnicianId(technicianId) {
+  return isUuid(technicianId);
+}
+
 /** Choose the latest snapshot captured BEFORE the service day. The applied
  * order wins its same-run before-image. Never manufacture a historical plan
- * from the schedule as it looks after completion. */
-function selectPlanningSnapshots(runs, { from, to, now = new Date() }) {
+ * from the schedule as it looks after completion. `includeToday` admits the
+ * current day's pre-service snapshot for a planned-only reader
+ * (getSavedDayPlans); the capture-before-midnight guard still applies. */
+function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId = anyStringId, includeToday = false }) {
   const selected = new Map();
   const today = etDateString(now);
   for (const run of runs) {
@@ -86,28 +149,81 @@ function selectPlanningSnapshots(runs, { from, to, now = new Date() }) {
     if (!Array.isArray(snapshots)) continue;
     for (const plan of snapshots) {
       if (!plan || !validCalendarDate(plan.date) || !Array.isArray(plan.plannedStops)) continue;
-      const validStops = plan.plannedStops.every(stop => stop && typeof stop.id === 'string'
-        && Number.isFinite(stop.serviceMinutes) && stop.serviceMinutes > 0
-        && (stop.arrivalWindow == null || (Number.isFinite(stop.arrivalWindow.startMin)
-          && Number.isFinite(stop.arrivalWindow.endMin) && stop.arrivalWindow.endMin >= stop.arrivalWindow.startMin)));
-      if (!validStops || new Set(plan.plannedStops.map(stop => stop.id)).size !== plan.plannedStops.length) continue;
+      if (!validPlannedStops(plan.plannedStops, validStopId)) continue;
       const captured = finiteDate(plan.as_of);
       const created = finiteDate(run.created_at);
       const midnight = parseETDateTime(`${plan.date}T00:00`);
       if (!captured || !created || !Number.isFinite(midnight.getTime()) || captured >= midnight || created >= midnight
-        || plan.date < from || plan.date > to || plan.date >= today
-        || typeof plan.technician_id !== 'string') continue;
+        || plan.date < from || plan.date > to || plan.date > today || (plan.date === today && !includeToday)
+        || !validSnapshotTechnicianId(plan.technician_id)) continue;
       const key = `${plan.date}|${plan.technician_id}`;
       const previous = selected.get(key);
       const rank = [captured.getTime(), created.getTime(), plan.snapshot_phase === 'applied_reorder' ? 1 : 0];
-      if (!previous || rank[0] > previous.rank[0] || (rank[0] === previous.rank[0] && (rank[1] > previous.rank[1]
-        || (rank[1] === previous.rank[1] && rank[2] > previous.rank[2])))) {
+      if (!previous || outranks(rank, previous.rank)) {
         selected.set(key, { ...plan, planningRunId: run.id, rank });
       }
     }
   }
   return [...selected.values()].map(({ rank: _rank, ...plan }) => plan)
     .sort((a, b) => a.date.localeCompare(b.date) || a.technician_id.localeCompare(b.technician_id));
+}
+
+// Straight passthrough of the SAVED snapshot's own planned numbers (the
+// day-quality byTech object route-reorder.js/quality-after-change.js spread
+// into the ledger row) — day-scorecard.js's PLANNED-as-of-the-day-before
+// column reads these instead of recomputing them, so the scorecard can never
+// disagree with what was actually saved.
+//
+// plannedPhysicalStops: physicalVisitCount over the snapshot's planned stops
+// (see its rule below) — a count only when the snapshot can prove it.
+
+// A stop's grouping evidence (Codex P2, round 9): the CURRENT row's own
+// visit_id and promised window when the row still exists — an explicit null
+// visit_id means the group was dissolved after the snapshot, and it wins —
+// else the snapshot's own membership and promise.
+function groupingOf(row, stop) {
+  if (row) return { visitId: row.visit_id || null, windowStartMin: effectiveWindowRange(row)?.startMin ?? null };
+  return { visitId: stop.visitId || null, windowStartMin: stop.arrivalWindow?.startMin ?? null };
+}
+
+// Physical visits: rows sharing a visitId are one. The one rule for the
+// saved plan's planned stops and the scorecard's completed (actual) stops,
+// so the two columns compare alike. Conservative by design (Codex P2,
+// round 9): a same-property co-visit and a version-2 allocation are also
+// one physical stop on the live board, but neither the snapshot nor this
+// reader keeps the customer/premise/allocation evidence to recognize them.
+// Both require a shared promised window start, so when two UNGROUPED rows
+// share one (or both lack one) the count can't be proven and is null
+// ("unknown"), never an overstated per-row count.
+function physicalVisitCount(stops) {
+  const ungrouped = stops.filter(stop => !stop.visitId);
+  const starts = ungrouped.map(stop => (Number.isFinite(stop.windowStartMin) ? stop.windowStartMin : 'none'));
+  if (new Set(starts).size !== starts.length) return null;
+  return ungrouped.length + new Set(stops.filter(stop => stop.visitId).map(stop => stop.visitId)).size;
+}
+
+function plannedPassthrough(plan) {
+  const finiteOrNull = value => (Number.isFinite(value) ? value : null);
+  return {
+    plannedPhysicalStops: physicalVisitCount(plan.plannedStops.map(stop => groupingOf(null, stop))),
+    plannedServiceMinutes: finiteOrNull(plan.serviceMinutes),
+    plannedDriveMinutes: finiteOrNull(plan.modeledDriveMinutes),
+    plannedWaitingMinutes: finiteOrNull(plan.modeledWaitingMinutes),
+    plannedReturnMinuteBeforeBreaks: finiteOrNull(plan.modeledReturnMinuteBeforeBreaks),
+    // Codex P2 (round 10): the saved snapshot's own modeled lateness count —
+    // day-scorecard.js's plannedPastRow used to hard-code this unknown even
+    // though the persisted snapshot carries it. modeledLateVisits is already
+    // null at capture time whenever the simulation didn't run (missing
+    // coordinates or grouped work — see measureDayQuality), so passing it
+    // through here (rather than recomputing anything) keeps that same null.
+    plannedLateVisits: Array.isArray(plan.modeledLateVisits) ? plan.modeledLateVisits.length : null,
+    // Codex P2 (round 12): the saved snapshot's own planned stop ids, so a
+    // caller (day-scorecard.js's unallocated footer) can partition CURRENT
+    // stops against what this plan actually named instead of excluding a
+    // whole technician's group wholesale.
+    plannedStopIds: plan.plannedStops.map(stop => stop.id),
+    driveModel: plan.drive_model || null,
+  };
 }
 
 function measureRoutePerformance(plan, rows) {
@@ -120,12 +236,22 @@ function measureRoutePerformance(plan, rows) {
     const changedPromise = (range?.startMin ?? null) !== (currentWindow?.startMin ?? null)
       || (range?.endMin ?? null) !== (currentWindow?.endMin ?? null);
     const sameRoute = row && dateOnly(row.scheduled_date) === plan.date && row.technician_id === plan.technician_id;
-    const comparable = sameRoute && row.status === 'completed' && !row.visit_id && !stop.visitId;
+    const completedOnRoute = sameRoute && row.status === 'completed';
+    const grouping = groupingOf(row, stop);
+    const visitId = grouping.visitId;
+    const comparable = completedOnRoute && !visitId;
+    // Grouped (visit_id) work is never comparable — its duration is a
+    // SUM-of-members model — but a completed grouped row's own corroborated
+    // arrival/completion still happened on this route. Carried separately
+    // (Codex P2) so a caller measuring the day's first-arrival-to-last-
+    // completion span keeps grouped work that opened or closed the day,
+    // without that row ever reading as a comparable duration.
+    const lifecycle = completedOnRoute ? lifecycleMinutes(timing, row) : { arrival: null, completion: null };
     let arrivalOutcome = 'unknown';
     if (!row) arrivalOutcome = 'missing_visit';
     else if (!sameRoute) arrivalOutcome = 'day_or_technician_changed';
     else if (row.status !== 'completed') arrivalOutcome = 'not_completed';
-    else if (row.visit_id || stop.visitId) arrivalOutcome = 'grouped_work_requires_review';
+    else if (visitId) arrivalOutcome = 'grouped_work_requires_review';
     else if (changedPromise) arrivalOutcome = 'promise_changed';
     else if (!range) arrivalOutcome = 'unpromised';
     else if (timing.arrival) {
@@ -135,8 +261,8 @@ function measureRoutePerformance(plan, rows) {
     const scoredArrival = ['early', 'late', 'on_time'].includes(arrivalOutcome);
     const duration = comparable ? timing.durationMinutes ?? null : null;
     return {
-      appointmentId: stop.id, arrivalOutcome,
-      recordedArrivalMinute: comparable && timing.arrival ? minuteInET(timing.arrival) : null,
+      appointmentId: stop.id, arrivalOutcome, ...grouping,
+      recordedArrivalMinute: comparable ? lifecycle.arrival : null,
       arrivalEvidence: timing.arrival ? 'lifecycle_corroborated_by_status_event' : 'unknown',
       lateMinutes: scoredArrival ? Math.max(0, minuteInET(timing.arrival) - range.endMin) : null,
       predictedArrivalMinute: stop.predictedArrivalMinute ?? null,
@@ -146,7 +272,8 @@ function measureRoutePerformance(plan, rows) {
       recordedServiceMinutes: duration,
       durationEvidence: comparable ? timing.durationEvidence : 'unmatched_or_uncompleted_work',
       servicePredictionErrorMinutes: duration != null ? duration - stop.serviceMinutes : null,
-      recordedCompletionMinute: comparable && timing.completion ? minuteInET(timing.completion) : null,
+      recordedCompletionMinute: comparable ? lifecycle.completion : null,
+      lifecycleArrivalMinute: lifecycle.arrival, lifecycleCompletionMinute: lifecycle.completion,
     };
   });
   const arrivalCounts = {};
@@ -173,18 +300,39 @@ function measureRoutePerformance(plan, rows) {
     serviceErrorByEvidence,
     lastRecordedCompletionMinute: stops.length && stops.every(stop => stop.recordedCompletionMinute != null)
       ? Math.max(...stops.map(stop => stop.recordedCompletionMinute)) : null,
+    ...plannedPassthrough(plan),
     actualDriveMinutes: null, actualWaitingMinutes: null, actualReturnMinute: null,
     stops,
   };
 }
 
-async function getRoutePerformance({ from, to, now = new Date() }, conn) {
-  // Range validation is shared with the caller, getScheduleQualityMeasurements.
-  const runs = await conn('route_optimization_planner_runs').whereIn('run_type', ['route_tiers_nightly', 'route_repair_change', 'schedule_quality_change'])
+function planningRuns(conn, from, to) {
+  return conn('route_optimization_planner_runs').whereIn('run_type', ['route_tiers_nightly', 'route_repair_change', 'schedule_quality_change'])
     .where('start_date', '<=', to).where('end_date', '>=', from)
     .whereRaw("jsonb_typeof(result->'route_quality') = 'array'").orderBy('created_at', 'desc').limit(501)
     .select('id', 'created_at', 'result');
-  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now });
+}
+
+/** The saved pre-service plan for a day that has already started (today),
+ * keyed by technician id — planned numbers only (plannedPassthrough plus the
+ * planned stop count). No recorded-work comparison: the day isn't over, so
+ * getRoutePerformance deliberately never measures it. Used by the scorecard
+ * so today's planned column doesn't shrink as visits complete (the live
+ * board excludes completed work). Same newest-500-runs cap and snapshot
+ * validation as getRoutePerformance; a technician with no saved plan (or
+ * one the cap evicted) is simply absent, and the caller falls back to the
+ * live board, labeled as the remaining route. */
+async function getSavedDayPlans({ date, now = new Date() }, conn) {
+  const runs = await planningRuns(conn, date, date);
+  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from: date, to: date, now, validStopId: isUuid, includeToday: true });
+  return new Map(plans.map(plan => [plan.technician_id,
+    { plannedVisits: plan.plannedStops.length, ...plannedPassthrough(plan) }]));
+}
+
+async function getRoutePerformance({ from, to, now = new Date() }, conn) {
+  // Range validation is shared with the caller, getScheduleQualityMeasurements.
+  const runs = await planningRuns(conn, from, to);
+  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now, validStopId: isUuid });
   const plannedIds = [...new Set(plans.flatMap(plan => plan.plannedStops.map(stop => stop.id)))];
   const rows = await conn('scheduled_services').where(query => query.whereIn('id', plannedIds).orWhereBetween('scheduled_date', [from, to]))
     .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'status', 'visit_id', 'is_callback', 'followup_included', 'window_start', 'time_window',
@@ -225,15 +373,76 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   const missingBaselineRoutes = [...missingRoutes.values()].sort((a, b) => a.date.localeCompare(b.date)
     || String(a.technicianId || '').localeCompare(String(b.technicianId || '')));
   const missingBaselineDates = [...new Set(missingBaselineRoutes.map(route => route.date))];
+  // Same tally the top-level unbaselinedCompletedVisits sums, kept per route
+  // key too: a route WITH a baseline can still miss a job added (and
+  // completed) after the snapshot was captured — a caller measuring "actual"
+  // work against `plan.plannedStops` alone would silently omit it (Codex
+  // P1 on day-scorecard.js's onSiteCoverage). Stores each unbaselined row's
+  // own recorded arrival/completion too (Codex P2, round 5) — the count
+  // alone couldn't extend a caller's actual SPAN to include a same-day
+  // added job's real arrival/completion; recordedTiming is cheap (already
+  // computed for durationReferences below over the same pastWork) so
+  // there's no reason to leave it out.
+  const unbaselinedByRoute = new Map();
+  for (const row of pastWork) {
+    if (row.status !== 'completed') continue;
+    const key = routeKey(dateOnly(row.scheduled_date), row.technician_id);
+    if (coveredRoutes.get(key)?.has(row.id)) continue;
+    const lifecycle = lifecycleMinutes(recordedTiming(row), row);
+    const entry = unbaselinedByRoute.get(key) || [];
+    entry.push({ appointmentId: row.id, ...groupingOf(row),
+      recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion });
+    unbaselinedByRoute.set(key, entry);
+  }
   return {
     basis: 'saved_pre_service_plan_vs_recorded_work', asOf: now.toISOString(),
-    plans: plans.map(plan => measureRoutePerformance(plan, enriched)), missingBaselineDates, missingBaselineRoutes,
-    unbaselinedCompletedVisits: pastWork.filter(row => row.status === 'completed'
-      && !coveredRoutes.get(routeKey(dateOnly(row.scheduled_date), row.technician_id))?.has(row.id)).length,
+    plans: plans.map(plan => {
+      const unbaselinedStops = unbaselinedByRoute.get(routeKey(plan.date, plan.technician_id)) || [];
+      return { ...measureRoutePerformance(plan, enriched),
+        unbaselinedStops, unbaselinedCompletedVisits: unbaselinedStops.length };
+    }),
+    missingBaselineDates, missingBaselineRoutes,
+    // A missing-baseline tech-day (no plan at all) still has raw completed
+    // work in `enriched` — shaped exactly like a plan's own `stops`
+    // (durationEvidence/recordedServiceMinutes/recordedArrivalMinute/
+    // recordedCompletionMinute) so a caller with no saved snapshot can
+    // aggregate actual on-site minutes/span the SAME way it does for a route
+    // that has one, instead of a second formula (Codex P2). Additive only —
+    // every existing field above is unchanged.
+    missingBaselineStops: missingBaselineActualStops(missingBaselineRoutes, pastWork, routeKey),
+    unbaselinedCompletedVisits: [...unbaselinedByRoute.values()].reduce((sum, entries) => sum + entries.length, 0),
     truncatedPlanningRuns: runs.length > 500,
     durationReferences: summarizeDurationReferences(pastWork, recordedTiming),
     note: 'Unknown arrivals are excluded from the on-time denominator. Duration sources stay separate; no GPS gap is classified as idle and no model is updated.',
   };
 }
 
-module.exports = { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance };
+// Every completed row for the tech-day, GROUPED ones included (Codex P1: an
+// all-grouped no-baseline day was dropping every one of its stops, reading
+// as zero actual stops with coverage that could still look complete). A
+// visit_id group's occupancy/duration is a SUM-of-members model this reader
+// does not re-compose, so a grouped row's own recordedTiming is never
+// trusted as ITS on-site duration — durationEvidence/recordedServiceMinutes
+// are forced the same way measureRoutePerformance's own "comparable" check
+// forces them for a grouped plan stop ('unmatched_or_uncompleted_work',
+// null) — but the row still counts as a completed stop, and its recorded
+// arrival/completion (if any) still counts toward the day's span. Keyed the
+// same way coveredRoutes/unbaselinedByRoute are.
+function missingBaselineActualStops(routes, pastWork, routeKey) {
+  const byKey = new Map();
+  for (const route of routes) {
+    const completed = pastWork.filter(row => dateOnly(row.scheduled_date) === route.date
+      && (row.technician_id || null) === route.technicianId && row.status === 'completed');
+    byKey.set(routeKey(route.date, route.technicianId), completed.map(row => {
+      const timing = recordedTiming(row);
+      const lifecycle = lifecycleMinutes(timing, row);
+      return { appointmentId: row.id, ...groupingOf(row),
+        durationEvidence: row.visit_id ? 'unmatched_or_uncompleted_work' : timing.durationEvidence,
+        recordedServiceMinutes: row.visit_id ? null : timing.durationMinutes,
+        recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion };
+    }));
+  }
+  return byKey;
+}
+
+module.exports = { lifecycleMinutes, physicalVisitCount, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };

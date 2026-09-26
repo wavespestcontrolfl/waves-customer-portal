@@ -33,10 +33,10 @@ These promotions cover presentation and component structure only. Existing data,
 
 - **Admin family:** `Roboto, system-ui, sans-serif`.
 - **New Tier-1 weights:** 400 for body copy and 500 for emphasis. Existing 600/700 legacy text may remain until its page is migrated.
-- **Page title:** 22px / 1.3 / 500.
+- **Page title:** 22px / 1.3 / 500; 18px under 768px (`#4714`, 2026-09-24, `client/src/styles/ui-workspace.css`).
 - **Section title:** 18px / 1.35 / 500.
 - **Card title:** 14px / 1.4 / 500.
-- **Record identity:** `ui-record-title`: 29px / 1.25 / 500 on desktop, 23px on phones. This is the Customer workspace's large identity treatment; ordinary page titles remain 22px.
+- **Record identity:** `ui-record-title`: 29px / 1.25 / 500 on desktop, 23px on phones. This is the Customer workspace's large identity treatment; ordinary page titles remain 22px (18px under 768px).
 - **Body:** `text-ui-body`, 14px / 1.55 / 400 minimum. Long operational copy may use 15–16px.
 - **Caption:** `text-ui-caption`, 14px / 1.55 / 400. Compact density does not reduce the readable-text floor.
 - **Form label:** `Field` / `ui-label`, 14px / 1.55 / 500; input, select, and textarea text is 16px.
@@ -108,8 +108,8 @@ Component classes own presentation. Customer styles may position record sections
 
 - Desktop, mobile tabs, and mobile More navigation must derive from one registry.
 - Every destination has one canonical ID, label, route, group, icon, role policy, and search keywords. Surface-specific overrides must be explicit.
-- The canonical groups are Overview, Operations, Customers & Sales, Marketing, Team & Automation, Billing & Finance, Resources, and Administration.
-- Mobile keeps Dashboard, Schedule, Customers, Messages, and More as the five primary task tabs. More contains every remaining destination under the same canonical groups used on desktop.
+- With the `admin-navigation` flag off, the canonical groups are Overview, Operations, Sales, Communications, Finance, People, Marketing, and System (`NAV_SECTION_DEFINITIONS`). With it on, `AdminWorkspaceNavigation` and the mobile More page use `WORKSPACE_GROUPS`: Dashboard, Schedule, Customers, Sales, Communications, Billing, Operations, Marketing, Team, Accounting, Agents and Settings.
+- Mobile keeps Dashboard, Schedule, Customers, Messages, and Settings as the five primary task tabs. The fifth tab keeps the stable `more` id and `/admin/more` route but is labelled Settings; it contains every remaining destination under the same canonical groups used on desktop.
 - A destination cannot be removed from either surface until usage and replacement-route checks are documented. Retired URLs must redirect during their deprecation window.
 - Active navigation uses both a visible state and `aria-current="page"`.
 - Navigation landmarks require an accessible label; section labels use real headings.

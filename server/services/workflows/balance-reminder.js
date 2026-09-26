@@ -61,6 +61,39 @@ function smsLogMetadata(row) {
   }
 }
 
+// Account-level reminders stop if ANY invoice behind the balance is held.
+// Read failures skip this run; late-payment-checker owns verification nudges.
+async function customerDunningStopped(balance, selectedInvoiceId) {
+  try {
+    const ids = [...new Set([
+      ...(balance.invoiceIds || []), balance.oldestInvoiceId, selectedInvoiceId,
+    ].filter(Boolean).map(String))];
+    if (!ids.length) return false;
+    const InvoiceFollowUps = require('../invoice-followups');
+    for (const id of ids) {
+      if (await InvoiceFollowUps.hasActiveSequence(id)) return true;
+      if (await InvoiceFollowUps.isDunningStopped(id)) return true;
+    }
+    const activePlan = await db('payment_plans')
+      .whereIn('invoice_id', ids)
+      .where({ status: 'active' })
+      .first('id');
+    if (activePlan) return true;
+    const rows = await db('invoices')
+      .whereIn('id', ids)
+      .whereNotNull('stripe_payment_intent_id')
+      .select('id', 'stripe_payment_intent_id');
+    const StripeService = require('../stripe');
+    for (const inv of rows) {
+      if (await StripeService.isInvoiceAwaitingMicrodepositVerification(inv, { throwOnError: true })) return true;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[balance-reminder] dunning-stop check failed — skipping this customer's reminder this run (fail closed): ${err.message}`);
+    return true;
+  }
+}
+
 function invoiceCanReceiveLatePaymentEmail(invoice) {
   if (!invoice?.id || !invoice?.token) return false;
   const status = String(invoice.status || "").toLowerCase();
@@ -248,14 +281,17 @@ class BalanceReminder {
       .select("id")
       .catch(() => []);
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
-    const isPayerPayment = (p) => {
+    const paymentInvoiceId = (p) => {
       try {
         const m = typeof p.metadata === "string" ? JSON.parse(p.metadata) : p.metadata;
-        const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
-        return !!(invId && payerInvoiceIds.has(invId));
+        return m && m.invoice_id != null ? String(m.invoice_id) : null;
       } catch {
-        return false;
+        return null;
       }
+    };
+    const isPayerPayment = (p) => {
+      const invId = paymentInvoiceId(p);
+      return !!(invId && payerInvoiceIds.has(invId));
     };
     const outstanding = payerInvoiceIds.size === 0
       ? allOutstanding
@@ -286,8 +322,15 @@ class BalanceReminder {
       .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
       .first();
 
+    // Include payment-linked debt as well as the invoice chosen for the link.
+    const invoiceIds = [...new Set([
+      ...outstanding.map((p) => paymentInvoiceId(p)).filter(Boolean),
+      ...(oldestInvoice?.id ? [String(oldestInvoice.id)] : []),
+    ])];
+
     return {
       totalBalance,
+      invoiceIds,
       invoiceCount: outstanding.length,
       oldestInvoiceId: oldestInvoice?.id || null,
       // /pay/ is keyed by the invoice token only — a customer id there opens a
@@ -301,6 +344,7 @@ class BalanceReminder {
   }
 
   async sendReminder(service, balance, tier, daysUntil) {
+    if (await customerDunningStopped(balance)) return false;
     if (!balance.oldestInvoiceId || !balance.oldestInvoiceUrl) {
       throw new Error(
         "balance reminder payment-link SMS skipped: no unpaid invoice id/token found",
@@ -640,6 +684,7 @@ class BalanceReminder {
         this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
       }).orderByRaw('COALESCE(due_date::timestamp, created_at) asc').first();
     if (!invoice?.id || !invoice.token) return false;
+    if (await customerDunningStopped(balance, invoice.id)) return false;
     const source = 'balance_reminder_late_payment_check';
     const progress = await reminderProgress(customer.id, source, channels);
     const pending = progress.find((event) => !event.complete && event.metadata.invoiceId === invoice.id);
@@ -751,6 +796,7 @@ class BalanceReminder {
         );
         continue;
       }
+      if (await customerDunningStopped(balance, oldestInvoice.id)) continue;
       const link = await shortenOrPassthrough(
         `${publicPortalUrl()}/pay/${oldestInvoice.token}`,
         {

@@ -153,11 +153,16 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     // takes "Reply STOP to opt out." off this template afterwards (it goes to
     // an existing recurring customer — see docs/sms-stop-line-policy.md). So
     // the seeded copy is asserted as "what this migration seeds, as the STOP
-    // sweep leaves it", not as the raw seed.
+    // sweep leaves it", not as the raw seed. The 2026-09-26 customer copy
+    // audit then rewrites exactly that swept body (exact-body CAS).
     const stopSweep = require('../models/migrations/20260911000010_stop_line_off_remaining_transactional');
+    const copyAudit = require('../models/migrations/20260926120000_customer_copy_audit_sms');
     const swept = stopSweep._dropStop(migration.TEMPLATE.body);
+    const [, auditBefore, auditAfter] = copyAudit._SWAPS
+      .find(([key]) => key === migration.TEMPLATE.template_key);
+    expect(auditBefore).toBe(swept);
     const row = await trx('sms_templates').where({ template_key: migration.TEMPLATE.template_key }).first();
-    expect(row.body).toBe(swept);
+    expect(row.body).toBe(auditAfter);
     expect(swept).not.toBe(migration.TEMPLATE.body);
     expect(row.variables).toEqual(['first_name', 'start_date', 'window_text']);
     await trx('sms_templates').where({ id: row.id }).update({ body: 'Administrator test edit' });

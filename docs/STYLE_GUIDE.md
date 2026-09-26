@@ -276,7 +276,7 @@ retained in admin code; see §14 for the current shell contract.
 
 **Props:** `variant`, `surface` (default `"customer"`), `fullWidthMobile`, `icon` + `iconPosition` (`"left"|"right"` default `"right"`), `as` (polymorphic — pass `"a"` for link CTAs), `className`, plus all native `<button>` / `<a>` props via spread.
 
-**In production on:** BookingPage, PayPage, PublicBookingPage, ReviewPage, and RatePage. `/button-examples` route is a throwaway visual-QA harness — delete once all customer pages are migrated.
+**In production on:** PublicBookingPage and RatePage (legacy `/review/:token` redirects to `/rate/:token`).
 
 ### FAB (bottom-right chat launcher)
 ```
@@ -407,7 +407,7 @@ Tailwind v4 defaults plus two custom compound queries:
 
 ## 14. Portal alignment (waves-customer-portal)
 
-The customer-facing portal (LoginPage, OnboardingPage, EstimateViewPage, PortalPage, ReportViewPage, BookingPage, ReportViewPage) consumes this style guide via `client/src/theme-brand.js`, which is imported by 5 of 6 pages. Palette and fonts there should stay in sync with the tokens above.
+The customer-facing portal (for example LoginPage, EstimateViewPage, PortalPage, ReportViewPage, PublicBookingPage, RatePage, PayPageV2, TrackPage and the report view pages — grep `theme-brand` for the full list) consumes this style guide via `client/src/theme-brand.js`, which the customer pages import. Palette and fonts there should stay in sync with the tokens above.
 
 **Key equivalents:**
 
@@ -427,5 +427,3 @@ forces Roboto. Do not apply the customer brand palette to admin pages. The
 shared `<Button surface="admin">` styles described in §8 remain a legacy
 dark/DM Sans compatibility surface; they do not define the styling of the
 whole admin shell.
-
-**BookingPage exception:** has its own local `BRAND` object (does not import from `theme-brand.js`). Keep its tokens aligned manually.

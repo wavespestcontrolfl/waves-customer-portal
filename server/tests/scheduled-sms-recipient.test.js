@@ -225,6 +225,23 @@ describe('canReplayBillingWithoutPhone', () => {
   test('requires a customer row', () => {
     expect(canReplayBillingWithoutPhone({ customer_id: null, to_phone: '' }, registered)).toBe(false);
   });
+
+  // PR #4843 Codex r6 activation-checklist: a phone-less Stripe billing hold
+  // (ACH failure / bank verification) stamps requires_registered_dispatch so
+  // it replays through the registered dispatch hook instead of retrying
+  // toward a phone that will never resolve; a phone-bearing hold never
+  // carries that stamp and stays on the ordinary refresh rail.
+  test('a phone-less Stripe billing hold (stripe_webhook_billing_deferred) is accepted', () => {
+    const stripeHold = { entry_point: 'stripe_webhook_billing_deferred', requires_registered_dispatch: true,
+      refresh_customer_phone: true, billingDeliveryCategory: 'payment_issue' };
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '' }, stripeHold)).toBe(true);
+  });
+
+  test('a phone-bearing Stripe billing hold never gets the stamp — stays on the refresh rail', () => {
+    const phoneBearingHold = { entry_point: 'stripe_webhook_billing_deferred',
+      refresh_customer_phone: true, billingDeliveryCategory: 'payment_issue' };
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '' }, phoneBearingHold)).toBe(false);
+  });
 });
 
 describe('scheduledDepositReceiptAllowed', () => {
