@@ -113,6 +113,19 @@ function version(overrides = {}) {
   };
 }
 
+function sendEstimate(idempotencyKey) {
+  return EmailTemplates.sendTemplate({
+    templateKey: 'estimate.expiring_notice',
+    to: 'sam@example.com',
+    payload: {
+      first_name: 'Sam',
+      estimate_url: 'https://example.com/estimate/est-1',
+      expires_at: 'June 12',
+    },
+    idempotencyKey,
+  });
+}
+
 describe('email template library rendering', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -962,6 +975,157 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test.each([
+    [
+      'a stale retry-worker queued row',
+      {
+        status: 'queued',
+        provider_retry_count: 1,
+        queued_at: new Date(Date.now() - 60 * 60 * 1000),
+      },
+      { deliveryOutcome: 'uncertain', reason: 'provider_retry_in_progress' },
+    ],
+    [
+      'a scheduled failed row',
+      { status: 'failed', provider_retry_next_at: new Date(Date.now() + 60 * 1000) },
+      { deliveryOutcome: 'uncertain', reason: 'provider_retry_scheduled', retryable: true },
+    ],
+    [
+      'an exhausted uncertain row',
+      { status: 'failed', provider_retry_count: 3, provider_retry_exhausted_at: new Date() },
+      { deliveryOutcome: 'uncertain', reason: 'provider_retry_exhausted' },
+    ],
+  ])('sendTemplate holds %s for the provider retry rail', async (_label, state, expected) => {
+    const existing = {
+      id: 'msg-provider-owned',
+      idempotency_key: 'estimate.extension_notice:provider-owned',
+      send_attempt_token: 'provider-attempt',
+      ...state,
+    };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [chain({ first: existing })],
+    });
+
+    await expect(sendEstimate(existing.idempotency_key)).rejects.toMatchObject({
+      code: 'EMAIL_PROVIDER_RETRY_HELD',
+      held: true,
+      ...expected,
+      providerOutcome: {
+        sent: false,
+        held: true,
+        providerAttempted: false,
+        emailMessageId: existing.id,
+        ...expected,
+      },
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [
+      'provider retry worker changes the attempt token',
+      { status: 'queued', send_attempt_token: 'provider-worker-token', provider_retry_count: 1 },
+    ],
+    [
+      'provider webhook schedules the unchanged failed attempt',
+      { status: 'failed', send_attempt_token: 'old-token', provider_retry_next_at: new Date() },
+    ],
+  ])('ordinary retry CAS loses when the %s', async (_label, winnerState) => {
+    const idempotencyKey = 'estimate.extension_notice:cas-race';
+    const failed = {
+      id: 'msg-cas-race',
+      status: 'failed',
+      send_attempt_token: 'old-token',
+      idempotency_key: idempotencyKey,
+    };
+    const claim = chain({ returning: [] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: failed }),
+        claim,
+        chain({ first: { ...failed, ...winnerState } }),
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    await expect(sendEstimate(idempotencyKey)).rejects.toMatchObject({
+      code: 'EMAIL_SEND_IN_PROGRESS',
+      retryable: true,
+    });
+    expect(claim.where).toHaveBeenCalledWith({ id: failed.id, status: 'failed' });
+    expect(claim.where).toHaveBeenCalledWith({ send_attempt_token: 'old-token' });
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_retry_next_at');
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_retry_exhausted_at');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('suppressed retry CAS cannot block a row claimed by the provider worker', async () => {
+    const idempotencyKey = 'estimate.extension_notice:suppression-race';
+    const failed = {
+      id: 'msg-suppression-race',
+      status: 'failed',
+      send_attempt_token: 'old-token',
+      idempotency_key: idempotencyKey,
+    };
+    const claim = chain({ returning: [] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: failed }),
+        claim,
+        chain({ first: { ...failed, status: 'queued', send_attempt_token: 'provider-worker-token', provider_retry_count: 1 } }),
+      ],
+      email_suppressions: [chain({ result: [{ suppression_type: 'bounce', group_key: null }] })],
+    });
+
+    await expect(sendEstimate(idempotencyKey)).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS' });
+    expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+    expect(claim.where).toHaveBeenCalledWith({ id: failed.id, status: 'failed' });
+    expect(claim.where).toHaveBeenCalledWith({ send_attempt_token: 'old-token' });
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_retry_next_at');
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_retry_exhausted_at');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('lost ordinary retry claim returns clean dedupe when the winner was accepted', async () => {
+    const idempotencyKey = 'estimate.extension_notice:accepted-race';
+    const failed = {
+      id: 'msg-accepted-race',
+      status: 'failed',
+      send_attempt_token: 'old-token',
+      idempotency_key: idempotencyKey,
+    };
+    const accepted = {
+      ...failed,
+      status: 'sent',
+      send_attempt_token: 'winner-token',
+      provider_message_id: 'sg-winner',
+    };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: failed }),
+        chain({ returning: [] }),
+        chain({ first: accepted }),
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    await expect(sendEstimate(idempotencyKey)).resolves.toMatchObject({
+      sent: true,
+      deduped: true,
+      message: accepted,
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('sendTemplate dedupes a concurrent idempotency-key insert collision instead of throwing', async () => {
     // Two overlapping callers both pass the pre-insert dedupe check (the row
     // does not exist yet), then race on the unique index. The loser hits a
@@ -1339,6 +1503,10 @@ describe('email template library rendering', () => {
       error_message: null,
       idempotency_key: 'estimate.extension_notice:est-1',
     }));
+    expect(queueUpdate.where).toHaveBeenCalledWith({ id: 'msg-1', status: 'failed' });
+    expect(queueUpdate.whereNull).toHaveBeenCalledWith('send_attempt_token');
+    expect(queueUpdate.whereNull).toHaveBeenCalledWith('provider_retry_next_at');
+    expect(queueUpdate.whereNull).toHaveBeenCalledWith('provider_retry_exhausted_at');
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
       to: 'sam@example.com',
       subject: 'Your estimate expires June 12',

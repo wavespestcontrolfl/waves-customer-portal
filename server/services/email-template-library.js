@@ -849,6 +849,50 @@ function shouldRetryExistingMessage(message) {
   return !DEDUPE_STATUSES.has(String(message?.status || '').toLowerCase());
 }
 
+// The provider retry worker owns its schedule and every claim it has moved to
+// queued. A direct idempotent send must not recycle those rows through the
+// ordinary failed/stale-queued retry path: the worker may already be at the
+// provider boundary, and an exhausted row can represent an unknown outcome.
+function providerRetryHoldErrorForExistingMessage(message) {
+  const status = String(message?.status || '').toLowerCase();
+  let deliveryOutcome;
+  let reason;
+  let retryable = false;
+  if (status === 'queued' && Number(message?.provider_retry_count || 0) > 0) {
+    deliveryOutcome = 'uncertain';
+    reason = 'provider_retry_in_progress';
+  } else if (status === 'failed' && message?.provider_retry_exhausted_at) {
+    deliveryOutcome = 'uncertain';
+    reason = 'provider_retry_exhausted';
+  } else if (status === 'failed' && message?.provider_retry_next_at) {
+    // A retry schedule only proves ownership. The preceding provider failure
+    // may have been a timeout/5xx with an unknown acceptance outcome.
+    deliveryOutcome = 'uncertain';
+    reason = 'provider_retry_scheduled';
+    retryable = true;
+  } else {
+    return null;
+  }
+  const providerOutcome = {
+    sent: false,
+    held: true,
+    retryable,
+    providerAttempted: false,
+    deliveryOutcome,
+    reason,
+    emailMessageId: message.id,
+  };
+  return Object.assign(new Error(`email send held by ${reason}`), {
+    code: 'EMAIL_PROVIDER_RETRY_HELD',
+    status: 409,
+    held: true,
+    retryable,
+    deliveryOutcome,
+    reason,
+    providerOutcome,
+  });
+}
+
 // Postgres unique_violation (email_messages.idempotency_key). Two overlapping
 // callers (e.g. retried Stripe webhooks) can both pass the pre-insert dedupe
 // check, then race on the unique index. The loser should resolve against the
@@ -939,6 +983,28 @@ async function resolveIdempotencyCollision(err, idempotencyKey) {
   const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
   if (existing && !shouldRetryExistingMessage(existing)) {
     return dedupedResultForExistingMessage(existing);
+  }
+  throw inFlightCollisionError(idempotencyKey);
+}
+
+// Claim an ordinary retry only if the row is still the exact attempt observed
+// by the preflight read. This fences both sendTemplate callers and the provider
+// retry worker, which replace send_attempt_token when they take ownership.
+function retryClaimQuery(message) {
+  const query = db('email_messages')
+    .where({ id: message.id, status: message.status })
+    // A provider-block webhook can schedule a failed row without changing
+    // its status or attempt token. Keep that schedule in the provider rail.
+    .whereNull('provider_retry_next_at')
+    .whereNull('provider_retry_exhausted_at');
+  if (message.send_attempt_token == null) return query.whereNull('send_attempt_token');
+  return query.where({ send_attempt_token: message.send_attempt_token });
+}
+
+async function resolveRetryClaimLoss(retryMessage, idempotencyKey) {
+  const current = await db('email_messages').where({ id: retryMessage.id }).first();
+  if (current && !shouldRetryExistingMessage(current)) {
+    return dedupedResultForExistingMessage(current);
   }
   throw inFlightCollisionError(idempotencyKey);
 }
@@ -1093,6 +1159,8 @@ async function sendTemplate({
     if (existing && !shouldRetryExistingMessage(existing)) {
       return dedupedResultForExistingMessage(existing);
     }
+    const providerRetryHold = providerRetryHoldErrorForExistingMessage(existing);
+    if (providerRetryHold) throw providerRetryHold;
     // A concurrent caller may have committed a `queued` row that is still
     // mid-flight (queued, not yet dispatched to SendGrid). Reclaiming it as a
     // retry here would re-send and duplicate, so surface a retryable collision;
@@ -1240,7 +1308,8 @@ async function sendTemplate({
       };
       let blocked;
       if (retryMessage) {
-        [blocked] = await db('email_messages').where({ id: retryMessage.id }).update(blockedPayload).returning('*');
+        [blocked] = await retryClaimQuery(retryMessage).update(blockedPayload).returning('*');
+        if (!blocked) return await resolveRetryClaimLoss(retryMessage, idempotencyKey);
       } else {
         try {
           [blocked] = await db('email_messages').insert(blockedPayload).returning('*');
@@ -1270,7 +1339,8 @@ async function sendTemplate({
   };
   let message;
   if (retryMessage) {
-    [message] = await db('email_messages').where({ id: retryMessage.id }).update(queuedPayload).returning('*');
+    [message] = await retryClaimQuery(retryMessage).update(queuedPayload).returning('*');
+    if (!message) return await resolveRetryClaimLoss(retryMessage, idempotencyKey);
   } else {
     try {
       [message] = await db('email_messages').insert(queuedPayload).returning('*');
