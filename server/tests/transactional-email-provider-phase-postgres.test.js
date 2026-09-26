@@ -29,6 +29,7 @@ jest.mock('../services/visit-completion-summary', () => ({
 }));
 
 const migration = require('../models/migrations/20260926000200_email_message_provider_handoff_phase');
+const tokenMigration = require('../models/migrations/20260926000201_email_provider_handoff_attempt_token');
 const retry = require('../services/transactional-email-provider-retry');
 const sendgrid = require('../services/sendgrid-mail');
 
@@ -39,6 +40,7 @@ let admin;
 
 function row(overrides = {}) {
   const now = new Date();
+  const attempt = overrides.send_attempt_token || randomUUID();
   return {
     id: randomUUID(),
     template_key: 'quote.request_received',
@@ -55,7 +57,8 @@ function row(overrides = {}) {
     provider_message_id: null,
     sent_at: null,
     queued_at: now,
-    send_attempt_token: randomUUID(),
+    send_attempt_token: attempt,
+    provider_handoff_attempt_token: overrides.provider_handoff_phase ? attempt : null,
     error_message: 'provider rejected',
     created_at: now,
     updated_at: now,
@@ -96,7 +99,7 @@ postgres('transactional provider send phase (PostgreSQL)', () => {
       table.string('provider_message_id');
       table.timestamp('sent_at');
       table.timestamp('queued_at');
-      table.uuid('send_attempt_token');
+      table.string('send_attempt_token');
       table.text('error_message');
       table.timestamp('created_at');
       table.timestamp('updated_at');
@@ -119,14 +122,21 @@ postgres('transactional provider send phase (PostgreSQL)', () => {
   test('migration is idempotent, enforces the phase domain, and reverses symmetrically', async () => {
     await migration.up(mockDatabase);
     await migration.up(mockDatabase);
+    await tokenMigration.up(mockDatabase);
+    await tokenMigration.up(mockDatabase);
     expect(await mockDatabase.schema.hasColumn('email_messages', 'provider_handoff_phase')).toBe(true);
+    expect(await mockDatabase.schema.hasColumn('email_messages', 'provider_handoff_attempt_token')).toBe(true);
     await expect(mockDatabase('email_messages').insert(row({ provider_handoff_phase: 'unknown' })))
       .rejects.toMatchObject({ code: '23514' });
 
+    await tokenMigration.down(mockDatabase);
+    await tokenMigration.down(mockDatabase);
+    expect(await mockDatabase.schema.hasColumn('email_messages', 'provider_handoff_attempt_token')).toBe(false);
     await migration.down(mockDatabase);
     expect(await mockDatabase.schema.hasColumn('email_messages', 'provider_handoff_phase')).toBe(false);
     await migration.down(mockDatabase);
     await migration.up(mockDatabase);
+    await tokenMigration.up(mockDatabase);
     expect(await mockDatabase.schema.hasColumn('email_messages', 'provider_handoff_phase')).toBe(true);
   });
 
@@ -160,6 +170,8 @@ postgres('transactional provider send phase (PostgreSQL)', () => {
 
     let [claimed] = await retry.claimDueRetries(1, new Date(Date.now() + 1000));
     expect(claimed).toMatchObject({ provider_retry_count: 1, provider_handoff_phase: 'pending' });
+    expect(claimed.provider_handoff_attempt_token).toBe(claimed.send_attempt_token);
+    expect(claimed.send_attempt_token).not.toBe(original.send_attempt_token);
     await retry.markRetryFailure(claimed, new Error('clear block failed'));
     let stored = await mockDatabase('email_messages').where({ id: original.id }).first();
     expect(stored).toMatchObject({ status: 'failed', provider_handoff_phase: 'pending', provider_retry_count: 1 });
@@ -223,5 +235,27 @@ postgres('transactional provider send phase (PostgreSQL)', () => {
     const held = await mockDatabase('email_messages').where({ id: unsafe.id }).first();
     expect(held).toMatchObject({ status: 'failed', provider_retry_next_at: null });
     expect(held.provider_retry_exhausted_at).not.toBeNull();
+  });
+
+  test('old workers cannot carry pending or rejected proof across a new token', async () => {
+    const old = new Date(Date.now() - 20 * 60 * 1000);
+    const candidates = ['pending', 'rejected'].flatMap((phase) => [
+      row({ status: 'queued', provider_retry_count: 2, provider_retry_next_at: null, queued_at: old,
+        provider_handoff_phase: phase, provider_handoff_attempt_token: randomUUID() }),
+      row({ template_key: 'service.visit_summary', status: 'queued', provider_retry_count: 2,
+        provider_retry_next_at: null, queued_at: old, provider_handoff_phase: phase,
+        provider_handoff_attempt_token: randomUUID(), error_message: retry.HANDOFF_STARTED }),
+      row({ provider_handoff_phase: phase, provider_handoff_attempt_token: randomUUID() }),
+    ]);
+    await mockDatabase('email_messages').insert(candidates);
+    expect(await retry.claimDueRetries(10, new Date(Date.now() + 1000))).toEqual([]);
+    await expect(retry.recoverStaleClaims(new Date(Date.now() + 1000))).resolves.toBe(6);
+    const held = await mockDatabase('email_messages').select('*');
+    for (const stored of held) {
+      expect(stored.provider_retry_count).toBe(candidates.find((item) => item.id === stored.id).provider_retry_count);
+      expect(stored.provider_retry_next_at).toBeNull();
+      expect(stored.provider_retry_exhausted_at).not.toBeNull();
+    }
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 });

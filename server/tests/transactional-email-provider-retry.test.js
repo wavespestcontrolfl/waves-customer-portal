@@ -69,6 +69,7 @@ describe('transactional email provider retry classification', () => {
         provider_retry_next_at: new Date(now.getTime() + delay),
         provider_retry_exhausted_at: null,
         provider_handoff_phase: 'rejected',
+        provider_handoff_attempt_token: null,
       });
     }
   });
@@ -79,6 +80,7 @@ describe('transactional email provider retry classification', () => {
       provider_retry_next_at: null,
       provider_retry_exhausted_at: now,
       provider_handoff_phase: 'rejected',
+      provider_handoff_attempt_token: null,
     });
   });
 
@@ -286,6 +288,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.whereNull = jest.fn(() => chain);
+    chain.whereRaw = jest.fn(() => chain);
     chain.whereNotNull = jest.fn(() => chain);
     chain.whereNot = jest.fn(() => chain);
     chain.orWhereNot = jest.fn(() => chain);
@@ -351,6 +354,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.whereNull = jest.fn(() => chain);
+    chain.whereRaw = jest.fn(() => chain);
     chain.whereNotNull = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
     chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
