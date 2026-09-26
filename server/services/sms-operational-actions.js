@@ -703,7 +703,13 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // future) with unseen visit activity, so an event is checked on the next
   // tick wherever the cursors stand (Codex #4816 r15–r17).
   const tickBound = Array(4).fill(now);
-  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound).orderBy('cc.id').limit(PAGE)
+  // A row waiting out a provider/schema failure's retry_after cannot make
+  // progress (verify returns the stored failure until then), so it yields
+  // its slot rather than pinning the page through an outage; its event stays
+  // unseen and it returns once the retry is due.
+  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
+    .whereRaw("COALESCE((cc.sms_context->'fulfillment_check'->>'retry_after')::timestamptz, '-infinity'::timestamptz) <= ?", [now])
+    .orderBy('cc.id').limit(PAGE)
     .select('cc.*', conn.raw(`${UNSEEN_VISIT_ACTIVITY}::text AS event_seen_through`, tickBound));
   const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at }) => [id, at]));
   const pages = [

@@ -1223,8 +1223,20 @@ postgres('SMS commitments on PostgreSQL', () => {
     // The due cursor has moved on; the event page still brings it back.
     await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
       .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    const parkDue = () => mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    let retryAt = new Date(now.getTime() + 1000);
+    if (cause === 'the provider fails') {
+      // Waiting out retry_after, the row yields its event-page slot...
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
+      expect(verify).not.toHaveBeenCalled();
+      await parkDue();
+      // ...and returns, event still unseen, once the retry is due.
+      retryAt = new Date(now.getTime() + 3601000);
+    }
     verify.mockClear();
-    await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
+    await refreshSmsCommitments({ conn: mockPg, verify, now: retryAt });
     expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
   },
   );
