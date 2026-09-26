@@ -161,11 +161,14 @@ describe('billing channel email adapter', () => {
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
-  test('reports a context preparation failure as retryable', async () => {
+  test('reports a context preparation failure as a schedulable hold', async () => {
     mockLoadBillingEmailContext.mockRejectedValue(new Error('connection reset'));
-    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, blocked: true, code: 'BILLING_EMAIL_PREPARATION_FAILED', retryable: true,
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'BILLING_EMAIL_PREPARATION_FAILED',
     });
+    expect(Date.parse(outcome.nextAllowedAt)).toBeGreaterThan(Date.now());
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
@@ -206,8 +209,13 @@ describe('billing channel email adapter', () => {
   ])('classifies %s from the template library as not sent', async (_label, result, code, retryable) => {
     mockSendTemplate.mockResolvedValue(result);
     const outcome = await sendBillingChannelEmail(input());
-    expect(outcome).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code, reason: result.reason });
+    expect(outcome).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: result.reason });
     expect(outcome.retryable === true).toBe(retryable);
+    // A retryable pre-handoff refusal is a schedulable hold that keeps its cause.
+    expect(outcome).toMatchObject(retryable
+      ? { code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: code, deferred: true }
+      : { code });
+    expect(outcome.deferred === true).toBe(retryable);
   });
 
   test('redacts email addresses out of a provider failure reason', async () => {

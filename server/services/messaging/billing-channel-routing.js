@@ -79,10 +79,12 @@ function billingNotificationEventKey(input) {
 // without it here too, a producer's copy of the old 4-code list would never
 // persist a retry for it and an Email-only -> Text-only race would drop the
 // notice. SUPPRESSION_LOOKUP_FAILED is the same kind of schedulable hold for
-// an explicit Email/App leg whose suppression state could not be read.
+// an explicit Email/App leg whose suppression state could not be read, and
+// BILLING_EMAIL_PREPARATION_HOLD for a retryable Email refusal before the
+// provider handoff (billing-channel-email.js).
 const REPLAY_HOLD_CODES = Object.freeze([
   'QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY',
-  'BILLING_PREFERENCES_CHANGED', 'SUPPRESSION_LOOKUP_FAILED',
+  'BILLING_PREFERENCES_CHANGED', 'SUPPRESSION_LOOKUP_FAILED', 'BILLING_EMAIL_PREPARATION_HOLD',
 ]);
 
 function isReplayHold(result) {

@@ -6627,9 +6627,9 @@ const InvoiceService = {
       const smsHeld =
         // Holds that are not bounded by the clock spend an attempt instead:
         // APP_PROVIDER_RETRY takes the native backoff below, and a suppression
-        // outage must not reschedule for free indefinitely.
+        // or Email preparation outage must not reschedule for free indefinitely.
         REPLAY_HOLD_CODES.includes(result.sms?.code)
-        && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED"].includes(result.sms?.code)
+        && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
         && result.sms?.nextAllowedAt;
       const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
         ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED

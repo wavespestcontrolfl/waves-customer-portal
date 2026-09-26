@@ -756,10 +756,22 @@ describe('explicit billing channel combinations', () => {
     const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
     const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['email', 'sms'] }, async (leg) =>
       leg.metadata.billingDeliveryLeg === 'email'
-        ? { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_EMAIL_PREPARATION_FAILED' }
+        ? { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_PROVIDER_ERROR' }
         : { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'TEXT_OUTCOME_UNCERTAIN' });
     expect(result).toMatchObject({ sent: false, retryable: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCERTAIN' });
     expect(result.originalCode).toBeUndefined();
+  });
+
+  test('an Email preparation hold is the outcome and holds Text for the replay', async () => {
+    const { dispatchBillingChannels, isReplayHold } = require('../services/messaging/billing-channel-routing');
+    const hold = { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', nextAllowedAt: new Date(Date.now() + 300000).toISOString() };
+    const sendLeg = jest.fn(async (leg) => (leg.metadata.billingDeliveryLeg === 'email'
+      ? hold : { sent: true, deliveryOutcome: 'accepted' }));
+    const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['email', 'sms'] }, sendLeg);
+    expect(isReplayHold(result)).toBe(true);
+    expect(result).toMatchObject({ code: 'BILLING_EMAIL_PREPARATION_HOLD', nextAllowedAt: hold.nextAllowedAt });
+    expect(sendLeg).toHaveBeenCalledTimes(1);
   });
 
   test('App proof cannot settle an Email leg that still needs retry', async () => {

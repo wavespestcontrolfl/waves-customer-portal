@@ -66,7 +66,25 @@ function providerFailure(err, handoffStarted) {
   };
 }
 
-async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
+// A retryable refusal before the provider handoff sent nothing and left no
+// provider attempt for the email retry rail to recover. Producers of one-shot
+// notices persist only schedulable holds, so return it as one: the replay
+// re-fans-out under the same notificationEventKey (Codex pre-push P1 on #4843).
+const PREPARATION_RETRY_MS = 5 * 60 * 1000;
+
+function preparationHold(result) {
+  if (!(result.blocked && result.retryable && result.deliveryOutcome === 'not_sent')) return result;
+  return {
+    ...result, code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: result.code, deferred: true,
+    nextAllowedAt: new Date(Date.now() + PREPARATION_RETRY_MS).toISOString(),
+  };
+}
+
+async function sendBillingChannelEmail(input, hooks) {
+  return preparationHold(await sendBillingChannelEmailOnce(input, hooks));
+}
+
+async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
   const notificationEventKey = clean(input?.metadata?.notificationEventKey);
   if (!notificationEventKey) {
     return blocked('NOTIFICATION_EVENT_KEY_REQUIRED', 'Billing email requires a stable notification event key');
