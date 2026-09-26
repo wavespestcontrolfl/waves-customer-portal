@@ -1817,6 +1817,43 @@ describe('start_before_call shadow-mode review card is refreshed, not dropped, o
     expect(enforcePayload).toContain('retained_service_id: null');
     expect(enforcePayload).toContain('retained_scheduled_date: null');
   });
+
+  // codex #4919 round-7 P2: the shadow-mode card transaction succeeding is
+  // not enough by itself — review_status and the lead's
+  // confirm-before-dispatch note derive from bridgeNeedsConfirmation, not
+  // from open triage rows, so a stale-start call's card never marked the
+  // call review-open until this push was added (mirrors the enforce-mode
+  // fallback's own push a few hundred lines below).
+  test('the shadow-mode card push onto bridgeNeedsConfirmation happens AFTER the transaction succeeds, inside the same try, guarded against duplicates', () => {
+    const shadowGateAt = processorSrc.indexOf("skipped_reason: 'start_before_call'");
+    const txEndAt = processorSrc.indexOf('});', processorSrc.indexOf("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload", shadowGateAt));
+    const catchAt = processorSrc.indexOf('start-before-call triage insert failed', shadowGateAt);
+    expect(txEndAt).toBeGreaterThan(shadowGateAt);
+    expect(catchAt).toBeGreaterThan(txEndAt);
+    const betweenTxAndCatch = processorSrc.slice(txEndAt, catchAt);
+    expect(betweenTxAndCatch).toContain(
+      "if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');",
+    );
+  });
+});
+
+// codex #4919 round-7 P2: the same review-state push, for the generalized
+// slot-elapsed-at-booking-time shadow card (round-7 P1) — same gap, same fix.
+describe('slot_elapsed_at_booking_time shadow-mode card also pushes onto bridgeNeedsConfirmation (codex #4919 round-7 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the shadow-mode card push happens AFTER the transaction succeeds, inside the same try', () => {
+    const shadowGateAt = processorSrc.indexOf("skipped_reason: 'slot_elapsed_at_booking_time'");
+    expect(shadowGateAt).toBeGreaterThan(-1);
+    const txEndAt = processorSrc.indexOf('});', processorSrc.indexOf("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload", shadowGateAt));
+    const catchAt = processorSrc.indexOf('slot-elapsed-at-booking-time triage insert failed', shadowGateAt);
+    expect(txEndAt).toBeGreaterThan(shadowGateAt);
+    expect(catchAt).toBeGreaterThan(txEndAt);
+    const betweenTxAndCatch = processorSrc.slice(txEndAt, catchAt);
+    expect(betweenTxAndCatch).toContain(
+      "if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');",
+    );
+  });
 });
 
 describe('clarify-draft target phone (owner directive 2026-09-26: both directions)', () => {

@@ -334,6 +334,15 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
     expect(isAuthorizedWdoArrangerBooking(past)).toBe(true);
   });
 
+  // codex #4919 round-7 P1: arrangerSlotElapsed is now a THIN WRAPPER over
+  // slotElapsedAtBookingTime (`authorized && slotElapsedAtBookingTime(...)`)
+  // — its own contract (including the `authorized: false` no-op case) is
+  // unchanged and still exhaustively covered here, but production's two
+  // booking call sites (call-recording-processor.js, the early check and
+  // the pre-insert recheck) now call slotElapsedAtBookingTime directly and
+  // unconditionally, so the elapsed check applies to every fresh booking,
+  // not only arranger-authorized ones — see the describe block below for
+  // slotElapsedAtBookingTime's own direct coverage.
   describe('arrangerSlotElapsed (clock pinned to 2026-09-28 13:30 EDT)', () => {
     beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-28T17:30:00Z') }); });
     afterAll(() => { jest.useRealTimers(); });
@@ -358,8 +367,45 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
       expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-29', windowStart: '10:00' })).toBe(false);
     });
 
-    test('bookings that did not need the arranger rule are untouched by this guard', () => {
+    test('the authorized:false gate is still a no-op on this wrapper, even though production no longer relies on it', () => {
       expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-27', windowStart: '10:00' })).toBe(false);
+    });
+  });
+
+  // The generalized check itself (codex #4919 round-7 P1) — no
+  // `authorized` concept at all, since it now applies to every fresh call
+  // booking regardless of arranger status or mode.
+  describe('slotElapsedAtBookingTime (clock pinned to 2026-09-28 13:30 EDT) — applies to every booking, not just arranger-authorized ones', () => {
+    const { slotElapsedAtBookingTime } = require('../services/call-recording-processor')._test;
+    beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-28T17:30:00Z') }); });
+    afterAll(() => { jest.useRealTimers(); });
+
+    test('an ORDINARY (non-arranger) booking whose agreed ET day has already passed is refused', () => {
+      expect(slotElapsedAtBookingTime('2026-09-27', '16:00')).toBe(true);
+    });
+
+    test('an ORDINARY same-day slot whose start has passed on the ET wall clock is refused', () => {
+      expect(slotElapsedAtBookingTime('2026-09-28', '10:00')).toBe(true);
+    });
+
+    test('an ORDINARY later same-day slot still books', () => {
+      expect(slotElapsedAtBookingTime('2026-09-28', '16:00')).toBe(false);
+    });
+
+    test('an ORDINARY future agreed day still books', () => {
+      expect(slotElapsedAtBookingTime('2026-09-29', '10:00')).toBe(false);
+    });
+
+    test('no scheduledDate at all is never elapsed (nothing to refuse)', () => {
+      expect(slotElapsedAtBookingTime(null, '10:00')).toBe(false);
+      expect(slotElapsedAtBookingTime(undefined, '10:00')).toBe(false);
+    });
+
+    test('arrangerSlotElapsed(authorized: true, ...) agrees with slotElapsedAtBookingTime for the same inputs — the wrapper is exact', () => {
+      for (const [scheduledDate, windowStart] of [['2026-09-27', '16:00'], ['2026-09-28', '10:00'], ['2026-09-28', '16:00'], ['2026-09-29', '10:00']]) {
+        expect(arrangerSlotElapsed({ authorized: true, scheduledDate, windowStart }))
+          .toBe(slotElapsedAtBookingTime(scheduledDate, windowStart));
+      }
     });
   });
 
@@ -454,13 +500,19 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
     expect(insertMarker).toBeGreaterThan(txStart);
   });
 
-  test('the elapsed check is re-run immediately before the fresh insert, gated the same way as the early (pre-transaction) check', () => {
+  // codex #4919 round-7 P1: generalized from arranger-only to every fresh
+  // booking — the pre-insert recheck now calls slotElapsedAtBookingTime
+  // directly (no `authorized`/arranger gate at this call site; every
+  // booking reaches this same insert, in both enforce and shadow/legacy
+  // mode) — see call-timeline.test.js / call-recording-processor-guards.test.js
+  // for slotElapsedAtBookingTime's own unit coverage.
+  test('the elapsed check is re-run immediately before the fresh insert, ungated by arranger status — every booking gets this recheck now', () => {
     const body = source.slice(txStart, insertMarker);
-    const idx = body.lastIndexOf('arrangerSlotElapsed({');
+    const idx = body.lastIndexOf('slotElapsedAtBookingTime(');
     expect(idx).toBeGreaterThan(-1);
+    // No leftover arranger-gated call at this site.
+    expect(body.lastIndexOf('arrangerSlotElapsed({')).toBe(-1);
     const recheck = body.slice(idx, idx + 500);
-    // Same authorization gate (enforce mode only) as the early check.
-    expect(recheck).toContain('CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass');
     // Same call-linked-visit exemption as the early check, now read through
     // this transaction's own connection.
     expect(recheck).toContain('findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx }');
@@ -471,7 +523,8 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
 
   test('nothing between the recheck and the insert can move scheduledDate/windowStart out from under it', () => {
     const body = source.slice(txStart, insertMarker);
-    const idx = body.lastIndexOf('arrangerSlotElapsed({');
+    const idx = body.lastIndexOf('slotElapsedAtBookingTime(');
+    expect(idx).toBeGreaterThan(-1);
     const between = body.slice(idx, body.length);
     // The only statement between the recheck and the insert is the insert
     // call itself (plus the recheck's own guard body) — no re-assignment of
@@ -490,12 +543,14 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
   });
 
   test('the in-transaction hold reason is distinct from the early (pre-transaction) check\'s skippedReason, so the early check keeps its own auto_booking_skipped_after_approval fallback card', () => {
-    // Regression guard: if the in-transaction reason were ever changed back
-    // to 'past_extracted_date' (the early check's own skippedReason) and
-    // added to heldReasons, the early check's refusal would silently stop
-    // filing ANY review card (pre-push audit P1 the early check's own
-    // comment relies on).
+    // Regression guard: if the in-transaction reason were ever changed to
+    // 'slot_elapsed_at_booking_time' (the early check's own skippedReason,
+    // codex #4919 round-7 P1 — was 'past_extracted_date' before the
+    // generalization) and added to heldReasons, the early check's refusal
+    // would silently stop filing ANY review card in enforce mode (its
+    // shadow-mode card is separate and unaffected either way).
     const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/)[0];
+    expect(heldReasonsMatch).not.toContain("'slot_elapsed_at_booking_time'");
     expect(heldReasonsMatch).not.toContain("'past_extracted_date'");
   });
 });
@@ -520,5 +575,48 @@ describe('codex #4890 post-merge review P2 — arranger_slot_elapsed_pre_insert 
       status: 'confirmed',
       confirmed_start_at: '2026-09-28T10:00:00-04:00',
     }));
+  });
+});
+
+// codex #4919 round-7 P1: the EARLY (pre-transaction) elapsed-slot check —
+// generalized the same way as the pre-insert recheck above, from
+// arranger-only to every fresh booking. Source-pinned for the same reason
+// as the pre-insert recheck's own P2 tests: a live run needs standing up
+// almost the whole processRecording pass.
+describe('codex #4919 round-7 P1 — the early elapsed-slot check is generalized and files a shadow-mode card', () => {
+  const fs = require('fs');
+  const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  const checkAt = source.indexOf('if (scheduledDate && slotElapsedAtBookingTime(scheduledDate, windowStart)');
+
+  test('the early check calls slotElapsedAtBookingTime directly — no arranger/authorized gate', () => {
+    expect(checkAt).toBeGreaterThan(-1);
+    const section = source.slice(checkAt, checkAt + 700);
+    expect(section).toContain("findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }");
+    expect(section).toContain("skippedReason: 'slot_elapsed_at_booking_time'");
+    expect(section).not.toContain('wdoArrangerAuthorizedThisPass');
+  });
+
+  test('shadow/legacy mode files its own card for this skip — same lock + merge + dispute-field-clearing shape as start_before_call\'s shadow card', () => {
+    const gateAt = source.indexOf('if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {', checkAt);
+    expect(gateAt).toBeGreaterThan(checkAt);
+    const catchAt = source.indexOf('slot-elapsed-at-booking-time triage insert failed', gateAt);
+    expect(catchAt).toBeGreaterThan(gateAt);
+    const section = source.slice(gateAt, catchAt);
+    expect(section).toContain('await lockTriageCall(ttrx, call.id);');
+    expect(section).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id')");
+    expect(section).toContain("flag: 'auto_booking_skipped_after_approval'");
+    expect(section).toContain("skipped_reason: 'slot_elapsed_at_booking_time'");
+    expect(section).toContain('dispute_customer_id: customerId ? String(customerId) : null');
+    expect(section).toContain('retained_service_id: null');
+    expect(section).toContain('retained_scheduled_date: null');
+    expect(section).toContain("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload");
+    expect(section).not.toContain('.ignore()');
+  });
+
+  test('"slot_elapsed_at_booking_time" is NOT in the enforce-mode fallback\'s heldReasons — it relies on that generic fallback for its enforce-mode card, same as start_before_call', () => {
+    const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/)[0];
+    expect(heldReasonsMatch).not.toContain("'slot_elapsed_at_booking_time'");
+    expect(heldReasonsMatch).not.toContain("'start_before_call'");
   });
 });

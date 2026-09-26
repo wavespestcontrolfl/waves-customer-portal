@@ -919,20 +919,6 @@ const COMMITMENT_TURN_VOCAB = new Set([
   // ruling 2026-09-25, single-sentence rule — see
   // COMMITMENT_TURN_ACKNOWLEDGEMENTS, below).
   'go', 'made', 'send', 'momentarily',
-  // codex #4919 r1 P1: an ARRIVAL WINDOW names its range with "between" (the
-  // "and"/"to" connectors were already ordinary vocabulary). The actual
-  // RANGE-BINDING is enforced by SLOT_BINDING_CHECKS/
-  // collapseRangeToFirstBound below, not here — this set only clears the
-  // ordinary closed-vocabulary screen. Relative-day binding
-  // ("today"/"tonight"/"tomorrow") was tried and removed (codex #4919
-  // round-4 P1s, non-converging) — see the day-binding SLOT_BINDING_CHECKS
-  // entry below.
-  'between',
-  // codex #4919 r5 P1: the v11 prompt keeps a loosely phrased committed
-  // window confirmed ("we'll be there sometime between 6 and 9"), so the
-  // closed vocabulary admits "sometime"; the slot binder still requires the
-  // range's first bound to match confirmed_start_at.
-  'sometime',
 ]);
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
@@ -999,14 +985,6 @@ const SLOT_WORDS = new Set([
   'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
   'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
   'september', 'october', 'november', 'december',
-  // codex #4919 r1 P1: an ARRIVAL WINDOW commitment names its range with
-  // "between … and …" or "… to …" — glue for the slot-binding grammar this
-  // set already gates (collapseRangeToFirstBound / parseSpokenSlot enforce
-  // the actual binding; this only lets the sentence FORM through).
-  'between', 'and', 'to',
-  // codex #4919 r5 P1: "sometime between 6 and 9" (the v11 prompt's loose
-  // committed-window phrasing) — a filler modifier; binding is unchanged.
-  'sometime',
 ]);
 const BENIGN_CLOSERS = [
   'and just let us know if anything changes',
@@ -1242,13 +1220,9 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
 // the unauthorized Sunday appointment books. Deterministic token check on the
 // normalized quote: it must contain BOTH the confirmed slot's ET weekday
 // name AND its ET hour in a spoken form ("noon"/"midnight" or the 12-hour
-// number). Relative phrasing ("today"/"tonight"/"tomorrow", "next Tuesday",
-// "this weekend") fails — conservative and accepted: those calls stay in
-// triage. (codex #4919 r1 P1 tried resolving "today"/"tonight"/"tomorrow"
-// against callStartedAt; round-4 found 3 more P1s in the binder expansion
-// and it was removed rather than patched further — non-converging. "this
-// <weekday>" on the SAME day is the one narrow exception kept; see the
-// day-binding SLOT_BINDING_CHECKS entry below.)
+// number). Relative-day commitments ("we'll see you tomorrow at 10") fail —
+// conservative and accepted: the call date isn't threaded here, so relative
+// days can't be verified and those calls stay in triage.
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
@@ -1546,16 +1520,6 @@ function etWallClockOfConfirmedStart(value) {
 // call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
 // ambiguous between today and next week) and day 7 is rejected (same
 // weekday again). Within 1–6 days every weekday names exactly one date.
-// codex #4919 round-4 P1: this function has exactly ONE call site
-// (quoteBindsConfirmedSlot, below) — NOT exported, and this file's only
-// confirmedSlotFacts() call. dayDiff 0 (today) is also RETURNED (widened
-// from the 1–6 range) so "this <weekday>" can bind a same-day slot (the ONE
-// narrow same-day exception kept after removing a broader relative-day
-// binder — see the day-binding SLOT_BINDING_CHECKS entry below); the
-// bare-weekday same-day ambiguity this comment describes is enforced there,
-// reading slot.dayDiff, not by this function returning null. If a second
-// call site is ever added, it must handle dayDiff 0 explicitly rather than
-// relying on null-on-same-day.
 function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
   const wall = etWallClockOfConfirmedStart(confirmedStartAt);
   const call = new Date(String(callStartedAt || ''));
@@ -1572,16 +1536,8 @@ function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
   // date is exact.
   const weekday = WEEKDAY_NAMES[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
   const monthName = MONTH_NAMES[month - 1];
-  // codex #4919 r1 P1: the lower bound widens to 0 (today) so a RELATIVE-day
-  // commitment ("tonight"/"today") can bind a same-day slot — but a bare
-  // WEEKDAY NAME is still genuinely ambiguous on day 0 (see comment above:
-  // "Sunday" spoken on a Sunday), so that ambiguity is enforced in
-  // SLOT_BINDING_CHECKS' day-binding check below, keyed on this dayDiff,
-  // not here.
-  if (!(dayDiff >= 0 && dayDiff <= 6) || !weekday || !monthName) return null;
-  return {
-    year, month, day, weekday, monthName, dayDiff, hour24: hour, hour12: hour % 12 || 12, period: hour >= 12 ? 'pm' : 'am',
-  };
+  if (!(dayDiff >= 1 && dayDiff <= 6) || !weekday || !monthName) return null;
+  return { year, month, day, weekday, monthName, hour24: hour, hour12: hour % 12 || 12, period: hour >= 12 ? 'pm' : 'am' };
 }
 
 // What ONE normalized sentence says about a slot, parsed once into a flat
@@ -1684,104 +1640,9 @@ function parseSpokenSlot(normalizedSentence) {
       return { nums, hourPosition, datePosition };
     }),
     spokenDayPeriods: new Set(toks.filter((t) => SPOKEN_DAY_PERIODS[t])),
-    // codex #4919 round-4 P1: "this <weekday>" resolves the same-day
-    // ambiguity a bare weekday name can't (see the day-binding
-    // SLOT_BINDING_CHECKS entry below) — "next <weekday>" or a bare name
-    // does not, so only a weekday IMMEDIATELY preceded by "this" counts.
-    thisWeekdays: new Set(toks.filter((t, i) => WEEKDAY_NAMES.includes(t) && at(i - 1) === 'this')),
     periods,
     times,
   };
-}
-
-// codex #4919 r1 P1: a committed ARRIVAL WINDOW ("between 6 and 9 tonight",
-// "6 to 9 PM Tuesday") states two time bounds by construction — only the
-// window's START is confirmed_start_at (v11 prompt, call-extraction-v1.js;
-// window_end is the separate job-duration block, never carried here). Rather
-// than teach every SLOT_BINDING_CHECKS entry a second, range-shaped case,
-// the range is collapsed to its first bound BEFORE parseSpokenSlot runs, so
-// every existing check keeps evaluating exactly what it always evaluated —
-// no check is loosened; the sentence text is. Detected as an explicit
-// "between N (period)? and N (period)?" or bare "N (period)? to N (period)?"
-// adjacency — "or" and any other connector are NOT range markers, so an
-// unrelated offer of two alternative slots ("we could do 10 am or 2 pm")
-// is untouched and still fails the (unchanged) single-time-mention check.
-// Either bound may be "noon"/"midnight" instead of a number (both
-// documented v11 prompt examples: "between 10 and noon tomorrow", "between
-// noon and 1 today") — collapsed to the literal word, which parseSpokenSlot
-// already reads as 12 pm/12 am. Either bound may also carry a minute
-// (codex #4919 round-3 P1): normalizeCommitmentText turns "6:00"/"6:30" into
-// "6 00"/"6 30" (the colon is stripped like every other punctuation), so a
-// bound is an hour, an OPTIONAL two-digit minute, then an optional period —
-// without the minute group, "between 6:00 and 9:00 PM" never matched at all
-// (an unrelated "00"/"30" token sat where the pattern expected "and"/"to").
-// The minute rides through the collapse verbatim: parseSpokenSlot's own time
-// regex already tolerates an optional " 00" the same way, so an on-the-hour
-// ":00" bound (the only kind `confirmed_start_at` is ever stamped at — the
-// window_start owner rule) still binds; any other minute ("6:30") collapses
-// structurally too but then correctly fails to bind downstream (no
-// NUMBER_RUN_SHAPES entry explains an [hour, non-zero-minute] run), same as
-// before this fix for a quote that was never a legitimate on-the-hour slot.
-const RANGE_RE = new RegExp(
-  '\\bbetween (?:(?<b1h>\\d{1,2})(?: (?<b1mm>\\d{2}))?(?: (?<b1p>am|pm))?|(?<b1w>noon|midnight)) and '
-  + '(?:(?<b2h>\\d{1,2})(?: (?<b2mm>\\d{2}))?(?: (?<b2p>am|pm))?|(?<b2w>noon|midnight))\\b'
-  + '|\\b(?:(?<c1h>\\d{1,2})(?: (?<c1mm>\\d{2}))?(?: (?<c1p>am|pm))?|(?<c1w>noon|midnight)) to '
-  + '(?:(?<c2h>\\d{1,2})(?: (?<c2mm>\\d{2}))?(?: (?<c2p>am|pm))?|(?<c2w>noon|midnight))\\b',
-);
-// The FIRST bound's period, when it states none itself, is resolved from
-// the SECOND bound (codex review round P1: "between 8 and 10 pm" is 8-10
-// PM, never the business-hours-inferred 8 AM — but "between 11 and 1 pm" is
-// still 11 AM-1 PM, never 11 PM, so the second bound's period is never just
-// copied onto the first either). Both readings of the first bound (am/pm)
-// are tried, and whichever makes the range run FORWARD the SHORTER way
-// (mod 24h — covers an overnight range like "11 PM and 1 AM" too) wins; a
-// tie, or the second bound stating no resolvable period/word of its own
-// either, falls back to the same business-hours inference parseSpokenSlot
-// already applies to a bare hour elsewhere. Works in MINUTES-of-day, not
-// bare hours (codex #4919 review round P1): "between 8 and 8:30 pm"
-// dropped the second bound's :30 and compared 8pm-as-hour to 8pm-as-hour —
-// an exact tie that fell through to the (wrong) business-hours 8 AM guess,
-// when the two half-hour-apart bounds unambiguously fix the first at PM.
-function secondBoundClock24(word, hour, minute, period) {
-  if (word) return word === 'noon' ? 12 * 60 : 0;
-  if (!period) return null;
-  return (Number(hour) % 12) * 60 + (period === 'pm' ? 12 * 60 : 0) + (Number(minute) || 0);
-}
-function resolveRangeStartPeriod(hour1, endMinutesOfDay) {
-  if (endMinutesOfDay == null) return null;
-  const h1 = (Number(hour1) % 12) * 60;
-  const durationVia = (startMinutesOfDay) => (((endMinutesOfDay - startMinutesOfDay) % 1440) + 1440) % 1440;
-  const durAm = durationVia(h1);
-  const durPm = durationVia(h1 + 12 * 60);
-  if (durAm === 0 || durPm === 0 || durAm === durPm) return null;
-  return durAm < durPm ? 'am' : 'pm';
-}
-function collapseRangeToFirstBound(ns) {
-  const m = RANGE_RE.exec(ns);
-  if (!m) return ns;
-  const g = m.groups || {};
-  const betweenBranch = g.b1h !== undefined || g.b1w !== undefined;
-  const wordBound = betweenBranch ? g.b1w : g.c1w;
-  let replacement;
-  if (wordBound) {
-    replacement = wordBound;
-  } else {
-    const hour = betweenBranch ? g.b1h : g.c1h;
-    const minute = betweenBranch ? g.b1mm : g.c1mm;
-    const explicitPeriod = betweenBranch ? g.b1p : g.c1p;
-    const endMinutesOfDay = secondBoundClock24(
-      betweenBranch ? g.b2w : g.c2w,
-      betweenBranch ? g.b2h : g.c2h,
-      betweenBranch ? g.b2mm : g.c2mm,
-      betweenBranch ? g.b2p : g.c2p,
-    );
-    const period = explicitPeriod
-      || resolveRangeStartPeriod(hour, endMinutesOfDay)
-      || inferPeriodFromBusinessHours(Number(hour));
-    if (!period) return ns;
-    replacement = minute ? `${hour} ${minute} ${period}` : `${hour} ${period}`;
-  }
-  return `${ns.slice(0, m.index)}${replacement}${ns.slice(m.index + m[0].length)}`;
 }
 
 // The complete MULTI-number shapes a slot explains: [hour12, 00] (spoken
@@ -1796,30 +1657,10 @@ const NUMBER_RUN_SHAPES = [
 ];
 // Every check must hold. Negations can't be parsed deterministically, so any
 // SECOND weekday or time mention fails closed — the extraction prompt
-// directs the model to pin the single final commitment sentence. The one
-// sanctioned exception is a committed ARRIVAL WINDOW's two time bounds,
-// handled upstream by collapseRangeToFirstBound (codex #4919 r1 P1) before
-// parseSpokenSlot ever runs — every check below still evaluates a single
-// collapsed mention, never a real range.
+// directs the model to pin the single final commitment sentence.
 const SLOT_BINDING_CHECKS = [
-  // The slot's WEEKDAY, exactly one mention. Main's rule: a bare weekday
-  // name spoken ON that same weekday is genuinely ambiguous between today
-  // and next week, so it only binds when the slot is 1-6 days out (per
-  // confirmedSlotFacts' dayDiff comment above). The ONE exception (codex
-  // #4919 round-4 P1): "this <weekday>" resolves that same-day ambiguity by
-  // construction — "this Tuesday" spoken on a Tuesday names TODAY, not
-  // ambiguous the way a bare "Tuesday" is. "next <weekday>" and a bare
-  // same-day weekday still fail, same as main.
-  // (Relative-day binding — "today"/"tonight"/"tomorrow" with no weekday —
-  // was tried and removed here: codex #4919 round-4 found 3 more P1s in
-  // that expansion and it was non-converging rather than fully specifiable.
-  // A relative-day quote now fails closed exactly like on main, raising a
-  // review card instead of auto-binding.)
-  (said, slot) => {
-    if (said.weekdays.size !== 1 || !said.weekdays.has(slot.weekday)) return false;
-    if (slot.dayDiff >= 1) return true;
-    return slot.dayDiff === 0 && said.thisWeekdays.has(slot.weekday);
-  },
+  // Exactly one weekday, the slot's.
+  (said, slot) => said.weekdays.size === 1 && said.weekdays.has(slot.weekday),
   // Exactly one time mention, the slot's hour AND period.
   (said, slot) => said.times.size === 1 && said.times.has(`${slot.hour12} ${slot.period}`),
   // A standalone period ("Sunday PM at 10") must be the slot's (codex round 13).
@@ -1857,7 +1698,7 @@ const SLOT_BINDING_CHECKS = [
 function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStartedAt) {
   const slot = confirmedSlotFacts(confirmedStartAt, callStartedAt);
   if (!slot) return false;
-  const said = parseSpokenSlot(collapseRangeToFirstBound(normalizedSentence));
+  const said = parseSpokenSlot(normalizedSentence);
   return SLOT_BINDING_CHECKS.every((check) => check(said, slot));
 }
 
