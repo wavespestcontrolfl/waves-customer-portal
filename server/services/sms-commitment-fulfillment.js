@@ -105,6 +105,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
         conn.raw("(sms_log.metadata->>'providerAccepted') = 'true' as provider_accepted"),
+        conn.raw("(sms_log.metadata->>'channel') = 'push' as push_channel"),
         // The visit an automated notice was about: the sender's metadata
         // stamp, else the audit row for the same provider message (Codex
         // #4816 r39). Null when neither links it.
@@ -235,7 +236,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
 // #4816 r39: customers on the app confirmation channel get the notice as
 // push, and it must answer the promise like a delivered text.
 function smsDelivered(record) {
-  return record.status === 'delivered' || (record.from_phone === 'push' && record.provider_accepted === true);
+  // The scheduled-send fallback settles its queue row as 'sent' with the
+  // push channel stamped but keeps the SMS from_phone (Codex #4816 r40).
+  return record.status === 'delivered' || (record.status === 'sent' && record.provider_accepted === true
+    && (record.from_phone === 'push' || record.push_channel === true));
 }
 
 // An automated notice names a service and time, not a property. On a
@@ -542,4 +546,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment, { eventOnly });
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL };

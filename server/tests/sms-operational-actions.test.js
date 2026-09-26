@@ -732,7 +732,9 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Call me over the weekend', 'Anytime through the week', 'Sometime in the next few days', 'At the next visit please call',
     'Call me in a year', 'Contact me within 2 yrs', 'Check back next year', 'Follow up in 6 mos', 'Over the next 2 years please check in',
     'Call early next year', 'Reach out by end of the year', 'Call me this month', 'Call me tomorrow, about the invoice',
-    'Call me about the invoice. Tomorrow works', 'At the next visit please call about the bait'])(
+    'Call me about the invoice. Tomorrow works', 'At the next visit please call about the bait',
+    'Please call me about my invoice tomorrow', 'Call about the invoice on Friday',
+    'Call me regarding the estimate next week', 'Call about the termite quote this afternoon'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
         .toEqual({ due_at: null, due_basis: null });
@@ -843,6 +845,13 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(push, { kind: 'send_appointment_confirmation' })).toBe(true);
     expect(admissibleWitness({ ...push, provider_accepted: false }, { kind: 'send_appointment_confirmation' })).toBe(false);
     expect(admissibleWitness({ ...push, from_phone: '+19415550100' }, { kind: 'send_appointment_confirmation' })).toBe(false);
+  });
+
+  test('Codex #4816 r40: the scheduled-push fallback row (SMS from_phone, push channel stamped) is delivery proof', () => {
+    const settled = { type: 'sms', status: 'sent', message_type: 'confirmation', from_phone: '+19415550100', provider_accepted: true, push_channel: true };
+    expect(admissibleWitness(settled, { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness({ ...settled, push_channel: false }, { kind: 'send_appointment_confirmation' })).toBe(false);
+    expect(admissibleWitness({ ...settled, provider_accepted: false }, { kind: 'send_appointment_confirmation' })).toBe(false);
   });
 
   test('Codex #4816 r39: on a property-scoped promise an automated notice counts only for a visit at that property', () => {

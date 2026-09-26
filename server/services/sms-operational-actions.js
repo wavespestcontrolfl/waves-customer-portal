@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -112,7 +112,14 @@ const SPAN_UNIT = String.raw`(?:days?|weeks?|months?|years?)`;
 // is dropped before the timing test; "in/within/after/give me about 2
 // hours" is an offset, not a topic, and stays. Erring toward the default
 // deadline is the safe side: a missed bell is the worse failure.
-const TOPIC_CLAUSE = /(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|re:|in regards? to|with regards? to)\s+[^,.;!?]*/gi;
+// The clause always takes its first word ("about tomorrow's visit", "about
+// my next visit"), then stops before a word that starts a trailing deadline
+// ("about my invoice tomorrow", "... on Friday", "... by 5", "... next
+// week"), so that timing is still tested (Codex #4816 r40).
+const TRAILING_TIMING_START = String.raw`(?:today|tomorrow|tmrw|tonight|asap|eod|eow|by|before|after|on|until|till|at|in|within|later|end`
+  + String.raw`|(?:mon|tues|wednes|thurs|fri|satur|sun)day|this (?:morning|afternoon|evening|week(?:end)?)|next (?:week(?:end)?|month|year))\b`;
+const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|re:|in regards? to|with regards? to)`
+  + String.raw`\s+[^\s,.;!?]+(?:\s+(?!${TRAILING_TIMING_START})[^\s,.;!?]+)*`, 'gi');
 function withoutTopics(quote) {
   return String(quote || '').replace(TOPIC_CLAUSE, ' ');
 }
@@ -688,6 +695,7 @@ const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
         AND h.to_status IN (${WITNESS_TRANSITION_STATUSES.map((v) => `'${v}'`).join(', ')})
     UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
       WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
+        AND ${LOGGED_MOVE_SQL('r')}
   ) a)`;
 
 // Match merge and intake: customer, source, then commitment. A relink, an

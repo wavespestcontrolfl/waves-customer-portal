@@ -1302,6 +1302,33 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(await tick(minutes(40))).toMatchObject({ scanned: 1 });
   });
 
+  test('Codex #4816 r40: a no-show reschedule_log row (no new date) is not an event; a logged move is', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(5)), window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(5),
+    }).returning('id');
+    await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: etDateString(minutes(5)), new_date: null, initiated_by: 'admin', created_at: minutes(5) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      return refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    expect(await tick(minutes(20))).toMatchObject({ scanned: 0 });
+    await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: etDateString(minutes(5)), new_date: etDateString(new Date(minutes(5).getTime() + 7 * 86400000)),
+      initiated_by: 'admin', created_at: minutes(21) });
+    expect(await tick(minutes(40))).toMatchObject({ scanned: 1 });
+  });
+
   test('Codex #4816 r38: an uncertain pet report still rings its safety review when the batch repeats the field', async () => {
     const body = 'We have a cat. Not sure whether the dog will be out.';
     message.message_body = body;

@@ -505,6 +505,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           providerAccepted: true,
           provider_from_number: fromNumber,
           ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
+          // The visit this notice is about, like the SMS path's metadata:
+          // readers that scope by property (SMS commitment evidence) need
+          // it on the proof row itself (Codex #4816 r40).
+          ...(appointmentId ? { scheduled_service_id: String(appointmentId) } : {}),
         }),
       }).returning('id');
       proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
@@ -571,6 +575,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
             provider_from_number: fromNumber,
             push_notification_id: notificationId,
             ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
+            ...(appointmentId ? { scheduled_service_id: String(appointmentId) } : {}),
           }),
         })
         .catch(() => {});

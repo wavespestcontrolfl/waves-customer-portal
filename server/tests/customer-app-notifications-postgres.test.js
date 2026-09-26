@@ -957,6 +957,20 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await mockPg('sms_log').where({ from_phone: 'push', status: 'sent' })).length).toBe(2);
   });
 
+  test('Codex #4816 r40: a push proof row names the visit its notice was about', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-2', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const appointmentId = randomUUID();
+    expect(await routing.attemptPushFirst({ customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
+      messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, appointmentId,
+      notificationEventKey: `qa:${invoiceId}:visit` })).toMatchObject({ delivered: true });
+    const proof = await mockPg('sms_log').where({ from_phone: 'push' }).first();
+    expect(proof.metadata).toMatchObject({ channel: 'push', providerAccepted: true, scheduled_service_id: appointmentId });
+  });
+
   test('payment problems preserves charged-profile ownership and legacy companion vetoes', async () => {
     const routing = require('../services/messaging/push-channel-routing');
     await mockPg('notification_prefs').where({ customer_id: property }).update({ billing_channel: 'email' });
