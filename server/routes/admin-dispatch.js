@@ -297,15 +297,8 @@ function recommendationTextValues(value) {
     .filter(Boolean);
 }
 
-function recommendationTextsFromRecord(record = {}) {
-  const structured = parseJsonObject(record.structured_notes);
-  const serviceData = parseJsonObject(record.service_data);
-  const snapshot = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
-    ? serviceData.typedReportSnapshot : null;
-  const texts = [
-    ...recommendationTextValues(structured.formRecommendations),
-    ...recommendationTextValues(snapshot?.nextStepChips),
-  ];
+function recommendationTextsFromSnapshot(snapshot = null) {
+  const texts = recommendationTextValues(snapshot?.nextStepChips);
   const values = snapshot?.values && typeof snapshot.values === 'object' && !Array.isArray(snapshot.values)
     ? snapshot.values : {};
   for (const [key, value] of Object.entries(values)) {
@@ -318,13 +311,44 @@ function recommendationTextsFromRecord(record = {}) {
         : mapped);
     }
   }
+  return texts;
+}
+
+function recommendationHistoryFromRecord(record = {}, visitLine = '') {
+  const structured = parseJsonObject(record.structured_notes);
+  if (structured.backfill || String(structured.visitOutcome || '') === 'incomplete') {
+    return { eligible: false, texts: [] };
+  }
+  const serviceData = parseJsonObject(record.service_data);
+  const primaryLine = String(record.service_line || '').trim() || detectServiceLine(record.service_type);
+  const primaryVisible = primaryLine === visitLine
+    && String(structured.typedReportDelivery || 'auto_send') === 'auto_send';
+  const snapshots = [];
+  if (primaryVisible && serviceData.typedReportSnapshot
+    && typeof serviceData.typedReportSnapshot === 'object') {
+    snapshots.push(serviceData.typedReportSnapshot);
+  }
+  const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots.filter((snapshot) => snapshot
+      && typeof snapshot === 'object'
+      && snapshot.delivery === 'auto_send'
+      && detectServiceLine(snapshot.type) === visitLine)
+    : [];
+  const texts = [
+    ...(primaryVisible ? recommendationTextValues(structured.formRecommendations) : []),
+    ...snapshots.flatMap(recommendationTextsFromSnapshot),
+    ...companionSnapshots.flatMap(recommendationTextsFromSnapshot),
+  ];
   const seen = new Set();
-  return texts.filter((text) => {
-    const key = text.toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return {
+    eligible: primaryVisible || companionSnapshots.length > 0,
+    texts: texts.filter((text) => {
+      const key = text.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+  };
 }
 
 async function loadPreviousRecommendations({ customerId, serviceType, serviceId, visitDay }) {
@@ -344,21 +368,17 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
     .catch(() => []);
   const priorVisits = rows
     .filter((row) => String(row.scheduled_service_id || '') !== String(serviceId || ''))
-    .filter((row) => (String(row.service_line || '').trim() || detectServiceLine(row.service_type)) === visitLine)
-    // Suggestions must come from a report the customer could actually open.
-    // Apply this before the three-visit bound so an internal/incomplete row
+    .map((row) => ({ row, history: recommendationHistoryFromRecord(row, visitLine) }))
+    // Apply customer visibility before the three-visit bound so backfills,
+    // incomplete/suppressed primary reports, and internal-only companions
     // cannot consume one of the customer's visible-history slots.
-    .filter((row) => {
-      const structured = parseJsonObject(row.structured_notes);
-      return String(structured.typedReportDelivery || 'auto_send') === 'auto_send'
-        && String(structured.visitOutcome || '') !== 'incomplete';
-    })
+    .filter(({ history }) => history.eligible)
     .slice(0, PREVIOUS_RECOMMENDATION_VISIT_LIMIT);
   const output = [];
-  for (const row of priorVisits) {
+  for (const { row, history } of priorVisits) {
     const serviceDate = String(row.service_date instanceof Date
       ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
-    for (const text of recommendationTextsFromRecord(row)) {
+    for (const text of history.texts) {
       output.push({ text, serviceDate, serviceRecordId: row.id });
       if (output.length >= PREVIOUS_RECOMMENDATION_ITEM_LIMIT) return output;
     }

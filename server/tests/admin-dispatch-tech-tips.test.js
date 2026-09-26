@@ -243,6 +243,10 @@ describe('GET /:serviceId/tech-tips', () => {
         structured_notes: { visitOutcome: 'incomplete', formRecommendations: ['Incomplete recommendation'] },
       },
       {
+        id: 'backfill-visit', scheduled_service_id: 'backfill-svc', service_line: 'mosquito', service_date: '2026-08-11',
+        structured_notes: { backfill: true, formRecommendations: ['Backfill recommendation'] },
+      },
+      {
         id: 'rec-1', scheduled_service_id: 'old-1', service_line: 'mosquito', service_date: '2026-08-01',
         technician_notes: 'Raw notes must never be mined for recommendations.',
         structured_notes: {
@@ -287,8 +291,40 @@ describe('GET /:serviceId/tech-tips', () => {
       { text: 'Schedule a follow-up inspection', serviceDate: '2026-07-15', serviceRecordId: 'rec-2' },
       { text: 'Empty outdoor containers', serviceDate: '2026-06-20', serviceRecordId: 'rec-3' },
     ]);
-    expect(JSON.stringify(res.body)).not.toMatch(/Raw notes|Internal tagged|Internal-only|Disabled recommendation|Incomplete recommendation|Wrong service line|Current visit|Future recommendation|Older than/);
+    expect(JSON.stringify(res.body)).not.toMatch(/Raw notes|Internal tagged|Internal-only|Disabled recommendation|Incomplete recommendation|Backfill recommendation|Wrong service line|Current visit|Future recommendation|Older than/);
     expect(calls).toEqual(['scheduled_services', 'service_records']);
+  });
+
+  test('completion history includes only customer-visible companions matching the current line', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: SERVICE,
+      recommendationRows: [{
+        id: 'combined-lawn', scheduled_service_id: 'old-combined', service_line: 'lawn', service_date: '2026-08-01',
+        structured_notes: { typedReportDelivery: 'internal_only', formRecommendations: ['Primary lawn recommendation'] },
+        service_data: {
+          typedReportSnapshot: { nextStepChips: ['Primary lawn next step'] },
+          companionReportSnapshots: [
+            {
+              type: 'mosquito_event', delivery: 'auto_send',
+              nextStepChips: ['Empty outdoor containers'],
+              values: { inspection_recommendation: 'Recheck the screened patio' },
+            },
+            { type: 'mosquito_event', delivery: 'internal_only', nextStepChips: ['Internal mosquito step'] },
+            { type: 'tree_shrub', delivery: 'auto_send', nextStepChips: ['Wrong companion line'] },
+          ],
+        },
+      }],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([
+      { text: 'Empty outdoor containers', serviceDate: '2026-08-01', serviceRecordId: 'combined-lawn' },
+      { text: 'Recheck the screened patio', serviceDate: '2026-08-01', serviceRecordId: 'combined-lawn' },
+    ]);
+    expect(JSON.stringify(res.body)).not.toMatch(/Primary lawn|Internal mosquito|Wrong companion/);
   });
 
   test('completion history is bounded to twelve suggestions', async () => {
