@@ -2971,13 +2971,65 @@ async function statusForPrepayInvoice(invoiceId, conn = db) {
 // reconcile sweep). Best-effort: a miss here self-heals on the NEXT sync
 // of this same successor invoice (every one of them re-enters the
 // pending→active / cancelled→active branches below).
-async function stampParentRenewedForSuccessor(successorTerm, contextLabel) {
+async function stampParentRenewedForSuccessor(successorTerm, contextLabel, conn = db) {
   if (!successorTerm?.renewed_from_term_id) return;
+  // Codex round-2 P1: a SAVEPOINT on the caller's own transaction — the
+  // SAME pattern reverseWaveguardExtensionCredits uses (see its own
+  // comment above). Running this write through the GLOBAL db handle while
+  // the successor's own activation held an outer transaction let the
+  // parent stamp commit BEFORE the successor's flip, or survive an outer
+  // rollback entirely (Codex round-2 finding). conn.transaction() on a
+  // knex trx is a savepoint: a failure here rolls back to it and the
+  // caller's transaction (the successor's own flip) stays healthy.
+  const work = (t) => recordDecision({ termId: successorTerm.renewed_from_term_id, action: 'renew', conn: t });
   try {
-    await recordDecision({ termId: successorTerm.renewed_from_term_id, action: 'renew' });
+    if (conn === db) await db.transaction(work);
+    else if (conn.isTransaction) await conn.transaction(work);
+    else await work(conn);
   } catch (err) {
     logger.warn(`[annual-prepay] parent renewed-stamp (${contextLabel}) skipped for successor ${successorTerm.id}: ${err.message}`);
   }
+}
+
+// Codex round-2 P1 (backstop): stampParentRenewedForSuccessor's own
+// try/catch is deliberately best-effort — a genuine failure there is
+// swallowed to protect the successor's own activation, so nothing else
+// ever retries it (the pending→active branch above only fires ONCE per
+// successor, on the exact tick its status flips). This reconcile leg finds
+// any ACTIVE, PAID termite renewal successor whose PARENT is still
+// undecided and completes the stamp — idempotent via recordDecision's own
+// `whereIn(ACTIVE_STATUSES) AND renewal_decision IS NULL` guard, so it is
+// always safe to re-run.
+async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
+  const summary = { scanned: 0, stamped: 0 };
+  if (!(await annualPrepayTableExists())) return summary;
+  let candidates = [];
+  try {
+    candidates = await conn('annual_prepay_terms as s')
+      .join('annual_prepay_terms as p', 'p.id', 's.renewed_from_term_id')
+      .leftJoin('invoices as i', 'i.id', 's.prepay_invoice_id')
+      .whereNotNull('s.renewed_from_term_id')
+      .whereIn('s.status', ACTIVE_STATUSES)
+      .whereNull('p.renewal_decision')
+      .where(function invoicePaid() {
+        this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+      })
+      .select('s.id as successor_id', 's.renewed_from_term_id as parent_id')
+      .limit(limit);
+  } catch (err) {
+    logger.warn(`[annual-prepay] parent-renewed reconcile scan failed: ${err.message}`);
+    return summary;
+  }
+  summary.scanned = candidates.length;
+  for (const row of candidates) {
+    try {
+      const decided = await recordDecision({ termId: row.parent_id, action: 'renew', conn });
+      if (decided) summary.stamped += 1;
+    } catch (err) {
+      logger.warn(`[annual-prepay] parent-renewed reconcile failed for successor ${row.successor_id}: ${err.message}`);
+    }
+  }
+  return summary;
 }
 
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
@@ -3043,6 +3095,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // …and any switch-restored per-application invoice becomes a
           // duplicate of the revived coverage (codex #3591 r54 P1).
           await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
+          // Termite renewal successor, freshly paid: stamp the PARENT
+          // 'renewed' now (move 14) — see stampParentRenewedForSuccessor's
+          // own comment. Codex round-2 P1: runs on THIS SAME transaction/
+          // savepoint (`t`), not the global `db` handle, so it can never
+          // commit out of order with, or survive a rollback of, this exact
+          // flip.
+          await stampParentRenewedForSuccessor(updated, 'pending->active', t);
         }
         return updated;
       };
@@ -3050,13 +3109,6 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         ? await conn.transaction(reviveFromPending)
         : await reviveFromPending(conn);
       current = updated || term;
-      // Termite renewal successor, freshly paid: stamp the PARENT 'renewed'
-      // now (move 14) — see stampParentRenewedForSuccessor's own comment.
-      // Deliberately OUTSIDE the transaction above: recordDecision writes
-      // through the global `db` handle (it has no conn parameter), and this
-      // stamp only fires once the successor's own flip has durably
-      // committed.
-      if (updated) await stampParentRenewedForSuccessor(updated, 'pending->active');
     } else if (nextStatus === 'active' && term.status === 'cancelled') {
       // Lost-dispute revival (see the marker-gated select above). The
       // conditional WHERE keeps it race-safe and replay-idempotent; a miss
@@ -3080,6 +3132,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // …and any switch-restored per-application invoice becomes a
           // duplicate of the revived coverage (codex #3591 r54 P1).
           await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
+          // Same stamp as the pending→active branch above, for the (rarer)
+          // dispute-revival shape: a termite renewal successor whose OWN
+          // invoice was disputed and lost, then re-paid. Same transaction/
+          // savepoint (`t`) as this flip, for the same reason.
+          await stampParentRenewedForSuccessor(updated, 'cancelled->active revival', t);
         }
         return updated;
       };
@@ -3087,10 +3144,6 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         ? await conn.transaction(reviveFromCancelled)
         : await reviveFromCancelled(conn);
       current = updated || term;
-      // Same stamp as the pending→active branch above, for the (rarer)
-      // dispute-revival shape: a termite renewal successor whose OWN
-      // invoice was disputed and lost, then re-paid.
-      if (updated) await stampParentRenewedForSuccessor(updated, 'cancelled->active revival');
     } else if (nextStatus === 'cancelled') {
       // The cancel flip and EVERY restoration commit TOGETHER (codex #3591
       // r53 local P0 — symmetric with the revival branches): on the global
@@ -5816,7 +5869,7 @@ async function hasAnnualPrepayRenewal(customerId, termEnd) {
   return !!row;
 }
 
-async function recordDecision({ termId, action, adminUserId = null, notes = null } = {}) {
+async function recordDecision({ termId, action, adminUserId = null, notes = null, conn = db } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const allowed = new Set(['contacted', 'renew', 'cancel', 'switch_plan']);
   if (!allowed.has(action)) throw new Error('invalid annual prepay action');
@@ -5829,7 +5882,7 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
       updated_at: now,
     };
     if (notes) update.renewal_notes = notes;
-    const [term] = await db('annual_prepay_terms')
+    const [term] = await conn('annual_prepay_terms')
       .where({ id: termId })
       .whereIn('status', ACTIVE_STATUSES)
       .whereNull('renewal_decision')
@@ -5846,7 +5899,12 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
     updated_at: now,
   };
   if (notes) update.renewal_notes = notes;
-  const [term] = await db('annual_prepay_terms')
+  // Codex round-2 P1: `conn` (default the global handle, unchanged for
+  // every pre-existing caller) lets stampParentRenewedForSuccessor below
+  // run this SAME write on the successor's own transaction/savepoint,
+  // instead of a separate global-db write that could commit out of order
+  // with, or survive a rollback of, the successor's own activation.
+  const [term] = await conn('annual_prepay_terms')
     .where({ id: termId })
     .whereIn('status', ACTIVE_STATUSES)
     .whereNull('renewal_decision')
@@ -5900,6 +5958,11 @@ module.exports = {
   TERMITE_RENEWAL_GRACE_DAYS,
   termiteRenewalGraceDeadlineFor,
   termiteRenewalGraceDeadlineSql,
+  // Codex round-2 P1 backstop: reconciles an active, paid termite renewal
+  // successor whose PARENT never got its 'renewed' stamp (a failure inside
+  // stampParentRenewedForSuccessor's own savepoint, swallowed to protect
+  // the successor's own activation).
+  reconcileParentRenewedStamps,
   // Root exports (not only _private): the annual-prepay-invoice route
   // validates the operator's first-visit time with the SAME normalizer that
   // persists it and the SAME conflict predicate the seeder re-checks with, so

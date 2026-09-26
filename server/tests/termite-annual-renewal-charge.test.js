@@ -29,7 +29,7 @@ describe('termite annual renewal charge', () => {
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   }
 
-  function mockGraceHelpers({ graceDays = 30 } = {}) {
+  function mockGraceHelpers({ graceDays = 30, reconcileParentRenewedStampsImpl } = {}) {
     // P1-2/P2-4: the grace window and its date formula are owned by
     // annual-prepay-renewals.js — mocked here so this suite never depends
     // on that module's own (separately-tested) internals.
@@ -46,6 +46,9 @@ describe('termite annual renewal charge', () => {
           d.setUTCDate(d.getUTCDate() + graceDays);
           return d.toISOString().slice(0, 10);
         }),
+        // Codex round-2 P1 backstop pass — a no-op stub by default so the
+        // sweep's own try/catch never masks a real assertion below.
+        reconcileParentRenewedStamps: jest.fn(reconcileParentRenewedStampsImpl || (async () => ({ scanned: 0, stamped: 0 }))),
       };
       return actual;
     });
@@ -946,78 +949,225 @@ describe('termite annual renewal charge', () => {
 
   // ---- grace lapse --------------------------------------------------------
 
-  describe('processGraceLapseForTerm', () => {
-    test('voids the successor invoice (cascading it to cancelled), raises the station-retrieval task, and stamps the PARENT decided-cancel (P2-1)', async () => {
+  // conn('annual_prepay_terms') is called twice inside processGraceLapseForTerm
+  // now: once to stamp renewal_lapse_started_at (`.where().whereNull().update()`),
+  // once to stamp renewal_lapse_completed_at (`.where().update()`). Both are
+  // supported on the SAME mocked `where()` return so either chain works.
+  function makeLapseConn({ startedAlreadySet = false } = {}) {
+    const startedUpdate = jest.fn().mockResolvedValue(1);
+    const completedUpdate = jest.fn().mockResolvedValue(1);
+    const conn = jest.fn((table) => {
+      if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
+      return {
+        where: jest.fn(() => ({
+          whereNull: jest.fn((col) => {
+            expect(col).toBe('renewal_lapse_started_at');
+            return { update: startedUpdate };
+          }),
+          update: completedUpdate,
+        })),
+      };
+    });
+    return { conn, startedUpdate, completedUpdate, startedAlreadySet };
+  }
+
+  function mockLapseDeps({
+    voidInvoiceImpl, raiseTermiteRetrievalTaskImpl, recordDecisionImpl, assertNoInvoiceChargeReconciliationPendingImpl,
+  } = {}) {
+    const voidInvoice = jest.fn(voidInvoiceImpl || (async () => ({})));
+    jest.doMock('../services/invoice', () => ({ voidInvoice }));
+    const raiseTermiteRetrievalTask = jest.fn(raiseTermiteRetrievalTaskImpl || (async () => ({ raised: true })));
+    jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask }));
+    const recordDecision = jest.fn(recordDecisionImpl || (async () => ({ id: 'parent-1' })));
+    jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision }));
+    const assertNoInvoiceChargeReconciliationPending = jest.fn(
+      assertNoInvoiceChargeReconciliationPendingImpl || (async () => undefined),
+    );
+    jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending }));
+    return { voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending };
+  }
+
+  describe('processGraceLapseForTerm — the re-entrant lapse state machine', () => {
+    test('a fresh lapse: stamps started_at, checks reconciliation, voids, raises retrieval, decides the parent, then stamps completed_at', async () => {
       mockCommon();
-      const voidInvoice = jest.fn(async () => ({}));
-      jest.doMock('../services/invoice', () => ({ voidInvoice }));
-      const raiseTermiteRetrievalTask = jest.fn(async () => ({ raised: true }));
-      jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask }));
-      const recordDecision = jest.fn().mockResolvedValue({ id: 'parent-1' });
-      jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision }));
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending } = mockLapseDeps();
+      const { conn, startedUpdate, completedUpdate } = makeLapseConn();
 
       const { _private } = require('../services/termite-annual-renewal-charge');
       const term = {
         id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
       };
-      await _private.processGraceLapseForTerm(term, jest.fn());
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
 
+      expect(outcome).not.toBe('deferred');
+      expect(startedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_started_at: expect.any(Date) }));
+      expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', conn);
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',
       }));
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel' });
+      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_completed_at: expect.any(Date) }));
     });
 
-    test('a lapse-stamp failure on the parent is best-effort and never throws', async () => {
+    // Codex round-2 P0.
+    test('P0: a pending charge reconciliation FAILS CLOSED — no void, a bell, started_at stamped but NOT completed_at, retried later', async () => {
       mockCommon();
-      jest.doMock('../services/invoice', () => ({ voidInvoice: jest.fn(async () => ({})) }));
-      jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask: jest.fn(async () => ({})) }));
-      jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision: jest.fn().mockRejectedValue(new Error('db down')) }));
+      const reconErr = new Error('Invoice already has a saved-card charge in progress or awaiting reconciliation');
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+        assertNoInvoiceChargeReconciliationPendingImpl: async () => { throw reconErr; },
+      });
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const { conn, startedUpdate, completedUpdate } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(startedUpdate).toHaveBeenCalledTimes(1); // provenance stamped regardless
+      expect(voidInvoice).not.toHaveBeenCalled(); // NEVER voided while reconciliation is pending
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(recordDecision).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalled(); // stays started-but-not-completed
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/reconciliation/i), expect.any(String), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:lapse_reconciliation_pending',
+      }));
+    });
+
+    test('a resumed lapse (started_at already set) does NOT re-stamp started_at, but still runs the rest', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps();
+      const { conn, startedUpdate, completedUpdate } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'), // crash after start, before void — resuming
+      };
+      await _private.processGraceLapseForTerm(term, conn);
+
+      expect(startedUpdate).not.toHaveBeenCalled();
+      // voidInvoice self-heals on re-entry — still called even resuming after
+      // a crash between the void and the retrieval task.
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      expect(recordDecision).toHaveBeenCalledTimes(1);
+      expect(completedUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a term with no prepay_invoice_id skips the reconciliation check and the void, but still raises retrieval + decides the parent', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending } = mockLapseDeps();
+      const { conn, completedUpdate } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = { id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: null, renewed_from_term_id: 'parent-1' };
+      await _private.processGraceLapseForTerm(term, conn);
+
+      expect(assertNoInvoiceChargeReconciliationPending).not.toHaveBeenCalled();
+      expect(voidInvoice).not.toHaveBeenCalled();
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      expect(recordDecision).toHaveBeenCalledTimes(1);
+      expect(completedUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a lapse-stamp failure on the parent is best-effort, never throws, but leaves completed_at unstamped so it retries', async () => {
+      mockCommon();
+      const { completedUpdate, conn } = makeLapseConn();
+      mockLapseDeps({ recordDecisionImpl: async () => { throw new Error('db down'); } });
 
       const { _private } = require('../services/termite-annual-renewal-charge');
       const term = { id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1' };
-      await expect(_private.processGraceLapseForTerm(term, jest.fn())).resolves.not.toThrow();
+      await expect(_private.processGraceLapseForTerm(term, conn)).resolves.not.toThrow();
+      expect(completedUpdate).not.toHaveBeenCalled();
     });
   });
 
-  describe('reconcileMissedLapseEffects (Codex round-1 P1) — recoverable post-void lapse effects', () => {
+  describe('reconcileMissedLapseEffects (Codex round-1/2 P1) — recoverable post-void lapse effects', () => {
     function tableQuery(rows) {
       const q = {};
-      const chain = ['whereNotNull', 'where', 'orderBy', 'limit', 'select'];
+      const chain = ['whereNotNull', 'whereNull', 'where', 'orderBy', 'limit', 'select'];
       for (const m of chain) q[m] = jest.fn(() => q);
       q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
       return q;
     }
 
-    test('re-runs processGraceLapseForTerm (void + retrieval task + parent decision) for every cancelled termite successor found — every step is independently idempotent, so re-running a finished one is a safe no-op', async () => {
+    // Codex round-2 P1: the query is keyed EXCLUSIVELY on the persisted
+    // provenance columns — never inferred from status.
+    test('the scan filters on renewal_lapse_started_at IS NOT NULL AND renewal_lapse_completed_at IS NULL — never on status', async () => {
       mockCommon();
-      const voidInvoice = jest.fn(async () => ({}));
-      jest.doMock('../services/invoice', () => ({ voidInvoice }));
-      const raiseTermiteRetrievalTask = jest.fn(async () => ({}));
-      jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask }));
-      const recordDecision = jest.fn().mockResolvedValue({ id: 'parent-1' });
-      jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision }));
-
-      const term = {
-        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', status: 'cancelled',
-      };
+      const scanQ = tableQuery([]);
       const conn = jest.fn((table) => {
-        if (table === 'annual_prepay_terms as t') return tableQuery([term]);
+        if (table === 'annual_prepay_terms as t') return scanQ;
         throw new Error(`unexpected table ${table}`);
       });
 
       const { _private } = require('../services/termite-annual-renewal-charge');
-      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0 };
+      await _private.reconcileMissedLapseEffects({ conn, limit: 200, counts: { lapseEffectsScanned: 0, lapseEffectsReconciled: 0, graceReconciliationDeferred: 0 } });
+
+      expect(scanQ.whereNotNull).toHaveBeenCalledWith('t.renewal_lapse_started_at');
+      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_lapse_completed_at');
+      // Never filters on status at all — a staff-voided (or dispute-lost, or
+      // flag-removed) successor with NO renewal_lapse_started_at is excluded
+      // by the whereNotNull above, regardless of its status.
+      expect(scanQ.where).not.toHaveBeenCalled();
+    });
+
+    test('re-runs processGraceLapseForTerm (void + retrieval task + parent decision) for every started-but-not-completed lapse found', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending } = mockLapseDeps();
+
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'), renewal_lapse_completed_at: null,
+      };
+      const { conn: lapseConn, completedUpdate } = makeLapseConn();
+      const conn = jest.fn((table) => {
+        if (table === 'annual_prepay_terms as t') return tableQuery([term]);
+        return lapseConn(table);
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0, graceReconciliationDeferred: 0 };
       await _private.reconcileMissedLapseEffects({ conn, limit: 200, counts });
 
       expect(counts.lapseEffectsScanned).toBe(1);
       expect(counts.lapseEffectsReconciled).toBe(1);
+      expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', conn);
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',
       }));
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel' });
+      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(completedUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a row still blocked by a pending reconciliation counts as deferred, not reconciled — never re-voided blindly', async () => {
+      mockCommon();
+      mockLapseDeps({ assertNoInvoiceChargeReconciliationPendingImpl: async () => { throw new Error('still ambiguous'); } });
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'), renewal_lapse_completed_at: null,
+      };
+      const { conn: lapseConn } = makeLapseConn();
+      const conn = jest.fn((table) => {
+        if (table === 'annual_prepay_terms as t') return tableQuery([term]);
+        return lapseConn(table);
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0, graceReconciliationDeferred: 0 };
+      await _private.reconcileMissedLapseEffects({ conn, limit: 200, counts });
+
+      expect(counts.lapseEffectsScanned).toBe(1);
+      expect(counts.lapseEffectsReconciled).toBe(0);
+      expect(counts.graceReconciliationDeferred).toBe(1);
     });
 
     test('a failure reconciling one successor never blocks the rest', async () => {
@@ -1025,23 +1175,24 @@ describe('termite annual renewal charge', () => {
       const voidInvoice = jest.fn()
         .mockRejectedValueOnce(new Error('boom'))
         .mockResolvedValueOnce({});
-      jest.doMock('../services/invoice', () => ({ voidInvoice }));
-      jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask: jest.fn(async () => ({})) }));
-      jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision: jest.fn().mockResolvedValue({}) }));
+      mockLapseDeps({ voidInvoiceImpl: voidInvoice });
 
       const badTerm = {
-        id: 'bad-term', customer_id: 'cust-1', prepay_invoice_id: 'bad-invoice', renewed_from_term_id: 'parent-1', status: 'cancelled',
+        id: 'bad-term', customer_id: 'cust-1', prepay_invoice_id: 'bad-invoice', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
       };
       const goodTerm = {
-        id: 'good-term', customer_id: 'cust-2', prepay_invoice_id: 'good-invoice', renewed_from_term_id: 'parent-2', status: 'cancelled',
+        id: 'good-term', customer_id: 'cust-2', prepay_invoice_id: 'good-invoice', renewed_from_term_id: 'parent-2',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
       };
+      const { conn: lapseConn } = makeLapseConn();
       const conn = jest.fn((table) => {
         if (table === 'annual_prepay_terms as t') return tableQuery([badTerm, goodTerm]);
-        throw new Error(`unexpected table ${table}`);
+        return lapseConn(table);
       });
 
       const { _private } = require('../services/termite-annual-renewal-charge');
-      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0 };
+      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0, graceReconciliationDeferred: 0 };
       await _private.reconcileMissedLapseEffects({ conn, limit: 200, counts });
 
       expect(counts.lapseEffectsScanned).toBe(2);
@@ -1053,7 +1204,7 @@ describe('termite annual renewal charge', () => {
       mockCommon();
       const conn = jest.fn(() => { throw new Error('db down'); });
       const { _private } = require('../services/termite-annual-renewal-charge');
-      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0 };
+      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0, graceReconciliationDeferred: 0 };
       await expect(_private.reconcileMissedLapseEffects({ conn, limit: 200, counts })).resolves.toBeUndefined();
     });
   });
@@ -1116,6 +1267,31 @@ describe('termite annual renewal charge', () => {
       q.catch = jest.fn(() => Promise.resolve());
       return q;
     }
+
+    test('runs reconcileParentRenewedStamps (Codex round-2 P1 backstop) and wires its summary into the sweep counts', async () => {
+      mockCommon();
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      const reconcileParentRenewedStamps = jest.fn(async () => ({ scanned: 3, stamped: 2 }));
+      mockGraceHelpers({ graceDays: 30, reconcileParentRenewedStampsImpl: reconcileParentRenewedStamps });
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn() }));
+      jest.doMock('../services/recurring-card-on-file', () => ({ resolvePrepayChargeMethod: jest.fn() }));
+      jest.doMock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(), quoteInvoiceSavedCardCharge: jest.fn(), assertNoInvoiceChargeReconciliationPending: jest.fn() }));
+
+      const empty = tableQuery([]);
+      const conn = jest.fn((table) => {
+        if (table === 'annual_prepay_terms as t') return empty;
+        throw new Error(`unexpected table ${table}`);
+      });
+      conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+
+      const { runTermiteAnnualRenewalSweep } = require('../services/termite-annual-renewal-charge');
+      const result = await runTermiteAnnualRenewalSweep({ conn, limit: 150 });
+
+      expect(reconcileParentRenewedStamps).toHaveBeenCalledWith({ conn, limit: 150 });
+      expect(result.parentRenewedScanned).toBe(3);
+      expect(result.parentRenewedStamped).toBe(2);
+    });
 
     test('6a: a never-attempted, hour-old successor with NO existing bell runs decideAndCharge for real', async () => {
       mockCommon();

@@ -53,6 +53,8 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'select',
     'forUpdate',
     'leftJoin',
+    'join',
+    'limit',
     'whereRaw',
     'whereNotNull',
     'orWhereNotNull',
@@ -3689,6 +3691,94 @@ describe('stampParentRenewedForSuccessor (move 14) — the parent-renewed hook',
   test('a db failure is best-effort — logged and swallowed, never thrown to the caller', async () => {
     db.mockImplementation(() => { throw new Error('connection lost'); });
     await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+  });
+
+  // Codex round-2 P1: the parent stamp must run on the successor's OWN
+  // transaction/savepoint, never a separate global-db write that could
+  // commit out of order with (or survive a rollback of) the successor's
+  // own activation flip.
+  test('when the caller passes an existing transaction, the stamp runs as a SAVEPOINT on it (conn.transaction), never the global db', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const trxTableQueues = { annual_prepay_terms: [recordDecisionQ] };
+    const trx = jest.fn((table) => {
+      const queue = trxTableQueues[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected trx table ${table}`);
+      return queue.shift();
+    });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn(async (cb) => cb(trx));
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test', trx);
+
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(db).not.toHaveBeenCalled(); // never touches the global handle
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+
+  test('a failure inside the savepoint never aborts (or is masked by) the caller\'s own transaction', async () => {
+    const trx = jest.fn(() => { throw new Error('constraint violation'); });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn(async (cb) => cb(trx));
+
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test', trx))
+      .resolves.toBeUndefined();
+    expect(trx.transaction).toHaveBeenCalledTimes(1); // the savepoint, not a raw statement on trx
+  });
+
+  test('a plain (non-db, non-transaction) conn runs the stamp directly, with no extra transaction/savepoint wrapper', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const plainConnQueues = { annual_prepay_terms: [recordDecisionQ] };
+    const plainConn = jest.fn((table) => {
+      const queue = plainConnQueues[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected conn table ${table}`);
+      return queue.shift();
+    });
+    // Deliberately no .transaction / .isTransaction — same shape a bare
+    // knex query builder (not a full connection) would have.
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test', plainConn);
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+});
+
+describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+  });
+
+  test('stamps recordDecision(\'renew\') for every active, paid termite successor whose parent is still undecided', async () => {
+    const scanQ = query({ rows: [{ successor_id: 'succ-1', parent_id: 'parent-1' }, { successor_id: 'succ-2', parent_id: 'parent-2' }] });
+    const decision1 = query({ returning: [{ id: 'parent-1', renewal_decision: 'renew' }] });
+    const decision2 = query({ returning: [{ id: 'parent-2', renewal_decision: 'renew' }] });
+    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [decision1, decision2] });
+
+    const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
+
+    expect(summary.scanned).toBe(2);
+    expect(summary.stamped).toBe(2);
+    expect(decision1.where).toHaveBeenCalledWith({ id: 'parent-1' });
+    expect(decision2.where).toHaveBeenCalledWith({ id: 'parent-2' });
+  });
+
+  test('a scan failure degrades to an empty summary, never throws', async () => {
+    const conn = jest.fn(() => { throw new Error('db down'); });
+    await expect(AnnualPrepayRenewals.reconcileParentRenewedStamps({ conn })).resolves.toEqual({ scanned: 0, stamped: 0 });
+  });
+
+  test('a per-row failure never blocks the rest', async () => {
+    const scanQ = query({ rows: [{ successor_id: 'succ-1', parent_id: 'bad-parent' }, { successor_id: 'succ-2', parent_id: 'parent-2' }] });
+    const badDecision = query();
+    badDecision.returning = jest.fn().mockRejectedValue(new Error('boom'));
+    const goodDecision = query({ returning: [{ id: 'parent-2', renewal_decision: 'renew' }] });
+    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [badDecision, goodDecision] });
+
+    const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
+
+    expect(summary.scanned).toBe(2);
+    expect(summary.stamped).toBe(1);
   });
 });
 

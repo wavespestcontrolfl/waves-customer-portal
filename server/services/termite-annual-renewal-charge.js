@@ -37,26 +37,29 @@
 //      NOT-stale, undecided termite term with no successor yet: mints the
 //      successor term + its renewal invoice (§2), then decides whether to
 //      charge it (§3).
-//   5. processGraceLapses — an unpaid successor past its own payment grace
-//      deadline (GRACE_DAYS from whichever is LATER of its term_start or
-//      its own created_at — see annual-prepay-renewals.js's
-//      termiteRenewalGraceDeadlineFor, the SAME formula
-//      coveredTermsAsOf's grace-coverage branch reads, P2-4) whose renewal
-//      invoice was actually presented to the customer (a charge was
-//      attempted, or the invoice was sent / is not still a draft) voids
-//      its invoice (which cascades the term to 'cancelled' through the
-//      existing invoice-void -> annual-prepay sync path) and raises the
-//      existing termite station-retrieval task. The SAME tick also records
-//      the decided lapse ('cancel') on the PARENT term.
-//   6. reconcileMissedLapseEffects (Codex round-1 P1) — the void in pass 5
-//      above commits BEFORE its two follow-on effects (the retrieval task,
-//      the parent's decided lapse); a crash or failure between the void
-//      and either effect leaves the successor 'cancelled', which no
-//      longer matches pass 5's own scan. Re-runs processGraceLapseForTerm
-//      for every already-cancelled termite renewal successor — every step
-//      in it (the void, the retrieval task, the parent decision) is
-//      independently idempotent, so re-running the whole function for one
-//      whose effects already finished is always a safe no-op.
+//   5. processGraceLapses — for a FRESH (never-started) unpaid successor
+//      past its own payment grace deadline (GRACE_DAYS from whichever is
+//      LATER of its term_start or its own created_at — see
+//      annual-prepay-renewals.js's termiteRenewalGraceDeadlineFor, the SAME
+//      formula coveredTermsAsOf's grace-coverage branch reads, P2-4) whose
+//      renewal invoice was actually presented to the customer (a charge
+//      was attempted, or the invoice was sent / is not still a draft):
+//      runs processGraceLapseForTerm's full state machine (below) —
+//      stamp renewal_lapse_started_at, fail-closed reconciliation check,
+//      void, retrieval task, parent decision, renewal_lapse_completed_at.
+//      A row this pass already started (or a prior tick did) is excluded
+//      here — pass 6 owns resuming it exclusively.
+//   6. reconcileMissedLapseEffects (Codex round-1/2 P1) — pass 5's state
+//      machine can stop partway through (a crash, or a fail-closed
+//      reconciliation deferral) leaving a row with renewal_lapse_started_at
+//      set and renewal_lapse_completed_at still null. Re-runs
+//      processGraceLapseForTerm for every such row — PERSISTED PROVENANCE,
+//      never inferred from status='cancelled' (which a staff void, a
+//      removed annual-prepay flag, or a lost dispute can ALSO produce, and
+//      which this pass must never touch). Every step in the state machine
+//      is independently idempotent/re-entrant, so re-running it for a row
+//      whose effects already finished, or one still genuinely blocked, is
+//      always safe.
 //   7. reconcileStuckSuccessors — two narrow, self-healing legs for the
 //      accepted crash gaps between minting a successor and finishing its
 //      charge decision (§3):
@@ -102,7 +105,24 @@
 //     the parent (docs/annual-prepay-term-states.md move 14) — or
 //     recordDecision('cancel') on a grace lapse (move 15). Both reuse the
 //     SAME writer an operator's manual decision uses, so neither is a new
-//     status-write site in THIS file.
+//     status-write site in THIS file. Codex round-2 P1: the parent stamp
+//     itself runs as a SAVEPOINT on the successor's OWN activation
+//     transaction (annual-prepay-renewals.js's stampParentRenewedForSuccessor),
+//     never a separate global-db write that could commit out of order
+//     with, or survive a rollback of, the successor's own flip; a reconcile
+//     leg (AnnualPrepayRenewals.reconcileParentRenewedStamps) backstops an
+//     active, paid successor whose parent still never got stamped.
+//   - Codex round-2 P0: the grace-lapse pass never voids an invoice without
+//     first asserting no Stripe charge reconciliation is pending on it (the
+//     SAME guard the abandoned-prepay sweep uses) — a crash after Stripe
+//     ACCEPTS a charge but before the local write completes must never be
+//     misread as "safe to void, nothing collected". Codex round-2 P1: the
+//     lapse itself is tracked with persisted PROVENANCE
+//     (renewal_lapse_started_at / renewal_lapse_completed_at, stamped
+//     BEFORE any void and only once every effect actually succeeds) —
+//     recovery reconciles ONLY a confirmed, started-but-incomplete lapse,
+//     never inferring one from status='cancelled' (a shape a staff void, a
+//     removed annual-prepay flag, or a lost dispute can also produce).
 //   - Codex round-1 P0: the fence claim is not a bare UPDATE — it is
 //     resolveChargeEligibility, a single transaction that re-reads the
 //     successor and its parent UNDER LOCK and refuses the claim if the
@@ -765,6 +785,14 @@ const RENEWAL_BELL_COPY = {
     title: 'Termite annual renewal — charge skipped, no longer eligible',
     body: `The renewal charge for customer ${successor.customer_id}'s termite annual renewal (invoice for $${Number(successor.prepay_amount).toFixed(2)}) was skipped without attempting the card: ${reason}. Check the account — this usually means the renewal was declined or has lapsed since it was minted. The card was NOT charged.`,
   }),
+  // Codex round-2 P0: the grace-lapse pass refused to void this successor's
+  // invoice because a Stripe charge reconciliation is still pending on it —
+  // voiding now could void collected revenue and wrongly trigger station
+  // retrieval. No void happened; the next sweep tick re-checks and retries.
+  lapse_reconciliation_pending: (successor, reason) => ({
+    title: 'Termite annual renewal — grace lapse deferred, charge reconciliation pending',
+    body: `The termite annual renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) reached its grace deadline, but a Stripe charge reconciliation is still pending on its invoice (${reason}) — voiding it now could void money that was actually collected. It was NOT voided; check Stripe and the invoice before collecting or cancelling any other way. The next sweep will retry automatically once the reconciliation clears.`,
+  }),
 };
 
 // Returns the underlying notifyAdmin result (or null on failure) so
@@ -917,7 +945,11 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
 // success), the station-retrieval task's own dedupeKey is a third,
 // independent safety net, and recordDecision('cancel') on the parent is
 // itself idempotent (whereIn(ACTIVE_STATUSES) AND renewal_decision IS
-// NULL).
+// NULL). Codex round-2 P1: `whereNull('t.renewal_lapse_started_at')`
+// excludes a lapse THIS pass, or a prior tick, already started — a
+// started-but-not-completed row is the recovery pass's job exclusively
+// (reconcileMissedLapseEffects below), never re-attempted from scratch
+// here.
 async function processGraceLapses({ conn = db, limit = 200, counts }) {
   try {
     const candidates = await conn('annual_prepay_terms as t')
@@ -925,6 +957,7 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
       .whereNotNull('t.annual_plan_version')
       .whereNotNull('t.renewed_from_term_id')
       .where('t.status', PAYMENT_PENDING_STATUS)
+      .whereNull('t.renewal_lapse_started_at')
       .where(function presented() {
         this.whereNotNull('t.renewal_charge_attempted_at')
           .orWhere(function invoiceDelivered() {
@@ -945,9 +978,10 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
       if (!deadline || etDateString() <= deadline) continue;
       counts.graceScanned += 1;
       try {
-        await processGraceLapseForTerm(term, conn);
+        const outcome = await processGraceLapseForTerm(term, conn);
         lapsed += 1;
-        counts.graceLapsed += 1;
+        if (outcome === 'deferred') counts.graceReconciliationDeferred += 1;
+        else counts.graceLapsed += 1;
       } catch (err) {
         logger.error(`[termite-annual-renewal] grace lapse failed for term ${term.id}: ${err.message}`);
       }
@@ -957,13 +991,61 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
   }
 }
 
+// A re-entrant state machine — safe to call again from wherever it last got
+// to, for BOTH callers (processGraceLapses on a fresh candidate, and
+// reconcileMissedLapseEffects resuming a started-but-not-completed one):
+//   1. Stamp renewal_lapse_started_at (Codex round-2 P1) — persisted
+//      PROVENANCE that this successor is undergoing a CONFIRMED grace
+//      lapse, committed in its own write BEFORE any void is even
+//      attempted. This is the ONLY thing that ever sets this column, so
+//      its mere presence (with completed_at still null) is what the
+//      recovery pass keys on — never an inference from status='cancelled',
+//      which a staff void, a removed annual-prepay flag, or a lost dispute
+//      can ALSO produce. Guarded (`whereNull`) so a resumed row no-ops here.
+//   2. Codex round-2 P0: before voiding, assert no Stripe charge
+//      reconciliation is pending on the invoice — the SAME guard the
+//      abandoned-prepay sweep uses (invoice.js's switch-restore leg) before
+//      its own auto-void. A crash after Stripe ACCEPTS a charge (from
+//      decideAndCharge, on this same successor) but before the local
+//      payments/invoice write completes leaves a durable CLAIMED
+//      stripe_invoice_charge_attempts row (or an orphan-charge marker)
+//      while the invoice still reads unpaid/draft — voidInvoice has no way
+//      to know money already moved. FAIL CLOSED: no void, bell staff, and
+//      leave the lapse started-but-not-completed for the next tick to
+//      retry (never inferred safe just because the deadline passed).
+//   3. voidInvoice — self-heals: re-entry on an already-void invoice
+//      re-runs its idempotent annual-prepay sync rather than erroring, so
+//      a prior partial run (invoice voided, sync lost) repairs here
+//      instead of being skipped forever.
+//   4. Raise the station-retrieval task — idempotent on its own dedupeKey.
+//   5. Record the decided lapse ('cancel') on the PARENT — the exact
+//      'cancelled' + renewal_decision='cancel' shape coveredTermsAsOf's
+//      decidedCoveredAndPaid branch already models for every other
+//      annual-prepay renewal lapse. Reuses the canonical
+//      recordDecision('cancel') writer (an operator's manual "cancel"
+//      click uses the SAME path) rather than a new status write in this
+//      file; its own guard makes this idempotent.
+//   6. Stamp renewal_lapse_completed_at — ONLY once the parent decision
+//      step above actually succeeded (best-effort/swallowed on failure, so
+//      a DB hiccup there never blocks the retrieval task that already ran
+//      — but also never marks this lapse "done" while it's still owed).
+//      A row left started-but-not-completed here is exactly what the
+//      recovery pass resumes on its next tick.
 async function processGraceLapseForTerm(term, conn = db) {
-  const InvoiceService = require('./invoice');
+  if (!term.renewal_lapse_started_at) {
+    await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_started_at')
+      .update({ renewal_lapse_started_at: new Date() });
+  }
+
   if (term.prepay_invoice_id) {
-    // voidInvoice self-heals: re-entry on an already-void invoice re-runs
-    // its idempotent annual-prepay sync rather than erroring, so a prior
-    // partial run (invoice voided, sync lost) repairs on the next tick
-    // instead of being skipped forever.
+    try {
+      await require('./stripe').assertNoInvoiceChargeReconciliationPending(term.prepay_invoice_id, conn);
+    } catch (reconErr) {
+      logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred — a charge reconciliation is pending on invoice ${term.prepay_invoice_id}: ${reconErr.message}`);
+      await ringRenewalBell(term, 'lapse_reconciliation_pending', reconErr.message);
+      return 'deferred';
+    }
+    const InvoiceService = require('./invoice');
     await InvoiceService.voidInvoice(term.prepay_invoice_id);
   }
   const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
@@ -976,50 +1058,49 @@ async function processGraceLapseForTerm(term, conn = db) {
     // retrieval task for the same customer.
     episodeKey: 'renewal_grace_lapse',
   });
-  // P2-1: record the decided lapse on the PARENT — the exact 'cancelled' +
-  // renewal_decision='cancel' shape coveredTermsAsOf's decidedCoveredAndPaid
-  // branch already models for every other annual-prepay renewal lapse.
-  // Reuses the canonical recordDecision('cancel') writer (an operator's
-  // manual "cancel" click uses the SAME path) rather than a new status
-  // write in this file; its own guard makes this idempotent.
+  let parentDecided = true;
   if (term.renewed_from_term_id) {
     try {
-      await require('./annual-prepay-renewals').recordDecision({ termId: term.renewed_from_term_id, action: 'cancel' });
+      await require('./annual-prepay-renewals').recordDecision({ termId: term.renewed_from_term_id, action: 'cancel', conn });
     } catch (err) {
       logger.warn(`[termite-annual-renewal] parent lapse-stamp skipped for successor ${term.id}: ${err.message}`);
+      parentDecided = false;
     }
+  }
+  if (parentDecided) {
+    await conn('annual_prepay_terms').where({ id: term.id }).update({ renewal_lapse_completed_at: new Date() });
   }
 }
 
-// ---- pass 5b: reconcile missed lapse effects (Codex round-1 P1) --------
+// ---- pass 5b: reconcile missed lapse effects (Codex round-1 P1 / round-2 P1) --------
 
-// voidInvoice commits FIRST (cascading the successor to 'cancelled'), then
-// processGraceLapseForTerm raises the station-retrieval task and records
-// the parent's decided lapse. A crash or a failure between the void
-// committing and either follow-on effect finishing leaves the successor
-// 'cancelled' — which no longer matches processGraceLapses' own scan
-// (`status = 'payment_pending'`), so nothing else ever retries those two
-// effects. Re-runs processGraceLapseForTerm itself (never a parallel
-// implementation of its tail) for every already-cancelled termite renewal
-// successor: voidInvoice self-heals on an already-void invoice (re-entry
-// is a documented no-op past the first success), the retrieval task is
-// idempotent on its own dedupeKey, and recordDecision('cancel') is
-// idempotent on its own undecided guard — so re-running the whole function
-// for a successor whose effects already finished is always a safe no-op.
+// Codex round-2 P1: reconciles ONLY rows whose lapse PROVENANCE proves they
+// are a confirmed grace lapse in progress — renewal_lapse_started_at set,
+// renewal_lapse_completed_at still null — never inferred from
+// status='cancelled' alone (which a staff void, a removed annual-prepay
+// flag, or a lost dispute can ALSO produce, and which this pass must NEVER
+// touch). Re-runs processGraceLapseForTerm itself (never a parallel
+// implementation of its state machine) for each: every step in it is
+// independently idempotent/re-entrant (the recon-check + void self-heal,
+// the retrieval task is dedupe-keyed, recordDecision('cancel') is guard-
+// idempotent), so re-running it for a row whose effects already finished
+// is always a safe no-op — and a row still genuinely blocked (a pending
+// Stripe reconciliation) is re-checked and, if still blocked, left exactly
+// as started-but-not-completed for the next tick.
 async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
   try {
     const candidates = await conn('annual_prepay_terms as t')
-      .whereNotNull('t.renewed_from_term_id')
-      .whereNotNull('t.annual_plan_version')
-      .where('t.status', 'cancelled')
-      .orderBy('t.updated_at', 'desc')
+      .whereNotNull('t.renewal_lapse_started_at')
+      .whereNull('t.renewal_lapse_completed_at')
+      .orderBy('t.renewal_lapse_started_at', 'asc')
       .select('t.*')
       .limit(limit);
     counts.lapseEffectsScanned = candidates.length;
     for (const term of candidates) {
       try {
-        await processGraceLapseForTerm(term, conn);
-        counts.lapseEffectsReconciled += 1;
+        const outcome = await processGraceLapseForTerm(term, conn);
+        if (outcome === 'deferred') counts.graceReconciliationDeferred += 1;
+        else counts.lapseEffectsReconciled += 1;
       } catch (err) {
         logger.error(`[termite-annual-renewal] reconcile (missed lapse effects) failed for successor ${term.id}: ${err.message}`);
       }
@@ -1131,10 +1212,11 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
     unanchoredScanned: 0, unanchoredBelled: 0,
     staleOverdueScanned: 0, staleOverdueBelled: 0,
     candidatesScanned: 0, minted: 0, charged: 0, failed: 0, skipped: 0,
-    graceScanned: 0, graceLapsed: 0,
+    graceScanned: 0, graceLapsed: 0, graceReconciliationDeferred: 0,
     lapseEffectsScanned: 0, lapseEffectsReconciled: 0,
     reconcileNeverAttemptedScanned: 0, reconcileSkipped: 0,
     reconcileNeverReachedStripeScanned: 0, reconcileNeverReachedStripeBelled: 0,
+    parentRenewedScanned: 0, parentRenewedStamped: 0,
   };
   if (!termiteAnnualRenewalChargeLive()) return { ...counts, gate: 'off' };
   if (!(await db.schema.hasTable('annual_prepay_terms'))) return { ...counts, gate: 'on', tableMissing: true };
@@ -1146,6 +1228,17 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
   await processGraceLapses({ conn, limit, counts });
   await reconcileMissedLapseEffects({ conn, limit, counts });
   await reconcileStuckSuccessors({ conn, limit, counts });
+  // Codex round-2 P1 backstop: an active, paid successor whose parent
+  // never got its 'renewed' stamp (stampParentRenewedForSuccessor's own
+  // savepoint failed and was swallowed to protect the successor's own
+  // activation) gets it here, idempotently.
+  try {
+    const parentRenewed = await require('./annual-prepay-renewals').reconcileParentRenewedStamps({ conn, limit });
+    counts.parentRenewedScanned = parentRenewed.scanned;
+    counts.parentRenewedStamped = parentRenewed.stamped;
+  } catch (err) {
+    logger.error(`[termite-annual-renewal] parent-renewed reconcile failed: ${err.message}`);
+  }
   return { ...counts, gate: 'on' };
 }
 

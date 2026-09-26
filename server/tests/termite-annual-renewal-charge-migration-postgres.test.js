@@ -70,6 +70,18 @@ describeOrSkip('20260926050000_termite_annual_renewal_charge — real Postgres D
     expect(second).toBe(0);
   });
 
+  test('up() adds renewal_lapse_started_at and renewal_lapse_completed_at as nullable timestamptz', async () => {
+    const { db } = fixture;
+    await migration.up(db);
+
+    const cols = await db('annual_prepay_terms').columnInfo();
+    for (const col of ['renewal_lapse_started_at', 'renewal_lapse_completed_at']) {
+      expect(cols).toHaveProperty(col);
+      expect(cols[col].nullable).toBe(true);
+      expect(cols[col].type).toBe('timestamp with time zone');
+    }
+  });
+
   test('up() seeds the termite_annual_renewal_charge_failed sms template with its variables', async () => {
     const { db } = fixture;
     await migration.up(db);
@@ -103,6 +115,8 @@ describeOrSkip('20260926050000_termite_annual_renewal_charge — real Postgres D
 
     const cols = await db('annual_prepay_terms').columnInfo();
     expect(cols).not.toHaveProperty('renewal_charge_attempted_at');
+    expect(cols).not.toHaveProperty('renewal_lapse_started_at');
+    expect(cols).not.toHaveProperty('renewal_lapse_completed_at');
     expect(cols).toHaveProperty('id');
 
     const row = await db('sms_templates').where({ template_key: 'termite_annual_renewal_charge_failed' }).first();

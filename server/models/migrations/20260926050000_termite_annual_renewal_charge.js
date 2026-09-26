@@ -12,6 +12,18 @@
  * twice" outranks "always collect"). Additive, nullable — every existing
  * term (which never went through this job) leaves it null.
  *
+ * annual_prepay_terms.renewal_lapse_started_at /
+ * annual_prepay_terms.renewal_lapse_completed_at — Codex round-2 P1:
+ * persisted PROVENANCE for the grace-lapse pass, so recovery never has to
+ * INFER "this cancelled successor is a confirmed grace lapse" from
+ * status='cancelled' alone (which a staff void, a removed annual-prepay
+ * flag, or a lost dispute can ALSO produce). started_at is stamped in its
+ * own committed write BEFORE the invoice void is even attempted; completed_at
+ * is stamped only once BOTH the station-retrieval task and the parent's
+ * decided-lapse stamp have actually succeeded. The recovery pass reconciles
+ * ONLY rows with started_at set and completed_at still null — it never
+ * touches any other cancelled successor. Additive, nullable.
+ *
  * sms_templates row `termite_annual_renewal_charge_failed` — the customer
  * notice queued when the renewal charge declines or the outcome is
  * ambiguous (never for a no-consent/no-method skip, where nothing was ever
@@ -28,6 +40,16 @@ exports.up = async function up(knex) {
     if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_attempted_at'))) {
       await knex.schema.alterTable('annual_prepay_terms', (t) => {
         t.timestamp('renewal_charge_attempted_at', { useTz: true });
+      });
+    }
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_started_at'))) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.timestamp('renewal_lapse_started_at', { useTz: true });
+      });
+    }
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_completed_at'))) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.timestamp('renewal_lapse_completed_at', { useTz: true });
       });
     }
   }
@@ -72,6 +94,16 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_attempted_at')) {
       await knex.schema.alterTable('annual_prepay_terms', (t) => {
         t.dropColumn('renewal_charge_attempted_at');
+      });
+    }
+    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_started_at')) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.dropColumn('renewal_lapse_started_at');
+      });
+    }
+    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_completed_at')) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.dropColumn('renewal_lapse_completed_at');
       });
     }
   }
