@@ -1244,6 +1244,16 @@ const PENDING_APPROVAL_SUBJECT_RE = new RegExp(
   + `|\\b(?:the|your|his|her|their|that|this|an|a|our) (?:okay|ok|yes) ${PENDING_APPROVAL_AUX_ALT}\\b`
   + `|^(?:(?:so|and|but|yeah|yep|yes|ok|okay|alright) )?(?:okay|ok|yes) ${PENDING_APPROVAL_AUX_ALT}\\b`,
 );
+// Codex round 21, P1 (:1143, :1181): the approval-verb family, closed at
+// the VERB instead of per carrier. Every shape so far — directives ("tell
+// him to okay it", "send the email to him to okay it"), needs ("need to
+// okay it"), future promises ("You will okay it.") — puts an authorization
+// verb right after an infinitive "to" or a modal/future auxiliary. That
+// position alone now poisons, whoever the subject is and whatever
+// channel or object sits before it. "confirm" is left out on purpose: it
+// is a pinned commitment head ("We'll confirm you for…") and already a
+// SCHEDULING_PREDICATE_TERMS entry for every other sentence.
+const APPROVAL_VERB_USE_RE = /\b(?:to|will|ll|would|d|should|shall|can|could|must|gonna|may|might|please) (?:approve|sign off|sign|okay|ok|authorize|give the go ahead|give the okay|give the green light)\b/;
 function sentenceHasDeclarativePoisonVocabulary(ns) {
   const padded = ` ${ns} `;
   return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
@@ -1255,6 +1265,7 @@ function sentenceHasDeclarativePoisonVocabulary(ns) {
     || SUBJECT_LED_APPROVAL_NEED_RE.test(ns)
     || DELEGATED_DECISION_RE.test(ns)
     || PENDING_APPROVAL_SUBJECT_RE.test(ns)
+    || APPROVAL_VERB_USE_RE.test(ns)
     || sentenceHasModalUncertainty(ns);
 }
 // These two lists (and the regex above) ALSO do their work inside
@@ -1390,6 +1401,7 @@ function clauseIsBenign(clauseNs, prevNs) {
   if (NON_POSSESSIVE_APPROVAL_RE.test(clauseNs)) return false;
   if (THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(clauseNs)) return false;
   if (SUBJECT_LED_APPROVAL_NEED_RE.test(clauseNs)) return false;
+  if (APPROVAL_VERB_USE_RE.test(clauseNs)) return false;
   if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
   if (BENIGN_NON_BOOKING_TOPICS.some((t) => padded.includes(t))) return true;
   if (prevNs && isBarePronounClause(clauseNs)) {
@@ -1421,6 +1433,11 @@ const SCHEDULING_PREDICATE_TERMS = [
   // and "inspection", so an OTHER sentence built on them ("We need you
   // confirming it.") must count as scheduling content too.
   ' confirming ', ' inspection ', ' inspections ',
+  // Codex round 21, P1 (:1426): booking idioms built from whitelisted words
+  // ("Need to put you down.") — any "<party> down" and "get <party> in".
+  ' you down ', ' him down ', ' her down ', ' them down ', ' us down ',
+  ' get you in ', ' get him in ', ' get her in ', ' get them in ',
+  ' coming out ',
   ' appointment ', ' appointments ',
   ' book ', ' booked ', ' booking ',
   ' schedule ', ' scheduled ', ' scheduling ', ' reschedule ', ' rescheduled ',

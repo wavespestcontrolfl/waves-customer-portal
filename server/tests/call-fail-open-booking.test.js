@@ -1570,6 +1570,26 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // Codex round 21 (review of 73d8b63ddd): three P1s, closed by family.
+  // P1 (:1143) — object before the recipient in a channel directive.
+  // P1 (:1181) — a direct future approval promise.
+  // P1 (:1426) — a pending booking idiom.
+  test.each([
+    "We'll send the email to him to okay it. We'll see you Sunday at noon.",
+    "We'll forward the link over to the owner to approve it. We'll see you Sunday at noon.",
+    "You will okay it. We'll see you Sunday at noon.",
+    "He'll okay it. We'll see you Sunday at noon.",
+    "They can sign off on it. We'll see you Sunday at noon.",
+    "Need to put you down. We'll see you Sunday at noon.",
+    "Have to get you in. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. Still have to put him down.",
+  ])('Codex round-22 regression: approval-verb use and pending booking idioms poison — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",
