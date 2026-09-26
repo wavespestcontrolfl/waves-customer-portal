@@ -166,8 +166,13 @@ function groundingFacts({
 } = {}) {
   const pressureEvidence = pestPressureEvidence || {};
   const findingList = Array.isArray(findings) ? findings : [];
-  const zeroInspectionSupported = pressureEvidence.zeroInspectionSupported === true
-    || findingList.some((finding) => finding?.category === 'no_activity');
+  const hasPositiveActivityFinding = findingList.some((finding) => (
+    ['activity', 'pest_activity'].includes(String(finding?.category || '').toLowerCase())
+  ));
+  const zeroInspectionSupported = !hasPositiveActivityFinding && (
+    pressureEvidence.zeroInspectionSupported === true
+    || findingList.some((finding) => finding?.category === 'no_activity')
+  );
   const pressureIsZero = Number(pestPressure?.displayScore) === 0;
   const pressure = pestPressure && pestPressure.enabled && pestPressure.displayScore != null
     ? {

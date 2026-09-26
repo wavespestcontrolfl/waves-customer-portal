@@ -210,11 +210,15 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   // roster references without a role verb claim nothing
   expect(ungroundedClaims('The service covers all of the traps around your home.', facts)).toEqual([]);
 
-  // standalone clock times validate against the window boundaries (codex
-  // round-8 P1): a reformatted single time keeps the meridiem honest
+  // Standalone clock times cannot turn either endpoint of the customer-facing
+  // window into an exact arrival promise.
   expect(ungroundedClaims('Your next visit is Monday, August 3 at 8 PM.', facts))
     .toContain('ungrounded_time:8 PM');
-  expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts))
+    .toContain('ungrounded_time:8 AM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 10 AM.', facts))
+    .toContain('ungrounded_time:10 AM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM.', facts)).toEqual([]);
   expect(ungroundedClaims('Your next visit is Monday, August 3 in 2027, arriving 8–10 AM.', facts)
     .some((problem) => problem.includes('ungrounded_date:') && problem.includes('in 2027'))).toBe(true);
 

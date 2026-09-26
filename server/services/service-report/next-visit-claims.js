@@ -6,10 +6,14 @@
 const WINDOW_TEXT_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
 const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
 const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
-const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4})\\)?)?`, 'gi');
+const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4}|[’']\\d{2})\\)?)?`, 'gi');
 const APPOINTMENT_CLAIM_RE = new RegExp(
   `\\b(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service)(?:\\s*:\\s*|\\s+(?:is|has\\s+been|will\\s+be|scheduled|booked|set|on|for)\\b)|(?:we(?:\\s+will|[’']ll)?\\s+)?see\\s+you\\b|we(?:\\s+will|[’']ll)\\s+(?:return|arrive|be\\s+back|come\\s+back)\\b|(?:appointment|visit|follow[-\\s]?up)\\s+(?:is\\s+)?(?:scheduled|booked|set)\\b)`,
   'i',
+);
+const EXACT_APPOINTMENT_TIME_RE = new RegExp(
+  `(?:${APPOINTMENT_CLAIM_RE.source}|\\bwe\\s+arrive\\b)[^.!?]*?(?<!until\\s)(\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM))\\b`,
+  'gi',
 );
 const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b|\bno\s+longer\s+(?:scheduled|booked|set)\b|\bcancell?ed\b/i;
 
@@ -46,17 +50,9 @@ function nextVisitProblems(text, facts) {
       problems.push(`ungrounded_weekday:${match[1]}`);
     }
   }
-  const allowedTimes = new Set();
-  const win = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*–\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/.exec(expectedWindow);
-  if (win) {
-    const [, startHour, startMinute = '00', startMeridiem, endHour, endMinute = '00', endMeridiem] = win;
-    allowedTimes.add(`${Number(startHour)}:${startMinute} ${startMeridiem || endMeridiem}`);
-    allowedTimes.add(`${Number(endHour)}:${endMinute} ${endMeridiem}`);
-  }
   const withoutRanges = String(text).replace(new RegExp(WINDOW_TEXT_RE.source, 'gi'), ' ');
-  for (const match of withoutRanges.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/gi)) {
-    const normalized = `${Number(match[1])}:${match[2] || '00'} ${match[3].toUpperCase()}`;
-    if (!allowedTimes.has(normalized)) problems.push(`ungrounded_time:${match[0].trim()}`);
+  for (const match of withoutRanges.matchAll(new RegExp(EXACT_APPOINTMENT_TIME_RE.source, 'gi'))) {
+    problems.push(`ungrounded_time:${match[1].trim()}`);
   }
   return problems;
 }

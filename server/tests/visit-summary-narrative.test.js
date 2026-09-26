@@ -324,6 +324,35 @@ test.each(['1st', '2nd', '3rd', '4th', '21st', '22nd', '23rd', '31st'])('ordinal
   })).toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
 });
 
+test.each([
+  "Friday, October 2, '27",
+  'Friday, October 2, ’27',
+  "Friday, October 2nd, '27",
+  "Friday, October 2 in '27",
+])('model output cannot add an abbreviated year to the supplied next-visit date: %s', (date) => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  expect(appointmentClaimProblems(`Your next visit is ${date}, arriving 8–10 AM.`, facts))
+    .toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
+});
+
+test.each(['8 AM', '10 AM'])('a grounded range does not authorize an exact %s arrival promise', (time) => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  expect(appointmentClaimProblems(
+    `Your next visit is Friday, October 2, arriving 8–10 AM, specifically at ${time}.`,
+    facts,
+  )).toContain(`ungrounded_time:${time}`);
+});
+
+test.each([
+  'Your next visit is Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 8 AM.',
+])('grounded range copy remains valid without a year or exact arrival promise: %s', (summary) => {
+  expect(appointmentClaimProblems(
+    summary,
+    { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } },
+  )).toEqual([]);
+});
+
 test('each appointment promise must independently match the authoritative slot', async () => {
   const args = input();
   const summary = 'We refreshed the perimeter today. Your next visit is Friday, October 2, arriving 8–10 AM. We will return next week to inspect again.';
@@ -358,6 +387,7 @@ test.each([
 test.each([
   'We treated a gap first noted on September 18, and your next visit is Friday, October 2, arriving 8–10 AM.',
   'Keep pets away until 4 PM, and your next visit is Friday, October 2, arriving 8–10 AM.',
+  'Keep pets away until 8 AM, and your next visit is Friday, October 2, arriving 8–10 AM.',
 ])('appointment guard ignores dates and times before the appointment clause: %s', (summary) => {
   expect(appointmentClaimProblems(summary, {
     nextVisit: { date: 'Friday, October 2', window: '8–10 AM' },
@@ -423,6 +453,25 @@ test('zero pressure uses deterministic assessed-area wording instead of model ab
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
   expect(out).toContain('No visible pest activity was noted in the areas assessed today.');
   expect(out).not.toContain('anywhere on the property');
+  expect(callModel).not.toHaveBeenCalled();
+});
+
+test.each(['activity', 'pest_activity'])('zero pressure does not add absence copy beside a positive %s finding', async (category) => {
+  const args = input({
+    pestPressure: { enabled: true, displayScore: 0, label: 'None', trend: null },
+    pestPressureEvidence: { zeroInspectionSupported: true },
+    findings: [
+      { category, title: 'Ant activity noted', severity: 'medium' },
+      { category: 'no_activity', title: 'No activity observed', severity: 'info' },
+    ],
+  });
+  const facts = groundingFacts(args);
+  const callModel = jest.fn();
+
+  expect(facts.pressure).toMatchObject({ isZero: true, zeroInspectionSupported: false });
+  expect(deterministicSummary(facts)).not.toContain('No visible pest activity was noted');
+  await expect(applyVisitSummaryNarrative(args, { callModel }))
+    .resolves.toBe(deterministicSummary(facts));
   expect(callModel).not.toHaveBeenCalled();
 });
 
