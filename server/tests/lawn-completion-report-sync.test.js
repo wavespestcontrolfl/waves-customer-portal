@@ -50,6 +50,9 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'Gate code is 2-4-6-8ml',
     'Gate PIN AB24 68oz',
     'rear gate AB24-68',
+    'rear gate AB-2468',
+    'rear gate #AB-2468',
+    'rear gate 2468-AB',
     'rear gate A2B4-68',
     'rear gate A2B4-6C8D',
     'rear gate A24-68',
@@ -59,6 +62,7 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'Opened rear gate, applied 100 ml around hinges',
     'Inspected the rear gate 120–150 feet from the lanai',
     'Opened rear gate, applied 24-68ml around hinges',
+    'Applied 24-0-11 near the rear gate',
   ];
   const data = await buildReportV1Data({
     id: 'test-lawn-record', customer_id: 'test-property', service_line: 'lawn', service_type: 'Every 6 Weeks Lawn Care Service', service_date: '2026-09-05', status: 'completed',
@@ -73,6 +77,7 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'Opened rear gate, applied 100 ml around hinges',
     'Inspected the rear gate 120–150 feet from the lanai',
     'Opened rear gate, applied 24-68ml around hinges',
+    'Applied 24-0-11 near the rear gate',
   ]);
   expect(JSON.stringify(data)).not.toMatch(/4417|2468|2-4-6-8ml|1 2 3 4ft|AB24 68oz|\[redacted\]|gate code/i);
   // The report projection filters at customer egress; stored/replay inputs
@@ -99,6 +104,9 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'Gate code is 2-4-6-8ml',
     'Gate PIN AB24 68oz',
     'rear gate AB24-68',
+    'rear gate AB-2468',
+    'rear gate #AB-2468',
+    'rear gate 2468-AB',
     'rear gate A2B4-68',
     'rear gate A2B4-6C8D',
     'rear gate A24-68',
@@ -108,6 +116,7 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'Opened rear gate, applied 100 ml around hinges',
     'Inspected the rear gate 120–150 feet from the lanai',
     'Opened rear gate, applied 24-68ml around hinges',
+    'Applied 24-0-11 near the rear gate',
   ]);
   expect(data.findings.map((item) => item.title)).toContain(finding);
   expect(data.findings.map((item) => item.title).join(' ')).not.toContain('Internal access');

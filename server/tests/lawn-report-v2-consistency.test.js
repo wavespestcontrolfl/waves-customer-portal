@@ -276,6 +276,9 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
         'Gate code is 2-4-6-8ml',
         'Gate PIN AB24 68oz',
         'rear gate AB24-68',
+        'rear gate AB-2468',
+        'rear gate #AB-2468',
+        'rear gate 2468-AB',
         'rear gate A2B4-68',
         'rear gate A2B4-6C8D',
         'rear gate A24-68',
@@ -302,11 +305,22 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
     expect(measurementReport.treatment.focus).toEqual([groupedMeasurement]);
     expect(measurementReport.snapshot.todaysFocus).toEqual([groupedMeasurement]);
 
+    const fertilizerAction = 'Applied 24-0-11 near the rear gate';
+    const fertilizerReport = buildLawnReportV2({
+      lawnAssessment: CASES.healthy,
+      actions: [fertilizerAction],
+    });
+    expect(fertilizerReport.treatment.focus).toEqual([fertilizerAction]);
+    expect(fertilizerReport.snapshot.todaysFocus).toEqual([fertilizerAction]);
+
     const groupedCredentials = [
       'Gate code is 1 2 3 4ft',
       'Gate code is 2-4-6-8ml',
       'Gate PIN AB24 68oz',
       'rear gate AB24-68',
+      'rear gate AB-2468',
+      'rear gate #AB-2468',
+      'rear gate 2468-AB',
       'rear gate A2B4-68',
       'rear gate A2B4-6C8D',
       'rear gate A24-68',

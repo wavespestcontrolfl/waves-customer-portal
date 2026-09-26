@@ -211,11 +211,15 @@ describe('deterministic report fallback', () => {
         'Swept exterior cobwebs',
         'Used gate code 4417 for access',
         'Used gate code [redacted] for access',
+        'rear gate AB-2468',
+        'rear gate #AB-2468',
+        'Applied 24-0-11 near the rear gate',
       ],
     });
 
     expect(report).toContain('Swept exterior cobwebs');
-    expect(report).not.toMatch(/4417|\[redacted\]|gate code/i);
+    expect(report).toContain('Applied 24-0-11 near the rear gate');
+    expect(report).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
     expect(reportCopyRejection(report)).toBeNull();
   });
 
@@ -411,11 +415,17 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('Gate PIN AB24 68oz.')).toBe('access_code');
     expect(reportCopyRejection('The rear gate AB24-68 was used for entry.')).toBe('access_code');
     expect(reportCopyRejection('The rear gate A2B4-6C8D was used for entry.')).toBe('access_code');
+    expect(reportCopyRejection('The rear gate AB-2468 was used for entry.')).toBe('access_code');
+    expect(reportCopyRejection('The rear gate #AB-2468 was used for entry.')).toBe('access_code');
+    expect(reportCopyRejection('The rear gate 2468-AB was used for entry.')).toBe('access_code');
     expect(reportCopyRejection('Opened rear gate with #AB24–68C*.')).toBe('access_code');
     expect(reportCopyRejection('Opened the gate onto 400 sqft of treated turf.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 100 ml around hinges.')).toBeNull();
     expect(reportCopyRejection('Inspected the rear gate 120–150 feet from the lanai.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 24-68ml around hinges.')).toBeNull();
+    expect(reportCopyRejection('Applied 24-0-11 near the rear gate.')).toBeNull();
+    expect(reportCopyRejection('Near the rear gate, 24-0-11 fertilizer was applied.')).toBeNull();
+    expect(reportCopyRejection('The gate code is 24-0-11 fertilizer.')).toBe('access_code');
     // alphabetic / quoted credentials after a code noun reject too (r34)
     expect(reportCopyRejection('We entered using the gate code BLUE and treated the perimeter.')).toBe('access_code');
     expect(reportCopyRejection('The keypad code is "sunset7" for the side door.')).toBe('access_code');

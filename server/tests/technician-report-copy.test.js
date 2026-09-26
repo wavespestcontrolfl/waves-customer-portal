@@ -65,6 +65,10 @@ describe('custom action credential screening', () => {
     'Gate code is 2-4-6-8ml',
     'Gate PIN AB24 68oz',
     'rear gate AB24-68',
+    'rear gate AB-2468',
+    'rear gate #AB-2468',
+    'rear gate AB 2468',
+    'rear gate 2468-AB',
     'rear gate A2B4-68',
     'rear gate A2B4-6C8D',
     'rear gate A24-68',
@@ -74,6 +78,7 @@ describe('custom action credential screening', () => {
     'Open side gate with 2468 in the morning',
     'Opened side gate with 2468 in the morning',
     'rear gate 2468 in the morning',
+    'Gate code is 24-0-11 fertilizer',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -89,6 +94,11 @@ describe('custom action credential screening', () => {
     'Opened rear gate, applied 100 ml around hinges',
     'Inspected the rear gate 120–150 feet from the lanai',
     'Opened rear gate, applied 24-68ml around hinges',
+    'Applied 24-0-11 near the rear gate',
+    'Near the rear gate, applied 24-0-11',
+    'Applied fertilizer 24-0-11 near the rear gate',
+    'Applied 24-0-11 fertilizer near the rear gate',
+    '24-0-11 fertilizer was applied near the rear gate',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });

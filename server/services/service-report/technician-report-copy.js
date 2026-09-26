@@ -174,7 +174,16 @@ const REPORT_ACCESS_CODE_RES = [
 // 2468ft" is still a credential, even though "400 ft" beside a gate can be
 // legitimate work detail. Inspect the original text before measurement
 // suppression and count digits in compact or grouped numeric tokens.
-const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`[A-Za-z#*]*\d[A-Za-z0-9#*]*(?:[\s–—-]+[A-Za-z#*]*\d[A-Za-z0-9#*]*)*`;
+const REPORT_NUMERIC_CREDENTIAL_GROUP = String.raw`[A-Za-z#*]*\d[A-Za-z0-9#*]*`;
+// Do not let the optional leading affix consume the device noun itself in
+// suffix forms such as "rear gate 2468-AB"; the contextual detector still
+// needs that noun after normalization.
+const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:gate|door|garage|entry|keypad|lockbox|alarm)\b)[A-Za-z#*]{1,8}`;
+// A separated suffix must be uppercase/symbolic. Lowercase words after a code
+// are ordinary prose ("8842 after hours") and must remain available to the
+// surrounding detector rather than being absorbed as part of the token.
+const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`[A-Z#*]{1,8}`;
+const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+)?${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:[\s–—-]+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP})?`;
 const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
   String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
   'gi',
@@ -198,6 +207,28 @@ const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
   'gi',
 );
 
+// N-P-K fertilizer analyses use the same separated-number surface as an
+// access token. Preserve them only when nearby treatment evidence establishes
+// an application or fertilizer identity. This masking runs after the original-
+// text explicit code/PIN scan, so "gate code 24-0-11" remains private even if
+// the sentence also mentions fertilizer.
+const REPORT_FERTILIZER_ANALYSIS_RE = /\b\d{1,2}(?:\.\d+)?\s*[-–—]\s*\d{1,2}(?:\.\d+)?\s*[-–—]\s*\d{1,2}(?:\.\d+)?\b/g;
+const REPORT_FERTILIZER_CONTEXT_RE = /\b(?:fertili[sz]er|plant\s+food|nutrient(?:\s+blend)?|n\s*[-–—]\s*p\s*[-–—]\s*k|npk|analysis)\b/i;
+const REPORT_APPLICATION_BEFORE_RE = /\b(?:appl(?:y|ied|ication)|broadcast(?:ed)?|spread|distributed)\b[^\n.!?]{0,40}$/i;
+const REPORT_APPLICATION_AFTER_RE = /^[^\n.!?]{0,20}\b(?:was\s+|were\s+)?(?:applied|broadcast|spread|distributed)\b/i;
+
+function maskFertilizerAnalyses(text) {
+  return String(text || '').replace(REPORT_FERTILIZER_ANALYSIS_RE, (analysis, offset, source) => {
+    const before = source.slice(Math.max(0, offset - 60), offset);
+    const after = source.slice(offset + analysis.length, offset + analysis.length + 60);
+    const treatmentEvidence = REPORT_APPLICATION_BEFORE_RE.test(before)
+      || REPORT_APPLICATION_AFTER_RE.test(after)
+      || REPORT_FERTILIZER_CONTEXT_RE.test(before)
+      || REPORT_FERTILIZER_CONTEXT_RE.test(after);
+    return treatmentEvidence ? '[fertilizer-analysis]' : analysis;
+  });
+}
+
 // Normalize numeric credential tokens to the digit-only shape already handled
 // by every contextual detector above. This covers compact alphanumeric tokens
 // on either side of the digits and individually separated digits without
@@ -208,7 +239,7 @@ const REPORT_CREDENTIAL_TOKEN_RE = new RegExp(
 );
 
 function accessCodeDetectionText(text) {
-  return String(text || '')
+  return maskFertilizerAnalyses(text)
     .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]')
     .replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
       const digits = token.replace(/\D/g, '');
