@@ -551,15 +551,23 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
   // Same guards as the rendered card: a credited watering-in only for a
   // REQUIRED watering-in, on a visit inside the plan week, on a plan that
   // prescribes a run (codex gh-r31).
-  const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
+  const recordedWaterIn = aftercare.creditableWaterIn === true;
+  const credited = recordedWaterIn && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
   const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
   // A HOLD plan beside a required watering-in: the answer must carry the
   // plan's no-extra-runs guidance too — the label instruction alone reads
   // as permission to resume the normal schedule (codex gh-r45).
-  const holdBeside = !reduced && aftercare.waterInRequired === true
-    && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
-    ? weekPlan : null;
-  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
+  const planBeside = !reduced && aftercare.waterInRequired === true
+    && weekPlan?.visitInPlanWeek === true && weekPlan?.title ? weekPlan : null;
+  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (planBeside ? `${planBeside.title}. ${planBeside.detail}` : null)].filter(Boolean).join(' ');
+}
+
+function answerConditionalWateringPlan({ weekPlan, aftercare }) {
+  const condition = aftercare.needsReview === true
+    ? 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.'
+    : 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.';
+  const plan = [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ');
+  return [aftercare.watering, condition, plan].filter(Boolean).join(' ');
 }
 
 // AW-06 / codex #4839 round-4 (4109926463): first-match precedence rules,
@@ -574,6 +582,11 @@ function questionRoutingRules({
   return [
     // Aftercare/watering answers first — never re-entry or generic copy
     // under the plan shown on the same page (codex #3565 gh-r29).
+    {
+      test: () => wateringIntent && Boolean(weekPlan?.title)
+        && (aftercare?.wateringHold === true || aftercare?.needsReview === true),
+      answer: () => answerConditionalWateringPlan({ weekPlan, aftercare }),
+    },
     {
       test: (q) => wateringIntent && Boolean(aftercare?.watering) && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q),
       answer: () => answerWateringAftercare({ data, weekPlan, aftercare }),

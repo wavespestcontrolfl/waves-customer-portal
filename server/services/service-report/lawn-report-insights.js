@@ -53,6 +53,7 @@ function buildLawnInsightCards({
   treatmentKinds = [],
   waterInRequired = false,
   waterInInstructionRecorded = false,
+  aftercare = {},
 } = {}) {
   const cards = [];
   const kinds = Array.isArray(treatmentKinds) ? treatmentKinds : [];
@@ -62,6 +63,11 @@ function buildLawnInsightCards({
     actionSource,
     planSource,
   });
+  const aftercareWaterAction = aftercare.needsReview === true
+    ? 'Confirm the product watering directions with your technician before changing irrigation.'
+    : aftercare.wateringHold === true
+      ? 'Follow the product-specific watering restriction in Aftercare before making any other irrigation changes.'
+      : null;
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');
@@ -94,7 +100,7 @@ function buildLawnInsightCards({
       wavesAction: has('fungicide')
         ? 'A fungicide application was recorded for today’s service.'
         : '',
-      customerAction: SURPLUS_CUSTOMER_ACTION[waterActionKey],
+      customerAction: aftercareWaterAction || SURPLUS_CUSTOMER_ACTION[waterActionKey],
       nextVisitPlan: '',
       confidenceNote: null,
       provenance: provenance(
@@ -113,11 +119,11 @@ function buildLawnInsightCards({
       // The sentence must agree with the plan card below it — a hold /
       // conditional plan is never described as "setting runs" (gh-r44,
       // same rule as buildRootCause).
-      customerAction: hasPlan
+      customerAction: aftercareWaterAction || (hasPlan
         ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
           ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
           : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
-        : 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
+        : 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.'),
       nextVisitPlan: '',
       provenance: provenance('calculated_estimate', null, hasPlan ? 'approved_watering_plan' : null),
     });
@@ -134,7 +140,8 @@ function buildLawnInsightCards({
         : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
       wavesAction: '',
-      customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
+      customerAction: aftercareWaterAction
+        || 'Check sprinkler coverage in that area rather than watering the whole yard more.',
       nextVisitPlan: '',
       provenance: provenance(water.localizedDryConfidence === 'tech_confirmed' ? 'technician' : 'photo_signal'),
     });
@@ -160,9 +167,9 @@ function buildLawnInsightCards({
       // With a weekly plan on the card the plan is the sole watering
       // instruction — never "keep your current schedule" / "ease back a
       // cycle" beside a hold or run plan (codex #3565 gh-r29).
-      customerAction: damp
+      customerAction: aftercareWaterAction || (damp
         ? DAMP_CUSTOMER_ACTION[waterActionKey]
-        : (hasPlan ? 'Follow this week’s watering plan below.' : ''),
+        : (hasPlan ? 'Follow this week’s watering plan below.' : '')),
       nextVisitPlan: '',
       provenance: provenance(damp ? 'photo_signal' : 'assessment_signal', null, hasPlan ? 'approved_watering_plan' : null),
     });
