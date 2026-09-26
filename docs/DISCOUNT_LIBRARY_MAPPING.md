@@ -52,13 +52,13 @@ Discounts in the same `stack_group` compete — only the highest-priority one wi
 
 ### When to Use `waveguard_member` vs Tier Discounts
 
-The tier-specific discounts (`waveguard_silver`, `waveguard_gold`, `waveguard_platinum`) auto-apply based on the customer's `waveguard_tier` field. The generic `waveguard_member` discount exists for cases where:
+The tier-specific discounts (`waveguard_silver`, `waveguard_gold`, `waveguard_platinum`) attach automatically from the customer's `waveguard_tier` field only while a row's `is_auto_apply` is on; with the seeded default (off), a tier discount applies only when it is assigned to the customer (`server/services/discount-engine.js`). The generic `waveguard_member` discount exists for cases where:
 
 1. A customer has an active WaveGuard membership but their tier hasn't been set in the system yet
 2. Square was applying the flat "WaveGuard Member Discount" instead of tier-specific ones
 3. Legacy invoices that used the generic 15% line item
 
-Once all customers have proper tier assignments, `waveguard_member` can be deactivated in favor of the tier-specific auto-apply discounts.
+Once all customers have proper tier assignments, `waveguard_member` can be deactivated in favor of the tier-specific discounts.
 
 ---
 

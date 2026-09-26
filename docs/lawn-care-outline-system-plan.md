@@ -1053,11 +1053,14 @@ There is no `/templates`, `/validate`, or generic `PATCH /:id` route.
 Product/fact routes: there is no dedicated `product-public-facts` API. Product facts are
 managed through the general admin inventory/product-catalog routes instead.
 
-Public route:
+Public API routes (as built, `server/routes/service-outlines-public.js`, mounted at `/api/service-outlines`):
 
 ```text
-GET    /service-outlines/:token
+GET    /api/service-outlines/:token
+POST   /api/service-outlines/:token/cta-click
 ```
+
+The customer page itself is the SPA route `/service-outlines/:token`.
 
 ## Tokenized Public Page Security
 

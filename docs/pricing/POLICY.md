@@ -376,9 +376,10 @@ in-memory cache. Run `/margin-check` after any bracket move.
 ### Mosquito programs — `MOSQUITO.basePrices`
 **Lot category × program matrix.** Mosquito has two programs:
 `seasonal9` (9 visits/yr) and `monthly12` (12 visits/yr). The former
-WaveGuard tier names (bronze/silver/gold/platinum) survive only as a
-replay shim for old estimates — they no longer select mosquito visit
-counts or pricing.
+WaveGuard tier names survive as aliases for old estimates: `bronze` maps
+to `seasonal9`, and `silver`/`gold`/`platinum` map to `monthly12`
+(`normalizeMosquitoProgramSelection`), so a legacy name still selects that
+program's visits and price.
 
 ### Other services
 Termite, rodent, palm, and specialty values follow the same pattern:

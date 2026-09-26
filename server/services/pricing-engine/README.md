@@ -20,7 +20,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | `MARGIN_FLOOR` | 35% | Margin REPORTING threshold for recurring lines (enforcement removed 2026-07-17 — owner ruling "forget all floors") |
 | `MARGIN_TARGET_TS` | 45% | Tree & Shrub admin-inclusive margin target |
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
-| `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 2.9% added at checkout) |
+| `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; a 2.9% credit-card surcharge is added at checkout) |
 
 **Service zones** (routing/metadata only; no pricing effect):
 
@@ -307,7 +307,7 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 ## 14. Payment Adjustments
 
 **ACH discount:** retired (0%). Kept as a constant for legacy-caller safety.
-**Card surcharge:** 2.9% added at checkout, not baked into engine output.
+**Card surcharge:** 2.9% added at checkout only when the payment method is a confirmed credit card; debit, prepaid, unknown-funding cards and ACH pay the base amount (`computeChargeAmount`, `server/services/stripe-pricing.js`). Not baked into engine output.
 
 ---
 

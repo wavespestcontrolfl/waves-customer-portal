@@ -42,7 +42,7 @@ The link Adam is describing already exists end-to-end — minus the dollar amoun
 | Piece | State | Where |
 |---|---|---|
 | Per-appointment "secure your appointment" link (`/secure/:token`): saves card, records v10 consent, enrolls Auto Pay | Built, dark (`APPOINTMENT_CARD_REQUEST` + inactive `secure_appointment_card` SMS template) | `server/services/appointment-card-request.js`, `server/routes/secure-card-public.js`, `client/src/pages/SecureAppointmentPage.jsx` |
-| New Appointment sheet checkbox "Text card-on-file link (Auto Pay setup)" (the screenshot) | Built, hidden while lane dark | `CreateAppointmentModal.jsx:6003`, `admin-schedule.js:19453` |
+| New Appointment sheet checkbox "Text card-on-file link (Auto Pay setup)" (the screenshot) | Built, hidden while lane dark | `CreateAppointmentModal.jsx:6044-6045`, `admin-schedule.js:8980-8987` |
 | Per-visit admin "Text card / Auto Pay link" button + status card | Built | `SchedulePage.jsx:1201`, `MobileAppointmentDetailSheet.jsx:501`, `admin-schedule.js:7777` |
 | AI call pipeline auto-sends the same link post-booking | Built, wired | `call-recording-processor.js:9049` |
 | /book wizard inline card step | Built | `booking.js:2586` |
@@ -86,11 +86,13 @@ Light `APPOINTMENT_CARD_REQUEST` + activate the SMS template (and optionally
   a pay link; the disclosed $75 fee has no automated charge path on this lane.
   The saved card + v10 consent still permit a manual office charge per disclosed
   terms.
-  **Update 2026-09-26:** one-time completion invoices now auto-charge the
-  /secure-consented card, capped at the visit's stamped estimated_price, behind
-  `GATE_APPT_CARD_COMPLETION_CHARGE` (`complete-scheduled-service.js:10773-10786`,
-  `feature-gates.js:65, 287`). The no-show/late-cancel fee still auto-charges
-  only for estimate card holds.
+  **Update 2026-09-26:** this lane now has both rails, each dark behind its own
+  gate. One-time completion invoices auto-charge the /secure-consented card,
+  capped at the visit's stamped estimated_price (`GATE_APPT_CARD_COMPLETION_CHARGE`,
+  `complete-scheduled-service.js:10773-10786`). The disclosed no-show/late-cancel
+  fee is charged from the `appointment_card_requests` row by
+  `chargeAppointmentNoShowFee` (`GATE_APPT_CARD_NO_SHOW_FEE`,
+  `server/services/appointment-card-request.js`).
 
 ### Option B — deposit variant on the same lane (the build)
 Appointments flagged "deposit required, $X" send the same `/secure` link, but the

@@ -147,7 +147,7 @@ Required: offer key (single vs 2-visit package), `fleaComplexity` (light/moderat
 
 ## 14. Stinging insects (`stinging`)
 
-Required: species, tier (1–3), removal option; optional aggressiveness/height/confined. **Fixed:** UI-A now collects species, scope tier and removal (`EstimateToolViewV2.jsx:3574-3576, 6669, 6678`; `property-lookup-v2.js:4478-4487`); the paper-wasp/tier-2/no-removal defaults apply only when a field is left blank.
+Required: species, tier (1–4), removal option; optional aggressiveness/height/confined. **Fixed:** UI-A now collects species, scope tier and removal (`EstimateToolViewV2.jsx:3574-3576, 6669, 6678`; `property-lookup-v2.js:4478-4487`); the paper-wasp/tier-2/no-removal defaults apply only when a field is left blank.
 
 ## 15. Lawn specialty (`plugging`, `top_dressing`, `dethatching`)
 
