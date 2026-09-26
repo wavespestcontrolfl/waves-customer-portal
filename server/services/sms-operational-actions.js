@@ -120,11 +120,6 @@ const SPAN_UNIT = String.raw`(?:days?|weeks?|months?|years?)`;
 // week"), so that timing is still tested (Codex #4816 r40).
 const TRAILING_TIMING_START = String.raw`(?:today|tomorrow|tmrw|tonight|asap|eod|eow|by|before|after|on|until|till|at|in|within|later|end`
   + String.raw`|(?:mon|tues|wednes|thurs|fri|satur|sun)day|this (?:morning|afternoon|evening|week(?:end)?)|next (?:week(?:end)?|month|year))\b`;
-const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|from|re:|in regards? to|with regards? to)`
-  + String.raw`\s+[^\s,.;!?]+(?:\s+(?!${TRAILING_TIMING_START})[^\s,.;!?]+)*`, 'gi');
-function withoutTopics(quote) {
-  return String(quote || '').replace(TOPIC_CLAUSE, ' ');
-}
 
 // A possessive period names the topic, not the deadline: "about this
 // month's invoice", "tomorrow's appointment", "Friday's visit" (Codex #4816
@@ -171,6 +166,15 @@ const STATED_TIMING = new RegExp([
   String.raw`\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b`,
   String.raw`\b\d{4}-\d{2}-\d{2}\b`,
 ].join('|'), 'i');
+
+// Stops before any word where STATED_TIMING itself matches, so every date
+// form it knows ("10/14", "Oct 14", "the 15th", weekdays) survives, plus the
+// preposition starts above (Codex #4816 r43).
+const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|from|re:|in regards? to|with regards? to)`
+  + String.raw`\s+[^\s,.;!?]+(?:\s+(?!${TRAILING_TIMING_START}|${STATED_TIMING.source})[^\s,.;!?]+)*`, 'gi');
+function withoutTopics(quote) {
+  return String(quote || '').replace(TOPIC_CLAUSE, ' ');
+}
 
 // Outcomes a visit-only fact may reach without anyone needing to act: the
 // duration verdict itself and the scope/authority guards that can run before

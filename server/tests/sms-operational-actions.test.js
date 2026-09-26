@@ -734,6 +734,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Call early next year', 'Reach out by end of the year', 'Call me this month', 'Call me tomorrow, about the invoice',
     'Call me about the invoice. Tomorrow works', 'At the next visit please call about the bait',
     'Please call before my next appointment', 'Have it ready by the next service', 'Call me next time you are out',
+    'Please call me about the invoice 10/14', 'Call me about the bill on 2040-10-14', 'Call about the estimate Oct 14',
+    'Call me regarding the invoice by the 15th',
     'Please call me about my invoice tomorrow', 'Call about the invoice on Friday',
     'Call me regarding the estimate next week', 'Call about the termite quote this afternoon'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
@@ -997,6 +999,16 @@ describe('fulfillment proof', () => {
     // Back at confirmed with no logged move: an undone En Route tap, not progress.
     expect(admissibleWitness({ ...progressedThenMoved, moved_at: null }, ask('other'))).toBe(false);
     expect(admissibleWitness({ ...progressedThenMoved, moved_at: null }, ask('callback'))).toBe(false);
+  });
+
+  test('Codex #4816 r43: progress recorded before a later no_show still answers; a no_show alone does not', () => {
+    const ask = (kind) => ({ kind, description: 'You still coming?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } });
+    const noShow = { id: 'visit-n', ref: 'visit:visit-n', type: 'visit', status: 'no_show', property_id: 'home',
+      created_at: '2040-03-01T15:00:00Z', progressed_at: '2040-03-10T16:00:00Z', text: 'Quarterly Lawn; status no_show' };
+    expect(admissibleWitness(noShow, ask('other'))).toBe(true);
+    expect(admissibleWitness(noShow, ask('callback'))).toBe(true);
+    expect(admissibleWitness({ ...noShow, progressed_at: null }, ask('other'))).toBe(false);
+    expect(admissibleWitness({ ...noShow, progressed_at: null }, ask('callback'))).toBe(false);
   });
 
   test('Codex #4816 r14–r27: a cancellation answers only a cancel ask whose property was resolved', () => {

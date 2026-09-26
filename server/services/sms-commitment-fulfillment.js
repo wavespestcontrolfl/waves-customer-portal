@@ -72,11 +72,12 @@ const SMS_TYPES = {
 // cancellation after the text is `other` evidence too — for the model only:
 // it answers "please cancel", never "are you still coming" (Codex #4816 r7).
 const PROGRESS_STATUSES = ['en_route', 'on_site', 'completed'];
-// A visit that progressed and was cancelled afterwards still carries that
-// progress (progressed_at), so `cancelled` is a possible current status for
-// both kinds; visitWitnessAt decides which recorded stamp may answer.
+// A visit that progressed and was then cancelled or marked no_show (dispatch
+// allows no_show from en_route/on_site, Codex #4816 r43) still carries that
+// progress (progressed_at), so both are possible current statuses for both
+// kinds; visitWitnessAt decides which recorded stamp may answer.
 const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'],
-  technician_follow_up: ['completed'], other: [...PROGRESS_STATUSES, 'cancelled'], callback: [...PROGRESS_STATUSES, 'cancelled'] };
+  technician_follow_up: ['completed'], other: [...PROGRESS_STATUSES, 'cancelled', 'no_show'], callback: [...PROGRESS_STATUSES, 'cancelled', 'no_show'] };
 // Moving a live visit resets it to confirmed (admin-schedule reschedule
 // paths), so a logged move keeps the recorded progress admissible (Codex
 // #4816 r35). Without a logged move, a visit back at confirmed is an undone
