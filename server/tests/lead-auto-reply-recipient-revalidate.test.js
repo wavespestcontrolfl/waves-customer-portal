@@ -38,8 +38,7 @@ jest.mock('../models/db', () => {
   db.__tableChain = tableChain;
   return db;
 });
-let mockThreadBlocker = null;
-jest.mock('../services/sms-suggest-mode', () => ({ threadHasLiveAnswer: jest.fn(async () => mockThreadBlocker) }));
+jest.mock('../services/sms-suggest-mode', () => ({ HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'] }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: async () => 'Hello Sam! Waves Pest Control here.' }));
 jest.mock('../utils/customer-comms-lock', () => ({
@@ -73,7 +72,6 @@ beforeEach(() => {
   mockCustomerRow = { phone: '(941) 555-1234', lead_intake_status: 'awaiting_service' };
   mockLeads = [{ status: 'new', deleted_at: null }];
   mockInbound = null;
-  mockThreadBlocker = null;
 });
 
 describe('recipientStillCurrent', () => {
@@ -183,12 +181,15 @@ describe('delayedLeadReplyStillEligible', () => {
     expect(leadChain.forNoKeyUpdate).toHaveBeenCalled();
   });
 
-  test('a staff reply still in flight (shared thread guard) → refused', async () => {
-    mockThreadBlocker = 'reply_in_flight';
-    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234', undefined, { since: new Date() }))
-      .resolves.toMatchObject({ ok: false, code: 'LEAD_CONVERSATION_STARTED' });
-    const { threadHasLiveAnswer } = require('../services/sms-suggest-mode');
-    expect(threadHasLiveAnswer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ threadLast10: '9415551234', customerId: 'cust-1' }));
+  test('a staff reply still in flight → refused; only human reply types count, so the send\'s own reservation cannot', async () => {
+    const db = require('../models/db');
+    const chains = [];
+    const trx = jest.fn((table) => { const c = db.__tableChain(table); chains.push([table, c]); return c; });
+    await delayedLeadReplyStillEligible('cust-1', '9415551234', trx, { since: new Date() });
+    const inFlight = chains.filter(([table]) => table === 'sms_log').map(([, c]) => c)
+      .find(c => c.whereIn.mock.calls.some(([col]) => col === 'message_type'));
+    expect(inFlight.whereIn).toHaveBeenCalledWith('message_type', ['manual', 'ai_approved', 'ai_revised']);
+    expect(inFlight.whereIn).toHaveBeenCalledWith('status', ['scheduled', 'sending']);
   });
 
   test('the lead phone was corrected on the lead alone → refused', async () => {

@@ -194,17 +194,23 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
     if (exchanged) {
       return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'A text was exchanged with the customer before the delayed lead reply' };
     }
-    // The shared thread guard every reply path runs (the Inbox sender, the
-    // auto-send executor): it also sees a staff reply still in flight (its
-    // 'sending' reservation is committed before its provider call) and a
-    // newer inbound. Run on this handoff's transaction; the thread advisory
-    // lock itself is NOT taken here, because the provider call below can
-    // open its own reservation transaction on that same lock.
-    const blocker = await require('./sms-suggest-mode').threadHasLiveAnswer(conn, {
-      threadLast10: phoneDigits, customerId, inboundCreatedAt: since,
-    });
-    if (blocker) {
-      return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: `The thread is already active (${blocker}) before the delayed lead reply` };
+    // A human reply still in flight on this thread (the Inbox sender commits
+    // its 'sending' reservation before its provider call): the human wins.
+    // Human reply types only, so this send's OWN provider-handoff
+    // reservation (twilio.js creates one before the handoff while gratitude
+    // coordination is on) can never block it. Accepted replies and newer
+    // inbound texts are covered by the query above. The thread advisory lock
+    // is not held here: the provider call can take it on its own connection.
+    const { HUMAN_REPLY_TYPES } = require('./sms-suggest-mode');
+    const humanReplyInFlight = await conn('sms_log')
+      .where({ direction: 'outbound' })
+      .whereIn('message_type', HUMAN_REPLY_TYPES)
+      .whereIn('status', ['scheduled', 'sending'])
+      .where('created_at', '>=', since)
+      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits])
+      .first('id');
+    if (humanReplyInFlight) {
+      return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'A staff reply is in flight before the delayed lead reply' };
     }
   }
   const customer = await conn('customers').where({ id: customerId }).first('lead_intake_status');
