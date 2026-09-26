@@ -868,17 +868,28 @@ function buildV2ToV1Map() {
 
 const V2_TO_V1_SLUG = buildV2ToV1Map();
 
-/** The v1 slug for a v2 node: its own legacy mapping, else the nearest
- * ancestor's (`aedes-mosquito` -> the `mosquitoes` group -> v1 `mosquito`).
- * Every v1 slug mapped at a group/subgroup carries a generic v1 label
- * ("Mosquitoes", "Widow Spiders"), so this never over-claims a species
- * (Codex #4916 r2 P2). */
+// v1 slugs whose (generic) label is true of EVERY species under the node
+// they're mapped to, so a named descendant may inherit them: any mosquito
+// is "Mosquitoes", any widow is "Widow Spiders". Not "honey-bee" (its
+// node, bees, also holds carpenter and bumble bees) or "aphid-scale"
+// (tiny plant pests also holds mites and thrips) — pre-push audit on
+// Codex #4916 r3.
+const V1_INHERITABLE = new Set(['mosquito', 'black-widow', 'flea', 'tick', 'rodent', 'whitefly', 'sod-webworm']);
+// Named entries a non-inheritable v1 slug still describes exactly.
+const V1_BY_ENTRY = new Map([['honey-bee-swarm', 'honey-bee'], ['honey-bee-wall-colony', 'honey-bee']]);
+
+/** The v1 slug for a v2 node: its own legacy mapping, an explicit entry
+ * mapping, else the nearest ancestor mapped to an inheritable v1 slug
+ * (`aedes-mosquito` -> `mosquitoes` -> v1 "mosquito"). Anything else stays
+ * unmatched rather than borrowing a v1 identity that isn't true of it. */
 function v1SlugFor(v2Slug) {
   if (!v2Slug) return null;
-  const rungs = catalog.lineage(v2Slug).slice().reverse();
-  for (const rung of rungs) {
+  const own = V2_TO_V1_SLUG.get(v2Slug) || V1_BY_ENTRY.get(v2Slug);
+  if (own && V1_BY_SLUG.has(own)) return own;
+  const ancestors = catalog.lineage(v2Slug).slice().reverse().slice(1);
+  for (const rung of ancestors) {
     const v1 = V2_TO_V1_SLUG.get(rung.id);
-    if (v1) return v1;
+    if (v1 && V1_INHERITABLE.has(v1)) return v1;
   }
   return null;
 }
@@ -1289,5 +1300,5 @@ module.exports = {
   REFERRAL_TEMPLATES,
   escalateBelow,
   toImages,
-  _test: { candidateContextFor, mergeVerify, combineEscalation, showsConflict, V2_TO_V1_SLUG },
+  _test: { candidateContextFor, mergeVerify, combineEscalation, showsConflict, V2_TO_V1_SLUG, v1SlugFor },
 };
