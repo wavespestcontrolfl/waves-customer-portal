@@ -23,6 +23,7 @@
  * baseline; truncatedPlanningRuns says which is true for this response).
  * Every null shows as "unknown" in the UI, never 0 (day-quality's own rule).
  */
+const { validate: isUuid } = require('uuid');
 const { etDateString, addETDays, validCalendarDate } = require('../../utils/datetime-et');
 const { etDateDiffDays } = require('../recurring-appointment-seeder');
 const { gateEnvValue } = require('../../config/feature-gates');
@@ -158,8 +159,17 @@ function actualPastRow(plan, mileage, fallbackStops) {
   if (!stops) return { stops: null, physicalStops: null, onSiteMinutes: null, onSiteCoverage: null, driveMinutes, driveTrips, spanMinutes: null };
   const recorded = stops.filter(stop => RECORDED_EVIDENCE.has(stop.durationEvidence) && Number.isFinite(stop.recordedServiceMinutes));
   const onSiteMinutes = recorded.length ? recorded.reduce((sum, stop) => sum + stop.recordedServiceMinutes, 0) : null;
-  const arrivals = stops.map(stop => stop.recordedArrivalMinute).filter(Number.isFinite);
-  const completions = stops.map(stop => stop.recordedCompletionMinute).filter(Number.isFinite);
+  // A same-day added (unbaselined) completed job's own recorded arrival/
+  // completion counts toward the SPAN too (Codex P2, round 5) — route-
+  // performance.js already loads it (the same pastWork pass that counts
+  // unbaselinedCompletedVisits) and exposes it per route as
+  // plan.unbaselinedStops, so this is the actual first-arrival-to-last-
+  // completion span for the tech-day, not just the snapshot's own stops. It
+  // never contributes to onSiteMinutes/onSiteCoverage — its duration still
+  // isn't independently trusted the way a planned, matched stop's is.
+  const spanStops = plan && Array.isArray(plan.unbaselinedStops) ? [...stops, ...plan.unbaselinedStops] : stops;
+  const arrivals = spanStops.map(stop => stop.recordedArrivalMinute).filter(Number.isFinite);
+  const completions = spanStops.map(stop => stop.recordedCompletionMinute).filter(Number.isFinite);
   const spanMinutes = arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null;
   const unbaselined = plan && Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
   const completedStops = plan
@@ -263,13 +273,26 @@ function missingBaselineIdsByDate(routes = []) {
   return byDate;
 }
 
+// A saved planner-run snapshot's technician_id is untrusted JSONB, not a
+// DB-validated column (mileage_log/missingBaselineRoutes technicianIds come
+// straight from a real FK column and are always well-formed already) — a
+// malformed/corrupted value passed straight into whereIn('id', ...) against
+// a uuid column would 500 the whole request (Codex P2). Dropped from the
+// lookup query entirely; its row still renders (the roster keeps the id),
+// labeled 'unknown technician' rather than leaking the raw garbage value.
 async function resolveHistoricalNames(conn, techs, idsByDateMaps) {
   const known = new Set(techs.map(tech => tech.id));
   const historicalIds = new Set();
   for (const map of idsByDateMaps) for (const set of map.values()) for (const id of set) historicalIds.add(id);
-  const missingIds = [...historicalIds].filter(id => !known.has(id));
+  const unresolved = [...historicalIds].filter(id => !known.has(id));
+  const missingIds = unresolved.filter(id => isUuid(id));
+  const malformedIds = unresolved.filter(id => !isUuid(id));
   const extra = missingIds.length ? await conn('technicians').whereIn('id', missingIds).select('id', 'name') : [];
-  return new Map([...techs.map(tech => [tech.id, tech.name]), ...extra.map(tech => [tech.id, tech.name])]);
+  return new Map([
+    ...techs.map(tech => [tech.id, tech.name]),
+    ...extra.map(tech => [tech.id, tech.name]),
+    ...malformedIds.map(id => [id, 'unknown technician']),
+  ]);
 }
 
 // PAST rosters are NOT day.byTech (getScheduleQualityMeasurements' own

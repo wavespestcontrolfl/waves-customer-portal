@@ -14,8 +14,13 @@ const DEFAULT_TO = () => etDateString(addETDays(new Date(), 7));
 
 function fmtMinutes(value) {
   if (!Number.isFinite(value)) return 'unknown';
-  const hours = Math.floor(Math.abs(value) / 60);
-  const mins = Math.round(Math.abs(value) % 60);
+  // Round the TOTAL once before splitting hours/minutes — rounding each
+  // piece separately (Math.floor on the raw total, Math.round on the raw
+  // remainder) can carry a fractional minute past 59 on its own and print
+  // "1h 60m" instead of "2h 0m" (Codex P2).
+  const total = Math.round(Math.abs(value));
+  const hours = Math.floor(total / 60);
+  const mins = total % 60;
   const sign = value < 0 ? '-' : '';
   return hours > 0 ? `${sign}${hours}h ${mins}m` : `${sign}${mins}m`;
 }
@@ -150,8 +155,13 @@ export default function DayScorecardPanel() {
   }
 
   const days = request.data?.days || [];
-  const techCounts = days.map((day) => day.byTech.length);
-  const showTechName = Math.max(0, ...techCounts) > 1;
+  // Distinct technicianIds across the WHOLE result, not the busiest single
+  // day (Codex P2): two different technicians on two different days each
+  // have a per-day max of 1 and would otherwise never get a Technician
+  // column to tell their rows apart.
+  const technicianIds = new Set(days.flatMap((day) => day.byTech.map((row) => row.technicianId)));
+  const showTechName = technicianIds.size > 1;
+  const rows = days.flatMap((day) => day.byTech.map((row) => ({ date: day.date, row })));
 
   return (
     <div>
@@ -171,16 +181,20 @@ export default function DayScorecardPanel() {
               </TR>
             </THead>
             <TBody>
-              {days.flatMap((day) => day.byTech.map((row) => (
+              {rows.map(({ date, row }) => (
                 <TechDayRows
-                  key={`${day.date}|${row.technicianId}`}
-                  date={day.date}
+                  key={`${date}|${row.technicianId}`}
+                  date={date}
                   row={row}
                   isPast={row.actual != null}
                   showTechName={showTechName}
                 />
-              )))}
-              {!days.length && (
+              ))}
+              {!rows.length && (
+                // A day can exist with an empty byTech array (e.g. a closed
+                // day) and render zero rows — days.length alone would miss
+                // that and leave a blank table with no empty-state message
+                // (Codex P2).
                 <TR><TD colSpan={2 + METRICS.length + (showTechName ? 1 : 0)} className="text-13 text-ink-tertiary py-6 text-center">No scheduled days in range</TD></TR>
               )}
             </TBody>

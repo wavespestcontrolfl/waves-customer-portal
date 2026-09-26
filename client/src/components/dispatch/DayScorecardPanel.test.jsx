@@ -216,3 +216,67 @@ it('a Span column renders actual.spanMinutes on the Actual row; the Planned row 
   const plannedRow = screen.getByText('Planned (legacy)').closest('tr');
   expect(within(plannedRow).getAllByText('unknown').length).toBeGreaterThan(0); // no planned-side span concept
 });
+
+it('shows the Technician column when >1 distinct technicianId appears ANYWHERE in the result, not just on one busy day', async () => {
+  // Each individual day has exactly one technician (a per-day max of 1), but
+  // the two days name DIFFERENT technicians — the column must still appear
+  // so the two rows aren't ambiguous (Codex P2).
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'calibrated',
+    days: [
+      { date: '2026-10-01', byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'calibrated',
+        planned: { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 540, lateVisits: 0 }, actual: null }] },
+      { date: '2026-10-02', byTech: [{ technicianId: 'tech2', technician: 'Ben', driveModel: 'calibrated',
+        planned: { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 540, lateVisits: 0 }, actual: null }] },
+    ],
+  }));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-10-01');
+  expect(screen.getByRole('columnheader', { name: 'Technician' })).toBeInTheDocument();
+  expect(screen.getByText('Adam')).toBeInTheDocument();
+  expect(screen.getByText('Ben')).toBeInTheDocument();
+});
+
+it('does not show the Technician column when every day names the same one technician', async () => {
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'calibrated',
+    days: [
+      { date: '2026-10-01', byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'calibrated',
+        planned: { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 540, lateVisits: 0 }, actual: null }] },
+      { date: '2026-10-02', byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'calibrated',
+        planned: { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 540, lateVisits: 0 }, actual: null }] },
+    ],
+  }));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-10-01');
+  expect(screen.queryByRole('columnheader', { name: 'Technician' })).not.toBeInTheDocument();
+});
+
+it('shows the empty state when every day has zero rendered rows, even though days.length > 0', async () => {
+  // A closed day (or one whose entire roster was filtered) still exists as
+  // a `day` object with an empty byTech array — days.length alone would
+  // miss this and render a blank table with no message (Codex P2).
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'calibrated',
+    days: [{ date: '2026-10-01', closed: true, byTech: [] }],
+  }));
+  render(<DayScorecardPanel />);
+  expect(await screen.findByText('No scheduled days in range')).toBeInTheDocument();
+  expect(screen.queryByText('2026-10-01')).not.toBeInTheDocument();
+});
+
+it('rounds the total minutes once, never carrying a fractional minute into "60m" (119.6 -> "2h 0m")', async () => {
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'calibrated',
+    days: [{
+      date: '2026-10-01',
+      byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'calibrated',
+        planned: { stops: 1, physicalStops: 1, onSiteMinutes: 119.6, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 540, lateVisits: 0 },
+        actual: null }],
+    }],
+  }));
+  render(<DayScorecardPanel />);
+  const row = (await screen.findByText('2026-10-01')).closest('tr');
+  expect(within(row).getByText('2h 0m')).toBeInTheDocument();
+  expect(within(row).queryByText(/60m/)).not.toBeInTheDocument();
+});

@@ -231,16 +231,16 @@ describe('getDayScorecard', () => {
     });
     getRoutePerformance.mockResolvedValue({
       plans: [{
-        date, technicianId: 'ghost', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        date, technicianId: '123e4567-e89b-12d3-a456-426614174000', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
         plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
         stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }],
       }],
     });
     const result = await getDayScorecard({ date_from: date, date_to: date },
-      conn([], [{ id: 'ghost', name: 'Former Tech' }]), new Date('2026-09-08T12:00:00Z'));
+      conn([], [{ id: '123e4567-e89b-12d3-a456-426614174000', name: 'Former Tech' }]), new Date('2026-09-08T12:00:00Z'));
     const ids = result.days[0].byTech.map(row => row.technicianId);
-    expect(ids).toEqual(expect.arrayContaining(['tech1', 'ghost']));
-    const ghostRow = result.days[0].byTech.find(row => row.technicianId === 'ghost');
+    expect(ids).toEqual(expect.arrayContaining(['tech1', '123e4567-e89b-12d3-a456-426614174000']));
+    const ghostRow = result.days[0].byTech.find(row => row.technicianId === '123e4567-e89b-12d3-a456-426614174000');
     // Name resolved via the direct, non-applyAssignable technicians lookup —
     // never dropped just because the roster query excludes this technician.
     expect(ghostRow.technician).toBe('Former Tech');
@@ -257,9 +257,9 @@ describe('getDayScorecard', () => {
     getRoutePerformance.mockResolvedValue({ plans: [] });
     // The mileage query itself must not filter by the assignable roster.
     const result = await getDayScorecard({ date_from: date, date_to: date },
-      conn([{ technician_id: 'ghost', trip_date: date, duration_minutes: 40, purpose: 'business' }], [{ id: 'ghost', name: 'Former Tech' }]),
+      conn([{ technician_id: '123e4567-e89b-12d3-a456-426614174000', trip_date: date, duration_minutes: 40, purpose: 'business' }], [{ id: '123e4567-e89b-12d3-a456-426614174000', name: 'Former Tech' }]),
       new Date('2026-09-08T12:00:00Z'));
-    const ghostRow = result.days[0].byTech.find(row => row.technicianId === 'ghost');
+    const ghostRow = result.days[0].byTech.find(row => row.technicianId === '123e4567-e89b-12d3-a456-426614174000');
     expect(ghostRow).toBeTruthy();
     expect(ghostRow.technician).toBe('Former Tech');
     expect(ghostRow.planned).toBeNull();
@@ -296,6 +296,50 @@ describe('getDayScorecard', () => {
     expect(row.actual.onSiteCoverage).toEqual({ covered: 2, total: 2, unbaselined: 1 });
     // 2 planned-and-completed stops + the 1 same-day unbaselined completion.
     expect(row.actual.stops).toBe(3);
+  });
+
+  // Codex P2 (round 5): the actual SPAN (first arrival to last completion)
+  // ignored a same-day added job entirely — only plan.stops fed the
+  // arrivals/completions arrays, even though route-performance already
+  // loads the unbaselined job's own recorded timing (unbaselinedStops).
+  test('a same-day added job\'s own recorded arrival/completion extends the actual span', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
+        unbaselinedCompletedVisits: 1,
+        // Snapshot's own stop spans 480->540; the unbaselined job (added and
+        // completed same day, outside the snapshot) ran later, 560->620 —
+        // the real span is 480->620 (140m), not the snapshot-only 60m.
+        unbaselinedStops: [{ appointmentId: 'added', recordedArrivalMinute: 560, recordedCompletionMinute: 620 }],
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech[0];
+    expect(row.actual.spanMinutes).toBe(140); // 620 - 480, not 540 - 480
+  });
+
+  test('a plan with no unbaselinedStops array (older shape) still computes a span from its own stops', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].actual.spanMinutes).toBe(60);
   });
 
   // Codex P1 (round 4): measureRoutePerformance forces durationEvidence to
@@ -428,14 +472,48 @@ describe('getDayScorecard', () => {
       days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
     });
     getRoutePerformance.mockResolvedValue({
-      plans: [], missingBaselineRoutes: [{ date, technicianId: 'ghost' }], truncatedPlanningRuns: false,
+      plans: [], missingBaselineRoutes: [{ date, technicianId: '123e4567-e89b-12d3-a456-426614174000' }], truncatedPlanningRuns: false,
     });
     const result = await getDayScorecard({ date_from: date, date_to: date },
-      conn([], [{ id: 'ghost', name: 'Former Tech' }]), new Date('2026-09-08T12:00:00Z'));
-    const ghostRow = result.days[0].byTech.find(row => row.technicianId === 'ghost');
+      conn([], [{ id: '123e4567-e89b-12d3-a456-426614174000', name: 'Former Tech' }]), new Date('2026-09-08T12:00:00Z'));
+    const ghostRow = result.days[0].byTech.find(row => row.technicianId === '123e4567-e89b-12d3-a456-426614174000');
     expect(ghostRow).toBeTruthy();
     expect(ghostRow.technician).toBe('Former Tech');
     expect(ghostRow.planned).toBeNull();
+  });
+
+  // Codex P2 (round 5): a saved planner-run snapshot's technician_id is
+  // untrusted JSONB, not a DB-validated column — a malformed value passed
+  // straight into whereIn('id', ...) against a uuid column would 500 the
+  // whole request. It must be dropped from the name-lookup query (never
+  // reach the DB at all) while its row still renders, labeled
+  // 'unknown technician' instead of leaking the raw garbage value.
+  test('a malformed technicianId from a corrupted snapshot never reaches the technicians query, and its row shows unknown technician', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'not-a-real-uuid', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }],
+      }],
+    });
+    const whereInSpy = jest.fn(() => ({ select: async () => { throw new Error('should never be queried'); } }));
+    const dbConn = jest.fn((table) => {
+      if (table === 'mileage_log') return { whereNotNull: () => ({ whereBetween: () => ({ select: async () => [] }) }) };
+      if (table === 'technicians') return { whereIn: whereInSpy };
+      throw new Error(`unexpected table ${table}`);
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, dbConn, new Date('2026-09-08T12:00:00Z'));
+    // The malformed id never made it into a whereIn('id', [...]) call at all.
+    expect(whereInSpy).not.toHaveBeenCalled();
+    const row = result.days[0].byTech.find(r => r.technicianId === 'not-a-real-uuid');
+    expect(row).toBeTruthy();
+    expect(row.technician).toBe('unknown technician');
+    expect(row.planned).toMatchObject({ stops: 1 }); // the row itself still renders normally
   });
 
   test('a missingBaselineRoutes entry with no technicianId is never turned into a row', async () => {

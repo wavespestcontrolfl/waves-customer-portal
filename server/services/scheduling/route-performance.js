@@ -239,18 +239,31 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   // key too: a route WITH a baseline can still miss a job added (and
   // completed) after the snapshot was captured — a caller measuring "actual"
   // work against `plan.plannedStops` alone would silently omit it (Codex
-  // P1 on day-scorecard.js's onSiteCoverage).
+  // P1 on day-scorecard.js's onSiteCoverage). Stores each unbaselined row's
+  // own recorded arrival/completion too (Codex P2, round 5) — the count
+  // alone couldn't extend a caller's actual SPAN to include a same-day
+  // added job's real arrival/completion; recordedTiming is cheap (already
+  // computed for durationReferences below over the same pastWork) so
+  // there's no reason to leave it out.
   const unbaselinedByRoute = new Map();
   for (const row of pastWork) {
     if (row.status !== 'completed') continue;
     const key = routeKey(dateOnly(row.scheduled_date), row.technician_id);
     if (coveredRoutes.get(key)?.has(row.id)) continue;
-    unbaselinedByRoute.set(key, (unbaselinedByRoute.get(key) || 0) + 1);
+    const timing = recordedTiming(row);
+    const entry = unbaselinedByRoute.get(key) || [];
+    entry.push({ appointmentId: row.id,
+      recordedArrivalMinute: timing.arrival ? minuteInET(timing.arrival) : null,
+      recordedCompletionMinute: timing.completion ? minuteInET(timing.completion) : null });
+    unbaselinedByRoute.set(key, entry);
   }
   return {
     basis: 'saved_pre_service_plan_vs_recorded_work', asOf: now.toISOString(),
-    plans: plans.map(plan => ({ ...measureRoutePerformance(plan, enriched),
-      unbaselinedCompletedVisits: unbaselinedByRoute.get(routeKey(plan.date, plan.technician_id)) || 0 })),
+    plans: plans.map(plan => {
+      const unbaselinedStops = unbaselinedByRoute.get(routeKey(plan.date, plan.technician_id)) || [];
+      return { ...measureRoutePerformance(plan, enriched),
+        unbaselinedStops, unbaselinedCompletedVisits: unbaselinedStops.length };
+    }),
     missingBaselineDates, missingBaselineRoutes,
     // A missing-baseline tech-day (no plan at all) still has raw completed
     // work in `enriched` — shaped exactly like a plan's own `stops`
@@ -260,7 +273,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     // that has one, instead of a second formula (Codex P2). Additive only —
     // every existing field above is unchanged.
     missingBaselineStops: missingBaselineActualStops(missingBaselineRoutes, pastWork, routeKey),
-    unbaselinedCompletedVisits: [...unbaselinedByRoute.values()].reduce((sum, count) => sum + count, 0),
+    unbaselinedCompletedVisits: [...unbaselinedByRoute.values()].reduce((sum, entries) => sum + entries.length, 0),
     truncatedPlanningRuns: runs.length > 500,
     durationReferences: summarizeDurationReferences(pastWork, recordedTiming),
     note: 'Unknown arrivals are excluded from the on-time denominator. Duration sources stay separate; no GPS gap is classified as idle and no model is updated.',
