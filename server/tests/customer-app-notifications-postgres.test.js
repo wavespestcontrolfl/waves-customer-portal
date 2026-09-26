@@ -1046,6 +1046,34 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(repaired[0].metadata).toMatchObject({ proof_repaired: true, scheduled_service_id: visitId, property_id: homeId });
   });
 
+  test('Codex #4816 r50: when both proof writes fail, the settled scheduled row carries the delivered visit scope', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-9', status: 'sent' });
+    const visitId = randomUUID();
+    const homeId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: visitId, customer_id: property, property_id: homeId,
+      scheduled_date: '2026-09-09', service_type: 'Pest Control' });
+    const [queued] = await mockPg('sms_log').insert({ customer_id: property, direction: 'outbound', from_phone: '+19415550199',
+      to_phone: '+19415550101', message_body: 'Your invoice is ready.', status: 'sending', message_type: 'invoice_followup',
+      created_at: new Date(), metadata: JSON.stringify({ queued: true }) }).returning('id');
+    await mockPg.raw(`CREATE OR REPLACE FUNCTION reject_push_proof() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.from_phone = 'push' THEN RAISE EXCEPTION 'proof write refused'; END IF; RETURN NEW; END $$`);
+    await mockPg.raw('CREATE TRIGGER reject_push_proof BEFORE INSERT ON sms_log FOR EACH ROW EXECUTE FUNCTION reject_push_proof()');
+    try {
+      const routing = require('../services/messaging/push-channel-routing');
+      expect(await routing.attemptPushFirst({ customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
+        messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, appointmentId: visitId,
+        scheduledSmsLogId: queued.id || queued, notificationEventKey: `qa:${invoiceId}:settle` })).toMatchObject({ delivered: true });
+    } finally {
+      await mockPg.raw('DROP TRIGGER IF EXISTS reject_push_proof ON sms_log');
+    }
+    const settled = await mockPg('sms_log').where({ id: queued.id || queued }).first();
+    expect(settled.status).toBe('sent');
+    expect(settled.metadata).toMatchObject({ channel: 'push', providerAccepted: true, scheduled_service_id: visitId, property_id: homeId, queued: true });
+  });
+
   test('Codex #4816 r45: another push of the same type near acceptance does not stand in for a missing proof', async () => {
     await device();
     await put({ invoiceChannel: 'push' });

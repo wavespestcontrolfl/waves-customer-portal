@@ -737,6 +737,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Please call me about the invoice 10/14', 'Call me about the bill on 2040-10-14', 'Call about the estimate Oct 14',
     'Call me regarding the invoice by the 15th',
     'Please call me from Friday onward', 'Call me from tomorrow on', 'Available from Monday through Wednesday, call me',
+    'Please call me about the report from last week tomorrow', 'Send the photos from Monday through Wednesday by Friday',
     'Please call me about my invoice tomorrow', 'Call about the invoice on Friday',
     'Call me regarding the estimate next week', 'Call about the termite quote this afternoon'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {

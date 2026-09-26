@@ -656,8 +656,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
                      'providerAccepted', true,
                      'provider_message_id', ?::text,
                      'provider_from_number', ?::text,
-                     'finalize_pending', ?::boolean)`,
-                  [schedRow.created_at, 'push:delivered', fromNumber, owesFinalize],
+                     'finalize_pending', ?::boolean) || ?::jsonb`,
+                  [schedRow.created_at, 'push:delivered', fromNumber ?? null, owesFinalize,
+                    // The delivered visit scope, as on a normal proof row
+                    // (Codex #4816 r50): this settled row is the only proof.
+                    JSON.stringify(proofScope)],
                 ),
               });
           }
