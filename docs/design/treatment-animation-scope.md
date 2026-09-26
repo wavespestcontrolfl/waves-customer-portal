@@ -30,9 +30,11 @@ shipped the same day** — PR #3306, "Termite foam: full service identity," merg
   and only enters the schedule when an estimate carrying a foam line is accepted.
 
 **So the trigger is the catalog service key, not a method-select value.** No change to the
-termite `treatment_method` options is needed, and none should be made — the options list stays
-`Spot treatment · Liquid perimeter · Trenching · Bait station setup · Cartridge replacement ·
-Wood treatment · Other`, with `percent_solution` required for the liquid-dilution ones.
+termite `treatment_method` options is needed, and none should be made — the options list is now
+`Spot treatment · Liquid perimeter · Trenching · Rodding · Foam / void injection ·
+Drill-and-inject · Bait station setup · Cartridge replacement · Wood treatment · Other`
+(Rodding, Foam / void injection and Drill-and-inject were added in #3701), with
+`percent_solution` required for the liquid-dilution ones.
 
 Two facts from that PR shape everything below:
 
@@ -122,6 +124,9 @@ caption.
 ---
 
 ## 5. The build
+
+**Update 2026-09-26:** shipped 2026-08-10 in #3301, dark behind `GATE_PHOTO_MARKS`
+(`server/services/service-report/trace-eligibility.js`, `client/src/components/report/MarkedPhotoCard.jsx`).
 
 ### 5.1 Marks storage
 

@@ -1,7 +1,8 @@
 # Third-party Payer — Phase 2: NET terms + consolidated monthly statements
 
 Design doc (2026-06-19). Phase 2 of the third-party Payer (Bill-To) subsystem
-(Phase 1 = PR #1850; deposit follow-up = PR #1906). **Design only — no code yet.**
+(Phase 1 = PR #1850; deposit follow-up = PR #1906). **Implemented, dark behind
+`GATE_PAYER_STATEMENTS`.**
 
 ## Goal
 

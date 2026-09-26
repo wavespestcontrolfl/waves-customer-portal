@@ -18,12 +18,12 @@ The destinations in `client/src/config/adminNavigation.js` remain the supported 
 
 - Overview
 - Operations
-- Customers & Sales
+- Sales
+- Communications
+- Finance
+- People
 - Marketing
-- Team & Automation
-- Billing & Finance
-- Resources
-- Administration
+- System
 
 The five mobile task tabs remain Dashboard, Schedule, Customers, Messages, and More.
 
@@ -71,7 +71,7 @@ These active entry routes now resolve inside a canonical destination. They use q
 | `/admin/estimates` | The route and `/admin/pipeline` both mount `EstimatesPageV2`. | `/admin/pipeline?tab=estimates`, while honoring explicit `tab=new` and estimate deep links |
 | `/admin/equipment-calibration` | `EquipmentCalibrationPanel` is already the Equipment `calibrations` tab. | `/admin/equipment?tab=calibrations` |
 | `/admin/lawn-protocol` | The command center owns seven related protocol-authoring and readiness areas. Services is its operational parent, and alert-driven subarea links must remain addressable. | `/admin/service-library?tab=protocols&protocolTab=<subarea>` |
-| `/admin/kb` | Wiki and Knowledge Base use separate APIs and workflows, but both are knowledge-management tools under the same Resources parent. | `/admin/knowledge?area=base`, while Wiki remains the default area |
+| `/admin/kb` | Wiki and Knowledge Base use separate APIs and workflows, but both are knowledge-management tools under the same Operations parent. | `/admin/knowledge?area=base`, while Wiki remains the default area |
 
 The `/admin/estimates/:estimateId/proposal` detail route remains a real workflow and must not be redirected.
 

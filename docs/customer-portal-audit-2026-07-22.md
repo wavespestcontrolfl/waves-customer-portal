@@ -84,7 +84,7 @@ The cold visitor's entry is the texted/emailed `/estimate/:token` link. Estimate
 ### B. Multi-service selection in one booking
 
 - **On the estimate** — fully supported: multi-service estimates render per-service sections with independent cadence combos where the server provides them (3770-3807), mirrored non-axis sections locked so the customer can't pick a cadence accept would ignore (4874-4880), plan-wide credit itemization (PlanTotalSummary, 1998-2122), and one accept books the whole plan. Add-a-service upsell files a bundle inquiry (412-495, 4703-4736).
-- **On `/book`** — impossible. One `service` per booking, fixed by URL param, and **no service picker exists in the UI** (finding S3-1).
+- **On `/book`** — impossible. One `service` per booking, fixed by URL param, and **no service picker exists in the UI** (finding S3-1). **Update 2026-09-26:** addressed — a flag-gated multi-service picker (pick up to 3) now exists (`client/src/pages/PublicBookingPage.jsx:168, 189, 1017-1040`), behind `GATE_MULTI_SERVICE_BOOKING`.
 
 ### C. Returning customer → post-service report / lawn assessment
 
@@ -111,7 +111,7 @@ Failure handling on save is good (optimistic revert + alert). The consent archit
 ### F. Failed payment → recovery
 
 - **Server:** retry ladder Day 1/3/5 (`RETRY_DELAYS_DAYS=[2,2]`, billing-cron.js:27, 437, 1176-1178) with SMS carrying an update-card URL at each rung (465-475, 1196-1206); third strike pauses service + notifies owner and customer (1124-1165). Ambiguous Stripe outcomes are parked, never blind-retried (stripe.js:1957-1968, 2039-2086).
-- **Portal:** red banner + failed history row offer **only "Update Payment Method"** (PortalPage.jsx:5279) — no retry-now/pay-now control; with Auto Pay off and a balance due, the only affordance is "enable Auto Pay and wait for the cron" (4617-4621), while the dashboard tile labeled "Pay now" (1769) routes to a Billing tab with no pay button. **This is the S2 dead end (finding S2-1).**
+- **Portal:** red banner + failed history row offer **only "Update Payment Method"** (PortalPage.jsx:5279) — no retry-now/pay-now control; with Auto Pay off and a balance due, the only affordance is "enable Auto Pay and wait for the cron" (4617-4621), while the dashboard tile labeled "Pay now" (1769) routes to a Billing tab with no pay button. **This is the S2 dead end (finding S2-1). Update 2026-09-26: fixed** — pay-now links now render in the billing header and the failed-payment banner (`PortalPage.jsx:6798-6799, 6900-6903`).
 - **Tokenized invoice links** (`/pay/:token`) recover fine: declined cards re-try in place, 3DS handled, ACH-processing and saved-card-pending states are honest (PayPageV2.jsx:1789-1808), receipt redirect after settle.
 - **SCA edge:** off-session card charge landing `requires_action` gets no retry and the only customer nudge is an SMS from a template keyed `bank_verification_incomplete` (billing-cron.js:388; stripe-webhook.js:3806) — mislabeled for a card-3DS situation (finding S3-16).
 
@@ -259,7 +259,7 @@ After the code-only pass, a live render pass was run at 390×844 (Chromium, iPho
 ## PHASE 7 — COMPLIANCE
 
 **SMS / A2P 10DLC / TCPA**
-- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and an **unwired** HELP template (opt-out-detector.js:46-49, exported but never imported by the webhook — twilio-webhook.js:9). Message frequency and "Msg & data rates may apply" appear nowhere a customer opts in. (S1-3)
+- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and the HELP template (opt-out-detector.js:46-49). **Update 2026-09-26:** HELP is now wired — the inbound webhook imports and answers it (`server/routes/twilio-webhook.js:693-704`). Message frequency and "Msg & data rates may apply" still appear nowhere a customer opts in. (S1-3)
 - **No per-recipient consent ledger; web captures record nothing** — no timestamp/source/language capture for web/portal SMS consent; `messaging_audit_log` stores caller-asserted basis per send, not the opt-in event (audit.js:65-67). Call-originated consent IS durably evidenced (verbatim `sms_consent_quote` inside call-extraction blobs — call-recording-processor.js:4588-4590, schema :368-384) but isn't indexed per recipient. The codebase itself proves the team knows how to do this right: payment consent snapshots verbatim text + version + IP + UA (payment-method-consents.js:41-50). SMS never got that rigor as a ledger. (S1-2)
 - **STOP enforcement is real but architectural only at the wrapper layer** — `TwilioService.sendSMS` itself never checks suppression (twilio.js:320-535, provider call at 488); one live customer path bypasses the wrapper today (estimate-public.js:17013) and any future direct caller silently will too. (S2-4)
 - **No TCPA calling-window floor (8am-9pm local)** — quiet hours exist only when a customer personally set them, and only on the dispatcher path (notification-dispatcher.js:65-83); the canonical wrapper has no time-of-day validator (send-customer-message.js:153-164). Exposure in practice depends on cron timing, but no code prevents a night send. (S1-3)
@@ -295,11 +295,16 @@ Blast radius: the SMS program's A2P 10DLC audit and TCPA defense posture — str
 Fix sketch: add an `sms_consents` table (phone, customer_id, captured_at, source, verbatim disclosure, version — mirror `payment_method_consents`), write it at every capture point, backfill call-originated rows from the existing extraction blobs, and pass it as the wrapper's consentBasis.
 
 **[S1-3] No TCPA quiet-hours floor; HELP keyword unwired; no in-repo opt-in disclosure**
-Where: `server/services/notification-dispatcher.js:65-83` (only quiet-hours check, customer-set only); `server/services/messaging/send-customer-message.js:153-164` (validator chain has no time-of-day gate); `server/services/messaging/opt-out-detector.js:46-49,143-152` (HELP template defined, never imported — `twilio-webhook.js:9`); `client/src/pages/PortalPage.jsx:4009` + `client/src/pages/PublicBookingPage.jsx` (no Msg&data-rates / frequency / STOP-HELP copy at any in-repo capture point)
-Repro: 1. Any cron/wrapper send fires outside 8am-9pm — nothing blocks it. 2. Text "HELP" to the Waves number — no compliance auto-reply is generated by this codebase. 3. Search client for "Msg & data rates" — zero hits.
-Expected / Actual: CTIA/10DLC baseline (time window, HELP response, disclosure at capture) / present only for STOP.
+
+**Update 2026-09-26:** the HELP-keyword part of this finding is fixed — `detectHelp` →
+`HELP_RESPONSE_TEMPLATE` is now wired into the inbound webhook (`server/routes/twilio-webhook.js:693-704`).
+The quiet-hours floor and in-repo opt-in disclosure gaps below remain open.
+
+Where: `server/services/notification-dispatcher.js:65-83` (only quiet-hours check, customer-set only); `server/services/messaging/send-customer-message.js:153-164` (validator chain has no time-of-day gate); `server/services/messaging/opt-out-detector.js:46-49,143-152` (HELP template defined; now imported and answered by `twilio-webhook.js:693-704`); `client/src/pages/PortalPage.jsx:4009` + `client/src/pages/PublicBookingPage.jsx` (no Msg&data-rates / frequency / STOP-HELP copy at any in-repo capture point)
+Repro: 1. Any cron/wrapper send fires outside 8am-9pm — nothing blocks it. 2. Text "HELP" to the Waves number — a compliance auto-reply is now generated by this codebase. 3. Search client for "Msg & data rates" — zero hits.
+Expected / Actual: CTIA/10DLC baseline (time window, HELP response, disclosure at capture) / present for STOP and HELP; quiet-hours floor and capture-point disclosure still absent.
 Blast radius: carrier registration risk for the sending number (suspension would silence every reminder/confirmation flow), plus statutory TCPA exposure for any night send.
-Fix sketch: add a default ET 8am-9pm validator to the wrapper's chain (with a transactional-override list if desired); wire `detectHelp` → `HELP_RESPONSE_TEMPLATE` in the inbound webhook; add the standard disclosure line wherever a number is captured. Verify whether Twilio Advanced Opt-Out already covers HELP at the account level before wiring (see UNVERIFIED).
+Fix sketch: add a default ET 8am-9pm validator to the wrapper's chain (with a transactional-override list if desired); add the standard disclosure line wherever a number is captured. Verify whether Twilio Advanced Opt-Out already covers HELP at the account level before wiring (see UNVERIFIED).
 
 **[S1-4] Third-party numbers enrolled for SMS with no recipient consent capture**
 Where: `client/src/pages/PortalPage.jsx:10175-10177,10527` (referral "Text a friend"); `client/src/pages/PortalPage.jsx:3972-4016` (on-location contacts); `server/routes/referrals-v2.js:243-255` (send self-asserts `consentBasis {status:'transactional_allowed', source:'referral_invite_form'}`)
@@ -309,6 +314,10 @@ Blast radius: every referral invite and every added property contact; referral i
 Fix sketch: add "I confirm they've agreed to receive this text" attestation + STOP line in the first message for contacts; for referral invites, consider a compliance review — recipient-initiated claim links (customer shares the link themselves) carry far less risk than Waves-originated texts.
 
 **[S2-1] Portal has no way to pay a balance; failed-payment recovery has no pay/retry action**
+
+**Update 2026-09-26:** fixed — pay-now links now render in the billing header and the
+failed-payment banner (`client/src/pages/PortalPage.jsx:6798-6799, 6900-6903`).
+
 Where: `client/src/pages/PortalPage.jsx:1769` ("Pay now" quick action → Billing tab), `:4617-4621` (Auto-Pay-off banner: "Add or enable Auto Pay below to run future charges automatically"), `:5279` (failed row → "Update Payment Method" only); BillingTab render read in full (4775-5460) — no pay control exists
 Repro: 1. Have a balance due with Auto Pay off. 2. Home tile says "Pay now" → lands on Billing. 3. Find: add/remove card, enable Auto Pay — no button that moves money today. 4. After a failed payment, the red "avoid service interruption" banner offers only the add-card modal; the re-charge is an invisible server retry.
 Expected / Actual: a "Pay $X now" that opens the existing `/pay/:token` checkout for the open invoice / enable-autopay-and-wait, or dig the invoice SMS back out of message history.
@@ -337,6 +346,11 @@ Blast radius: narrow today (customer-initiated, in-session, deduped) but it is a
 Fix sketch: route this send through `sendCustomerMessage`; add a lint/contract check (or a suppression check inside `TwilioService.sendSMS` itself) so customer-numbered direct sends fail loudly.
 
 **[S3-1] `/book` has no service picker — service is a URL parameter**
+
+**Update 2026-09-26:** addressed — a flag-gated multi-service picker (pick up to 3, one visit,
+one arrival window) now renders on step 1 (`client/src/pages/PublicBookingPage.jsx:168, 189, 1017-1040`),
+behind `GATE_MULTI_SERVICE_BOOKING` (server confirms via `/booking/config`).
+
 Where: `client/src/pages/PublicBookingPage.jsx:93,100` (service from `?service=`, default `pest_control`); `SERVICES` catalog (15-23) never rendered as UI; step 1 is address-only (668-750); no `setService` call exists
 Repro: 1. Open bare `/book` (GBP button, typed URL). 2. You are booking Pest Control; nothing on any step lets you choose lawn/mosquito/termite/rodent. 3. Multi-service booking in one pass is impossible.
 Expected / Actual: pick what you're booking / silently pre-decided.

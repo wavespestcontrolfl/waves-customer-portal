@@ -128,10 +128,12 @@ the type's standalone graduation state at cutover:
   rodent_general_one_time stays a rodent report). Without this, "Pest &
   Rodent Control" rendered the RODENT report layout.
 
-## Graduation recipe (rodent family — future migration)
+## Graduation recipe (rodent family — executed 2026-07-12)
 
-When the rodent family graduates (owner shadow review), the graduation
-migration must flip BOTH:
+The rodent family graduated on the owner's fixture-render review
+(2026-07-12). The migration that ran is
+`server/models/migrations/20260712200000_rodent_family_graduation.js`. It
+flipped BOTH:
 1. `delivery_mode` on the standalone rodent keys (the 20260612000023
    pattern), AND
 2. the companion entry on `pest_rodent_quarterly`:

@@ -41,7 +41,7 @@ audit of the current repo:
   and `assessment_completion_tracking` all aggregate every row assuming it's a real
   customer assessment. Injecting prospect/spot-check rows silently corrupts those metrics
   unless a filter is patched into every consumer.
-- Baseline is **auto-assigned on insert** (`server/routes/admin-lawn-assessment.js:613`:
+- Baseline is **auto-assigned on insert** (`server/routes/admin-lawn-assessment.js:792-798, 855`:
   first row for a customer → `is_baseline = true`). Incompatible with standalone records.
 
 Reuse doesn't require sharing the table: the AI engine, S3 upload, PDF renderer, and
@@ -87,9 +87,11 @@ per-photo AI score columns.
 - Tokenized public-page pattern from estimates (`EstimateViewPage` + `estimate-public.js`) — web page, NOT PDF (no render-to-PDF exists in the repo).
 - Public report token + `express-rate-limit` + expiry pattern from `server/routes/reports-public.js` / `estimate-public.js`.
 
-**Not reused (existing-customer machinery, stays untouched):** `lawn-snapshot.js`,
-`lawn-recommendation-engine.js`, baseline logic, `lawn_baseline_resets`, the
-`server/routes/lawn-health.js` customer endpoints.
+**Not reused (existing-customer machinery, stays untouched):** baseline logic,
+`lawn_baseline_resets`, the `server/routes/lawn-health.js` customer endpoints.
+(`lawn-snapshot.js` and `lawn-recommendation-engine.js` were deleted in
+commit `29264bdfd6`; the cautious finding phrasing now lives in
+`server/services/lawn-diagnostic-report.js`.)
 
 ## Lifecycle
 1. Tech starts a diagnostic → photos → AI diagnosis (their eyes only). Done, if internal.
@@ -331,10 +333,10 @@ report is a tokenized web page modeled on `client/src/pages/EstimateViewPage.jsx
   (`#FAF8F3` bg, Source Serif 4 headings, navy `#1B2C5B`), `<Page>` / `<Header>` /
   `<BrandFooter>` / `<GuaranteeStrip>` / `<QuestionsEscapeHatch>`. NOT admin monochrome.
 - **Satellite map embed already exists** — reuse the Static Maps URL pattern from
-  `PortalPage.jsx:4260`:
+  `PortalPage.jsx:8579`:
   `https://maps.googleapis.com/maps/api/staticmap?center=${address}&zoom=19&size=640x280&scale=2&maptype=satellite&key=${VITE_GOOGLE_MAPS_API_KEY}`
   built from the diagnostic's `address_snapshot`. The estimate's `WaveGuardIntelligenceCard`
-  (`EstimateViewPage.jsx:310-325`) already embeds `intelligence.satelliteUrl` — same mechanism.
+  (`EstimateViewPage.jsx:896-903`) already embeds `intelligence.satelliteUrl` — same mechanism.
 - Fork `WaveGuardIntelligenceCard` → `LawnReportCard` (it already renders headline + body +
   metrics grid + signals grid in the warm theme; feed it lawn data).
 
@@ -368,7 +370,8 @@ pre-written customer-safe snippets for what it sees in the photos; it does NOT i
 - Micronutrient yellowing blog (`.../blog/sarasota-lawn-yellowing-micronutrient-deficiency.md`) —
   best customer-facing copy for color/yellowing: Fe (new growth) vs Mn (green veins) vs Mg
   (margins) vs N (uniform/older); sandy-soil + high-pH iron lockout.
-- `server/services/lawn-snapshot.js` — reuse the cautious finding phrasing
+- `server/services/lawn-diagnostic-report.js` (the former `lawn-snapshot.js`
+  phrasing now lives here) — reuse the cautious finding phrasing
   ("We saw signs consistent with …") verbatim for unconfirmed disease.
 
 **Internal-only (powers the TECH view, never the customer report):**
@@ -535,7 +538,8 @@ Tests: `lawn-diagnostic-public.test.js` (whitelisting no-leak, strict validation
 404s, one-shot 409) + send-gate helper units in the route test. 54 lawn-diagnostic tests green.
 
 ### v1 still to build
-Photo S3 persistence into `lawn_diagnostic_photos` (best-effort, for findings thumbnails);
-the `/tech/*` Lawn Diagnostic UI (D palette: capture → diagnosis → save/send/lead/archive);
-the public `/lawn-report/:token` React page (clone `EstimateViewPage`, satellite hero, plain
-findings, grass-type context, fix-it plan, quote CTA). v1.5: SMS/email link delivery.
+**Shipped:** the `/tech/*` Lawn Diagnostic UI (`TechLawnDiagnosticPage`, `client/src/App.jsx:711`)
+and the public `/lawn-report/:token` React page (`LawnReportViewPage`, `client/src/App.jsx:686`).
+**Still open:** photo S3 persistence into `lawn_diagnostic_photos` exists only for the public
+funnel (`server/routes/public-lawn-assessment.js`); it is not yet wired for the tech-side flow.
+v1.5: SMS/email link delivery.

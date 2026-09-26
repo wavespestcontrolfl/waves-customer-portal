@@ -1,6 +1,8 @@
 # Sprinkler Timer Guide — verified scope
 
-Concept scope · Waves Lawn Care · 2026-09-05 · scoping only, nothing built.
+Concept scope · Waves Lawn Care · 2026-09-05. **Update 2026-09-26:** the Phase 2
+email send has shipped (see below); the hub pages and brand-capture phases remain
+scoping only, nothing built.
 
 The concept: a brand-by-brand guide that teaches lawn customers to operate
 the irrigation controller on their own wall — an email with brand buttons,
@@ -55,7 +57,9 @@ keeps a builder's leftover program from double-watering.
    brand family, print stylesheet as the truck copy. Link from
    `lawn-treatment-prep.md`. Sitemap sync puts every page in the composer
    link library the next night, so the office can also text a link.
-2. **One email template, one-time manual send** (portal). A new protected
+2. **One email template, one-time manual send** (portal). **Update 2026-09-26: shipped 2026-09-06 in #3953**
+   (`server/services/prep-guide-sender.js`, migration
+   `20260905000010_seed_sprinkler_timer_prep_email_template.js`). A new protected
    key `prep.sprinkler_timer`, seeded by migration: heading, an opening
    paragraph that names the Monday-morning watering plan the customer
    already receives (`irrigation-weekly-email.js`) so the reason for the
@@ -113,7 +117,7 @@ copy.
 |---|---|---|
 | 0 · Content | Per brand, manual-first: OFF between runs, manual / run-all-zones with minutes, then the schedule section (clock, day, start time, minutes, rain delay, sensor bypass). Rain Bird ESP-TM2 / Me3 and Hunter X-Core / Pro-C / Hydrawise first, identify-your-controller page, Tier 2/3 stubs, faceplate photos. | 2–3 days + a photo session on the route |
 | 1 · Hub pages | Index + per-brand markdown pages, dial-position comparison, link from the lawn prep page. Print stylesheet doubles as the truck copy. | 1 day |
-| 2 · Email + send | Template seed migration, `PREP_CONFIG` entry with the no-token flag, Communications allow-list, SMS companion copy. | 1 day |
+| 2 · Email + send | Template seed migration, `PREP_CONFIG` entry with the no-token flag, Communications allow-list, SMS companion copy. **Shipped 2026-09-06 (#3953).** | 1 day |
 | 3 · Brand capture (optional) | Columns, validation, portal + admin inputs, one-button collapse. | 1–1½ days |
 
 Content and photos remain the long pole. Code is about two days without brand capture.

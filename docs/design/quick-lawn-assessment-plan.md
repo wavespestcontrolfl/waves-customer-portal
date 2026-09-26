@@ -72,11 +72,11 @@ dual-vision analysis → multi-photo averaging → seasonal normalization → we
 `/assess` (requires `customerId` + `photos`, line 484–485), `/:assessmentId/snapshot`,
 `/history/:customerId`, `/baseline/:customerId`, `/latest/:customerId`, `/service/:serviceId`,
 `/reset-baseline`, `/confirm/:assessmentId`, `/override/:assessmentId`, `/customers`, plus
-recommendation/snapshot endpoints. **Baseline auto-set logic is at lines 608–646.**
+recommendation/snapshot endpoints. **Baseline auto-set logic is at lines 855–878.**
 
 ### Delivery rails (all reusable, all mature)
 
-- **Token links** — `ensureReportToken()` (`server/routes/reports-public.js:888`), 32-hex plaintext
+- **Token links** — `ensureReportToken()` (`server/routes/reports-public.js:2454`), 32-hex plaintext
   token, public `GET /api/reports/:token`, rate-limited (20/min). *No expiry today.* Keyed on
   `service_records` — quick assessments have no service record, so they need their **own** token.
 - **SMS** — `sendCustomerMessage({ purpose, ... })` (`server/services/messaging/send-customer-message.js:105`)
@@ -100,7 +100,7 @@ REST endpoints**, not an IB tool.
 |---|---|---|
 | "Extend the existing lawn assessment model" (open question whether it exists) | It exists and is mature | Confirmed extend. Far less to build; far more to *not break*. |
 | Greenfield table with ~25 fields | ~half already exist as columns/related tables | Map fields to existing first; only add what's missing. |
-| `property_id` as a first-class link | **Properties are not first-class** — `customer_turf_profiles` is 1:1 per customer | **Defer `property_id`.** Use `customer_id` (+ optional `turf_profile_id` later). |
+| `property_id` as a first-class link | **Properties are now first-class** — `customer_properties` exists and `lawn_assessments.property_id` is live | **Reuse the existing `property_id` column.** |
 | `report_token_hash` | Existing tokens are **plaintext + unique + rate-limited**, not hashed | Decision in §12 — recommend matching the existing plaintext convention. |
 | Sending is risky → defer to v1.5 | Consent/suppression/logs **already built** | Sending can be v1 (with confirmation). |
 | Photos blocked without a record | Lawn photos use their **own** path, not gated `service_photos` | Quick-capture photos are easy. |
@@ -130,7 +130,7 @@ One migration that **alters** the existing table (no new core table). Map every 
 | `recommendation_json` | **EXISTING** | `property_recommendation_cards` (standard); quick stores lightweight inline |
 | `final_assessment_json` | **EXISTING** | the display-score columns |
 | `human_review_status` / `_by` / `_at` | **PARTIAL** | reuse `confirmed_by_tech` / `confirmed_at`; add explicit review status only if needed |
-| `property_id` | **DEFER** | properties not first-class |
+| `property_id` | **EXISTING** | `customer_properties` + `lawn_assessments.property_id` are live (`20260629000001_customer_properties.js`, `20260907000010_lawn_assessments_property_id.js`) |
 
 Backfill defaults are chosen so **every existing row keeps behaving exactly as today**
 (`source=standard`, `subject=customer`, `baseline_policy=eligible`, `status=reviewed`).

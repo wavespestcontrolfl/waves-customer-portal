@@ -257,7 +257,7 @@ import { Button } from '../components/Button';
 <Button variant="primary" surface="admin">Save</Button>                      {/* D palette + DM Sans + 6px radius */}
 ```
 
-**Customer surface (default):** `#FFD700` / `#1B2C5B` / `#009CDE` / `Inter 800` / `rounded-full`. Responsive padding scales at `640px` and `1024px` breakpoints.
+**Customer surface (default):** `#FFD700` / `#04395E` / `#009CDE` / `Inter 700` / `rounded-full`. Responsive padding scales at `640px` and `1024px` breakpoints.
 
 **Admin surface (`surface="admin"`):** `#0ea5e9` / `DM Sans 600` / `6px radius`. Required on admin pages — see §14 admin-exclusion note. Do not pass `surface="customer"` (or omit it) on `/admin/*`.
 
@@ -271,7 +271,7 @@ import { Button } from '../components/Button';
 
 **Props:** `variant`, `surface` (default `"customer"`), `fullWidthMobile`, `icon` + `iconPosition` (`"left"|"right"` default `"right"`), `as` (polymorphic — pass `"a"` for link CTAs), `className`, plus all native `<button>` / `<a>` props via spread.
 
-**In production on:** BookingPage, PayPage, PublicBookingPage, ReviewPage, and RatePage. `/button-examples` route is a throwaway visual-QA harness — delete once all customer pages are migrated.
+**In production on:** PublicBookingPage, ReviewPage, and RatePage.
 
 ### FAB (bottom-right chat launcher)
 ```
@@ -402,7 +402,7 @@ Tailwind v4 defaults plus two custom compound queries:
 
 ## 14. Portal alignment (waves-customer-portal)
 
-The customer-facing portal (LoginPage, OnboardingPage, EstimateViewPage, PortalPage, ReportViewPage, BookingPage, ReportViewPage) consumes this style guide via `client/src/theme-brand.js`, which is imported by 5 of 6 pages. Palette and fonts there should stay in sync with the tokens above.
+The customer-facing portal (LoginPage, EstimateViewPage, PortalPage, ReportViewPage, BookingPage, ReportViewPage) consumes this style guide via `client/src/theme-brand.js`, which is imported by 18 or more pages. Palette and fonts there should stay in sync with the tokens above.
 
 **Key equivalents:**
 
@@ -417,5 +417,3 @@ The customer-facing portal (LoginPage, OnboardingPage, EstimateViewPage, PortalP
 | `--font-sans` | `FONTS.body` / `FONTS.ui` | `'Inter', system-ui, sans-serif` |
 
 **Admin portal (`/admin/*`) is out of scope** — admin stays on the `D` dark palette + DM Sans. Do not apply customer brand palette to admin pages (see `feedback_admin_style_guide_exclusion`). The shared `<Button>` component (§8) supports this via `surface="admin"` — use it there rather than inline-styled admin buttons.
-
-**BookingPage exception:** has its own local `BRAND` object (does not import from `theme-brand.js`). Keep its tokens aligned manually.

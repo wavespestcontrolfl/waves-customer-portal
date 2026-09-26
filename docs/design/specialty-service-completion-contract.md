@@ -31,6 +31,9 @@ Cutover phases (profile row = feature flag; explicit allowlists only):
 | 2 | remaining cockroach, flea, rodent trap/exclusion, wildlife, bed bug | Phase 1 + 1b verified; client-read + support metrics reviewed; bed bug copy owner-approved |
 | 3 | termite_inspection, then termite remedial | Compliance signoff (FS 482.226, FS 482.2265, FAC 5E-14) |
 
+**Update 2026-09-26:** all four phases above are live. Termite (Phase 3) shipped
+2026-07-13 after compliance signoff (`server/models/migrations/20260713100000_termite_typed_cutover.js`, #2703).
+
 ## 2. Hard product constraints (binding)
 
 1. p90 mobile completion **≤ 60 seconds** for pilot types; ≤5 required

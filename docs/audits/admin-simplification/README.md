@@ -100,15 +100,15 @@ Larger recommendations are **DEFER PENDING EVIDENCE** for implementation. Their 
 ## Implemented navigation and behavior
 
 The review branch implements this tree, using the existing registry and individual
-role/flag filters. Every leaf is still a direct link. Service operations stays
+role/flag filters. Every leaf is still a direct link. Operations stays
 second so Schedule remains the second desktop destination.
 
 ```text
 Overview: Dashboard
-Service operations: Schedule, Reports, Assessments, Services, Pricing, Equipment, Inventory, Compliance, Knowledge
-Customers & Sales: Customers, Pipeline, Agent Estimate [flag], Price Match, Contracts
+Operations: Schedule, Reports, Assessments, Services, Pricing, Equipment, Inventory, Compliance, Knowledge
+Sales: Customers, Pipeline, Agent Estimate [flag], Price Match, Contracts
 Communications: Communications, Email
-Billing & Finance: Invoices, Recovery, Payers, Banking, Taxes
+Finance: Invoices, Recovery, Payers, Banking, Taxes
 People: Staff, Recruiting
 Marketing: PPC, SEO, Social Media, Blog, Newsletter, Reviews, Referrals
 System: Agent Ops, Tool Health, Settings

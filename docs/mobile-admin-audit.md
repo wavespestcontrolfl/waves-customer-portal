@@ -6,8 +6,9 @@
 > 2026-04-18 while V1 admin pages were still flag-gated alongside their V2
 > counterparts. The V1↔V2 page pairs referenced below (`DashboardPage` /
 > `CustomersPage` / `EstimatePage` / `SchedulePage` / `CommunicationsPage`)
-> have since been retired — V2 is the only path. Read this file as an
-> audit artifact, not a current-state document. See PRs #297, #302, #304,
+> have since been retired — V2 is the only path. `AdminLayout.jsx` (referenced
+> below) has also since been renamed to `AdminLayoutV2.jsx`. Read this file as
+> an audit artifact, not a current-state document. See PRs #297, #302, #304,
 > and #305 for the migration history.
 
 Audit date: **2026-04-18**
