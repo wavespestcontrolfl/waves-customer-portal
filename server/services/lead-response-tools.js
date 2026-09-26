@@ -272,7 +272,7 @@ async function executeLeadTool(toolName, input, context) {
     case 'send_lead_response': {
       const customer = subject.customer;
       if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
-      const message = stripTrailingSignature(input.message);
+      const message = stripTrailingSignature(input.message, { addresseeFirstName: customer.first_name });
       if (!message) return { error: 'Message is empty once the sign-off is removed', validationError: true };
 
       // Routed through the customer-message middleware so consent /

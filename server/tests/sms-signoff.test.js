@@ -116,4 +116,27 @@ describe('stripTrailingSignature', () => {
   ])('keeps text that is not a sign-off: %j', (input) => {
     expect(stripTrailingSignature(input)).toBe(input);
   });
+
+  describe('addressed to a customer who shares a signer\'s first name', () => {
+    test.each([
+      ['Hello Adam! See you soon, Adam.', 'Adam'],
+      ['See you soon, Adam', 'adam'],
+      ['Your visit is Tuesday.\nAdam', 'Adam'],
+      ['Talk soon! Thanks, Virginia', 'Virginia'],
+    ])('keeps %j for a customer named %s', (input, addresseeFirstName) => {
+      expect(stripTrailingSignature(input, { addresseeFirstName })).toBe(input);
+    });
+
+    test.each([
+      // Company sign-offs and full signature blocks still go.
+      ['See you soon. - Waves Pest Control', 'Adam', 'See you soon.'],
+      ['See you soon. Adam, Waves Pest Control', 'Adam', 'See you soon.'],
+      // The other signer's name is still a sign-off.
+      ['See you soon. - Virginia', 'Adam', 'See you soon.'],
+      // A different customer: unchanged behavior.
+      ['See you soon, Adam.', 'Maria', ''],
+    ])('strips %j for a customer named %s', (input, addresseeFirstName, expected) => {
+      expect(stripTrailingSignature(input, { addresseeFirstName })).toBe(expected);
+    });
+  });
 });
