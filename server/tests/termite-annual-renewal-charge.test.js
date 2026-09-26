@@ -387,6 +387,56 @@ describe('termite annual renewal charge', () => {
       expect(stampUpdates.renewal_no_witness_belled_at).toHaveBeenCalledTimes(1);
     });
 
+    // Codex #4971 post-push audit round-2 P1: notifyAdmin returns null on a
+    // persistence failure (its own dedupe transaction threw and was
+    // swallowed) — NOT the same as a dedupe hit or a fresh success. Staff
+    // were never actually told, so stamping the exclusion column would
+    // permanently drop this term from every future scan on a mere
+    // transient failure. All three passes share this fix; pinned once per
+    // pass.
+    test('bellNoWitnessTerms: notifyAdmin returning null (persistence failure) never stamps — stays retryable', async () => {
+      mockCommon();
+      const term = { id: 'term-5', customer_id: 'cust-1', term_end: '2026-09-01' };
+      const { conn, stampUpdates } = makeBellConn([term]);
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { noWitnessBelled: 0 };
+      await _private.bellNoWitnessTerms({ conn, limit: 1, today: '2026-09-26', counts });
+
+      expect(counts.noWitnessBelled).toBe(0);
+      expect(stampUpdates.renewal_no_witness_belled_at).toBeUndefined();
+    });
+
+    test('bellUnanchoredOriginalTerms: notifyAdmin returning null (persistence failure) never stamps — stays retryable', async () => {
+      mockCommon();
+      const term = { id: 'term-6', customer_id: 'cust-1', term_end: '2026-09-01' };
+      const { conn, stampUpdates } = makeBellConn([term]);
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { unanchoredBelled: 0 };
+      await _private.bellUnanchoredOriginalTerms({ conn, limit: 1, today: '2026-09-26', counts });
+
+      expect(counts.unanchoredBelled).toBe(0);
+      expect(stampUpdates.renewal_unanchored_belled_at).toBeUndefined();
+    });
+
+    test('bellStaleOverdueTerms: notifyAdmin returning null (persistence failure) never stamps — stays retryable', async () => {
+      mockCommon();
+      mockGraceHelpers({ graceDays: 30 });
+      const term = { id: 'term-7', customer_id: 'cust-1', term_end: '2026-06-01' };
+      const { conn, stampUpdates } = makeBellConn([term]);
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { staleOverdueBelled: 0 };
+      await _private.bellStaleOverdueTerms({ conn, limit: 1, today: '2026-09-26', counts });
+
+      expect(counts.staleOverdueBelled).toBe(0);
+      expect(stampUpdates.renewal_stale_overdue_belled_at).toBeUndefined();
+    });
+
     // Codex round-6 P1 — the exact scenario the finding named: a term
     // already belled for kind A (no_witness — e.g. staff eventually sent
     // the notice, fixing that condition) later legitimately matches a

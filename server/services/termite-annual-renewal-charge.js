@@ -472,7 +472,14 @@ async function bellNoWitnessTerms({ conn = db, limit = 200, today = etDateString
           },
         );
         if (result && !result.deduped && !result.suppressed) counts.noWitnessBelled += 1;
-        await stampRenewalExceptionBelled(term, 'no_witness', conn);
+        // Codex #4971 post-push audit round-2 P1: notifyAdmin returns null
+        // on a persistence failure (its own dedupe transaction threw and
+        // was swallowed) — stamping unconditionally would then read a
+        // never-delivered bell as "handled" and permanently drop this term
+        // from every future scan. Stamp only on a truthy result: either a
+        // fresh row actually persisted, or a genuine dedupe hit (staff was
+        // already told on an earlier tick) — never on a bare failure.
+        if (result) await stampRenewalExceptionBelled(term, 'no_witness', conn);
       } catch (err) {
         logger.error(`[termite-annual-renewal] no-witness bell failed for term ${term.id}: ${err.message}`);
       }
@@ -510,7 +517,10 @@ async function bellUnanchoredOriginalTerms({ conn = db, limit = 200, today = etD
           },
         );
         if (result && !result.deduped && !result.suppressed) counts.unanchoredBelled += 1;
-        await stampRenewalExceptionBelled(term, 'unanchored', conn);
+        // Codex #4971 post-push audit round-2 P1: see the SAME fix's own
+        // comment in bellNoWitnessTerms above — stamp only on a truthy
+        // result, never on notifyAdmin's null (a persistence failure).
+        if (result) await stampRenewalExceptionBelled(term, 'unanchored', conn);
       } catch (err) {
         logger.error(`[termite-annual-renewal] unanchored bell failed for term ${term.id}: ${err.message}`);
       }
@@ -548,7 +558,10 @@ async function bellStaleOverdueTerms({ conn = db, limit = 200, today = etDateStr
           },
         );
         if (result && !result.deduped && !result.suppressed) counts.staleOverdueBelled += 1;
-        await stampRenewalExceptionBelled(term, 'stale_overdue', conn);
+        // Codex #4971 post-push audit round-2 P1: see the SAME fix's own
+        // comment in bellNoWitnessTerms above — stamp only on a truthy
+        // result, never on notifyAdmin's null (a persistence failure).
+        if (result) await stampRenewalExceptionBelled(term, 'stale_overdue', conn);
       } catch (err) {
         logger.error(`[termite-annual-renewal] stale-overdue bell failed for term ${term.id}: ${err.message}`);
       }
