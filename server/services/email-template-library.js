@@ -907,36 +907,28 @@ function providerRetryHoldErrorForExistingMessage(message) {
   const retryCount = Number(message.provider_retry_count || 0);
   const definitelyUnsent = providerRetryDefinitelyUnsent(message);
   const hasPhaseEvidence = !!phase || !!message.provider_handoff_attempt_token;
-  let reason;
-  let retryable = false;
 
   if (status === 'queued') {
     const providerWorkerOwned = retryCount > 0
       || message.provider_retry_next_at || message.provider_retry_exhausted_at;
     if (!providerWorkerOwned && phase !== PROVIDER_HANDOFF_STARTED
         && (!hasPhaseEvidence || definitelyUnsent)) return null;
-    reason = 'provider_retry_in_progress';
-  } else if (status !== 'failed') {
-    return null;
-  } else if (message.provider_retry_next_at) {
-    reason = 'provider_retry_scheduled';
-    retryable = true;
-  } else if (phase === PROVIDER_HANDOFF_STARTED) {
-    reason = message.provider_retry_exhausted_at
-      ? 'provider_retry_exhausted'
-      : 'provider_retry_ambiguous';
-  } else if (hasPhaseEvidence && !definitelyUnsent) {
-    reason = message.provider_retry_exhausted_at
-      ? 'provider_retry_exhausted'
-      : 'provider_retry_ambiguous';
-  } else if (message.provider_retry_exhausted_at && !definitelyUnsent) {
-    reason = 'provider_retry_exhausted';
-  } else if (retryCount > 0 && !definitelyUnsent) {
-    reason = 'provider_retry_ambiguous';
-  } else {
-    return null;
+    return providerRetryHoldError(message, 'provider_retry_in_progress');
   }
+  if (status !== 'failed') return null;
+  if (message.provider_retry_next_at) {
+    return providerRetryHoldError(message, 'provider_retry_scheduled', true);
+  }
+  const ambiguous = !definitelyUnsent
+    && (hasPhaseEvidence || message.provider_retry_exhausted_at || retryCount > 0);
+  if (!ambiguous) return null;
+  const reason = message.provider_retry_exhausted_at
+    ? 'provider_retry_exhausted'
+    : 'provider_retry_ambiguous';
+  return providerRetryHoldError(message, reason);
+}
 
+function providerRetryHoldError(message, reason, retryable = false) {
   const providerOutcome = {
     sent: false,
     held: true,
