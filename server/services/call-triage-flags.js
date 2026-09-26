@@ -155,7 +155,7 @@ for (const group of NICKNAME_GROUPS) {
   }
 }
 
-function nameTokenMatchesEmailLocal(token, local) {
+function nameTokenMatchesEmailLocal(token, local, { segments = [], allowNickname = false } = {}) {
   const t = String(token || '').replace(/[^a-z]/g, '');
   if (t.length < 3) return false;
   if (local.includes(t)) return true;
@@ -168,16 +168,21 @@ function nameTokenMatchesEmailLocal(token, local) {
   }
 
   // (a) Fuzzy whole-string match — a transcription/typing drift on the SAME
-  // name (e.g. a surname segment spelled with one letter off).
-  if (fuzzyWholeMatch(t, local)) return true;
+  // name — against the collapsed local AND each delimited segment, so a
+  // mailbox affix in front ("home.whitfeld@") cannot hide a one-letter drift
+  // on the name segment (codex #4901 r1 P2).
+  if (fuzzyWholeMatch(t, local) || segments.some((seg) => fuzzyWholeMatch(t, seg))) return true;
 
   // (c) Nickname ↔ formal-first-name equivalence, either direction, fuzzy
   // included so drift on the FORMAL form still corroborates a spoken
-  // nickname ("Jackie" / "jacqueline525@").
-  const equivalents = NICKNAME_EQUIVALENTS.get(t);
+  // nickname ("Jackie" / "jacqueline525@"). FIRST names only (codex #4901
+  // r1 P2): a surname that is also a formal first name ("Thomas") must not
+  // expand to a nickname ("tom") and corroborate someone else's mailbox.
+  const equivalents = allowNickname ? NICKNAME_EQUIVALENTS.get(t) : null;
   if (equivalents) {
     for (const alt of equivalents) {
-      if (alt.length >= 3 && (local.includes(alt) || fuzzyWholeMatch(alt, local))) return true;
+      if (alt.length >= 3 && (local.includes(alt) || fuzzyWholeMatch(alt, local)
+        || segments.some((seg) => fuzzyWholeMatch(alt, seg)))) return true;
     }
   }
 
@@ -192,9 +197,18 @@ function wordInitial(word) {
   return word.length <= 2 ? word : word[0];
 }
 
+// All structured name fields, not name_full alone (codex #4901 r1 P2): the
+// schema does not keep them consistent, so a partial name_full ("Nadia") must
+// not hide the extracted surname. Order: first name, any extra name_full
+// words (middle names, suffixes), last name.
 function callerNameWords(caller) {
-  const raw = String(caller.name_full || `${caller.first_name || ''} ${caller.last_name || ''}`).toLowerCase();
-  return raw.split(/[^a-z]+/).filter(Boolean);
+  const words = (v) => String(v || '').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const first = words(caller.first_name);
+  const last = words(caller.last_name);
+  const full = words(caller.name_full);
+  if (!first.length && !last.length) return full;
+  const middle = full.filter((w) => !first.includes(w) && !last.includes(w));
+  return [...new Set([...first, ...middle, ...last])];
 }
 
 function initialsCorroborated(local, tokens, nameWords) {
@@ -217,15 +231,21 @@ function initialsCorroborated(local, tokens, nameWords) {
     if (local.length > ini.length && local.endsWith(ini)
       && restCorroborates(local.slice(0, local.length - ini.length))) return true;
   }
-  // A surname prefix directly adjacent to a short (2-3 letter) initials-like
-  // remainder anywhere in the local — e.g. a surname prefix followed by a
-  // short first-name abbreviation ("cast" + "nc").
+  // A surname prefix directly adjacent to a short (2-3 letter) fragment that
+  // is itself the caller's initials or the start of another name word —
+  // e.g. a surname prefix followed by a first-name abbreviation ("cast" +
+  // "na" for Nadia Castellanos). The fragment must be VALIDATED (codex #4901
+  // r1 P2): "castzz@" or "xxcastunrelated@" corroborate nothing.
+  const fragmentCorroborates = (frag, prefix) => (frag.length === 2 || frag.length === 3) && (
+    candidates.has(frag)
+    || nameWords.some((w) => w.length > frag.length && !w.startsWith(prefix) && w.startsWith(frag))
+  );
   for (const p of surnamePrefixes) {
     const idx = local.indexOf(p);
     if (idx === -1) continue;
     const before = local.slice(0, idx);
     const after = local.slice(idx + p.length);
-    if ((before.length === 2 || before.length === 3) || (after.length === 2 || after.length === 3)) return true;
+    if (fragmentCorroborates(before, p) || fragmentCorroborates(after, p)) return true;
   }
   return false;
 }
@@ -277,7 +297,16 @@ function hasNameEmailMismatch(caller = {}) {
   // once (see initialsCorroborated), so it short-circuits both (1) and (2).
   if (initialsCorroborated(local, tokens, callerNameWords(caller))) return false;
 
-  const present = tokens.filter((t) => nameTokenMatchesEmailLocal(t, local));
+  const firstNameTokens = new Set(
+    [caller.first_name, String(caller.name_full || '').split(/\s+/)[0]]
+      .filter(Boolean)
+      .map((n) => String(n).toLowerCase().replace(/[^a-z]/g, ''))
+      .filter((t) => t.length >= 3)
+  );
+  const present = tokens.filter((t) => nameTokenMatchesEmailLocal(t, local, {
+    segments: localSegments,
+    allowNickname: firstNameTokens.has(t),
+  }));
 
   // (1) Not one extracted name token appears anywhere → uncorroborated name.
   // This is what caught the real incident (spoken "Jeanette", surname extracted
@@ -300,7 +329,8 @@ function hasNameEmailMismatch(caller = {}) {
       .filter((seg) => seg.length >= 4
         && !NON_NAME_EMAIL_AFFIXES.has(seg)
         && !GENERIC_EMAIL_LOCALPARTS.has(seg)) // a delimited role mailbox (office.john@) is not a name
-      .some((seg) => !tokens.some((t) => nameTokenMatchesEmailLocal(t, seg) || seg.includes(t) || t.includes(seg)));
+      .some((seg) => !tokens.some((t) => nameTokenMatchesEmailLocal(t, seg, { allowNickname: firstNameTokens.has(t) })
+        || seg.includes(t) || t.includes(seg)));
     if (foreignSegment) return true;
   }
   return false;

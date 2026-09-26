@@ -1139,3 +1139,31 @@ describe('advisory identity flags (missing_last_name / rental_or_tenant_occupied
     expect(r.flags).toEqual(expect.arrayContaining(['missing_last_name', 'rental_or_tenant_occupied']));
   });
 });
+
+// Codex #4901 r1 P2s — the relaxed matcher must not corroborate a different
+// person's mailbox, and must see name fields and segments it used to miss.
+describe('hasNameEmailMismatch — codex #4901 r1 refinements', () => {
+  const { hasNameEmailMismatch } = require('../services/call-triage-flags');
+
+  test('a surname that is also a formal first name never expands to a nickname', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Karen', last_name: 'Thomas', email: 'tommy@example.com' })).toBe(true);
+  });
+
+  test('the short fragment next to a surname prefix must be the caller\'s initials or a name start', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'castzz@example.com' })).toBe(true);
+    expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'xxcastunrelated@example.com' })).toBe(true);
+    expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'castna@example.com' })).toBe(false);
+  });
+
+  test('fuzzy matching sees each delimited segment, so a mailbox affix cannot hide a drifted surname', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Priya', last_name: 'Whitfield', email: 'home.whitfeld@example.com' })).toBe(false);
+  });
+
+  test('initials use every structured name field, not a partial name_full alone', () => {
+    expect(hasNameEmailMismatch({ name_full: 'Nadia', first_name: 'Nadia', last_name: 'Castellanos', email: 'nccastellenos@example.com' })).toBe(false);
+  });
+
+  test('a first-name nickname still corroborates the formal form in a delimited segment', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Jackie', last_name: 'Nguyen', email: 'jacqueline84@example.com' })).toBe(false);
+  });
+});
