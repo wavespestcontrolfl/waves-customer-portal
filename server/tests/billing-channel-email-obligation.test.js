@@ -104,6 +104,43 @@ test('uncertain acceptance is a durable blocked hold, never an automatic schedul
   });
 });
 
+test('a definite not_sent initial result is trusted against this attempt\'s own concluded failed row', async () => {
+  // Simulates the immediate attempt's own email_messages row: a definite
+  // SendGrid rejection (400/401/429) persisted as `failed` with the real
+  // error message — no abort sentinel, no matching replay token. Before the
+  // fix, emailEvidence() alone called this 'uncertain' and the row queued
+  // permanently blocked even though the caller's own result already proved
+  // a definite not_sent for this exact attempt.
+  db._rows.push({ idempotency_key: obligation.obligationKey('receipt:event-definite'), status: 'failed',
+    error_message: 'SendGrid rejected the recipient (400)', send_attempt_token: 'unrelated-token', metadata: {} });
+  const result = { sent: false, retryable: true, deliveryOutcome: 'not_sent', code: 'EMAIL_PROVIDER_REJECTED' };
+  const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-definite', result, ['sms']);
+  expect(queued).toMatchObject({ queued: true, uncertain: false });
+  const row = db._rows.find((candidate) => candidate.id === queued.id);
+  expect(row).toMatchObject({ status: 'scheduled', metadata: { billing_email_uncertain: false } });
+});
+
+test('a genuinely ambiguous in-flight collision row still holds even against a definite input result', async () => {
+  // The row is NOT concluded (still 'queued', i.e. another caller's provider
+  // handoff may still be in flight) — no evidence ties it to THIS attempt's
+  // definite result, so it must stay held (don't weaken the uncertain
+  // protections).
+  db._rows.push({ idempotency_key: obligation.obligationKey('receipt:event-inflight'), status: 'queued', metadata: {} });
+  const result = { sent: false, retryable: true, deliveryOutcome: 'not_sent' };
+  const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-inflight', result, ['sms']);
+  expect(queued).toMatchObject({ queued: true, uncertain: true });
+});
+
+test('an ambiguous initial result still holds even against a concluded failed collision row', async () => {
+  // The caller's OWN result is itself uncertain (e.g. a transport timeout) —
+  // a concluded row alone must not override that.
+  db._rows.push({ idempotency_key: obligation.obligationKey('receipt:event-ambiguous-input'), status: 'failed',
+    error_message: 'transport response lost', metadata: {} });
+  const result = { sent: false, deliveryOutcome: 'uncertain' };
+  const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-ambiguous-input', result, ['sms']);
+  expect(queued).toMatchObject({ queued: true, uncertain: true });
+});
+
 test('sibling claim and outcome transitions distinguish accepted from definitely not sent', async () => {
   await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-2',
     { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, ['sms']);
@@ -143,6 +180,34 @@ test('canonical replay preserves a fresh preference refusal and never fans out t
   await expect(obligation.replay(meta)).resolves.toMatchObject({ sent: false, code: 'BILLING_EMAIL_NOT_SELECTED' });
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   expect(sendCustomerMessage.mock.calls[0][0].channel).toBe('email');
+});
+
+test('a pre-fence replay exception is retryable, not blocked, when the provider was never reached', async () => {
+  // sendCustomerMessage() throws before ever invoking the replay's own
+  // preSendCheck (which would have claimed fence.providerStarted) — the
+  // fence proves no provider request began, so this must be retryable
+  // not_sent, never the durable uncertain/blocked hold.
+  await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-prefence',
+    { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, ['sms']);
+  sendCustomerMessage.mockImplementationOnce(async () => { throw new Error('boom before the fence'); });
+  const meta = { ...db._rows[0].metadata, scheduled_sms_log_id: 'queue-1' };
+  await expect(obligation.replay(meta)).resolves.toEqual({ sent: false, blocked: false,
+    deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_EMAIL_REPLAY_PRE_FENCE_ERROR' });
+});
+
+test('a pre-fence exception carrying an uncertain providerOutcome still holds as uncertain', async () => {
+  // sendCustomerMessageCore tags every throw with its observed providerOutcome
+  // — an uncertain one must still be trusted over the pre-fence default.
+  await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-prefence-uncertain',
+    { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, ['sms']);
+  sendCustomerMessage.mockImplementationOnce(async () => {
+    const err = new Error('ambiguous provider state');
+    err.providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+    throw err;
+  });
+  const meta = { ...db._rows[0].metadata, scheduled_sms_log_id: 'queue-1' };
+  await expect(obligation.replay(meta)).resolves.toMatchObject({ sent: false, blocked: true,
+    deliveryOutcome: 'uncertain', code: 'BILLING_EMAIL_DELIVERY_UNCERTAIN' });
 });
 
 test('pre-charge replay refuses a paused customer before Email provider preparation', async () => {
@@ -309,5 +374,34 @@ describe('producerEligible refusal codes', () => {
     await expect(obligation.producerEligible({ source_entry_point: 'autopay_card_expiry_warning', customer_id: customerId,
       payment_method_id: 'card-1', expiry_month: String(month), expiry_year: String(year), expiry_stage: 'soon' }))
       .resolves.toEqual({ eligible: false, reason: 'prepay-covered', retryable: false });
+  });
+});
+
+describe('producerEligible reuses the registry\'s full invoice collectibility recheck', () => {
+  const invoiceId = 'invoice-collectibility-1';
+
+  test('refuses a terminal invoice that selfPayAtDispatch alone would not catch', async () => {
+    db._rows.push({ id: invoiceId, status: 'paid', total: 100, credit_applied: 0 });
+    await expect(obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId }))
+      .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
+  });
+
+  test('refuses when the invoice\'s followup sequence has been stopped', async () => {
+    db._rows.push({ id: invoiceId, status: 'sent', total: 100, credit_applied: 0 });
+    db._rows.push({ id: 'sequence-1', status: 'stopped' });
+    await expect(obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId,
+      followup_sequence_id: 'sequence-1' })).resolves.toMatchObject({ eligible: false, reason: 'sequence-stopped' });
+  });
+
+  test('refuses when the live balance no longer matches the rendered amount', async () => {
+    db._rows.push({ id: invoiceId, status: 'sent', total: 100, credit_applied: 0 });
+    await expect(obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId,
+      rendered_amount: '50.00' })).resolves.toMatchObject({ eligible: false, reason: 'amount-changed' });
+  });
+
+  test('remains eligible when both the collectibility recheck and the kept self-pay check agree', async () => {
+    db._rows.push({ id: invoiceId, status: 'sent', total: 100, credit_applied: 0, payer_id: null });
+    await expect(obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId }))
+      .resolves.toEqual({ eligible: true });
   });
 });

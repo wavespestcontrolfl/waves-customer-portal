@@ -68,6 +68,11 @@ async function reuseExistingQueueRow(trx, existing, uncertain) {
   return { queued: true, duplicate: true, ...existingOutcome(current) };
 }
 
+function keyCollisionRefusal() {
+  return { queued: false, code: 'BILLING_EMAIL_KEY_COLLISION',
+    reason: 'An Email idempotency key belongs to another customer' };
+}
+
 // A collision with an earlier caller can report not_sent while that
 // caller's provider handoff is still in flight. A stale queued Email
 // row is NOT proof that SendGrid refused it; hold it even past the
@@ -76,8 +81,7 @@ async function collidingEmailMessage(trx, key, customerId) {
   const emailMessage = await trx('email_messages').where({ idempotency_key: key })
     .first('status', 'provider_message_id', 'recipient_id', 'error_message', 'send_attempt_token');
   if (emailMessage?.recipient_id && String(emailMessage.recipient_id) !== String(customerId)) {
-    return { blocked: { queued: false, code: 'BILLING_EMAIL_KEY_COLLISION',
-      reason: 'An Email idempotency key belongs to another customer' } };
+    return { blocked: keyCollisionRefusal() };
   }
   return { emailMessage };
 }
@@ -99,6 +103,11 @@ function queuedRowMetadata(input, category, eventKey, key, siblings, holdUncerta
     billing_email_siblings: Object.fromEntries(siblings.map((channel) => [channel, 'pending'])),
     original_message_type: meta.original_message_type || null,
     invoice_id: input.invoiceId || null,
+    // Producer identifiers the registry's invoiceStillCollectible recheck
+    // needs on replay (sequence-stopped / amount-changed) — persisted only
+    // when the enqueue input actually carried them.
+    followup_sequence_id: meta.followup_sequence_id || null,
+    rendered_amount: meta.rendered_amount || null,
     estimate_id: input.estimateId || null,
     appointment_id: input.appointmentId || null,
     charge_date: meta.charge_date || null,
@@ -136,15 +145,32 @@ async function queueObligation(input, category, eventKey, result, siblings = [],
   const uncertain = result?.deliveryOutcome !== 'not_sent';
   const key = obligationKey(eventKey);
   return withCustomerCommsLock(database, input.customerId, async (trx) => {
-    const existing = await trx('sms_log').where({ customer_id: input.customerId })
+    // Serialize on the obligation key itself, inside the per-customer comms
+    // lock. Two different customers racing the same eventKey take DIFFERENT
+    // customer-comms locks and would otherwise both pass the "no existing
+    // row" lookup below and each insert their own owner. Same
+    // hashtextextended(key, 0) idiom customer-comms-lock.js uses for its own
+    // single-key locks; the 'billing_channel_email:' prefix keeps this
+    // namespace distinct from customer-comms/customer-email keys.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+    const existing = await trx('sms_log')
       .whereRaw("metadata->>'billing_channel_email_key' = ?", [key])
-      .first('id', 'status', 'metadata');
+      .first('id', 'customer_id', 'status', 'metadata');
+    if (existing && String(existing.customer_id) !== String(input.customerId)) return keyCollisionRefusal();
     if (existing) return reuseExistingQueueRow(trx, existing, uncertain);
     const collision = await collidingEmailMessage(trx, key, input.customerId);
     if (collision.blocked) return collision.blocked;
     const evidence = emailEvidence(collision.emailMessage);
     const accepted = evidence === 'accepted';
-    const holdUncertain = !accepted && (uncertain || evidence === 'uncertain');
+    // A definite not_sent FOR THIS ATTEMPT (the caller's own just-concluded
+    // result) is authoritative once the colliding row has actually concluded
+    // (`failed`) rather than still resolving in flight (`queued`/`sending`/
+    // `blocked`) — an unresolved row can't be tied to this attempt's result,
+    // so it stays genuinely ambiguous and held (codex r1 #4844 P1: a definite
+    // 400/401/429 rejection was being reported uncertain and blocked forever
+    // because emailEvidence() alone can't see this attempt's own evidence).
+    const tiedToThisAttempt = !uncertain && collision.emailMessage?.status === 'failed';
+    const holdUncertain = !accepted && !tiedToThisAttempt && (uncertain || evidence === 'uncertain');
     const metadata = queuedRowMetadata(input, category, eventKey, key, siblings, holdUncertain);
     return insertQueuedRow(trx, input, category, metadata, accepted, holdUncertain);
   });
@@ -335,6 +361,19 @@ async function expiryRefusal(meta, database) {
   return cardExpiryExemptionRefusal(meta, customer, method);
 }
 
+// The registry's own dunning/pay-link recheck (invoiceStillCollectible):
+// terminal status, payer-billed/withdrawn, a stopped followup sequence, and
+// a rendered amount that no longer matches the live balance — none of which
+// selfPayAtDispatch alone catches (codex r1 #4844 P1). No-op when there is
+// no invoice.
+async function invoiceCollectibilityRefusal(meta) {
+  if (!meta.invoice_id) return null;
+  const { invoiceStillCollectible } = require('./deferred-replay-registry');
+  const verdict = await invoiceStillCollectible(meta);
+  if (verdict.eligible === true) return null;
+  return refused(verdict.reason, verdict.retryable === true);
+}
+
 async function invoiceSelfPayRefusal(meta, database) {
   if (!meta.invoice_id) return null;
   const verdict = await require('../invoice-helpers').selfPayAtDispatch(meta.invoice_id, database)();
@@ -347,6 +386,8 @@ async function producerEligible(meta, database = db) {
   if (precharge) return precharge;
   const expiry = await expiryRefusal(meta, database);
   if (expiry) return expiry;
+  const collectibility = await invoiceCollectibilityRefusal(meta);
+  if (collectibility) return collectibility;
   const invoice = await invoiceSelfPayRefusal(meta, database);
   if (invoice) return invoice;
   return { eligible: true };
@@ -441,9 +482,24 @@ function replaySendInput(meta, row, database, fence) {
   };
 }
 
-async function dispatchReplaySend(input) {
+// A throw before sendCustomerMessage() ever invokes the replay's own
+// preSendCheck (which claims the provider-started fence) proves no email
+// provider request began — fence.providerStarted stays false. Classify that
+// case from the fence itself and the error's attached providerOutcome
+// (sendCustomerMessageCore tags every throw with the provider outcome it had
+// observed, or the pre-dispatch 'not_sent' default) instead of reporting
+// every exception uncertain, which left an unambiguous pre-fence failure
+// blocked forever (codex r1 #4844 P1). A throw after the fence was claimed
+// stays uncertain — the provider may already have been contacted.
+async function dispatchReplaySend(input, fence) {
   try { return { result: await require('./send-customer-message').sendCustomerMessage(input) }; }
-  catch { return { refusal: deliveryUncertainOutcome() }; }
+  catch (err) {
+    if (fence.providerStarted) return { refusal: deliveryUncertainOutcome() };
+    const deliveryOutcome = err?.providerOutcome?.deliveryOutcome || 'not_sent';
+    if (deliveryOutcome !== 'not_sent') return { refusal: deliveryUncertainOutcome() };
+    return { refusal: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+      retryable: true, code: 'BILLING_EMAIL_REPLAY_PRE_FENCE_ERROR' } };
+  }
 }
 
 // A fence claimed but never resolved to a definite result, or a definite
@@ -471,7 +527,7 @@ async function replay(meta, database = db) {
   if (messageOutcome.resolved) return messageOutcome.resolved;
   const fence = { providerStarted: false, uncertain: false };
   const input = replaySendInput(meta, state.row, database, fence);
-  const dispatch = await dispatchReplaySend(input);
+  const dispatch = await dispatchReplaySend(input, fence);
   if (dispatch.refusal) return dispatch.refusal;
   return finalizeReplayResult(meta, database, fence, dispatch.result);
 }

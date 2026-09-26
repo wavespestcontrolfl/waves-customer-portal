@@ -18,6 +18,7 @@ const schema = `billing_email_obligation_${randomUUID().replaceAll('-', '')}`;
 let admin;
 let mockPg;
 let customerId;
+let otherCustomerId;
 jest.setTimeout(60000);
 
 postgres('billing Email-only obligation PostgreSQL', () => {
@@ -34,8 +35,13 @@ postgres('billing Email-only obligation PostgreSQL', () => {
       await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
     customerId = randomUUID();
-    await mockPg('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
-      phone: '+12025550101', email: 'synthetic@example.invalid' });
+    otherCustomerId = randomUUID();
+    await mockPg('customers').insert([
+      { id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+        phone: '+12025550101', email: 'synthetic@example.invalid' },
+      { id: otherCustomerId, first_name: 'Synthetic', last_name: 'Second',
+        phone: '+12025550102', email: 'synthetic2@example.invalid' },
+    ]);
   });
 
   afterAll(async () => {
@@ -63,6 +69,22 @@ postgres('billing Email-only obligation PostgreSQL', () => {
     expect(rows[0].metadata).toMatchObject({ entry_point: obligation.ENTRY_POINT,
       requires_registered_dispatch: true, billingDeliveryLeg: 'email', channel: 'email',
       notificationEventKey: eventKey, billing_email_siblings: { sms: 'pending' } });
+  });
+
+  test('two different customers racing the same obligation key yield exactly one owner and a collision refusal', async () => {
+    const eventKey = `receipt:${randomUUID()}`;
+    const failure = { sent: false, retryable: true, deliveryOutcome: 'not_sent' };
+    const [a, b] = await Promise.all([
+      obligation.queueObligation(notice(), 'payment_receipt', eventKey, failure, ['sms']),
+      obligation.queueObligation({ ...notice(), customerId: otherCustomerId }, 'payment_receipt', eventKey, failure, ['sms']),
+    ]);
+    const outcomes = [a, b];
+    const collisions = outcomes.filter((item) => item.code === 'BILLING_EMAIL_KEY_COLLISION');
+    const owners = outcomes.filter((item) => item.queued === true && item.duplicate !== true);
+    expect(collisions).toHaveLength(1);
+    expect(owners).toHaveLength(1);
+    const rows = await mockPg('sms_log').whereRaw("metadata->>'billing_channel_email_key' = ?", [obligation.obligationKey(eventKey)]);
+    expect(rows).toHaveLength(1);
   });
 
   test('concurrent Email status writes and sibling progress preserve both JSONB fields', async () => {

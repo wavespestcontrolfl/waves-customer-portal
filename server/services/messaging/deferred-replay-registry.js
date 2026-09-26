@@ -1669,5 +1669,6 @@ module.exports = {
   requiresTerminalHook,
   DURABLE_FINALIZE_ENTRY_POINTS,
   TERMINAL_HOOK_ENTRY_POINTS,
+  invoiceStillCollectible,
   _registry: REGISTRY,
 };
