@@ -121,7 +121,7 @@ const FALLBACK_RESULT = Object.freeze({
 // paired with a reaction word (plain "ants bite" stays a normal fallback).
 // English + Spanish — the surface explicitly supports Spanish visitors, so
 // every deterministic guard reads both languages.
-const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|(?:not|isn'?t|aren'?t|stopped|stops|quit)\s+breathing|no\s+(?:est[aá]\s+)?respira(?:ndo)?|dej[oó]\s+de\s+respirar|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
+const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|(?:not|isn'?t|aren'?t|stopped|stops|quit)\s+breathing|no\s+(?:est[aá]\s+)?respira(?:ndo)?|dej[oó]\s+de\s+respirar|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|(?:at|in|to|from)\s+(?:the\s+)?hospital|hospitali[sz]\w*|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
 const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?|picad(?:o|a|ura|uras)|pic[oó]|mordedura?s?|mordi[dó]\w*|mordi[oó])\b/i;
 const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|respir\w*|beb[eé])\b/i;
 
@@ -257,7 +257,7 @@ function scrubPriceTalk(result) {
 const UNSAFE_CLAIM_REPLY_ES = `No puedo dar una garantía general de seguridad ni un tiempo fijo para volver a entrar — depende del producto y de su hogar. Su técnico sigue las instrucciones de la etiqueta del producto y puede explicarle los detalles para su propiedad. Para algo urgente, llámenos al ${COMPANY.phone}.`;
 // Two or more distinctly Spanish words (single words like "son" or "es" are
 // ambiguous with English), or Spanish-only punctuation.
-const SPANISH_WORD_RE = /(?:^|[^\p{L}])(?:sí)(?![\p{L}])|\b(?:el|los|las|para|puede|pueden|usted|seguro|segura|seguros|producto|productos|tratamiento|mascotas|niños|horas|minutos|está|están|también|después|hora|salir|volver|entrar|seco|seca|secarse|tarda)\b/giu;
+const SPANISH_WORD_RE = /(?:^|[^\p{L}])(?:sí)(?![\p{L}])|\b(?:el|los|las|para|puede|pueden|usted|seguro|segura|seguros|producto|productos|tratamiento|mascotas|niños|horas|minutos|está|están|también|después|hora|salir|volver|entrar|seco|seca|secarse|tarda|inofensiv[oa]s?|inocu[oa]s?|pesticidas?|insecticidas?|químic[oa]s?|perros?|gatos?|completamente|totalmente|muy|sin|riesgos?|peligros?|tratad[oa]s?|césped|casa|cebos?|ustedes|nuestr[oa]s?|mediante|aprobad[oa]s?|mantenga|espere)\b/giu;
 function looksSpanish(text) {
   const t = String(text || '');
   // ¿/¡ are unambiguous; otherwise two distinctly Spanish words. A lone ñ
@@ -294,7 +294,7 @@ const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w
 const EPA_MENTION_RE = /\b(?:epa|e\.\s?p\.\s?a\.?|environmental\s+protection\s+agency|agencia\s+de\s+protecci[oó]n\s+ambiental)(?![a-z])/i;
 const APPROVAL_WORD_RE = /\b(?:approv\w*|endors\w*|certif\w*|sanction\w*|authoriz\w*|clear(?:ed|ance)|aprob\w*|avalad\w*|respaldad\w*|autoriz\w*)\b/i;
 
-const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|ly|ty)?|harmless|gentle|non-?toxic|risk[-\s]?free|hazard[-\s]?free|worry[-\s]?free|(?:pet|kid|child|children|family|people|eco)[-\s]?(?:safe|friendly)|seguros?|seguras?|seguridad|inofensiv\w*)\b/i;
+const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|ly|ty)?|harmless|gentle|non-?toxic|risk[-\s]?free|hazard[-\s]?free|worry[-\s]?free|(?:pet|kid|child|children|family|people|eco)[-\s]?(?:safe|friendly)|seguros?|seguras?|seguridad|inofensiv\w*|inocu[oa]s?|sin\s+riesgos?|no\s+t[oó]xic\w*)\b/i;
 // Negation directly governing a hazard, allowing only filler words between
 // ("doesn't pose any risk", "will not cause any harm") — so "We can't treat
 // dangerous wasp nests at height" is not a claim.
@@ -379,7 +379,7 @@ const DIGITAL_ACCESS_RE = /\b(?:re-?enter(?:ing)?|log(?:ging)?\s*(?:in|back\s+in
 // Looser than ACCESS_SIGNAL_RE, for deciding the TOPIC only: any subject or
 // modal in front of going in/out ("You'll be able to go inside", "When can
 // we go inside?", "Can the kids play outside?").
-const ACCESS_TOPIC_RE = /\b(?:(?:return|go|get|come|head|move)\s+(?:back\s+)?(?:home|to\s+(?:the|my|our)\s+(?:house|home|apartment|condo))|back\s+(?:home|in\s+the\s+house)|(?:volver|regresar)\s+a\s+(?:casa|la\s+casa)|(?:go|get|come|head|walk|be|play|stay)\s+(?:back\s+)?(?:inside|outside|indoors|outdoors)|(?:go|get)\s+(?:back\s+)?(?:out|in)\b|back\s+(?:inside|outside|indoors|outdoors)|re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|dr(?:y|ies|ied|ying)|stay\s+(?:off|out|away|inside|indoors)|(?:salir|entrar|volver|regresar)|sec(?:o|a|os|as|ar|arse))\b/i;
+const ACCESS_TOPIC_RE = /\b(?:(?:return|come\s+back|go\s+back|get\s+back|be\s+back)\b(?=[^.?!]{0,30}\b(?:after|once|following|until)\b[^.?!]{0,25}\b(?:treat\w*|spray\w*|servic\w*|appli\w*|pest\s+control|fumig\w*|exterminat\w*))|(?:volver|regresar)\s+(?:a\s+\w+\s+)?(?:despu[eé]s|tras)\b|(?:return|go|get|come|head|move)\s+(?:back\s+)?(?:home|to\s+(?:the|my|our)\s+(?:house|home|apartment|condo))|back\s+(?:home|in\s+the\s+house)|(?:volver|regresar)\s+a\s+(?:casa|la\s+casa)|(?:go|get|come|head|walk|be|play|stay)\s+(?:back\s+)?(?:inside|outside|indoors|outdoors)|(?:go|get)\s+(?:back\s+)?(?:out|in)\b|back\s+(?:inside|outside|indoors|outdoors)|re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|dr(?:y|ies|ied|ying)|stay\s+(?:off|out|away|inside|indoors)|(?:salir|entrar|volver|regresar)|sec(?:o|a|os|as|ar|arse))\b/i;
 function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = contextText) {
   const text = String(reply || '');
   // Topic, not proximity: when the reply or the visitor's question is about

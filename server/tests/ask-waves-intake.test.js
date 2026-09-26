@@ -215,13 +215,14 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Our formula is safe for pets.', ''],
     ['Our pesticide has no adverse effects on children or pets.', ''],
     ['El tratamiento no produce efectos adversos.', ''],
+    ['El pesticida es completamente inocuo para niños y mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
     ['Our treatment is non\u2011toxic.', ''],
     ['Our treatment is risk\u2010free.', ''],
     ['It\u2019s pet\u00ADsafe.', ''],
   ])('any safety wording gets the reviewed copy, whatever its subject or typography: %s', (reply, context) => {
-    expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions/);
+    expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
 
   test.each([
@@ -238,6 +239,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['You can re-enter at 4 PM.', "I cannot log in to the portal; when can I re-enter the house?"],
     ["You'll be able to go inside after 30 minutes.", 'When can we go inside?'],
     ['At 4 PM.', 'When can I return home after pest control?'],
+    ['At 4 PM.', 'When can we return after treatment?'],
+    ['At 4 PM.', 'When can we come back after treatment?'],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -689,6 +692,21 @@ describe('normalizeIntakeResult', () => {
     const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I have a dog and a cat.\nMy son swallowed some bait');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.reply).not.toMatch(/veterinarian/);
+  });
+
+  test('"El pesticida es inofensivo" gets the Spanish replacement from its own vocabulary', () => {
+    expect(scrubUnsafeClaims({ reply: 'El pesticida es inofensivo.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?').reply)
+      .toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test('a hospital as a customer is not an emergency', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'Pest control for a hospital is $500 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
+      'openai',
+      'How much is pest control for a hospital?',
+    );
+    expect(out.reply).toMatch(/Get my price/);
+    expect(out.intent).toBe('quote');
   });
 
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
