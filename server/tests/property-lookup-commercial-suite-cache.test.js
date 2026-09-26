@@ -104,3 +104,12 @@ test('a warm DBPR cache on a cache-hit request resolves the real match with zero
   expect(cacheHitProfile.homeSqFt).toBe(1400);
   expect(fetchText).not.toHaveBeenCalled();
 });
+
+describe('coalescing key separates suite-sizing lookups', () => {
+  test('an opt-in suite-sizing lookup never joins an ordinary in-flight lookup', () => {
+    const key = require('../routes/property-lookup-v2')._private.lookupCoalesceKey;
+    const a = key('4400 Test Commons Pkwy E #102, Bradenton, FL 00000', {});
+    const b = key('4400 Test Commons Pkwy E #102, Bradenton, FL 00000', { commercialSuiteSizing: true });
+    expect(a).not.toBe(b);
+  });
+});

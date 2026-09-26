@@ -319,3 +319,20 @@ describe('designator-bearing target units match the bare extract unit', () => {
     expect(matchDbprRow([row102], { street: '4400 Test Commons Pkwy E', unit, zip: '00000' })).toBe(row102);
   });
 });
+
+describe('DBPR row unit in Location Address Line 2, and both phone columns', () => {
+  const { matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
+  const base = { 'Location Street Address': '4400 TEST COMMONS PKWY E', 'Location Zip Code': '00000' };
+  test.each(['STE 102', 'SUITE 102', '#102', '102', 'UNIT 102'])('line 2 "%s" matches Suite 102', (line2) => {
+    const row = { ...base, 'Location Address Line 2': line2 };
+    expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000' })).toBe(row);
+  });
+  test('line 2 naming another suite is still rejected', () => {
+    const row = { ...base, 'Location Address Line 2': 'STE 104' };
+    expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000' })).toBeNull();
+  });
+  test('the caller matches the PRIMARY phone even when a secondary phone is also listed', () => {
+    const row = { ...base, 'Primary Phone Number': '(555) 010-0111', 'Secondary Phone Number': '555-010-0999' };
+    expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', zip: '00000', phone: '+15550100111' })).toBe(row);
+  });
+});

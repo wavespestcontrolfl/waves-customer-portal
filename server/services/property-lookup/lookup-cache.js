@@ -347,6 +347,10 @@ const EVIDENCE_BACKFILL_KEYS = {
   _floodZone: "NOT (property_record \? '_floodZone')",
   _poolPermits: "NOT (property_record \? '_poolPermits')",
   _addressAudit: "NOT (property_record \? '_addressAudit')",
+  // A suite stamp REPLACES an absent or aged-out one — freshness is
+  // enforced by the reader (commercialSuiteSizeStampIsFresh), and the
+  // newest sourced resolution is always the one to keep.
+  _commercialSuiteSize: 'TRUE',
 };
 
 async function attachEvidenceToCachedLookup(address, key, value) {
@@ -380,6 +384,10 @@ async function attachPoolPermitsToCachedLookup(address, poolPermits) {
 
 async function attachAddressAuditToCachedLookup(address, addressAudit) {
   return attachEvidenceToCachedLookup(address, '_addressAudit', addressAudit);
+}
+
+async function attachCommercialSuiteSizeToCachedLookup(address, stamp) {
+  return attachEvidenceToCachedLookup(address, '_commercialSuiteSize', stamp);
 }
 
 // ── Attempt lifecycle (owner ruling 2026-08-11) ─────────────────
@@ -648,6 +656,7 @@ module.exports = {
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,
   attachAddressAuditToCachedLookup,
+  attachCommercialSuiteSizeToCachedLookup,
   saveLookup,
   markLookupAttempt,
   sweepStalePendingAttempts,

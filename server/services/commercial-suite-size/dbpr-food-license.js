@@ -184,8 +184,14 @@ function businessNameMatches(candidate, hint) {
 }
 
 // A single license row's location address, parsed once.
+// The suite can sit in its own column ("Location Address Line 2") rather
+// than the street line, so both are joined before the unit is parsed.
 function rowLocation(row) {
-  const parsed = parseAddressLine(row['Location Street Address']);
+  const street = String(row['Location Street Address'] || '').trim();
+  const line2 = String(row['Location Address Line 2'] || '').trim();
+  // A bare "102" in line 2 gets a "#" so the unit parser recognizes it.
+  const line2Unit = /^\d/.test(line2) ? `#${line2}` : line2;
+  const parsed = parseAddressLine(line2 && !parseAddressLine(street).unit ? `${street} ${line2Unit}` : street);
   return {
     ...parsed,
     zip: String(row['Location Zip Code'] || '').trim().slice(0, 5),
@@ -229,9 +235,9 @@ function matchDbprRow(rows, { street, unit, zip, phone, businessNameHint } = {})
     if (targetUnit && rowUnit && rowUnit !== targetUnit) return false;
     if (targetUnit && rowUnit && rowUnit === targetUnit) return true;
     if (targetPhone) {
-      const rowPhone = normalizePhoneDigits(row['Secondary Phone Number'])
-        || normalizePhoneDigits(row['Primary Phone Number']);
-      if (rowPhone && rowPhone === targetPhone) return true;
+      // Either license phone can be the business line — compare both.
+      const rowPhones = [row['Secondary Phone Number'], row['Primary Phone Number']].map(normalizePhoneDigits);
+      if (rowPhones.includes(targetPhone)) return true;
     }
     if (businessNameHint && businessNameMatches(row['Business Name'], businessNameHint)) return true;
     return false;

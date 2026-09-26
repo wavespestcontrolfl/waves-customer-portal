@@ -13,6 +13,7 @@ jest.mock('../services/property-lookup/lookup-cache', () => ({
   getCachedLookup: jest.fn(async () => null),
   applyVerifiedOverrides: jest.fn((record) => record),
   saveLookup: jest.fn(async () => {}),
+  attachCommercialSuiteSizeToCachedLookup: jest.fn(async () => {}),
 }));
 jest.mock('../services/property-lookup/fema-nfhl', () => ({ lookupFloodZoneByPoint: jest.fn(async () => null) }));
 jest.mock('../services/property-lookup/ai-property-lookup', () => ({
@@ -96,4 +97,30 @@ test('a type-default guess is NOT pinned to the cache row, so a later lookup can
   expect(saveLookup).toHaveBeenCalledTimes(1);
   const [, savedResult] = saveLookup.mock.calls[0];
   expect(savedResult.propertyRecord._commercialSuiteSize).toBeUndefined();
+});
+
+
+describe('cache hit on an older row with no suite stamp', () => {
+  const { _private: { buildResultFromCachedLookup } } = require('../routes/property-lookup-v2');
+  const { attachCommercialSuiteSizeToCachedLookup } = require('../services/property-lookup/lookup-cache');
+  const row = () => ({
+    property_record: {
+      formattedAddress: ADDRESS, propertyType: 'Commercial', squareFootage: 46031,
+      _parcel: { landUseDescription: 'Community Shopping Centers (1555)' }, unitCount: 1, stories: 1, _source: 'county',
+    },
+    ai_analysis: null, lat: 27.5, lng: -82.45,
+  });
+
+  test('a license size resolved on the hit is backfilled onto the cached row, tagged with its unit', async () => {
+    const result = await buildResultFromCachedLookup(ADDRESS, row(), null, Date.now(), { commercialSuiteSizing: true });
+    expect(result.enriched.suiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats' }));
+    expect(attachCommercialSuiteSizeToCachedLookup).toHaveBeenCalledTimes(1);
+    expect(attachCommercialSuiteSizeToCachedLookup.mock.calls[0][1]).toEqual(expect.objectContaining({ value: 1400, unitKey: '102' }));
+  });
+
+  test('persist:false and cacheOnly never backfill', async () => {
+    await buildResultFromCachedLookup(ADDRESS, row(), null, Date.now(), { commercialSuiteSizing: true, persist: false });
+    await buildResultFromCachedLookup(ADDRESS, row(), null, Date.now(), { commercialSuiteSizing: true, cacheOnly: true });
+    expect(attachCommercialSuiteSizeToCachedLookup).not.toHaveBeenCalled();
+  });
 });

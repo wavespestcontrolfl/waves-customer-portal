@@ -27,6 +27,7 @@ const {
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,
   attachAddressAuditToCachedLookup,
+  attachCommercialSuiteSizeToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -216,7 +217,11 @@ function lookupCoalesceKey(address, options) {
   if (typeof cacheAddressKey !== 'function') return null;
   try {
     const hash = cacheAddressKey(address)?.hash;
-    return hash ? `${hash}${options.prioritizeAccuracy ? ':full-analysis' : ''}` : null;
+    // Suite sizing changes the response (suite homeSqFt/footprint, stamp),
+    // so opt-in and ordinary callers never join each other's run.
+    return hash
+      ? `${hash}${options.prioritizeAccuracy ? ':full-analysis' : ''}${options.commercialSuiteSizing === true ? ':suite-sizing' : ''}`
+      : null;
   } catch {
     return null;
   }
@@ -1010,6 +1015,19 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     requireWarmCache: true,
     cacheOnly: options.cacheOnly === true,
   });
+  // A license size resolved on THIS hit (older row with no stamp, or an
+  // aged-out stamp, and a warm DBPR cache) is backfilled onto the cached
+  // row like the fresh path persists it — otherwise every process restart
+  // falls back to the type default until DBPR warms again. A reused stamp
+  // carries the same resolvedAt as the record's, so it is not rewritten.
+  const hitSuite = enriched?.suiteSize;
+  if (options.persist !== false && options.cacheOnly !== true && record
+    && PERSISTED_SUITE_SIZE_SOURCES.has(hitSuite?.source)
+    && hitSuite.resolvedAt && hitSuite.resolvedAt !== record._commercialSuiteSize?.resolvedAt) {
+    const stamp = { ...hitSuite, unitKey: suiteUnitKey(address) };
+    record._commercialSuiteSize = stamp;
+    await attachCommercialSuiteSizeToCachedLookup(address, stamp);
+  }
 
   const result = {
     address: String(address).trim(),
@@ -5391,6 +5409,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,
+  buildResultFromCachedLookup,
   cachedAggregateResolvesToOwnUnit,
   subdivisionMedianEstimate,
   inFlightLookups,
