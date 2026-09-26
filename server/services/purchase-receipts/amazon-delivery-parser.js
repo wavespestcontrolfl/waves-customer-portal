@@ -43,10 +43,13 @@
 const AMAZON_DELIVERY_FROM = 'order-update@amazon.com';
 const ORDER_NUMBER_RE = /Order\s*#\s*([\d-]+)/i;
 // The "Track package" (or "Track your package") link's shipmentId query
-// param. Deliberately never the same URL's orderId=/orderID= — that value
-// can legitimately differ from the "Order #" line for a multi-shipment
-// order, and the Order # line is always the order-number source of truth.
-const SHIPMENT_ID_RE = /[?&]shipmentId=([A-Za-z0-9._~-]+)/i;
+// param: plain in body_text (`?shipmentId=X`), `&amp;shipmentId=X` in raw
+// HTML, or URL-encoded inside Amazon's redirect link (`%26shipmentId%3DX`,
+// the form every real delivery's body_html carries). Deliberately never the
+// same URL's orderId=/orderID= — that value can legitimately differ from
+// the "Order #" line for a multi-shipment order, and the Order # line is
+// always the order-number source of truth.
+const SHIPMENT_ID_RE = /(?:[?&;]|%26)shipmentId(?:=|%3D)([A-Za-z0-9._~-]+)/i;
 
 function isAmazonDeliveredEmail(email) {
   const from = String(email?.from_address || '').trim().toLowerCase();
@@ -147,7 +150,10 @@ function parseAmazonDeliveredEmail(email) {
   const orderNumber = extractOrderNumber(text);
   const items = parseItemBlocksFromText(text);
   if (!orderNumber && !items.length) return null;
-  const shipmentId = extractShipmentId(text);
+  // stripHtml drops hrefs, so an HTML-only email is also searched raw —
+  // otherwise its shipment falls back to the email's own identity, and a
+  // second email for the same shipment would get a different claim key.
+  const shipmentId = extractShipmentId(text) || extractShipmentId(email?.body_html);
   return {
     orderNumber,
     shipmentId: shipmentId || null,

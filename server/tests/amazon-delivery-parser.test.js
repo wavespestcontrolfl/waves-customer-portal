@@ -156,6 +156,30 @@ describe('parseAmazonDeliveredEmail — Order # and shipmentId extraction', () =
     expect(parsed.shipmentKey).toBe('SHIPTEST01');
   });
 
+  test('an HTML-only email reads shipmentId from the raw link (hrefs are gone after stripping), in both encodings', () => {
+    const html = (href) => ({
+      from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: '', gmail_id: 'gm-html',
+      body_html: `<p>Order # 900-4000004-4000004</p><ul><li>* Thing Quantity: 1</li></ul><a href="${href}">Track package</a>`,
+    });
+    // Amazon's redirect link, URL-encoded — the form real deliveries carry.
+    const encoded = parseAmazonDeliveredEmail(html('https://www.amazon.com/gp/r.html?C=X&amp;U=https%3A%2F%2Fwww.amazon.com%2Fprogress-tracker%2Fpackage%3FitemIndex%3D0%26shipmentId%3DSHIPTEST01%26x%3D1'));
+    const plain = parseAmazonDeliveredEmail(html('https://www.amazon.com/gp/css/order-details?orderId=900-4000004-4000004&amp;shipmentId=SHIPTEST01'));
+    expect(encoded.shipmentKey).toBe('SHIPTEST01');
+    expect(plain.shipmentKey).toBe('SHIPTEST01');
+  });
+
+  test('the same shipment gets the same key whether its email arrives with body_text or HTML only', () => {
+    const withText = parseAmazonDeliveredEmail({
+      from_address: 'order-update@amazon.com', subject: 'Delivered: your order', gmail_id: 'gm-a',
+      body_text: 'Order # 900-4000004-4000004\n\n* Thing\n  Quantity: 1\n\nTrack package: https://www.amazon.com/x?orderId=900-4000004-4000004&shipmentId=SHIPTEST01\n',
+    });
+    const htmlOnly = parseAmazonDeliveredEmail({
+      from_address: 'order-update@amazon.com', subject: 'Delivered: your order', gmail_id: 'gm-b', body_text: '',
+      body_html: '<p>Order # 900-4000004-4000004</p><li>* Thing Quantity: 1</li><a href="https://www.amazon.com/gp/r.html?U=x%3FitemIndex%3D0%26shipmentId%3DSHIPTEST01">Track</a>',
+    });
+    expect(htmlOnly.shipmentKey).toBe(withText.shipmentKey);
+  });
+
   test('two Delivered emails for the SAME order but different shipmentId get different shipmentKeys (split shipment)', () => {
     const base = 'Order # 900-4000004-4000004\n\n* Thing\n  Quantity: 1\n\nTrack package: https://www.amazon.com/x?orderId=900-4000004-4000004&shipmentId=';
     const first = parseAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: `${base}SHIP-ONE\n` });
