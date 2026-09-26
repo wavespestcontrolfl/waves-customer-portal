@@ -1855,6 +1855,17 @@ describe('fileSkippedBookingCard — the shared shadow/legacy-mode "approved but
     expect(typeof CallRecordingProcessor._test.fileSkippedBookingCard).toBe('function');
   });
 
+  // codex #4919 round-10 P2: a superseded worker files no card, so it must
+  // not push the review marker (the lead-activity refresh reads it unfenced).
+  test('pushes the review marker only when this worker still owned the call and filed the card', () => {
+    expect(body).toContain('if (!stillOwner) return false;');
+    expect(body).toContain('return true;');
+    const gate = body.indexOf('if (!filed) return;');
+    const push = body.indexOf("bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval')");
+    expect(gate).toBeGreaterThan(-1);
+    expect(push).toBeGreaterThan(gate);
+  });
+
   test('takes the call lock, checks ownership under the claim fence, and MERGES instead of .ignore()-ing', () => {
     expect(body).toContain('await lockTriageCall(ttrx, call.id)');
     expect(body).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id')");

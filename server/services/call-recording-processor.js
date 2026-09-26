@@ -1124,11 +1124,11 @@ function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null }) 
 // awaited from inside the caller's own db.transaction (this opens its own).
 async function fileSkippedBookingCard({ call, procToken, customerId, extraction, skippedReason, preferredDateTime, serviceType, bridgeNeedsConfirmation, callSid }) {
   try {
-    await db.transaction(async (ttrx) => {
+    const filed = await db.transaction(async (ttrx) => {
       await lockTriageCall(ttrx, call.id);
       // A superseded worker leaves the current task untouched (codex r38 P1).
       const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
-      if (!stillOwner) return;
+      if (!stillOwner) return false;
       await ttrx('triage_items')
         .insert(buildTriageItem({
           callLogId: call.id,
@@ -1155,7 +1155,11 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
           summary: ttrx.raw('EXCLUDED.summary'),
           updated_at: new Date(),
         });
+      return true;
     });
+    // A superseded worker filed no card, so it must not mark the call for
+    // review either (codex #4919 round-10 P2).
+    if (!filed) return;
     // The task rides the call's review state (codex #4919 round-7 P2):
     // review_status and the lead's confirm-before-dispatch note derive from
     // bridgeNeedsConfirmation, not from open triage rows, so a stale-start
