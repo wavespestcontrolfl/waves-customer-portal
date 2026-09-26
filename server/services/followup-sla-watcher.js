@@ -362,7 +362,8 @@ async function runInner({ now = new Date() } = {}) {
     if (r.failed > 0) unverified.add(id);
   }
   const live = await commitments.stillOpenIds(db, candidates.map((r) => r.id), { now });
-  candidates = candidates.filter((r) => live.has(r.id) && !unverified.has(r.call_log_id));
+  const liveCandidates = candidates.filter((r) => live.has(r.id));
+  candidates = liveCandidates.filter((r) => !unverified.has(r.call_log_id));
   let missed = [];
   const followed = await followedUpIds(db, candidates).catch((err) => {
     logger.warn(`[followup-sla] activity lookup failed: ${err.message}`);
@@ -380,69 +381,70 @@ async function runInner({ now = new Date() } = {}) {
   //    read state kept (good news never re-rings);
   //  - nothing missed → the latest post is marked read and flagged emptied,
   //    so a miss that returns later always gets a fresh post.
-  // A tick that could not verify every candidate changes nothing.
+  // A promise whose call could not be verified this tick is never newly
+  // listed, but one ALREADY on the list stays on it — one bad lookup never
+  // holds back every other miss, nor silently drops one (the tick still
+  // fails job health).
   let alerted = 0;
   let changed = 0;
-  if (unverified.size) {
-    logger.warn(`[followup-sla] ${unverified.size} call(s) unverified — rolling list left unchanged this tick`);
-  } else {
-    // Publish in ONE transaction that first locks and reloads every listed
-    // promise: if staff changed any of them since the scan (a new deadline,
-    // a dismissal, a snooze — anything that moves updated_at) or it closed,
-    // this tick publishes nothing and the next one decides on fresh rows.
-    // The same transaction posts the new list and retires the old posts, so
-    // the single rolling alert never splits into two unread copies.
-    await db.transaction(async (trx) => {
-      // Every staff action on a promise (dismiss, snooze, edit, close) moves
-      // its updated_at, so a status + updated_at comparison catches them all.
-      const locked = await trx('call_commitments').whereIn('id', missed.map((r) => r.id)).forUpdate().select('id', 'status', 'updated_at');
-      const byId = new Map(locked.map((f) => [String(f.id), f]));
-      const stamp = (v) => new Date(v || 0).getTime();
-      changed = missed.filter((r) => byId.get(String(r.id))?.status !== 'open'
-        || stamp(byId.get(String(r.id)).updated_at) !== stamp(r.updated_at)).length;
-      // Follow-up evidence lives in other tables (visits, calls, texts) that
-      // this lock does not fence: re-check it now, after the lock.
-      if (!changed) changed = (await followedUpIds(trx, missed)).size;
-      if (changed) {
-        logger.info(`[followup-sla] ${changed} listed promise(s) changed during the tick — list left for the next tick`);
-        return;
-      }
-      const latest = await trx('notifications').where({ recipient_type: 'admin' })
+  const latest = await db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
+    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body');
+  const meta = (latest && (typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : latest.metadata)) || {};
+  const shown = latest && !meta.emptied ? (meta.missed_commitment_ids || []).map(String) : [];
+  const carried = liveCandidates.filter((r) => (unverified.has(r.call_log_id)) && shown.includes(String(r.id)));
+  const onList = [...missed, ...carried].sort((a, b) => a.sla_due_at - b.sla_due_at);
+  // Publish in ONE transaction that first locks and reloads every listed
+  // promise: if staff changed any of them since the scan (a new deadline,
+  // a dismissal, a snooze — anything that moves updated_at) or it closed,
+  // this tick publishes nothing and the next one decides on fresh rows.
+  // The same transaction posts the new list and retires the old posts, so
+  // the single rolling alert never splits into two unread copies.
+  await db.transaction(async (trx) => {
+    // Every staff action on a promise (dismiss, snooze, edit, close) moves
+    // its updated_at, so a status + updated_at comparison catches them all.
+    const locked = await trx('call_commitments').whereIn('id', onList.map((r) => r.id)).forUpdate().select('id', 'status', 'updated_at');
+    const byId = new Map(locked.map((f) => [String(f.id), f]));
+    const stamp = (v) => new Date(v || 0).getTime();
+    changed = onList.filter((r) => byId.get(String(r.id))?.status !== 'open'
+      || stamp(byId.get(String(r.id)).updated_at) !== stamp(r.updated_at)).length;
+    // Follow-up evidence lives in other tables (visits, calls, texts) that
+    // this lock does not fence: re-check it now, after the lock.
+    if (!changed) changed = (await followedUpIds(trx, missed)).size;
+    if (changed) {
+      logger.info(`[followup-sla] ${changed} listed promise(s) changed during the tick — list left for the next tick`);
+      return;
+    }
+    const ids = onList.map((r) => String(r.id)).sort();
+    const fresh = ids.filter((id) => !shown.includes(id));
+    const title = `${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`;
+    const body = `Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`;
+    if (fresh.length) {
+      const key = `${ROLLING_KEY}:${now.toISOString()}`;
+      const notif = await NotificationService.notifyAdmin('alert', title, body, {
+        link: '/admin/communications#tab=owed', dedupeKey: key, bell: true, trx,
+        metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
+      });
+      if (!notif?.id || notif.suppressed) return;
+      await trx('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
         .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-        .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body');
-      const meta = (latest && (typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : latest.metadata)) || {};
-      const shown = latest && !meta.emptied ? (meta.missed_commitment_ids || []).map(String) : [];
-      const ids = missed.map((r) => String(r.id)).sort();
-      const fresh = ids.filter((id) => !shown.includes(id));
-      const title = `${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`;
-      const body = `Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${missed.map((r) => `• ${describe(r)}`).join('\n')}`;
-      if (fresh.length) {
-        const key = `${ROLLING_KEY}:${now.toISOString()}`;
-        const notif = await NotificationService.notifyAdmin('alert', title, body, {
-          link: '/admin/communications#tab=owed', dedupeKey: key, bell: true, trx,
-          metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
-        });
-        if (!notif?.id || notif.suppressed) return;
-        await trx('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
-          .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-          .whereRaw("metadata->>'dedupeKey' <> ?", [key]).update({ read_at: now });
-        alerted = fresh.length;
-        return;
-      }
-      // No new miss: keep the standing post true without re-ringing it —
-      // emptied → read and flagged (a returning miss posts fresh); fewer
-      // items or changed details → rewritten in place, read state kept.
-      if (!shown.length) return;
-      const patch = ids.length
-        ? { title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
-        : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
-      // Same items, same words: nothing to write (an emptied patch carries no
-      // title, so it never matches).
-      if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length) return;
-      await trx('notifications').where({ id: latest.id }).update(patch);
-    });
-  }
-  return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: missed.length, alerted, changed, unverified: unverified.size };
+        .whereRaw("metadata->>'dedupeKey' <> ?", [key]).update({ read_at: now });
+      alerted = fresh.length;
+      return;
+    }
+    // No new miss: keep the standing post true without re-ringing it —
+    // emptied → read and flagged (a returning miss posts fresh); fewer
+    // items or changed details → rewritten in place, read state kept.
+    if (!shown.length) return;
+    const patch = ids.length
+      ? { title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
+      : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
+    // Same items, same words: nothing to write (an emptied patch carries no
+    // title, so it never matches).
+    if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length) return;
+    await trx('notifications').where({ id: latest.id }).update(patch);
+  });
+  return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: onList.length, alerted, changed, unverified: unverified.size };
 }
 
 module.exports = {

@@ -264,14 +264,20 @@ test('a promise the fulfillment proof closes, or staff settled, dismissed or sno
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
 
-test('a tick that could not verify every candidate leaves the list untouched', async () => {
+test('one unverifiable call never holds back the other misses — they publish, and the tick still fails job health', async () => {
   mockDb();
   listOpenCommitments.mockResolvedValue([row('a'), row('b', { call_log_id: 'call-b' })]);
   refreshFulfillment.mockImplementation(async (_conn, id) => (id === 'call-b' ? { failed: 1 } : { fulfilled: 0 }));
-  // The tick fails job health rather than reading green.
   await expect(runFollowUpSlaWatcher({ now: NOW })).rejects.toThrow('Follow-up verification incomplete for 1 call(s)');
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  expect(queriesOn('notifications')).toHaveLength(0);
+  expect(rollingCall()[3].metadata.missed_commitment_ids).toEqual(['a']);
+});
+
+test('a promise already on the list stays on it while its call cannot be verified', async () => {
+  mockDb({ standingRow: posted(['b']) });
+  listOpenCommitments.mockResolvedValue([row('a'), row('b', { call_log_id: 'call-b' })]);
+  refreshFulfillment.mockImplementation(async (_conn, id) => (id === 'call-b' ? { failed: 1 } : { fulfilled: 0 }));
+  await expect(runFollowUpSlaWatcher({ now: NOW })).rejects.toThrow('verification incomplete');
+  expect(rollingCall()[3].metadata.missed_commitment_ids).toEqual(['a', 'b']);
 });
 
 test('a lead with no customer record is checked by the number the promise was made on', async () => {
