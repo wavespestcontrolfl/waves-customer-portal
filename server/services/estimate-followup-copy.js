@@ -33,7 +33,7 @@ const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const logger = require('./logger');
 
 const RECURRING_TERMS_BENEFIT =
-  'No long-term contract, unlimited free callbacks, and a 90-day money-back guarantee.';
+  'No long-term contract, unlimited free callbacks, and a money-back guarantee.';
 const NEUTRAL_BENEFIT =
   'Licensed and insured, satisfaction guaranteed — and a real person answers when you reply.';
 
