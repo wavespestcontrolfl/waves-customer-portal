@@ -6994,8 +6994,10 @@ const InvoiceService = {
    */
   async receiptSmsFacts(invoice) {
     const domain = publicPortalUrl();
+    // /receipt/, not /pay/: the pay page forwards paid invoices to the
+    // receipt but renders a refunded one as a "Refunded" payment page.
     const longReceiptUrl = invoice.token
-      ? `${domain}/pay/${invoice.token}`
+      ? `${domain}/receipt/${invoice.token}`
       : "";
     const receiptUrl = longReceiptUrl
       ? await shortenOrPassthrough(longReceiptUrl, {

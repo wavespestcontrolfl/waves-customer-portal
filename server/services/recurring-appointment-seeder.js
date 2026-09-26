@@ -592,7 +592,7 @@ function notifySeedShortfall(parent, shortfall) {
         'Recurring plan seeded short',
         shortfallMsg,
         {
-          link: parent?.customer_id ? `/admin/customers/${parent.customer_id}` : '/admin/schedule',
+          link: parent?.customer_id ? `/admin/customers?customerId=${parent.customer_id}` : '/admin/schedule',
           bell: true,
           metadata: {
             dedupeKey,

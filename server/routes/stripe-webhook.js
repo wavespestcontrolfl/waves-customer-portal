@@ -4982,7 +4982,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
             'billing',
             'Auto Pay bank enrollment refused at recovery',
             'An accepted recurring plan captured a bank account, but bank capture is no longer offered for this customer — Auto Pay was NOT enrolled. Add a card or re-enable bank capture, then re-enroll from the customer page.',
-            { link: `/admin/customers/${estimate.customer_id}`, metadata: { estimateId: estimate.id, setupIntentId: setupIntent.id } },
+            { link: `/admin/customers?customerId=${estimate.customer_id}`, metadata: { estimateId: estimate.id, setupIntentId: setupIntent.id } },
           );
         } catch (alertErr) {
           logger.warn(`[stripe-webhook] recovery refusal alert failed: ${alertErr.message}`);
@@ -5352,7 +5352,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           'billing',
           'Card saved without Auto Pay (payer-billed)',
           'A portal card save (webhook completion) skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
-          { link: `/admin/customers/${wavesCustomerId}`, metadata: { customerId: wavesCustomerId, paymentMethodId: saved.id } },
+          { link: `/admin/customers?customerId=${wavesCustomerId}`, metadata: { customerId: wavesCustomerId, paymentMethodId: saved.id } },
         ).catch(() => {});
         return;
       }
@@ -6449,7 +6449,7 @@ async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
       if (customer?.phone) {
         const body = await renderRequiredSmsTemplate('bank_verification_incomplete', {
           first_name: customer.first_name || 'there',
-          billing_url: `${publicPortalUrl()}/billing`,
+          billing_url: `${publicPortalUrl()}/?tab=billing`,
         }, {
           workflow: 'bank_verification_incomplete',
           entity_type: 'payment_intent',
@@ -8276,7 +8276,7 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
       if (customer?.phone) {
         const body = await renderRequiredSmsTemplate('bank_verification_failed', {
           first_name: customer.first_name || 'there',
-          billing_url: `${publicPortalUrl()}/billing`,
+          billing_url: `${publicPortalUrl()}/?tab=billing`,
         }, {
           workflow: 'bank_verification_failed',
           entity_type: 'setup_intent',
