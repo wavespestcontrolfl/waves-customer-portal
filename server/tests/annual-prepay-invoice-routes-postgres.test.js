@@ -403,6 +403,45 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect(Number(custRow.account_credits)).toBe(0);
   });
 
+  // Pre-push audit P1: the decision check locks the term, and the guarded
+  // demotion refuses when it unexpectedly matches nothing. A decision that
+  // lands after the check (simulated inside postCreditMovement, which runs
+  // between the check and the demotion) must roll the whole reversal back.
+  test('a decision that lands after the check rolls the reversal back instead of committing it', async () => {
+    const customerId = await customer({ billing_mode: null, account_credits: 400 });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending',
+      term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const invoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: invoiceId });
+    expect((await request('POST', `/${invoiceId}/apply-credit`, { note: 'synthetic' })).status).toBe(200);
+    const before = await trx('customers').where({ id: customerId }).first('billing_mode', 'account_credits');
+
+    const CustomerCredit = require('../services/customer-credit');
+    const original = CustomerCredit.postCreditMovement;
+    const spy = jest.spyOn(CustomerCredit, 'postCreditMovement').mockImplementation(async (...args) => {
+      await require('../models/db')('annual_prepay_terms').where({ id: termId })
+        .update({ renewal_decision: 'renew', renewal_decision_at: new Date() });
+      return original.apply(CustomerCredit, args);
+    });
+    let res;
+    try {
+      res = await request('POST', `/${invoiceId}/reverse-prepaid`, { note: 'synthetic' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/renewal decision/);
+    const inv = await trx('invoices').where({ id: invoiceId }).first('status', 'credit_applied');
+    expect(inv.status).toBe('prepaid');
+    expect(Number(inv.credit_applied)).toBe(400);
+    const after = await trx('customers').where({ id: customerId }).first('billing_mode', 'account_credits');
+    expect(after.billing_mode).toBe(before.billing_mode);
+    expect(Number(after.account_credits)).toBe(Number(before.account_credits));
+  });
+
   // ADMIN-BUG-R17-FINDING-3: a payment 'disputed' by Stripe (invoice reopened
   // as overdue, PI cleared) is unresolved money — the payments query must not
   // treat 'disputed' the same as "no payment", and must also match the

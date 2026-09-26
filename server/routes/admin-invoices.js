@@ -3049,9 +3049,14 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
   // matching zero rows left credit already posted, the invoice already
   // reopened and the per-visit stamps already cleared, with the billing-mode
   // reset silently skipped.
-  const decidedTermRefusal = async (conn, termId) => {
+  // lock: under the reversal's transaction the term row is locked (after the
+  // customer and invoice, the order this route already takes), so a
+  // recordDecision cannot commit between this check and the demotion below.
+  const decidedTermRefusal = async (conn, termId, { lock = false } = {}) => {
     if (!termId) return null;
-    const term = await conn('annual_prepay_terms').where({ id: termId }).first('renewal_decision');
+    const query = conn('annual_prepay_terms').where({ id: termId });
+    if (lock) query.forUpdate();
+    const term = await query.first('renewal_decision');
     if (term?.renewal_decision) {
       return `This term already has a renewal decision (${term.renewal_decision}) and cannot be reversed this way — use the renewal workflow instead.`;
     }
@@ -3135,7 +3140,7 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
         // partial-credit reversal never activated a term, so this only
         // applies to the fully-prepaid case.
         if (isPrepaid && locked.annual_prepay_term_id) {
-          const lockedRefusal = await decidedTermRefusal(trx, locked.annual_prepay_term_id);
+          const lockedRefusal = await decidedTermRefusal(trx, locked.annual_prepay_term_id, { lock: true });
           if (lockedRefusal) {
             const err = new Error(lockedRefusal); err.statusCode = 409; err.isOperational = true; throw err;
           }
@@ -3216,6 +3221,22 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
             .whereNull('renewal_decision')
             .whereNotIn('status', ['cancelled', 'canceled'])
             .update(demotion);
+          // Zero rows is expected only for a term that is already cancelled.
+          // Anything else (a decision that got past the check) refuses, so
+          // the credit, the reopened invoice and the stamp clear all roll back
+          // instead of committing against a term that kept its coverage.
+          if (!demotedCount) {
+            const current = await trx('annual_prepay_terms')
+              .where({ id: locked.annual_prepay_term_id })
+              .first('status', 'renewal_decision');
+            if (current && !['cancelled', 'canceled'].includes(current.status)) {
+              const err = new Error(current.renewal_decision
+                ? `This term already has a renewal decision (${current.renewal_decision}) and cannot be reversed this way — use the renewal workflow instead.`
+                : 'This term changed while the reversal was running. Nothing was changed; try again.');
+              err.statusCode = 409; err.isOperational = true;
+              throw err;
+            }
+          }
           // throwOnError → if stamp cleanup fails, the whole reversal rolls
           // back rather than restoring credit while visits stay stamped free.
           await AnnualPrepayRenewals.clearPrepaidStampsForTerm(locked.annual_prepay_term_id, trx, { throwOnError: true });
