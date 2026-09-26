@@ -9,7 +9,7 @@
 // path here is fail-closed: never charge twice, never guess a price.
 //
 // Runs as a daily sweep (registered alongside the other annual-prepay jobs
-// in workflows/renewal-reminder.js) over SIX independent passes, each
+// in workflows/renewal-reminder.js) over SEVEN independent passes, each
 // bounded and each tolerant of the others' failures:
 //
 //   1. bellNoWitnessTerms — a termite term due for renewal that never got
@@ -48,7 +48,16 @@
 //      existing invoice-void -> annual-prepay sync path) and raises the
 //      existing termite station-retrieval task. The SAME tick also records
 //      the decided lapse ('cancel') on the PARENT term.
-//   6. reconcileStuckSuccessors — two narrow, self-healing legs for the
+//   6. reconcileMissedLapseEffects (Codex round-1 P1) — the void in pass 5
+//      above commits BEFORE its two follow-on effects (the retrieval task,
+//      the parent's decided lapse); a crash or failure between the void
+//      and either effect leaves the successor 'cancelled', which no
+//      longer matches pass 5's own scan. Re-runs processGraceLapseForTerm
+//      for every already-cancelled termite renewal successor — every step
+//      in it (the void, the retrieval task, the parent decision) is
+//      independently idempotent, so re-running the whole function for one
+//      whose effects already finished is always a safe no-op.
+//   7. reconcileStuckSuccessors — two narrow, self-healing legs for the
 //      accepted crash gaps between minting a successor and finishing its
 //      charge decision (§3):
 //        a. renewal_charge_attempted_at IS NULL and the successor is more
@@ -94,6 +103,24 @@
 //     recordDecision('cancel') on a grace lapse (move 15). Both reuse the
 //     SAME writer an operator's manual decision uses, so neither is a new
 //     status-write site in THIS file.
+//   - Codex round-1 P0: the fence claim is not a bare UPDATE — it is
+//     resolveChargeEligibility, a single transaction that re-reads the
+//     successor and its parent UNDER LOCK and refuses the claim if the
+//     parent has been decided anything but undecided/'renew' (a customer
+//     decline racing in after the mint), the successor is no longer
+//     payment_pending, its invoice is no longer open, or today is past
+//     the successor's own grace deadline — THEN claims the fence in the
+//     SAME transaction. Both callers (the normal mint-then-charge tick and
+//     reconcileStuckSuccessors' recovery leg, which can run hours or days
+//     later) share this one function, so neither can drift from what
+//     "still eligible to charge" means. An ineligible successor bells
+//     staff and is never charged.
+//   - Codex round-1 P1: a renewal successor carries its PARENT's
+//     renewal_charge_consent_at forward at mint (a successor never signs
+//     a fresh agreement — the original v3 signature's consent covers
+//     every renewal under it). createTermForAnnualPrepay stamps the SAME
+//     value onto the successor's own row, so a year-2 successor's later
+//     year-3 mint carries it forward again — the chain, not just one hop.
 //   - The Stripe-attempt fence is a single stamped column
 //     (annual_prepay_terms.renewal_charge_attempted_at), set with an atomic
 //     `UPDATE ... WHERE renewal_charge_attempted_at IS NULL` BEFORE the
@@ -144,7 +171,7 @@
 //   - A crash between the attempt stamp committing and the Stripe call
 //     actually firing (renewal_charge_attempted_at set, but no
 //     stripe_invoice_charge_attempts row for the invoice) is caught by
-//     pass 6b above rather than left as a silent, permanent gap.
+//     pass 7b above rather than left as a silent, permanent gap.
 // ============================================================
 
 const db = require('../models/db');
@@ -152,11 +179,12 @@ const logger = require('./logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { addMonthsSameDay, dateOnlyString } = require('../utils/date-only');
 const { gateEnvValue } = require('../config/feature-gates');
+const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
 
 const RENEWABLE_STATUSES = ['active', 'renewal_pending'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
 const RENEWAL_CHARGE_FAILED_SMS_KEY = 'termite_annual_renewal_charge_failed';
-// One-hour crash-gap tolerance for reconcile pass 6a (below) — long enough
+// One-hour crash-gap tolerance for reconcile pass 7a (below) — long enough
 // that an ordinary in-flight sweep tick is never mistaken for a crash.
 const RECONCILE_NEVER_ATTEMPTED_AFTER_MS = 60 * 60 * 1000;
 
@@ -462,6 +490,13 @@ async function mintRenewalSuccessor(parentTermId, conn = db) {
       coverageCadence: parent.coverage_cadence || undefined,
       annualPlanVersion: parent.annual_plan_version,
       renewedFromTermId: parent.id,
+      // Codex round-1 P1: carry the ORIGINAL Auto Pay consent forward — a
+      // renewal successor never signs a fresh agreement, so without this
+      // every second-and-later renewal would fall into decideAndCharge's
+      // no_consent skip forever. createTermForAnnualPrepay stamps it onto
+      // the successor too, so ITS eventual renewal carries it forward
+      // again (the chain, not just one hop).
+      renewalChargeConsentAt: parent.renewal_charge_consent_at || undefined,
       conn: trx,
     });
     if (!successor?.id) throw new Error(`renewal successor mint returned no term for parent ${parent.id}`);
@@ -475,6 +510,75 @@ async function mintRenewalSuccessor(parentTermId, conn = db) {
     // once the successor's own invoice actually pays) and this file's
     // processGraceLapseForTerm (which records the decided lapse instead).
     return { successor, minted: true, parentId: parent.id };
+  });
+}
+
+// Codex round-1 P0: re-validates every fact that could have changed since
+// the successor was minted, and claims the Stripe-attempt fence in the
+// SAME transaction/lock as the last check — so nothing can slip through
+// between "still eligible" and "charged". Shared by BOTH decideAndCharge
+// callers (the normal mint-then-charge tick, immediately after minting,
+// and reconcileStuckSuccessors' recovery leg, which can run hours or days
+// later) so the two can never drift apart on what "eligible" means:
+//   - the successor itself is still payment_pending (a concurrent grace-
+//     lapse tick — or this very fence, raced — hasn't already resolved it)
+//   - its PARENT has not been decided anything other than undecided/'renew'
+//     — a customer decline (recordDecision('cancel'), from the general
+//     annual-prepay cancellation flow or an operator's manual click) wins
+//     over an in-flight charge, even one racing in right after the mint
+//   - its own renewal invoice is not void/cancelled/refunded/already paid
+//   - today is still within the successor's OWN grace deadline (the SAME
+//     GRACE_DAYS window minting itself is bounded to, P1-2) — a long
+//     outage that leaves the recovery leg running weeks late must bell
+//     staff, never fire a months-overdue charge.
+// Returns { eligible: true } with the fence ALREADY claimed, or
+// { eligible: false, reason } with nothing claimed and nothing charged.
+async function resolveChargeEligibility(successorId, conn = db) {
+  return conn.transaction(async (trx) => {
+    const freshSuccessor = await trx('annual_prepay_terms').where({ id: successorId }).forUpdate().first();
+    if (!freshSuccessor) return { eligible: false, reason: 'successor_not_found' };
+    if (freshSuccessor.status !== PAYMENT_PENDING_STATUS) {
+      return { eligible: false, reason: `successor_status_${freshSuccessor.status}` };
+    }
+    if (freshSuccessor.renewal_charge_attempted_at) return { eligible: false, reason: 'already_attempted' };
+
+    if (freshSuccessor.renewed_from_term_id) {
+      const parent = await trx('annual_prepay_terms').where({ id: freshSuccessor.renewed_from_term_id }).forUpdate().first();
+      // A parent decided anything other than undecided/'renew' — most
+      // commonly a customer decline ('cancel') — refuses the charge. A
+      // parent already 'renew' is theoretically unreachable here (that
+      // decision is only ever recorded once THIS successor's own invoice
+      // pays), but is accepted rather than refused should some future
+      // caller ever race one in.
+      if (parent && parent.renewal_decision && parent.renewal_decision !== 'renew') {
+        return { eligible: false, reason: `parent_decided_${parent.renewal_decision}` };
+      }
+    }
+
+    const deadline = graceDeadlineFor(freshSuccessor);
+    if (deadline && etDateString() > deadline) {
+      return { eligible: false, reason: 'past_grace_deadline' };
+    }
+
+    if (freshSuccessor.prepay_invoice_id) {
+      const invoice = await trx('invoices').where({ id: freshSuccessor.prepay_invoice_id }).first('status');
+      const invStatus = String(invoice?.status || '').toLowerCase();
+      if (invoice && (INVOICE_CANCELLED_STATUSES.has(invStatus) || invStatus === 'paid')) {
+        return { eligible: false, reason: `invoice_${invStatus}` };
+      }
+    }
+
+    // The ONE Stripe-attempt fence: claimed in the SAME transaction as
+    // every check above, atomically, and never re-checked afterward. A
+    // concurrent/retried tick that loses this race sees 0 rows updated and
+    // does nothing further — no bell, no second charge, no second
+    // delivery (whichever tick won already handles those).
+    const claimed = await trx('annual_prepay_terms')
+      .where({ id: successorId })
+      .whereNull('renewal_charge_attempted_at')
+      .update({ renewal_charge_attempted_at: new Date() });
+    if (!claimed) return { eligible: false, reason: 'already_attempted' };
+    return { eligible: true };
   });
 }
 
@@ -527,15 +631,19 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     logger.warn(`[termite-annual-renewal] pre-charge quote failed for term ${successor.id} — relying on the charge ceiling: ${err.message}`);
   }
 
-  // The ONE Stripe-attempt fence: stamped BEFORE the call, atomically, and
-  // never re-checked afterward. A concurrent/retried tick that loses this
-  // race sees 0 rows updated and does nothing further — no bell, no second
-  // charge, no second delivery (whichever tick won already handles those).
-  const claimed = await conn('annual_prepay_terms')
-    .where({ id: successor.id })
-    .whereNull('renewal_charge_attempted_at')
-    .update({ renewal_charge_attempted_at: new Date() });
-  if (!claimed) return { status: 'already_attempted' };
+  // P0: re-validate eligibility (parent still undecided/'renew', successor
+  // still payment_pending, its invoice still open, still inside its own
+  // grace deadline) and claim the Stripe-attempt fence ATOMICALLY, under
+  // lock — the SAME function the recovery leg (reconcileStuckSuccessors)
+  // uses, so a customer decline (or a lapse, or a stale recovery run)
+  // racing in between the mint and this exact instant can never reach
+  // Stripe from either caller.
+  const eligibility = await resolveChargeEligibility(successor.id, conn);
+  if (!eligibility.eligible) {
+    if (eligibility.reason === 'already_attempted') return { status: 'already_attempted' };
+    await ringRenewalBell(successor, 'ineligible', eligibility.reason);
+    return { status: 'ineligible', reason: eligibility.reason };
+  }
 
   const StripeService = require('./stripe');
   let chargeResult;
@@ -646,6 +754,16 @@ const RENEWAL_BELL_COPY = {
   ambiguous: (successor, reason) => ({
     title: 'Termite annual renewal — charge outcome unclear, needs reconciliation',
     body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal may or may not have gone through (${reason}). Check Stripe and the invoice before collecting any other way — the card will NOT be retried automatically.`,
+  }),
+  // Codex round-1 P0: the eligibility re-check (resolveChargeEligibility)
+  // refused to claim the fence — most commonly a customer decline landed
+  // between the mint and this attempt, but also a lapse or a stale
+  // recovery run. No pay link: a declined customer doesn't want one, and
+  // a lapsed successor's own bell (processGraceLapseForTerm) already
+  // covers that case.
+  ineligible: (successor, reason) => ({
+    title: 'Termite annual renewal — charge skipped, no longer eligible',
+    body: `The renewal charge for customer ${successor.customer_id}'s termite annual renewal (invoice for $${Number(successor.prepay_amount).toFixed(2)}) was skipped without attempting the card: ${reason}. Check the account — this usually means the renewal was declined or has lapsed since it was minted. The card was NOT charged.`,
   }),
 };
 
@@ -790,7 +908,7 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
 // draft that was never sent (some delivery evidence: not 'draft' status, or
 // a sent_at/sms_sent_at/email_sent_at stamp). Without this, a successor
 // that fell through every notification path (a crash before
-// decideAndCharge ever ran — see pass 6a) would lapse and trigger station
+// decideAndCharge ever ran — see pass 7a) would lapse and trigger station
 // retrieval against a customer who was never told anything was due.
 //
 // At-most-once by construction: a cancelled term no longer matches this
@@ -873,13 +991,51 @@ async function processGraceLapseForTerm(term, conn = db) {
   }
 }
 
-// ---- pass 6: reconcile stuck successors (P1-3) --------------------------
+// ---- pass 5b: reconcile missed lapse effects (Codex round-1 P1) --------
+
+// voidInvoice commits FIRST (cascading the successor to 'cancelled'), then
+// processGraceLapseForTerm raises the station-retrieval task and records
+// the parent's decided lapse. A crash or a failure between the void
+// committing and either follow-on effect finishing leaves the successor
+// 'cancelled' — which no longer matches processGraceLapses' own scan
+// (`status = 'payment_pending'`), so nothing else ever retries those two
+// effects. Re-runs processGraceLapseForTerm itself (never a parallel
+// implementation of its tail) for every already-cancelled termite renewal
+// successor: voidInvoice self-heals on an already-void invoice (re-entry
+// is a documented no-op past the first success), the retrieval task is
+// idempotent on its own dedupeKey, and recordDecision('cancel') is
+// idempotent on its own undecided guard — so re-running the whole function
+// for a successor whose effects already finished is always a safe no-op.
+async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
+  try {
+    const candidates = await conn('annual_prepay_terms as t')
+      .whereNotNull('t.renewed_from_term_id')
+      .whereNotNull('t.annual_plan_version')
+      .where('t.status', 'cancelled')
+      .orderBy('t.updated_at', 'desc')
+      .select('t.*')
+      .limit(limit);
+    counts.lapseEffectsScanned = candidates.length;
+    for (const term of candidates) {
+      try {
+        await processGraceLapseForTerm(term, conn);
+        counts.lapseEffectsReconciled += 1;
+      } catch (err) {
+        logger.error(`[termite-annual-renewal] reconcile (missed lapse effects) failed for successor ${term.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-renewal] reconcile (missed lapse effects) scan failed: ${err.message}`);
+  }
+}
+
+// ---- pass 7: reconcile stuck successors (P1-3) --------------------------
 
 // Two narrow, self-healing legs for the accepted crash gaps between minting
 // a successor and finishing its charge decision. Never blocks the other
 // passes; a failure on one successor never blocks the rest.
 async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
-  // 6a. renewal_charge_attempted_at IS NULL and old enough that a normal
+  // 7a. renewal_charge_attempted_at IS NULL and old enough that a normal
   // same-tick decideAndCharge() call would already have run (or already
   // hit a skip that legitimately never stamps the fence — no_consent /
   // no_method / surcharge_not_authorized, each of which already belled and
@@ -922,7 +1078,7 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
     logger.error(`[termite-annual-renewal] reconcile (never-attempted) scan failed: ${err.message}`);
   }
 
-  // 6b. renewal_charge_attempted_at IS NOT NULL, but no
+  // 7b. renewal_charge_attempted_at IS NOT NULL, but no
   // stripe_invoice_charge_attempts row exists for the successor's invoice:
   // the claimed attempt provably never reached Stripe (a crash between the
   // atomic fence stamp and the actual Stripe call). Safe to deliver the
@@ -976,6 +1132,7 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
     staleOverdueScanned: 0, staleOverdueBelled: 0,
     candidatesScanned: 0, minted: 0, charged: 0, failed: 0, skipped: 0,
     graceScanned: 0, graceLapsed: 0,
+    lapseEffectsScanned: 0, lapseEffectsReconciled: 0,
     reconcileNeverAttemptedScanned: 0, reconcileSkipped: 0,
     reconcileNeverReachedStripeScanned: 0, reconcileNeverReachedStripeBelled: 0,
   };
@@ -987,6 +1144,7 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
   await bellStaleOverdueTerms({ conn, limit, today, counts });
   await processRenewalCandidates({ conn, limit, today, counts });
   await processGraceLapses({ conn, limit, counts });
+  await reconcileMissedLapseEffects({ conn, limit, counts });
   await reconcileStuckSuccessors({ conn, limit, counts });
   return { ...counts, gate: 'on' };
 }
@@ -997,7 +1155,9 @@ module.exports = {
   _private: {
     mintRenewalSuccessor,
     decideAndCharge,
+    resolveChargeEligibility,
     processGraceLapseForTerm,
+    reconcileMissedLapseEffects,
     whereDueForRenewal,
     whereNoticeWitnessed,
     whereAnchoredOrSuccessor,

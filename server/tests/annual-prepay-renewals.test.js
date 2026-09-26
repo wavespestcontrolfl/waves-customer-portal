@@ -2214,6 +2214,41 @@ describe('annual prepay renewal helpers', () => {
     expect(seedInsert.insert).not.toHaveBeenCalled();
   });
 
+  test('Codex round-1 P1: renewalChargeConsentAt is written onto a newly-inserted successor — the parent\'s Auto Pay consent carries forward', async () => {
+    const consentAt = new Date('2025-09-01T00:00:00Z');
+    const termInsert = query({ returning: [termiteTerm({ status: 'payment_pending' })] });
+    const seedInsert = query({ returning: [{ id: 'never' }] });
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: { annual_plan_version: {}, renewed_from_term_id: {}, renewal_charge_consent_at: {}, coverage_service_type: {}, coverage_visit_count: {}, coverage_cadence: {} } }),
+        query({ first: undefined }), // existing lookup by source estimate
+        query({ first: undefined }), // existing lookup by customer + window
+        termInsert,
+        query({ first: termiteTerm({ status: 'payment_pending' }) }), // refreshTermSnapshot term read
+        query({ returning: [termiteTerm({ status: 'payment_pending' })] }),
+      ],
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        ...Array.from({ length: 6 }, () => query({ rows: [] })),
+        seedInsert,
+      ],
+    });
+
+    await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-termite',
+      prepayInvoiceId: 'succ-invoice-1',
+      termStart: '2026-09-27',
+      coverageServiceType: 'Termite Bait',
+      coverageVisitCount: 1,
+      coverageCadence: 'annual',
+      annualPlanVersion: 'v3',
+      renewedFromTermId: 'parent-1',
+      renewalChargeConsentAt: consentAt,
+    });
+
+    expect(termInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_consent_at: consentAt }));
+  });
+
   test('renewal successors and unstamped terms are never deferred — they reach the seeding path', async () => {
     const run = (t) => _private.ensureCoverageRowsForTerm(t, undefined, { today: '2026-01-01' });
     for (const term of [termiteTerm({ renewed_from_term_id: 'term-prior' }), termiteTerm({ annual_plan_version: null })]) {

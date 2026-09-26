@@ -22,7 +22,10 @@ async function createScratchDb() {
     throw new Error('This test requires a local invoice_repair_test or waves_test database');
   }
   const schema = `termite_grace_cov_${randomUUID().replace(/-/g, '')}`;
-  const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 4 } });
+  // A single persistent connection (pool min=max=1): the evening-boundary
+  // test below runs `SET TIME ZONE` and every later query in the same test
+  // must land on that SAME session, not a fresh pooled connection.
+  const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 1, max: 1 } });
   await db.raw('CREATE SCHEMA ??', [schema]);
   await db.raw(`CREATE TABLE invoices (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -65,6 +68,11 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
   beforeEach(async () => {
     fixture = await createScratchDb();
     db = fixture.db;
+    // Codex round-1 P1: force the SQL session's own timezone to UTC — the
+    // exact condition the finding names ("with UTC sessions") — so this
+    // test proves the fix regardless of what timezone the machine running
+    // it happens to default to.
+    await db.raw("SET TIME ZONE 'UTC'");
     customerId = randomUUID();
     invoiceId = randomUUID();
     await db('invoices').insert({ id: invoiceId, status: 'sent' });
@@ -142,5 +150,22 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
     const id = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z', overrides: { renewed_from_term_id: null } });
     const row = await AnnualPrepayRenewals.coveredTermsAsOf(db, '2026-10-01').where('t.id', id).first('t.id');
     expect(row).toBeUndefined();
+  });
+
+  // Codex round-1 P1: created_at::date cast in the SQL session's OWN
+  // timezone (UTC, forced above) instead of ET. 2026-10-01T01:30Z is
+  // 2026-09-30 21:30 in America/New_York (EDT, UTC-4) — a mint that landed
+  // just before midnight ET reads as the NEXT calendar day under a bare
+  // UTC cast, pushing the grace deadline a day too late.
+  test('an evening ET mint (created 2026-10-01T01:30Z = 2026-09-30 ET) anchors on the ET date, not the UTC session date', async () => {
+    const id = await insertSuccessor({ termStart: '2026-09-30', createdAt: '2026-10-01T01:30:00Z' });
+    // Correct ET-anchored deadline: 2026-09-30 + 30 days = 2026-10-30.
+    const coveredOnCorrectDeadline = await AnnualPrepayRenewals.coveredTermsAsOf(db, '2026-10-30').where('t.id', id).first('t.id');
+    expect(coveredOnCorrectDeadline).toBeDefined();
+    // The bug's deadline (a bare UTC cast reads created_at as 2026-10-01,
+    // one day later) would still read this date as covered — proving the
+    // fix actually converts to ET before casting, not just coincidence.
+    const notCoveredDayAfter = await AnnualPrepayRenewals.coveredTermsAsOf(db, '2026-10-31').where('t.id', id).first('t.id');
+    expect(notCoveredDayAfter).toBeUndefined();
   });
 });

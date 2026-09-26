@@ -31,7 +31,13 @@ const TERMITE_RENEWAL_GRACE_DAYS = 30;
 // created_at (ET date) — means the successor never gets LESS than a full
 // grace window from the moment it actually came into existence.
 function termiteRenewalGraceDeadlineSql(alias = 't') {
-  return `(GREATEST(${alias}.term_start, ${alias}.created_at::date) + INTERVAL '${TERMITE_RENEWAL_GRACE_DAYS} days')::date`;
+  // Codex round-1 P1: created_at::date cast in the SQL session's own
+  // timezone (typically UTC on Railway) — a mint after 8pm ET reads a day
+  // late there, disagreeing with the JS twin below (which explicitly
+  // converts to ET first). AT TIME ZONE 'America/New_York' matches the
+  // repo's own ET-cast convention (completion-record-invariants.js's
+  // TODAY_ET, customer-stages.js's CONVERSION_DATE_SQL, etc.).
+  return `(GREATEST(${alias}.term_start, (${alias}.created_at AT TIME ZONE 'America/New_York')::date) + INTERVAL '${TERMITE_RENEWAL_GRACE_DAYS} days')::date`;
 }
 
 // JS-side twin for a single already-fetched row (the lapse pass reads
@@ -4848,6 +4854,15 @@ async function createTermForAnnualPrepay({
   // must be present before the refreshTermSnapshot call below runs its
   // seeding decision, or a successor's coverage visits would wrongly defer.
   renewedFromTermId = undefined,
+  // Codex round-1 P1: renewal-charge consent provenance (ruling A-13). The
+  // ONLY writer of this column is the original signed agreement
+  // (termite-annual-activation.js); a renewal successor never signs a new
+  // one, so the mint (termite-annual-renewal-charge.js's
+  // mintRenewalSuccessor) carries the PARENT's own timestamp forward
+  // explicitly — the SAME consent covers every renewal under it, chained
+  // year over year (a year-2 successor's own renewalChargeConsentAt is set
+  // here too, so its OWN eventual year-3 mint carries it forward again).
+  renewalChargeConsentAt = undefined,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -4942,6 +4957,9 @@ async function createTermForAnnualPrepay({
     }
     if (termCols.renewed_from_term_id && renewedFromTermId && !existing.renewed_from_term_id) {
       updates.renewed_from_term_id = renewedFromTermId;
+    }
+    if (termCols.renewal_charge_consent_at && renewalChargeConsentAt && !existing.renewal_charge_consent_at) {
+      updates.renewal_charge_consent_at = renewalChargeConsentAt;
     }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
@@ -5105,6 +5123,9 @@ async function createTermForAnnualPrepay({
   }
   if (termCols.renewed_from_term_id && renewedFromTermId) {
     insert.renewed_from_term_id = renewedFromTermId;
+  }
+  if (termCols.renewal_charge_consent_at && renewalChargeConsentAt) {
+    insert.renewal_charge_consent_at = renewalChargeConsentAt;
   }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');

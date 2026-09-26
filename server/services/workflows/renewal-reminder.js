@@ -57,8 +57,10 @@ class RenewalReminder {
     try {
       const { runTermiteAnnualRenewalSweep } = require('../termite-annual-renewal-charge');
       const renewalCharge = await runTermiteAnnualRenewalSweep();
-      if (renewalCharge.minted || renewalCharge.charged || renewalCharge.failed || renewalCharge.graceLapsed || renewalCharge.noWitnessBelled) {
-        logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.noWitnessBelled} no-witness bells`);
+      if (renewalCharge.minted || renewalCharge.charged || renewalCharge.failed || renewalCharge.graceLapsed
+        || renewalCharge.noWitnessBelled || renewalCharge.unanchoredBelled || renewalCharge.staleOverdueBelled
+        || renewalCharge.lapseEffectsReconciled || renewalCharge.reconcileNeverReachedStripeBelled) {
+        logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.noWitnessBelled} no-witness bells, ${renewalCharge.unanchoredBelled} unanchored bells, ${renewalCharge.staleOverdueBelled} stale-overdue bells, ${renewalCharge.lapseEffectsReconciled} lapse-effects reconciled, ${renewalCharge.reconcileNeverAttemptedScanned} never-attempted scanned, ${renewalCharge.reconcileNeverReachedStripeBelled} never-reached-Stripe bells`);
       }
     } catch (err) {
       logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
