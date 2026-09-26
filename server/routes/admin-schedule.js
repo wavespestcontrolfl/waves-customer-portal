@@ -22238,14 +22238,16 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
             billingType: serviceModel = null,
             companions = [],
           } = completionProfile || {};
-          reportPromptContext = {
-            requireCanonical: true,
-            serviceKey,
-            findingsType,
-            serviceModel,
-            isCallback: svc.is_callback === true,
-            isBundled: customerFacingCompanionTypes(companions).length > 0,
-          };
+          reportPromptContext = profileResolutionFailed
+            ? { requireCanonical: false }
+            : {
+              requireCanonical: true,
+              serviceKey,
+              findingsType,
+              serviceModel,
+              isCallback: svc.is_callback === true,
+              isBundled: customerFacingCompanionTypes(companions).length > 0,
+            };
           // A transient profile-resolution failure must not silently drop
           // the typed/companion facts (empty allowlist -> prose from the
           // primary lane alone) or 409 a legitimate typed request — fail

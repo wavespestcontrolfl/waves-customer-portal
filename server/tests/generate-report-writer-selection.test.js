@@ -1,10 +1,14 @@
 const mockProfile = { serviceKey: null, findingsType: null };
+let mockProfileError = null;
 const mockProvider = jest.fn(async () => ({ ok: true, text: 'WHAT WE DID\n\nRemoved webs from the recorded exterior areas.\n\nWHAT WE FOUND\n\nThe technician recorded web activity near the entry.' }));
 jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockProvider(...args), callAnthropic: (...args) => mockProvider(...args) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: async () => null }));
 jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
-  resolveCompletionProfileForScheduledService: async () => mockProfile,
+  resolveCompletionProfileForScheduledService: async () => {
+    if (mockProfileError) throw mockProfileError;
+    return mockProfile;
+  },
 }));
 jest.mock('../services/service-report/report-copy-context', () => ({ buildReportCopyContext: async () => ({ contextText: '', signals: {} }) }));
 jest.mock('../models/db', () => {
@@ -21,7 +25,11 @@ jest.mock('../models/db', () => {
 const router = require('../routes/admin-schedule');
 const handler = router.stack.find((layer) => layer.route?.path === '/generate-report').route.stack.at(-1).handle;
 
-beforeEach(() => { mockProvider.mockClear(); mockProfile.findingsType = null; });
+beforeEach(() => {
+  mockProvider.mockClear();
+  mockProfileError = null;
+  mockProfile.findingsType = null;
+});
 test.each(['wdo_inspection', 'termite_slab_pretreat', 'unknown_service'])(
   '%s never reaches the provider through a generic display label', async (serviceKey) => {
     mockProfile.serviceKey = serviceKey;
@@ -36,6 +44,14 @@ test('the canonical initial-cleanout service reaches the existing provider with 
   mockProfile.serviceKey = 'pest_initial_cleanout';
   const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json: jest.fn() };
   await handler({ techRole: 'admin', body: { scheduledServiceId: '11111111-1111-4111-8111-111111111111', serviceType: 'Old label', actionsCompleted: ['Removed exterior webs'] } }, res);
+  expect(res.statusCode).toBe(200);
+  expect(mockProvider).toHaveBeenCalled();
+  expect(mockProvider.mock.calls[0][0].system).toContain('RECURRING PEST CONTROL SERVICE MODULE');
+});
+test('a profile outage preserves the existing notes-only label fallback', async () => {
+  mockProfileError = new Error('profile read unavailable');
+  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json: jest.fn() };
+  await handler({ techRole: 'admin', body: { scheduledServiceId: '11111111-1111-4111-8111-111111111111', serviceType: 'Stale request label', actionsCompleted: ['Removed exterior webs'] } }, res);
   expect(res.statusCode).toBe(200);
   expect(mockProvider).toHaveBeenCalled();
   expect(mockProvider.mock.calls[0][0].system).toContain('RECURRING PEST CONTROL SERVICE MODULE');
