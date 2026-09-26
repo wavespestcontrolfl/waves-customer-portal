@@ -2172,6 +2172,15 @@ const gates = {
   // separate opt-in so collection can stay observational.
   scheduleQualityAlerts: gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS'),
 
+  // Admin-only per-day drive-vs-stops scorecard (day-scorecard.js): read-only
+  // composition over the existing planned quality + saved-snapshot/recorded-
+  // work readers, plus a Bouncie mileage_log rollup for the actual side of a
+  // past day. No writes, no customer surface, no emails. Read at call time
+  // by the route (server/routes/admin-route-scorecard.js) — off answers 404
+  // {enabled:false} and the admin tab hides. Kill switch: unset
+  // GATE_ROUTE_SCORECARD.
+  routeScorecard: gateEnvValue('GATE_ROUTE_SCORECARD'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
