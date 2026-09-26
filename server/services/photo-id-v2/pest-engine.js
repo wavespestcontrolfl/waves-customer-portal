@@ -183,9 +183,20 @@ function dedupeCandidates(list) {
   for (const c of list) {
     const key = c.slug ? `slug:${c.slug}` : `off:${c.offCatalogName || ''}:${c.groupId || ''}`;
     const existing = seen.get(key);
-    if (!existing || c.confidence > existing.confidence) seen.set(key, c);
+    // A checked confidence beats an unchecked guess for the same candidate,
+    // whatever the numbers; between two of the same kind, the higher wins
+    // (Codex round-0 P1, round 15: Gemini's stale 0.90 on a failed verify
+    // must not outrank OpenAI's checked 0.20 for the same species).
+    if (!existing || (!!c.verified === !!existing.verified ? c.confidence > existing.confidence : !!c.verified)) {
+      seen.set(key, c);
+    }
   }
-  return [...seen.values()].sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+  // Checked candidates rank above unchecked guesses, then by confidence —
+  // with no checks at all (verify and escalation both missed) this is the
+  // plain confidence order.
+  return [...seen.values()]
+    .sort((a, b) => (!!b.verified - !!a.verified) || (b.confidence - a.confidence))
+    .slice(0, 3);
 }
 
 function sameCandidateKey(a, b) {
@@ -327,6 +338,15 @@ function verifyCoversAllCandidates(verifyResult, catalogCandidates) {
   return catalogCandidates.every((c) => isValidVerifyRecord(bySlug.get(c.slug)));
 }
 
+/** A trait check only counts as one when it cites at least one of the
+ * entry's real numbered traits as visible — a score with nothing seen
+ * behind it (empty or out-of-range citations) is still a guess (Codex
+ * round-0 P1, round 15). */
+function citesARealTrait(entry, traitsVisible) {
+  const count = entry?.traits?.length || 0;
+  return (traitsVisible || []).some((n) => Number.isInteger(n) && n >= 1 && n <= count);
+}
+
 function mergeVerify(candidates, verifyResult) {
   const bySlug = new Map();
   if (verifyResult?.ok && Array.isArray(verifyResult.json?.candidates)) {
@@ -343,12 +363,13 @@ function mergeVerify(candidates, verifyResult) {
     // `unansweredTrigger` caps it below pretty_sure if OpenAI doesn't
     // answer either.
     if (!v) return c;
+    const traitsVisible = v.traits_visible.filter(Number.isFinite);
     return {
       ...c,
       confidence: clamp01(v.confidence),
-      traitsVisible: v.traits_visible.filter(Number.isFinite),
+      traitsVisible,
       traitsNotVisible: v.traits_not_visible.filter(Number.isFinite),
-      verified: true,
+      verified: citesARealTrait(c.entry, traitsVisible),
     };
   });
 }
@@ -651,14 +672,18 @@ function entryLevelAnswer(candidates, top, blockPrettySure) {
   // no second candidate at all.
   const applicablePair = (second?.entry && pairIfBothApproved(top.entry, second.entry.slug)) || firstApprovedLookAlike(top.entry);
   const unconfirmablePair = applicablePair?.photo_can_confirm === false;
+  // Codex round-0 P1 (rounds 10–15): "pretty sure" is only ever earned by a
+  // confidence a real trait check produced. One gate here, instead of each
+  // merge path proving it never lets an unchecked number through.
+  const blocked = blockPrettySure || !top.verified;
   const named = (wording) => ({
     level: 'entry', wording, nodeId: top.slug, subhead: top.entry.scientific_name || null,
     headline: `${wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${top.entry.common_name}`,
     entry: top.entry,
   });
-  if (top.confidence >= PRETTY_SURE_MIN && !blockPrettySure && !unconfirmablePair) return named('pretty_sure');
+  if (top.confidence >= PRETTY_SURE_MIN && !blocked && !unconfirmablePair) return named('pretty_sure');
   if (isHarmlessOrAlly(top.entry) && top.confidence >= HARMLESS_PRETTY_SURE_MIN
-    && !consequentialAltClose(candidates, top) && !blockPrettySure && !unconfirmablePair) return named('pretty_sure');
+    && !consequentialAltClose(candidates, top) && !blocked && !unconfirmablePair) return named('pretty_sure');
   if (top.confidence >= LIKELY_MIN) return named('likely');
   return null;
 }
@@ -852,7 +877,7 @@ function stripUncontextedTraits(candidate, contextSlugs) {
   // against, and already passed `isValidEscalationCandidate`'s array-shape
   // requirement — a genuine check, `verified: true` (used by
   // combineEscalation's agreement branch, Codex round-0 P1).
-  if (contextSlugs.has(candidate.slug)) return { ...candidate, verified: true };
+  if (contextSlugs.has(candidate.slug)) return { ...candidate, verified: citesARealTrait(candidate.entry, candidate.traitsVisible) };
   return { ...candidate, traitsVisible: [], traitsNotVisible: [], verified: false };
 }
 

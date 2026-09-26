@@ -44,10 +44,12 @@ const {
 
 // ── ctx-builder helpers for buildAnswer unit tests ─────────────────────────
 
-function cand(slug, confidence, { traitsVisible = [], traitsNotVisible = [] } = {}) {
+// buildAnswer unit tests model post-verify candidates, so `verified`
+// defaults to true; pass `verified: false` for an unchecked guess.
+function cand(slug, confidence, { traitsVisible = [], traitsNotVisible = [], verified = true } = {}) {
   const entry = catalog.getEntry(slug);
   if (!entry) throw new Error(`fixture has no entry "${slug}"`);
-  return { slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible };
+  return { slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, verified };
 }
 
 function candOff(offCatalogName, groupId, confidence) {
@@ -613,6 +615,44 @@ describe('identifyPestV2 — escalation triggers', () => {
     // OpenAI is the winning (higher-confidence) side and its trait check
     // must be what the customer sees — never empty, never Gemini's.
     expect(result.v2.evidence.matches).toEqual(['Reddish-brown mound builders', 'Aggressive when disturbed']);
+  });
+
+  test('a stale unchecked secondary never outranks or out-merges a checked one — Codex round-0 P1 (round 15)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.97 }, { slug: 'ghost-ant', confidence: 0.90 }]))
+      // Gemini's verify is invalid (no trait arrays): neither number was checked.
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.97 }, { slug: 'ghost-ant', confidence: 0.90 }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [
+            { slug: 'fire-ant', confidence: 0.70, traits_visible: [1, 2], traits_not_visible: [] },
+            { slug: 'ghost-ant', confidence: 0.20, traits_visible: [], traits_not_visible: [1] },
+          ],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+    expect(result.v2.evidence.matches).toEqual(['Reddish-brown mound builders', 'Aggressive when disturbed']);
+  });
+
+  test('an unchecked Gemini top that OpenAI never re-scored can read likely at most, never pretty_sure — Codex round-0 P1 (round 15)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.70 }, { slug: 'ghost-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.70 }, { slug: 'ghost-ant', confidence: 0.95 }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'ghost-ant', confidence: 0.93, traits_visible: [], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
   });
 
   test('self-contradiction (candidates-call top != verify-call top) triggers escalation', async () => {
