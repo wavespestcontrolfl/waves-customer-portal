@@ -815,7 +815,18 @@ function isValidEscalationCandidate(raw) {
   return true;
 }
 
-function combineEscalation(geminiCandidates, escalationResult) {
+/** Trait numbers OpenAI reports for a slug it was never GIVEN a numbered
+ * list for (any catalog candidate outside `contextSlugs` — a candidate
+ * Gemini never raised, or a brand-new one OpenAI names on its own) are not
+ * a real check against anything; `evidenceFor` would otherwise cite the
+ * catalog's real trait strings at those numbers as if they had been
+ * observed. Codex round-0 P1 (round 11). */
+function stripUncontextedTraits(candidate, contextSlugs) {
+  if (!candidate.entry || contextSlugs.has(candidate.slug)) return candidate;
+  return { ...candidate, traitsVisible: [], traitsNotVisible: [] };
+}
+
+function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
   // Codex round-0 P1 (round 4): `dispatch()` does not locally validate a
   // provider's JSON against the requested schema — an `ok:true` response
   // whose `candidates` field isn't an array (or is missing) must be
@@ -828,7 +839,8 @@ function combineEscalation(geminiCandidates, escalationResult) {
     return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false, openaiStoodInAlone: false };
   }
   const openaiCandidates = dedupeCandidates(
-    sanitizedCandidatesOf(escalationResult.json).filter(isValidEscalationCandidate).map(resolveCandidate),
+    sanitizedCandidatesOf(escalationResult.json).filter(isValidEscalationCandidate).map(resolveCandidate)
+      .map((c) => stripUncontextedTraits(c, contextSlugs)),
   );
   const openaiTop = openaiCandidates[0] || null;
   const geminiTop = geminiCandidates[0] || null;
@@ -954,9 +966,10 @@ async function identifyPestV2(photos = []) {
 
   if (escalationTriggered) {
     escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1));
+    const contextSlugs = new Set(catalogCandidates1.map((c) => c.slug));
     ({
       finalCandidates, disagreed, disagreementNode, openaiAnswered, openaiStoodInAlone,
-    } = combineEscalation(finalCandidates, escalationResult));
+    } = combineEscalation(finalCandidates, escalationResult, contextSlugs));
   }
 
   const escalationJson = escalationResult?.ok && hasCandidatesArray(escalationResult.json) ? escalationResult.json : null;

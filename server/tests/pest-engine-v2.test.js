@@ -516,6 +516,24 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.v2.evidence).toEqual({ matches: [], still_need: [] });
   });
 
+  test('trait numbers OpenAI cites for a candidate it was never given a numbered list for are discarded, not published as evidence — Codex round-0 P1 (round 11)', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'gemini_500' }) // candidates fail — contextSlugs ends up empty
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          // fire-ant was never raised, so this candidate never got a
+          // numbered trait list — yet it cites trait numbers anyway.
+          candidates: [{ slug: 'fire-ant', confidence: 0.95, traits_visible: [1, 3], traits_not_visible: [2] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.evidence).toEqual({ matches: [], still_need: [] }); // discarded, not cited
+  });
+
   test('Gemini missed entirely (candidates call fails) escalates, skips the verify call, and stands in as the ONLY candidate — capped at likely even citing traits', async () => {
     // Non-empty trait numbers here don't rescue pretty_sure either: Gemini
     // never raised anything, so OpenAI had no numbered list to check
