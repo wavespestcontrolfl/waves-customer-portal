@@ -4854,6 +4854,19 @@ describe('voice relay eval — named spoken checks', () => {
     const entreBareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es entre una y tres de la tarde.' }] }));
     expect(entreBareWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: entreBareWindow })).toBe('pass');
+    // PR #4946 review: an invented minute on the SECOND endpoint of an
+    // "entre" range, and a range whose endpoint carries "y veinte", must both
+    // fail — the shared normalizer turns them into 3:30 / 3:20, which the
+    // returned 1–3 window does not cover — while a duration sentence
+    // ("entre dos y veinte minutos") beside the correct window is not a time.
+    for (const text of ['La ventana es entre una y tres y media de la tarde.', 'La ventana es entre una y tres y veinte.']) {
+      const invented = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect(invented.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+      expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
+    }
+    const windowPlusDuration = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde; la visita dura entre dos y veinte minutos.' }] }));
+    expect(windowPlusDuration.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: windowPlusDuration })).toBe('pass');
     const bareWrongWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de dos a cuatro de la tarde.' }] }));
     expect(bareWrongWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: bareWrongWindow })).toBe('fail');

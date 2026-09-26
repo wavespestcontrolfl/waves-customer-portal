@@ -81,15 +81,34 @@ function hourTokenToDigit(tok) {
   if (/^\d+$/.test(t)) return Number(t);
   return HOUR_WORD_TO_DIGIT[t];
 }
-// "y <minute>" — media (30) and cuarto (15) are unambiguous; a spelled
-// number is accepted ONLY when it parses to 13–59. A minute count of 1–12
-// is the exact shape a genuine "entre X y Y" / "de X a Y" RANGE also takes
-// ("entre dos y cuatro", "la una y tres") — since Spanish never says a
-// single-digit minute count bare like that in practice ("la una y tres"
-// meaning 1:03 is vanishingly rare next to "la una y tres" meaning a
-// caller's own picked hour beside a range), leaving 1–12 unconverted here
-// is what keeps a real range intact instead of manufacturing a fake time.
-const HOUR_Y_MINUTE_RE = new RegExp(`\\b(${HOUR_TOKEN_SRC})\\s+y\\s+(media|cuarto|(?:${NUMBER_WORD_ALT})(?:\\s+y\\s+(?:${NUMBER_WORD_ALT}))?)\\b`, 'gi');
+// "y <minute>" — the minute side is ENUMERATED, never "any number word":
+// media (30), cuarto (15), or a spelled count of 13–59, where a compound is
+// only ever tens + "y" + unit ("treinta y cinco"). Two consequences, both
+// load-bearing (PR #4946 review):
+//  - a 1–12 count — the exact shape a genuine "entre X y Y" range takes — is
+//    not a minute at all, so "entre una y tres" never matches, and a
+//    NON-match consumes nothing: "entre dos y cuatro y media" still reaches
+//    "cuatro y media" (→ 4:30) instead of the range swallowing "cuatro";
+//  - "una y tres y veinte" reads as "una y 3:20", never as "1:23" (the old
+//    "number word (y number word)?" minute side let "tres y veinte" parse as
+//    a 23-minute count).
+// A minute side followed by a unit noun is a quantity, not a clock time
+// ("entre dos y veinte minutos", "dos y quince por ciento") — left alone.
+const accentTolerant = (w) => w.replace(/e/g, '[eé]').replace(/o/g, '[oó]').replace(/i/g, '[ií]').replace(/a/g, '[aá]').replace(/u/g, '[uú]');
+const altOf = (words) => words.slice().sort((a, b) => b.length - a.length).map(accentTolerant).join('|');
+const MINUTE_SINGLE_WORDS = [
+  'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve',
+  'veinte', 'veintiuno', 'veintiun', 'veintidos', 'veintitres', 'veinticuatro',
+  'veinticinco', 'veintiseis', 'veintisiete', 'veintiocho', 'veintinueve',
+];
+const MINUTE_TENS_WORDS = ['treinta', 'cuarenta', 'cincuenta'];
+const MINUTE_UNIT_WORDS = ['uno', 'un', 'una', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+const MINUTE_SRC = `media|cuarto|(?:${altOf(MINUTE_TENS_WORDS)})(?:\\s+y\\s+(?:${altOf(MINUTE_UNIT_WORDS)}))?|${altOf(MINUTE_SINGLE_WORDS)}`;
+const QUANTITY_UNIT_AHEAD_SRC = '\\s+(?:de\\s+)?(?:minutos?|min\\b|horas?|d[ií]as?|semanas?|meses?|a[ñn]os?|veces|personas?|habitaciones?|cuartos?|ba[ñn]os?|pisos?|t[ée]cnicos?|mascotas?|perros?|gatos?|d[oó]lares?|pesos?|por\\s*ciento|%)';
+// The first lookahead stops a backtrack from settling on a bare tens word
+// when the full compound was refused ("tres y treinta y cinco minutos" must
+// not become "3:30 y cinco minutos"); the second is the quantity guard.
+const HOUR_Y_MINUTE_RE = new RegExp(`\\b(${HOUR_TOKEN_SRC})\\s+y\\s+(${MINUTE_SRC})\\b(?!\\s+y\\s+(?:${altOf(MINUTE_UNIT_WORDS)})\\b)(?!${QUANTITY_UNIT_AHEAD_SRC})`, 'gi');
 const HOUR_MENOS_CUARTO_RE = new RegExp(`\\b(${HOUR_TOKEN_SRC})\\s+menos\\s+cuarto\\b`, 'gi');
 const HOUR_EN_PUNTO_RE = new RegExp(`\\b(${HOUR_TOKEN_SRC})\\s+en\\s+punto\\b`, 'gi');
 const pad2 = (n) => String(n).padStart(2, '0');

@@ -63,6 +63,14 @@ describe('normalizeSpanishSpokenText — hour + minute phrases -> digital time',
     ['la una menos cuarto', 'la 12:45'],
     ['el técnico llega a las tres en punto', 'el técnico llega a las 3:00'],
     ['de la una a las tres y treinta y cinco de la tarde', 'de la una a las 3:35 de la tarde'],
+    ['llega a las tres y veintitrés', 'llega a las 3:23'],
+    // The minute side is enumerated (13–59, media, cuarto), so a 1–12 range
+    // connector never matches and never CONSUMES the second endpoint: the
+    // minute modifier on "cuatro" is still found (PR #4946 review).
+    ['la ventana es entre dos y cuatro y media de la tarde', 'la ventana es entre dos y 4:30 de la tarde'],
+    // ...and "tres y veinte" is a 3:20 endpoint, never a 23-minute count
+    // hung off "una" ("1:23").
+    ['la ventana es entre una y tres y veinte', 'la ventana es entre una y 3:20'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });
@@ -96,6 +104,12 @@ describe('normalizeSpanishSpokenText — spoken phone digit strings', () => {
 
 describe('normalizeSpanishSpokenText — article/quantity uses are never converted (Codex round-2/3 collisions)', () => {
   test.each([
+    // "hour y minute"-shaped spans followed by a unit noun are durations or
+    // amounts, not clock times — including a compound whose full form was
+    // refused, which must not backtrack onto its bare tens word.
+    'La visita dura entre dos y veinte minutos.',
+    'Tarda entre tres y treinta y cinco minutos.',
+    'Sube dos y quince por ciento.',
     'Necesito una visita más.',
     '¿Hay entre dos y cuatro habitaciones afectadas?',
     'Necesitamos entre dos y cuatro técnicos.',
