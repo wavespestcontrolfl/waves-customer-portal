@@ -1,5 +1,6 @@
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
 const { buildLawnReportV2, buildAftercare } = require('../services/service-report/lawn-report-v2');
+const { _test: { groundingFacts, mergeNarrative } } = require('../services/service-report/lawn-report-narrative');
 
 function assessment(overrides = {}) {
   return {
@@ -75,6 +76,9 @@ describe('lawn insight evidence boundaries', () => {
     }
     expect(cards[1]).toMatchObject({ status: 'watch' });
     expect(cards[1].whatWeSaw).toMatch(/coverage is below the healthy range/i);
+    const overlaid = mergeNarrative({ insights: cards }, { insights: cards.map(() => ({ wavesAction: 'We inspected and treated the affected area.' })) });
+    expect(overlaid.insights.map((card) => card.wavesAction)).toEqual(['', '']);
+    expect(groundingFacts({ insights: cards }, {}).insights[0]).toMatchObject({ wavesAction: '', provenance: { actionSource: null } });
   });
 
   test('water cards separate historical estimates, photo signals, and approved plans', () => {

@@ -26,12 +26,9 @@ const SURPLUS_CUSTOMER_ACTION = {
 };
 
 const DAMP_CUSTOMER_ACTION = {
+  ...SURPLUS_CUSTOMER_ACTION,
   'with_plan:not_required': 'Let the damp areas dry out between waterings and follow this week’s watering plan below rather than adding cycles.',
   'with_plan:recorded': 'Today’s application requires water-in; use the recorded product directions first, then follow this week’s watering plan below.',
-  'with_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report; confirm that instruction before following the weekly plan.',
-  'without_plan:not_required': 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
-  'without_plan:recorded': 'Today’s application requires water-in; use the recorded product directions. No upcoming watering plan is recorded on this report.',
-  'without_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report.',
 };
 
 const COVERAGE_PRESENTATION = {

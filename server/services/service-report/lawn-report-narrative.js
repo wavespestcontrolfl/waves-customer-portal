@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v7'; // v7: ground drought rewrites in the report's low/high water states.
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v8'; // v8: preserve recorded action evidence through the overlay.
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -37,8 +37,7 @@ function stableStringify(value) {
   return JSON.stringify(value ?? null);
 }
 
-// Only the FACTS that should drive copy — not the deterministic prose itself, so the
-// model writes fresh rather than paraphrasing our fallback sentences.
+// Facts and evidence-bound actions drive copy; an empty action must stay empty.
 function groundingFacts(v2, ctx) {
   return {
     overallScore: v2.snapshot?.overallScore ?? null,
@@ -49,7 +48,7 @@ function groundingFacts(v2, ctx) {
     mowing: v2.mowing && v2.mowing.measuredHeightInches != null ? { status: v2.mowing.status, measured: v2.mowing.measuredHeightInches, idealMin: v2.mowing.idealMinInches, idealMax: v2.mowing.idealMaxInches } : null,
     treatment: v2.treatment ? { focus: v2.treatment.focus, products: (v2.treatment.products || []).map((p) => ({ name: p.name, activeIngredient: p.activeIngredient, kind: p.kind, whatItDoes: p.whatItDoes, targets: p.targets })) } : null,
     trendDirection: trendDirection(v2.trends?.overall),
-    insights: (v2.insights || []).map((i) => ({ category: i.category, status: i.status, priority: i.priority })),
+    insights: (v2.insights || []).map((i) => ({ category: i.category, status: i.status, priority: i.priority, wavesAction: i.wavesAction, customerAction: i.customerAction, nextVisitPlan: i.nextVisitPlan, provenance: i.provenance })),
     observations: String(ctx.observations || '').slice(0, 600),
     customerConcern: String(ctx.customerConcern || '').slice(0, 300),
   };
@@ -87,6 +86,7 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 7. Use active-ingredient names or plain descriptions for products — never hype. Lead with the product's plain-language role and never make a bare chemical name the subject of an instruction to the homeowner ("water in the clothianidin" → "water in today's treatment").
 8. Plain text only. No markdown, no emojis, no headers inside values.
 9. A product's "targets" list is what it is designed to control — NOT what was observed. Never say a pest or disease was found/observed unless the observations say so; frame targeted products as seasonal protection otherwise.
+10. Insight actions must preserve their supplied provenance. An empty wavesAction stays empty; never turn a condition or customer concern into completed work.
 
 ## OUTPUT
 - statusHeadline: <=8 words, the one-line state for the hero.
@@ -234,7 +234,7 @@ function mergeNarrative(v2, out) {
         headline: safeText(m.headline, ins.headline),
         whatWeSaw: safeText(m.whatWeSaw, ins.whatWeSaw),
         whyItMatters: safeText(m.whyItMatters, ins.whyItMatters),
-        wavesAction: safeText(m.wavesAction, ins.wavesAction),
+        wavesAction: ins.wavesAction && ins.provenance?.actionSource ? safeText(m.wavesAction, ins.wavesAction) : ins.wavesAction,
         customerAction: ins.customerAction ? safeText(m.customerAction, ins.customerAction) : ins.customerAction,
         nextVisitPlan: ins.nextVisitPlan ? safeText(m.nextVisitPlan, ins.nextVisitPlan) : ins.nextVisitPlan,
       };
