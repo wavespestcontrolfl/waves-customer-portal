@@ -521,22 +521,32 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect((await addonsAlert(f)).body).toMatch(/no price yet/);
     });
 
-    test('add-ons that changed after the bill was made leave it to the office on the retry — not collected as it stands, never re-minted', async () => {
-      const f = await coveredVisit({ secondAddon: true });
-      await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
-      await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON });
-      const idempotencyKey = randomUUID();
-      const held = await withFailure(failAlerts((key) => key === `annual_prepay_addons_unbilled:${f.serviceId}`), () => complete(f, {}, { idempotencyKey }));
-      expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_alert_failed' } });
-      const [bill] = await liveInvoices(f);
-      // The office prices the second add-on before the retry.
-      await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: ADDON2, estimated_price: ADDON2 });
-      await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON + ADDON2 });
-      const retry = await complete(f, {}, { idempotencyKey });
-      expect(retry).toMatchObject({ status: 200 });
-      expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
-      expect(retry.body?.invoicePaymentActionRequired).not.toBe(true);
-      expect((await addonsAlert(f)).body).toMatch(/changed since bill/);
+    test('a bill or add-ons changed after the bill was made leave it to the office on the retry — not collected as it stands, never re-minted', async () => {
+      const edits = {
+        // The office prices the second add-on before the retry.
+        'add-on priced': async (f) => {
+          await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: ADDON2, estimated_price: ADDON2 });
+          await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON + ADDON2 });
+        },
+        // The office adds the covered base to the bill before the retry.
+        'covered base added to the bill': async (f, bill) => trx('invoices').where({ id: bill.id }).update({
+          line_items: JSON.stringify([...linesOf(bill), baseLine(f)]), subtotal: ADDON + BASE, total: ADDON + BASE }),
+      };
+      for (const [name, edit] of Object.entries(edits)) {
+        const f = await coveredVisit({ secondAddon: true });
+        await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
+        await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON });
+        const idempotencyKey = randomUUID();
+        const held = await withFailure(failAlerts((key) => key === `annual_prepay_addons_unbilled:${f.serviceId}`), () => complete(f, {}, { idempotencyKey }));
+        expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_alert_failed' } });
+        const [bill] = await liveInvoices(f);
+        await edit(f, bill);
+        const retry = await complete(f, {}, { idempotencyKey });
+        expect(retry).toMatchObject({ status: 200 });
+        expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
+        expect({ name, collected: retry.body?.invoicePaymentActionRequired === true }).toEqual({ name, collected: false });
+        expect((await addonsAlert(f)).body).toMatch(/changed since bill/);
+      }
     });
 
     test('a bill minted but not recorded on the record is never billed twice — the retry leaves it to the office', async () => {

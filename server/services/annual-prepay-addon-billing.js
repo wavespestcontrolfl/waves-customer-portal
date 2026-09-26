@@ -270,13 +270,16 @@ class CoveredVisitCloseout {
   // This closeout's own add-ons bill, found again on a retry. The add-ons
   // are read again as for a first bill (an earlier pass's alert may not have
   // landed, so it is raised again). The bill is collected only while it
-  // still charges exactly the add-ons as they stand; changed since (an
-  // add-on priced, repriced or removed), the office adjusts it.
+  // still bills nothing but this visit's add-ons (plus deposit credit) and
+  // charges exactly the add-ons as they stand; changed since (an add-on
+  // priced, repriced or removed, or another line added), the office
+  // adjusts it.
   async resumeOwnBill(own) {
     const read = await this.billableExtras();
     if (this.lookupError) return;
     const lines = require('./invoice')._parseInvoiceLineItems(own.line_items);
-    if (addonCharges(lines, this.svc.id) === addonCharges(read ? read.extras.lines : [], this.svc.id)) {
+    if (read && classifyCoveredVisitInvoice(own, read.addons).billsOnlyAddons
+      && addonCharges(lines, this.svc.id) === addonCharges(read.extras.lines, this.svc.id)) {
       await this.takeBill(own);
       return;
     }
