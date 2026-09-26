@@ -154,14 +154,22 @@ describe('unchanged state — the offer goes through', () => {
 });
 
 describe('a change DURING the slot probe (Codex #4918 r5)', () => {
-  test("the lead's email changes during the probe → no context, nothing minted", async () => {
+  test("the lead's email changes during the probe → the link is dropped, judged on fresh state at the send", async () => {
     mockBuilders.leads = leadsBuilder({
       rows: [leadRow({ email: 'original@example.com' }), leadRow({ email: 'changed-mid-probe@example.com' })],
     });
-    const { context, url } = await offerFor();
-    expect(context).toBeNull();
+    const { url } = await offerFor();
     expect(url).toBe('');
-    expect(mockShortWrap).not.toHaveBeenCalled();
+  });
+
+  test('the estimate email AND the lead email are both corrected during the probe → the offer survives (no pre-probe recipient snapshot)', async () => {
+    mockBuilders.leads = leadsBuilder({
+      rows: [leadRow({ email: 'orignal@example.com' }), leadRow({ email: 'original@example.com' })],
+    });
+    mockBuilders.estimates = estimatesBuilder([estimateRow({ customer_email: 'orignal@example.com' }), estimateRow()]);
+    // The engine's own post-probe read carries the corrected recipient.
+    const { url } = await offerFor('original@example.com');
+    expect(url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/l\//);
   });
 
   test("the lead's email changes during the probe TO the recipient → eligible (fresh state governs, not a frozen refusal)", async () => {

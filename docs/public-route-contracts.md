@@ -1422,8 +1422,11 @@ owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)
 is the "Want us to come look first?" section's link to the SAME
 `/inspection/:token` self-booking page the recurring-lead new_lead email
-offers (`lead-consultation-email-block.js`) — this covers the estimate page
-only, never the email. Present only when: both gates are live; the estimate
+offers (`lead-consultation-email-block.js`). This entry covers the page
+field only; the gone-quiet follow-up email's own link
+(`estimate-email-consultation-offer.js`) reuses the same eligibility and is
+not part of this route's payload.
+Present only when: both gates are live; the estimate
 is in an open, customer-actionable state (never accepted/declined/expired/
 send_failed/unpublished/past-expiry, and never a staff draft or verified
 staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
@@ -1448,9 +1451,10 @@ is time-boxed at 3 s (`PROBE_BUDGET_MS` — a slower probe is abandoned, left
 to finish in the background, and nothing it resolves is used), and at most
 3 probes run at once per server process (`MAX_PROBES_IN_FLIGHT`, abandoned
 ones counted until their work settles — past the cap no probe starts).
-After the probe the estimate and the lead are re-read and every rule above
-is re-judged on the fresh rows (`finalEligibility`), so a status change,
-hold, re-link or contact edit that lands during the probe omits the field.
+After the probe the estimate and the lead are re-read and every row-level
+rule above is re-judged on the fresh rows (`finalEligibility`), so a status
+change, hold, re-link or contact edit that lands during the probe omits the
+field.
 Quote-first only: never on an estimate drafted from a visit
 (`estimate_data.scheduled_service_id`) or on a grouped estimate
 (`estimate_group_id`). Composed on the page's own first `/data` load only —

@@ -545,9 +545,9 @@ async function processDueBatch(now = new Date()) {
       // The offer's slot probe can take up to 3 s, so it runs FIRST — before
       // the fresh re-read below (Codex #4918 r7–r12): every check and every
       // payload field this job uses is then read after the probe, exactly as
-      // before the offer existed. Only its probe-free re-judge runs later,
-      // as the last step before the send. Shadow jobs never send, so they
-      // never probe.
+      // before the offer existed. Only its probe-free finalize runs later,
+      // after the claim, followed by one last re-read of the estimate before
+      // the send. Shadow jobs never send, so they never probe.
       const consultationContext = live && isGoneQuiet
         ? await probeGoneQuietConsultation(job.estimate_id)
         : null;

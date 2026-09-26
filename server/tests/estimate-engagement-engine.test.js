@@ -476,7 +476,7 @@ describe('processDueJobs', () => {
     const step = (name, value) => async () => { reads.push({ step: name }); return value; };
     const order = () => reads.map((r) => r.step || r.table);
 
-    test('the probe runs FIRST — before the estimate re-read and every check that reads it — and the link is finalized LAST, against the post-probe recipient (Codex #4918 r7–r12)', async () => {
+    test('the probe runs FIRST — before the estimate re-read and every check that reads it; finalize runs after the claim against the post-probe recipient, then one last re-read, then the send (Codex #4918 r7–r13)', async () => {
       probeGoneQuietConsultation.mockImplementation(step('probe', CONTEXT));
       followupShared.claimFollowupSend.mockImplementation(step('claim', true));
       finalizeGoneQuietConsultationUrl.mockImplementation(step('finalize', OFFER_URL));

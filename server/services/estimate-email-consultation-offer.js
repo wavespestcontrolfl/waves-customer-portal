@@ -18,13 +18,14 @@
  *   - probeGoneQuietConsultation(estimateId) — the slow step, called BEFORE
  *     the engine re-reads the estimate. Returns the context the second step
  *     needs (the eligible lead and the property its probe resolved), or null
- *     for no offer. Mints nothing.
+ *     for no offer. Mints nothing and judges no recipient.
  *   - finalizeGoneQuietConsultationUrl(context, recipientEmail) — after the
  *     engine's claim, right before its send (only the engine's own final
  *     re-read of the estimate follows): mints the short link, then re-runs
  *     the probe-free shared eligibility (reconfirmConsultationLead) and the
- *     lead's-own-inbox rule against the recipient this email is about to go
- *     to. Returns the short URL, or '' to drop the link.
+ *     lead's-own-inbox rule (the bearer goes ONLY to the lead's own inbox,
+ *     as in the new_lead consultation email) against the recipient this
+ *     email is about to go to. Returns the short URL, or '' to drop the link.
  *
  * '' is what the estimate.engage_gone_quiet template's `consultation_url`
  * CTA block treats as "render nothing" — so a dark gate or an ineligible
@@ -71,13 +72,9 @@ async function probeGoneQuietConsultation(estimateId) {
       acceptActive: isEstimateAcceptActive(estimate),
       context,
     });
-    if (!lead) return null;
-    // The bearer link goes ONLY to the lead's own inbox (same rule the
-    // new_lead consultation email enforces). Checked here so a recipient
-    // that can never qualify costs no mint later; the second step checks
-    // again against the recipient of the actual send.
-    if (!recipientIsLead(estimate.customer_email, lead)) return null;
-    return context;
+    // The lead's-own-inbox rule is judged once, in the second step, against
+    // the recipient of the actual send — never against this pre-probe row.
+    return lead ? context : null;
   } catch (err) {
     logger.warn(`[estimate-email-consultation-offer] probe failed for estimate ${estimateId}: ${err.message}`);
     return null;

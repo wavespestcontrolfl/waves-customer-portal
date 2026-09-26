@@ -163,8 +163,8 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
   // gone-quiet follow-up) — both consultation surfaces share this helper
   // and never re-derive eligibility themselves. The page mints right after
   // this. The email runs this before the engine's own send checks, records
-  // `context`, and re-runs finalEligibility as its last step before the
-  // send (reconfirmConsultationLead).
+  // `context`, and re-runs finalEligibility after the engine's claim
+  // (reconfirmConsultationLead).
   const fresh = await finalEligibility(estimate.id, leadId, result.address);
   if (fresh && context) Object.assign(context, { estimateId: estimate.id, leadId, probedAddress: result.address });
   return fresh;

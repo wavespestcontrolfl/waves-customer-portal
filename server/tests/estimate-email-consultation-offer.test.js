@@ -5,8 +5,8 @@
  *
  *   - probeGoneQuietConsultation(estimateId): the slow step (shared
  *     eligibility + slot probe), BEFORE the engine re-reads the estimate.
- *     A context for an eligible lead whose own email is the estimate's
- *     recipient, else null. Never mints.
+ *     A context for an eligible lead, else null. Never mints, and never
+ *     judges a recipient from its pre-probe row.
  *   - finalizeGoneQuietConsultationUrl(context, recipientEmail): the last
  *     await before the send — mint, then the probe-free re-judge and the
  *     lead's-own-inbox rule against the send's recipient. The short URL,
@@ -98,7 +98,7 @@ beforeEach(() => {
 });
 
 describe('probeGoneQuietConsultation — the slow step, before the engine re-reads the estimate', () => {
-  test('eligible lead whose own inbox is the estimate recipient → the context the helper recorded; nothing minted', async () => {
+  test('eligible lead → the context the helper recorded; nothing minted, no recipient judged', async () => {
     const context = await probeGoneQuietConsultation('est-1');
 
     expect(context).toEqual(CONTEXT);
@@ -110,7 +110,7 @@ describe('probeGoneQuietConsultation — the slow step, before the engine re-rea
       context: expect.any(Object),
     });
     expect(mockIsEstimateAcceptActive).toHaveBeenCalledWith(mockEstimateRow);
-    expect(mockRecipientIsLead).toHaveBeenCalledWith('taylor@example.com', LEAD);
+    expect(mockRecipientIsLead).not.toHaveBeenCalled();
     expect(mockConsultationUrlForLead).not.toHaveBeenCalled();
     expect(mockShortWrap).not.toHaveBeenCalled();
   });
@@ -144,11 +144,11 @@ describe('probeGoneQuietConsultation — the slow step, before the engine re-rea
     expect(mockRecipientIsLead).not.toHaveBeenCalled();
   });
 
-  test('the estimate\'s recipient is not the lead\'s own inbox → null (a recipient that can never qualify costs no mint later)', async () => {
+  test('the recipient is never judged from the pre-probe row — the second step judges the actual send\'s recipient on fresh state', async () => {
     mockEstimateRow = estimateRow({ customer_email: 'someone-else@example.com' });
     mockRecipientIsLead.mockReturnValue(false);
-    expect(await probeGoneQuietConsultation('est-1')).toBeNull();
-    expect(mockRecipientIsLead).toHaveBeenCalledWith('someone-else@example.com', LEAD);
+    expect(await probeGoneQuietConsultation('est-1')).toEqual(CONTEXT);
+    expect(mockRecipientIsLead).not.toHaveBeenCalled();
   });
 
   test('any throw (estimate read, shared helper) fails closed → null, logged', async () => {
