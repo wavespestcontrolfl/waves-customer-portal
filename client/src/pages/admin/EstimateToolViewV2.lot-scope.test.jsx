@@ -100,8 +100,31 @@ describe('estimate dimension boxes govern pricing', () => {
     expect(profile.homeSqFt).toBe(2400);
   });
 
+  it('a cleared Stories box prices the 1-story default as a default, never as staff-entered', async () => {
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    selectService('Pest Control');
+    await lookUp();
+    change('Stories', '');
+    const profile = await generate();
+    expect(profile.stories).toBe(1);
+    expect(profile.storiesSource).toBe('default');
+  });
+
+  it('turf derived from the lookup lot stops pricing once the Lot box no longer holds that lot', async () => {
+    enriched = { ...HOUSE, estimatedTurfSf: 6000, turfSource: 'county_prior', countyTurfPriorSf: 6000 };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    selectService('Pest Control');
+    await lookUp();
+    // Unchanged lot: the county-prior turf still prices.
+    expect((await generate()).estimatedTurfSf).toBe(6000);
+    change('Lot Sq Ft', '12000');
+    const corrected = await generate();
+    expect(corrected.lotSqFt).toBe(12000);
+    for (const key of ['estimatedTurfSf', 'turfSource', 'countyTurfPriorSf']) expect(corrected[key]).toBeUndefined();
+  });
+
   it('a cleared Home Sq Ft box clears the footprint too — the lookup\'s own footprint never prices pest', async () => {
-    enriched = { ...HOUSE, footprint: 1200 };
+    enriched = { ...HOUSE, footprint: 1200, squareFootage: 2400 };
     render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
     selectService('Pest Control');
     await lookUp();
@@ -109,6 +132,8 @@ describe('estimate dimension boxes govern pricing', () => {
     const profile = await generate();
     expect(profile.homeSqFt).toBe(0);
     expect(profile.footprint).toBe(0);
+    // A legacy alias the translator would fall back to is gone too.
+    expect(profile.squareFootage).toBeUndefined();
     expect(profile.lotSqFt).toBe(9000);
   });
 

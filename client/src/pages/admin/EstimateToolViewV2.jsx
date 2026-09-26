@@ -378,6 +378,22 @@ function buildTurfRequestProfile(baseProfile, form) {
     bedAreaSource: form._manualFields?.includes("bedArea") && parseNonNegativeNumber(form.bedArea) !== undefined
       ? "manual" : baseProfile.bedAreaSource,
   };
+  // The translator reads `homeSqFt || squareFootage`: a legacy profile's
+  // alias must not re-price a cleared Home Sq Ft box (codex r1 P1 #4871).
+  delete profile.squareFootage;
+  // Turf DERIVED from the lookup's lot — the county-prior seed, or a vision
+  // read clamped to that parcel — is only as good as that lot. Once the Lot
+  // box no longer holds it (cleared or corrected), it must not price
+  // (codex r1 P1 #4871); a measured turf entry is separate and unaffected.
+  if (
+    profile.lotSqFt !== (Number(baseProfile.lotSqFt) || 0) &&
+    (profile.turfSource === "county_prior" || profile.turfCappedToParcel === true)
+  ) {
+    delete profile.estimatedTurfSf;
+    delete profile.turfSource;
+    delete profile.turfCappedToParcel;
+    delete profile.countyTurfPriorSf;
+  }
   // footprintUnknown (association aggregate, story count unknown): the
   // summed living area over a defaulted story count is NOT a ground-floor
   // footprint — deriving one here would hand pricing the exact fake slab
@@ -408,9 +424,14 @@ function buildTurfRequestProfile(baseProfile, form) {
     !form._poolCageSizeEdited &&
     profile.poolCage === "YES" &&
     profile.poolCageSize === "MEDIUM";
-  profile.storiesSource = form._storiesEdited
-    ? "manual"
-    : baseProfile.storiesSource;
+  // A blank Stories box prices the 1-story DEFAULT — stamped as such, never
+  // as a staff-entered value, so the engine keeps its stories review
+  // (codex r1 P1 #4871).
+  profile.storiesSource = !Number.isFinite(parseInt(form.stories, 10))
+    ? "default"
+    : form._storiesEdited
+      ? "manual"
+      : baseProfile.storiesSource;
   profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
   profile.treeDensity = form.treeDensity || profile.treeDensity;
   profile.landscapeComplexity =
@@ -4192,9 +4213,13 @@ export default function EstimateToolViewV2({
     // on the stale-imagery path the profile's lookup-time
     // turfFallbackPreviewSf covers the gap until it answers. The heuristic
     // is only the fail-open fallback for a preview miss.
+    // The stored stale-imagery preview was computed from the lookup's lot —
+    // shown only while the Lot box still holds that lot (codex r1 P1 #4871).
     const enginePreview = parseNonNegativeInteger(
       enginePreviewSf ??
-        (turfUnobservable ? enrichedProfile?.turfFallbackPreviewSf : null),
+        (turfUnobservable && lotSqFtForTurf > 0 && lotSqFtForTurf === (Number(enrichedProfile?.lotSqFt) || 0)
+          ? enrichedProfile?.turfFallbackPreviewSf
+          : null),
     );
     // Zero included: an engine 0 (footprint + hardscape consume the lot) is
     // the authoritative answer, not a miss — falling through to the local
