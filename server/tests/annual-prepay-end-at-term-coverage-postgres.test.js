@@ -140,12 +140,31 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     expect((await coverage(t)).length).toBeGreaterThan(0);
   });
 
-  test('a lapse with no kept visit and no end_at_term case is not reseeded', async () => {
+  test('a renewal-time lapse (no cancellation case) still replaces its last visit', async () => {
     const t = await seededTerm();
     await decideCancel(t);
     for (const visit of await coverage(t)) await skip(visit);
     await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
-    expect(await coverage(t)).toHaveLength(0);
+    expect((await coverage(t)).length).toBeGreaterThan(0);
+  });
+
+  test('a cancellation being committed for the customer holds the reseed off until it finishes', async () => {
+    const t = await seededTerm();
+    await decideCancel(t);
+    const kept = await upcoming(t);
+    await skip(kept[kept.length - 1]);
+    // Cancel plan's commit holds this session-level key for its whole run.
+    const other = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 1, max: 1 } });
+    try {
+      await other.raw('SELECT pg_advisory_lock(hashtext(?), hashtext(?::text))', ['admin-cancel-plan', t.customerId]);
+      await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+      expect(await upcoming(t)).toHaveLength(kept.length - 1);
+      await other.raw('SELECT pg_advisory_unlock(hashtext(?), hashtext(?::text))', ['admin-cancel-plan', t.customerId]);
+    } finally {
+      await other.destroy();
+    }
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+    expect(await upcoming(t)).toHaveLength(kept.length);
   });
 
   test('a disputed end-at-term lapse does not get its stamps or a replacement back', async () => {

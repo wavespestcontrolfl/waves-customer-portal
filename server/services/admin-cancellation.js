@@ -615,6 +615,19 @@ function resolvePrepay(input, term, wholeAccount) {
 // processor and the case write, released in the caller's finally. Busy or
 // unacquirable = refuse, never proceed unlocked (money path fails closed).
 const CANCEL_LOCK_NS = 'admin-cancel-plan';
+// The same key, transaction-scoped, for a writer that must not interleave
+// with a cancel commit (the annual-prepay decided-lapse reseed). Advisory
+// session and transaction locks share one key space: while a commit runs this
+// returns false, and while it is held the commit's try-lock refuses as
+// "in progress" until the holder's transaction ends.
+async function tryHoldCancelCommitLockForTransaction(trx, customerId) {
+  const res = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+    [CANCEL_LOCK_NS, String(customerId)],
+  );
+  return res?.rows?.[0]?.locked === true;
+}
+
 async function acquireCancelCommitLock(customerId) {
   let conn = null;
   let locked = false;
@@ -2304,6 +2317,9 @@ module.exports = {
   // a term's renewal decision serializes on this lock so a renew can never
   // land between the cancel's destructive wind-down and its term decision.
   acquireCancelCommitLock,
+  // The same key, transaction-scoped: the annual-prepay decided-lapse reseed
+  // serializes with a cancel commit through it.
+  tryHoldCancelCommitLockForTransaction,
   // Portal replay guard (requests.js dedupe + inactive retry): never re-run
   // a portal cancellation without the boundary an admin end-of-coverage
   // decision holds.

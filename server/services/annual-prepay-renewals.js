@@ -2791,36 +2791,25 @@ function isDecidedLapseInWindow(term, today = etDateString()) {
     && dateOnly(term.term_end) >= today;
 }
 
-// Cancel plan records that same decided-lapse shape for two opposite
-// dispositions (admin-cancellation.js decideTermCancel): end_at_term keeps
-// every covered visit through term_end, end_now_refund pulls them all first
-// and owes the unused value back. The disposition is durable on the
-// cancellation case (snapshot.prepayTermId / prepayDisposition — the record
-// the cancel flow's own idempotency latch reads), so:
-// - an end_now_refund case for this term never reseeds or stamps: the office
-//   removed those visits on purpose and a refund is owed;
-// - otherwise a still-open linked visit (the calendar was kept — also a
-//   renewal-time lapse, which has no case) or a recorded end_at_term case
-//   keeps the guarantees. The case covers the boundary where the last kept
-//   visit was just skipped and no open linked visit is left.
-// All of it only while the read side still reports the term as paid
-// coverage today (coveredTermsAsOf): a dispute clears a decided lapse's
-// stamps and suspends it through that paid-invoice gate, and a refresh must
-// not hand the stamps back while the money is contested or refunded.
+// Cancel plan records that same decided-lapse shape for "end now + refund",
+// which pulls every visit first and owes the unused value back, so it must
+// never be reseeded or stamped. Its disposition is durable on the
+// cancellation case (snapshot.prepayTermId / prepayDisposition, the record the
+// cancel flow's own idempotency latch reads). Every other decided lapse — "end
+// of paid coverage", or a renewal-time lapse, which has no case — keeps its
+// guarantees, but only while the read side still reports it as paid coverage
+// today (coveredTermsAsOf): a dispute clears a decided lapse's stamps and
+// suspends it through that paid-invoice gate, and a refresh must not hand the
+// stamps back while the money is contested or refunded.
 async function decidedLapseKeepsCoverage(term, conn = db) {
   const stillPaid = await coveredTermsAsOf(conn, etDateString()).where('t.id', term.id).first('t.id');
   if (!stillPaid) return false;
-  const dispositions = (await conn('cancellation_cases')
+  const endedNow = await conn('cancellation_cases')
     .where({ customer_id: term.customer_id })
     .whereRaw("snapshot->>'prepayTermId' = ?", [String(term.id)])
-    .select(conn.raw("snapshot->>'prepayDisposition' AS disposition")))
-    .map((row) => row.disposition);
-  if (dispositions.includes('end_now_refund')) return false;
-  const kept = await conn('scheduled_services')
-    .where({ annual_prepay_term_id: term.id })
-    .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
+    .whereRaw("snapshot->>'prepayDisposition' = 'end_now_refund'")
     .first('id');
-  return !!kept || dispositions.includes('end_at_term');
+  return !endedNow;
 }
 
 async function refreshTermSnapshot(termOrId, conn = db) {
@@ -2850,10 +2839,8 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (term.status !== PAYMENT_PENDING_STATUS) {
     await detachCallbacksFromTerm(term, conn);
   }
-  const seedsCoverage = ACTIVE_STATUSES.includes(term.status)
-    || (isDecidedLapseInWindow(term) && await decidedLapseKeepsCoverage(term, conn));
-  if (seedsCoverage) {
-    const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
+  const seedCoverage = async (c) => {
+    const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, c);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
     // Attach + prepaid stamping run even on a palm-identity DEFERRAL
     // (codex r18 pre-push P0, superseding the earlier hard-stop): the
@@ -2864,14 +2851,28 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     // quarantined by the deferral's durable coverage exception until the
     // next refresh restores the catalog identity and re-runs this
     // sequence idempotently.
-    await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
-    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+    await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, c);
+    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, c);
     // Callers sync customers.waveguard_renewal_date from the PRE-slide end
     // (or their own normalizedEnd), so renewal workflows would fire while
     // coverage is still running — re-sync from the slid end here.
     if (windowEnd !== termEnd) {
-      await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
+      await syncCustomerRenewalDate(term.customer_id, windowEnd, c);
     }
+  };
+  if (ACTIVE_STATUSES.includes(term.status)) {
+    await seedCoverage(conn);
+  } else if (isDecidedLapseInWindow(term)) {
+    // Evaluated and reseeded under Cancel plan's commit key, held until this
+    // transaction ends: a cancellation switching the term to end_now_refund
+    // mid-refresh would otherwise sweep the visits before these inserts land.
+    // A commit in progress holds the key — skip; the next refresh sees its case.
+    const reseed = async (t) => {
+      const { tryHoldCancelCommitLockForTransaction } = require('./admin-cancellation');
+      if (!(await tryHoldCancelCommitLockForTransaction(t, term.customer_id))) return;
+      if (await decidedLapseKeepsCoverage(term, t)) await seedCoverage(t);
+    };
+    await (conn.isTransaction ? reseed(conn) : conn.transaction(reseed));
   }
   const coveredRows = coverageServiceType && coverageVisitCount
     ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn)

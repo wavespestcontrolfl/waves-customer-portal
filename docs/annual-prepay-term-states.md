@@ -78,14 +78,16 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   The WRITE side matches (ADMIN-BUG-R18): `refreshActiveTermsForCustomer` /
   `refreshTermSnapshot` keep gap-fill reseeding and prepaid stamping for a
   decided lapse through `term_end` (`isDecidedLapseInWindow`), so a visit
-  skipped after an "end of paid coverage" cancel is still replaced and a
-  hand-added replacement is still stamped. Cancel plan records the same shape
-  for "end now + refund", which pulls every visit first; the disposition on
-  the cancellation case (`snapshot.prepayDisposition`) tells them apart, and
-  an `end_now_refund` term is never reseeded or stamped
-  (`decidedLapseKeepsCoverage`). Both only while `coveredTermsAsOf` still
-  reports the term as paid coverage today, so a dispute's cleared stamps are
-  not handed back by a refresh.
+  skipped after an "end of paid coverage" cancel or a renewal-time lapse is
+  still replaced and a hand-added replacement is still stamped. Cancel plan
+  records the same shape for "end now + refund", which pulls every visit
+  first; the disposition on its cancellation case
+  (`snapshot.prepayDisposition = 'end_now_refund'`) keeps that term from ever
+  being reseeded or stamped (`decidedLapseKeepsCoverage`). Only while
+  `coveredTermsAsOf` still reports the term as paid coverage today (a
+  dispute's cleared stamps are not handed back), and under Cancel plan's
+  commit key (`tryHoldCancelCommitLockForTransaction`) so a cancellation
+  being committed is never interleaved with.
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
   card-expiry exemptions, `getPaymentPendingCustomerIds`.
 
