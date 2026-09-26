@@ -604,6 +604,17 @@ describe('normalizeIntakeResult', () => {
     expect(out.reply).toContain('1-800-222-1222');
   });
 
+  test('a Poison Control number in the reply keeps the emergency script', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'The product is not safe to swallow. Call 1-800-222-1222 immediately.', intent: 'question', service_keys: [], ready_for_quote: true },
+      'openai',
+      'Some bait got into her mouth. What should we do?',
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+    expect(out.intent).toBe('emergency');
+  });
+
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
     const out = normalizeIntakeResult(
       { reply: 'The product is not safe to ingest; call Poison Control now. Treatment costs $50.', intent: 'question', service_keys: ['pest'], ready_for_quote: true },
@@ -1244,6 +1255,7 @@ describe('looksLikeEmergency', () => {
     'mi hijo se tragó un cebo',
     'The bait was swallowed by my child',
     'Some granules were ingested by my dog',
+    'Some bait got into her mouth',
   ])('flags urgent/medical text: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(true);
   });
