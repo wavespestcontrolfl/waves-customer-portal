@@ -8,12 +8,17 @@ function clean(value) {
   return String(value || '').trim();
 }
 
-// Only rows stored under the replay contract are re-authorized here; a
-// billing row with no stored context (an unregistered producer, or one sent
-// before the contract) keeps the ordinary provider retry.
 function isBillingEmailProviderReplay(message) {
-  return BILLING_REPLAY_TEMPLATES.has(clean(message?.template_key))
-    && EmailTemplateLibrary.hasStoredBillingReplayContext(message);
+  if (!BILLING_REPLAY_TEMPLATES.has(clean(message?.template_key))) return false;
+  let payload = message.payload_snapshot;
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch { return true; }
+  }
+  // The templates are also used by legacy rows and producers that do not
+  // own this replay contract (for example monthly payment receipts).
+  // A present but invalid contract stays fail-closed in the handoff check.
+  return !!payload && typeof payload === 'object'
+    && Object.prototype.hasOwnProperty.call(payload, '__billing_replay_context');
 }
 
 const { readStoredBillingReplayContext } = EmailTemplateLibrary;
@@ -76,6 +81,5 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
 
 module.exports = {
   isBillingEmailProviderReplay,
-  readStoredBillingReplayContext,
   runBillingEmailProviderReplayHandoff,
 };

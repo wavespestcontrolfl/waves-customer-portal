@@ -105,11 +105,8 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
       if (accepted) {
         if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
       } else if (await resolveBillingEmailReservationRefusal(message, database)) {
-        // Reflect the repair in the rows this pass already loaded, so the
-        // current progress read treats the leg as resolved and never reuses
-        // its reservation for another send.
-        candidate.metadata = { ...metadataOf(candidate), send_failed: true, resolved: true,
-          resolution: 'email_terminal_refusal' };
+        candidate.metadata = { ...metadataOf(candidate), send_failed: true,
+          resolved: true, resolution: 'email_terminal_refusal' };
       }
     }
     return repaired;

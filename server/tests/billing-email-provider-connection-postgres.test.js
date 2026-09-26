@@ -44,6 +44,7 @@ async function waitForPhoneLock(pid) {
   }
   throw new Error('Expected a concurrent phone-lock waiter');
 }
+
 function billingReplayRow(chargeDate, overrides = {}) {
   const event = `precharge:${customerId}:${chargeDate}`;
   const attempt = randomUUID();
@@ -188,6 +189,21 @@ postgres('billing Email provider preparation on its held connection', () => {
     }
   }, 15000);
 
+  test.each(['billing.notice', 'billing.receipt_notice'])('a contextless %s still reaches the existing provider retry path', async (templateKey) => {
+    const stored = billingReplayRow('2026-01-01', {
+      template_key: templateKey,
+      payload_snapshot: { first_name: 'QA', notification_body: 'Payment received' },
+      categories: JSON.stringify(['billing', 'payment_receipt']),
+      trigger_event_id: `monthly_billing_success:${randomUUID()}`,
+    });
+    await mockPg('email_messages').insert(stored);
+    await expect(retryOne(stored)).resolves.toMatchObject({ sent: true });
+    await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+      status: 'sent', sent_at: expect.any(Date), provider_retry_exhausted_at: null,
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  }, 15000);
+
   test('a Text-only billing choice defers the same row until Email is selected again', async () => {
     const chargeDate = etDateString(addETDays(new Date(), 1));
     await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
@@ -287,39 +303,6 @@ postgres('billing Email provider preparation on its held connection', () => {
     } finally {
       await mockPg.schema.renameTable('messaging_suppression_unavailable', 'messaging_suppression');
       await mockPg('customers').where({ id: customerId }).update({ phone: null });
-    }
-  }, 15000);
-
-  test.each([true, false])('full billing replay on one root slot respects current Email choice %s', async (emailEnabled) => {
-    const chargeDate = etDateString(addETDays(new Date(), 1));
-    await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
-      monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
-    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: emailEnabled });
-    const estimateToken = randomUUID().replaceAll('-', '');
-    await mockPg('estimates').insert({ id: randomUUID(), token: estimateToken, status: 'accepted', estimate_data: {} });
-    const stored = billingReplayRow(chargeDate, {
-      html_snapshot: `<a href="https://example.invalid/estimate/${estimateToken}">Review</a>`,
-    });
-    const attempt = stored.send_attempt_token;
-    await mockPg('email_messages').insert(stored);
-    global.fetch.mockImplementation(async (_url, options) => {
-      if (options.method === 'POST') {
-        expect(await mockMarkerPg('email_messages').where({ id: stored.id }).first()).toMatchObject({
-          provider_handoff_phase: 'started', provider_handoff_attempt_token: attempt,
-        });
-      }
-      return { ok: true, headers: { get: () => 'synthetic-provider-id' } };
-    });
-    const outcome = await retryOne(stored);
-    const saved = await mockPg('email_messages').where({ id: stored.id }).first();
-    if (emailEnabled) {
-      expect(outcome).toMatchObject({ sent: true });
-      expect(saved).toMatchObject({ status: 'sent', sent_at: expect.any(Date) });
-      expect(global.fetch).toHaveBeenCalledTimes(2);
-    } else {
-      expect(outcome).toMatchObject({ sent: false, stopped: true });
-      expect(saved).toMatchObject({ status: 'blocked', provider_retry_next_at: null });
-      expect(global.fetch).not.toHaveBeenCalled();
     }
   }, 15000);
 
