@@ -133,9 +133,10 @@ test('a snapshot with an empty-string, non-UUID, or otherwise malformed technici
   expect(selectPlanningSnapshots([runFor('not-a-uuid')], from)).toEqual([]);
   expect(selectPlanningSnapshots([runFor(42)], from)).toEqual([]);
   expect(selectPlanningSnapshots([runFor(undefined)], from)).toEqual([]);
-  // A genuinely null technician_id is accepted (no production writer emits
-  // one today, but the validator treats it as a real value, not malformed).
-  expect(selectPlanningSnapshots([runFor(null)], from)).toHaveLength(1);
+  // No writer snapshots an unassigned route, so null is malformed too (it
+  // would otherwise collide with the null-technician route key and crash
+  // the same-date sort).
+  expect(selectPlanningSnapshots([runFor(null)], from)).toEqual([]);
 });
 
 // Codex P2 (round 8): planned stops sharing a visitId are one physical

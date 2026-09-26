@@ -128,8 +128,12 @@ function outranks(rank, previous) {
 // as the real Unassigned route's own saved plan. Its own function (not an
 // inline condition) so it doesn't add another branch to the already-large
 // selectPlanningSnapshots.
+// Snapshots are written per assigned technician route, so a technician_id
+// that is not a UUID (null, '' or garbage) is malformed: reject it rather
+// than let it collide with the unassigned (null-technician) route key or
+// reach the sort's localeCompare.
 function validSnapshotTechnicianId(technicianId) {
-  return technicianId === null || isUuid(technicianId);
+  return isUuid(technicianId);
 }
 
 /** Choose the latest snapshot captured BEFORE the service day. The applied
