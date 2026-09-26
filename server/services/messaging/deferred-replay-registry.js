@@ -1578,20 +1578,28 @@ async function stampPartialFanoutDelivery(meta, channelResults) {
 // deferred one queues ONE new row, capped at 5 attempts.
 async function requeuePartialFanoutIfPending(meta, channelResults, { toPhone, body, smsLogId, customerId } = {}) {
   const InvoiceService = require('../invoice');
-  const { pendingChannel } = InvoiceService.pendingBillingLeg(channelResults);
+  const { pendingChannel, uncertainChannels, retryableLegs } = InvoiceService.pendingBillingLeg(channelResults);
   if (!pendingChannel) return { ok: true };
-  const [channel, leg] = pendingChannel;
-  if (leg?.deliveryOutcome === 'uncertain') {
-    logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${channel} leg outcome uncertain — not requeued (no double-send)`);
+  // Codex round-4 P1 pre-push audit: an uncertain leg used to win outright
+  // (pendingBillingLeg's old single-winner shape) and block requeuing a
+  // DIFFERENT, genuinely retryable sibling — every uncertain leg is now
+  // logged by name (it is never retried; queuePendingChannelReplay excludes
+  // it from the replay via replaySkipChannels) and every retryable/deferred
+  // leg is queued regardless of what else is pending.
+  for (const uncertainChannel of uncertainChannels) {
+    logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${uncertainChannel} leg outcome uncertain — not requeued (no double-send)`);
+  }
+  if (!retryableLegs.length) {
+    if (!uncertainChannels.length) {
+      const [channel, leg] = pendingChannel;
+      logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${channel} leg permanently blocked (${leg?.code}) — surfaced only, not requeued`);
+    }
     return { ok: true };
   }
-  if (!(leg?.retryable === true || leg?.deferred === true)) {
-    logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${channel} leg permanently blocked (${leg?.code}) — surfaced only, not requeued`);
-    return { ok: true };
-  }
+  const [, representativeRetryableLeg] = retryableLegs[0];
   const attempt = (Number(meta.partial_fanout_attempt) || 1) + 1;
   if (attempt >= 5) {
-    logger.error(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id} exhausted retries (5 attempts) — ${channel} leg still pending, needs operator review`);
+    logger.error(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id} exhausted retries (5 attempts) — ${retryableLegs.map(([ch]) => ch).join(', ')} leg(s) still pending, needs operator review`);
     return { ok: true };
   }
   try {
@@ -1602,8 +1610,8 @@ async function requeuePartialFanoutIfPending(meta, channelResults, { toPhone, bo
     // it as if a fresh retry already existed and skip queuing a genuine one.
     const queueOutcome = await InvoiceService.queuePendingChannelReplay({
       invoiceId: meta.invoice_id, customerId, toPhone, body,
-      scheduledFor: InvoiceService.scheduledForPendingLeg(leg),
-      originalBlockCode: leg.code, channelResults,
+      scheduledFor: InvoiceService.scheduledForPendingLeg(representativeRetryableLeg),
+      originalBlockCode: representativeRetryableLeg.code, channelResults,
       previousSkipChannels: meta.replaySkipChannels, attempt, excludeSmsLogId: smsLogId || null,
     });
     return queueOutcome?.queued ? { ok: true } : { ok: false };

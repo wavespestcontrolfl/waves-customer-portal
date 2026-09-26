@@ -73,6 +73,21 @@ describe('billing-channel-routing selectedLegs / replaySkipChannels (Codex #4963
     expect(result.deferred).not.toBe(true);
   });
 
+  test('Email absent only because hasEmailLeg owns it, Push already delivered -> CHANNEL_EMAIL_ONLY, never ALREADY_DELIVERED', async () => {
+    // Codex round-4 P1 pre-push audit: selected ['email','push'], hasEmailLeg
+    // excludes Email (the caller's OWN email sender is sending it, not a
+    // dead leg), replaySkipChannels excludes Push (already delivered). The
+    // resulting empty `channels` must not be misread as "everything already
+    // delivered" — Email hasn't delivered here at all, it's just not this
+    // call's job. CHANNEL_EMAIL_ONLY must still win.
+    const sendLeg = jest.fn(async ({ channel }) => accepted(channel));
+    const input = baseInput({ hasEmailLeg: true, metadata: { ...baseInput().metadata, replaySkipChannels: ['push'] } });
+    const result = await dispatchBillingChannels(input, { invoice_channels: ['email', 'push'] }, sendLeg);
+    expect(sendLeg).not.toHaveBeenCalled();
+    expect(result.code).toBe('CHANNEL_EMAIL_ONLY');
+    expect(result.code).not.toBe('BILLING_CHANNELS_ALREADY_DELIVERED');
+  });
+
   test('an ordinary empty selection (no skip involved) still reports NO_BILLING_CHANNEL_SELECTED', async () => {
     const sendLeg = jest.fn(async ({ channel }) => accepted(channel));
     const result = await dispatchBillingChannels(baseInput(), { invoice_channels: [] }, sendLeg);

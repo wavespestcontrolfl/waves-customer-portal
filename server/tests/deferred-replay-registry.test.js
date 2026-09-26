@@ -10,6 +10,11 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  // queuePendingChannelReplay's own advisory-lock wrap (Codex round-4 P1
+  // pre-push audit) calls db.transaction when it gets no override — the
+  // mock just re-enters with the same handle, matching invoice-sms-
+  // provider-handoff.test.js's own db mock shape.
+  mockDb.transaction = jest.fn(async (callback) => callback(mockDb));
   return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
