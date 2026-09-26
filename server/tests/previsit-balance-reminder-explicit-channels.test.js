@@ -186,7 +186,7 @@ test("explicit selection ['email'] ⇒ only the email leg is attempted, keyed to
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
     channel: 'email',
-    to: undefined,
+    to: null,
     entryPoint: 'previsit_balance_reminder',
     body: 'previsit balance sms body',
     metadata: expect.objectContaining({
@@ -500,4 +500,14 @@ test('a multi-channel selection quotes only invoices every permitted channel hol
   expect(sendReminderChannels).not.toHaveBeenCalled();
   expect(result).toMatchObject({ sent: 0 });
   collectionsChannelVerdict.mockImplementation(async () => ({ permitted: true, eligibleInvoiceIds: null }));
+});
+
+test('an App leg is addressed by customer, never the loaded phone', async () => {
+  armOneVisit({ notificationPrefs: { billing_channels: ['push'] } });
+  sendReminderChannels.mockImplementation(async ({ send }) => {
+    await send('push', { id: 'led-p' });
+    return { complete: true, deliveredNow: ['push'], results: {} };
+  });
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ channel: 'push', to: null, customerId: 'cust-1' });
 });

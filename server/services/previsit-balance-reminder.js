@@ -238,7 +238,9 @@ async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDi
     };
   }
   return sendCustomerMessage({
-    to: channel === 'email' ? undefined : visit.phone,
+    // Only the Text leg is addressed by phone; App and Email identify the
+    // recipient by customerId (a stale phone would read as a changed choice).
+    to: channel === 'sms' ? visit.phone : null,
     body,
     channel,
     audience: 'customer',
