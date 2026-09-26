@@ -1360,6 +1360,13 @@ const TwilioService = {
           metadata: JSON.stringify({
             pre_handoff_stamp: true,
             ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
+            // Which explicit billing-channel leg this accepted send IS
+            // (billing-channel-routing.js's sendBillingLeg) — scopes a later
+            // replay's notificationEventKey dedupe lookup
+            // (messaging/billing-text-leg-dedupe.js) to an explicit billing
+            // Text leg, never a legacy send or another producer's own reuse
+            // of the same-shaped key.
+            ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
             ...(options.humanAuthored === true ? { human_authored: true } : {}),
             ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
             ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
