@@ -5,6 +5,7 @@ const { randomUUID } = require('node:crypto');
 const sms = require('../models/migrations/20260926120000_customer_copy_audit_sms');
 const email = require('../models/migrations/20260926120100_customer_copy_audit_email');
 const automations = require('../models/migrations/20260926120200_customer_copy_audit_automations');
+const r1 = require('../models/migrations/20260926120300_customer_copy_audit_codex_r1');
 const baseline = require('./fixtures/customer-copy-audit-email-baseline.json');
 
 const connection = process.env.COPY_AUDIT_TEST_DATABASE_URL;
@@ -142,5 +143,38 @@ postgres('customer copy audit migrations on PostgreSQL', () => {
     expect((await trx('automation_steps').where({ template_key: 'estimate_sent' }).first()).html_body).toBe('<p>Administrator copy</p>');
     expect((await trx('automation_templates').where({ key: smsSwap.key }).first()).sms_template).toBe(smsSwap.after);
     expect(await trx('audit_log')).toHaveLength(2);
+  }));
+
+  test('codex r1: service_renewal becomes a renewal ask after 120200, edits are kept', async () => inRollback(async (trx) => {
+    const { before, after } = r1.RENEWAL;
+    const original = before.preview_text[0];
+    await trx('automation_templates').insert({ key: 'service_renewal', name: 'Service Renewal Reminder', sms_template: r1.RENEWAL.sms.before[0] });
+    const [step] = await trx('automation_steps').insert({
+      template_key: 'service_renewal', step_order: 0, delay_hours: 0,
+      subject: before.subject, preview_text: original, html_body: before.html_body, text_body: before.text_body,
+    }).returning('*');
+    await automations.up(trx);
+    expect((await trx('automation_steps').where({ id: step.id }).first()).preview_text).toBe(before.preview_text[1]);
+    await r1.up(trx);
+    expect(await trx('automation_steps').where({ id: step.id }).first()).toMatchObject(after);
+    expect((await trx('automation_templates').where({ key: 'service_renewal' }).first()).sms_template).toBe(r1.RENEWAL.sms.after);
+    // An administrator-edited body keeps every field, preview included.
+    await trx('automation_steps').where({ id: step.id }).update({ ...before, preview_text: original, html_body: '<p>Administrator copy</p>' });
+    await r1.up(trx);
+    expect(await trx('automation_steps').where({ id: step.id }).first()).toMatchObject({ preview_text: original, html_body: '<p>Administrator copy</p>' });
+  }));
+
+  test('codex r1: micro-deposit email republishes over 120100 and rolls back to it', async () => inRollback(async (trx) => {
+    const fixture = baseline.find((t) => t.template_key === 'payment.microdeposit_verification');
+    const { template } = await seedEmail(trx, fixture);
+    expect(await email._publishPatched(trx, fixture.template_key)).toBe('published');
+    const v120100 = (await trx('email_templates').where({ id: template.id }).first()).active_version_id;
+    expect(await r1._publishPatched(trx, fixture.template_key)).toBe('published');
+    const live = await trx('email_templates').where({ id: template.id }).first();
+    const current = await trx('email_template_versions').where({ id: live.active_version_id }).first();
+    expect(JSON.stringify(current.blocks)).toContain('one or two small test deposits');
+    expect(await trx('email_template_versions').where({ template_id: template.id, status: 'active' })).toHaveLength(1);
+    await r1.down(trx);
+    expect((await trx('email_templates').where({ id: template.id }).first()).active_version_id).toBe(v120100);
   }));
 });

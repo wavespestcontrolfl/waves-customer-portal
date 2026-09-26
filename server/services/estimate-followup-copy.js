@@ -37,10 +37,12 @@ const RECURRING_TERMS_BENEFIT =
 const NEUTRAL_BENEFIT =
   'Licensed and insured, satisfaction guaranteed — and a real person answers when you reply.';
 // Termite carries no guarantee of any kind (owner ruling, waves-content
-// SKILL: re-treatment requires the paid bond), so it gets the neutral line
-// without "satisfaction guaranteed".
-const TERMITE_BENEFIT =
+// SKILL: re-treatment requires the paid bond), so any estimate with a
+// termite lane, and any estimate whose lanes are unknown, gets the neutral
+// line without "satisfaction guaranteed".
+const NO_GUARANTEE_BENEFIT =
   'FDACS-licensed and insured, with the work documented when it’s done — and a real person answers when you reply.';
+const TERMITE_LANES = new Set(['termite', 'commercial_termite_bait']);
 
 // FAQ answers (owner-authored voice, 2026-07-21 "a few things folks
 // usually ask"). Truth scope mirrors `benefit`: the no-contract and
@@ -191,7 +193,7 @@ const PACKS = {
     smsHook: 'termite protection quote',
     headline: 'Your termite protection quote is ready',
     hook: 'Measured from your home — not a ballpark — and documented when the work is done.',
-    benefit: TERMITE_BENEFIT,
+    benefit: NO_GUARANTEE_BENEFIT,
     question: 'Wondering what’s covered or how long protection lasts? Reply and ask — a real person answers.',
     included: 'Protection measured from your home’s actual footprint — quoted from real measurements, not a ballpark, and documented when the work is done.',
     process: 'Approve online and we schedule the work — you get documentation of exactly what was done when it’s completed.',
@@ -238,13 +240,14 @@ const PACKS = {
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
   },
   // Property-generic claims only, so nothing service-specific can be wrong
-  // (same rule as glassEstimateCopyFor's unknown fallback).
+  // (same rule as glassEstimateCopyFor's unknown fallback). An unknown
+  // estimate may be termite, so it makes no guarantee either.
   unknown: {
     label: 'service',
     smsHook: 'plan',
     headline: 'Your Waves plan is ready',
     hook: 'Your price was built from your actual property — not somebody else’s.',
-    benefit: NEUTRAL_BENEFIT,
+    benefit: NO_GUARANTEE_BENEFIT,
     question: 'Wondering what’s included, or about pricing and scheduling? Reply and ask — a real person answers.',
     included: 'A plan priced from your actual property — with every visit documented so you always know what was done.',
     process: 'Approve online, we schedule your first visit, and you get a report after every visit.',
@@ -277,20 +280,23 @@ function estimateIsOneTimeOnly(estimate) {
   return monthly <= 0 && annual <= 0 && onetime > 0;
 }
 
-function copyCategoryForEstimate(estimate) {
-  let lines = [];
+// Classifiable lane keys, or null when inference fails. Copy is decoration,
+// never a blocker — an unclassifiable estimate just gets the
+// property-generic pack.
+function laneKeysFor(estimate) {
   try {
-    lines = inferEstimateServiceLines(estimate || {});
+    const lines = inferEstimateServiceLines(estimate || {});
+    return [...new Set(
+      (lines || []).map((l) => l?.key).filter((k) => k && k !== 'unknown'),
+    )];
   } catch (e) {
-    // Copy is decoration, never a blocker — an unclassifiable estimate
-    // just gets the property-generic pack.
     logger.warn(`[estimate-followup-copy] service-line inference failed: ${e.message}`);
-    return 'unknown';
+    return null;
   }
-  const keys = [...new Set(
-    (lines || []).map((l) => l?.key).filter((k) => k && k !== 'unknown'),
-  )];
-  if (!keys.length) return 'unknown';
+}
+
+function copyCategoryForEstimate(estimate, keys = laneKeysFor(estimate)) {
+  if (!keys || !keys.length) return 'unknown';
   if (keys.some((k) => k.startsWith('commercial_'))) return 'commercial';
   // One-time-only wins over every service-keyed pack: a one-time pest or
   // lawn quote must never inherit the recurring-terms benefit, FAQ answers,
@@ -310,12 +316,18 @@ function packForEstimate(estimate) {
  * them never render with holes.
  */
 function followupEmailVars(estimate) {
-  const pack = packForEstimate(estimate);
+  const keys = laneKeysFor(estimate);
+  const pack = PACKS[copyCategoryForEstimate(estimate, keys)];
+  // A termite lane drops the guarantee under ANY pack: one-time trenching /
+  // pre-slab / Bora-Care quotes fold to `one_time`, termite + pest to
+  // `bundle`, bait monitoring to `commercial`, and all three carry
+  // "satisfaction guaranteed".
+  const hasTermite = (keys || []).some((k) => TERMITE_LANES.has(k));
   return {
     service_label: pack.label,
     category_headline: pack.headline,
     category_hook: pack.hook,
-    category_benefit: pack.benefit,
+    category_benefit: hasTermite ? NO_GUARANTEE_BENEFIT : pack.benefit,
     category_question: pack.question,
     category_included: pack.included,
     category_process: pack.process,
@@ -343,5 +355,5 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT },
 };
