@@ -246,12 +246,12 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
       source: 'annual_prepay_payment_reminder',
     }));
     expect(global.__ledgerStore[0].metadata).toEqual(expect.objectContaining({ send_failed: true }));
-    // No suitable email template exists yet — never delivered, and the term
-    // is NOT stamped sent, so tomorrow's scan retries it.
-    expect(result).toEqual({ sent: false, termId: 'term-1', complete: false });
+    // No email template exists for this reminder: the leg settles as a
+    // terminal template_unavailable refusal (never delivered, never looped).
+    expect(result).toEqual({ sent: false, termId: 'term-1', complete: true });
   });
 
-  test("(c) ['sms','email'] — two ledger rows share one event key; sms delivers, email leg stays pending", async () => {
+  test("(c) ['sms','email'] — two ledger rows share one event key; sms delivers, template-less email leg settles", async () => {
     setDbQueues(standardQueues({ prefs: { billing_channels: ['email', 'sms'] } }));
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 
@@ -269,7 +269,7 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     expect(byChannel.email.metadata.delivered).not.toBe(true);
     // sms delivered ⇒ a customer-visible touch happened ⇒ sent:true, but the
     // episode is not complete (email leg still open) ⇒ not stamped, retried.
-    expect(result).toEqual({ sent: true, termId: 'term-1', complete: false });
+    expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
   });
 
   test('(d) replay hold on sms leg — not delivered, retried next run under the SAME event key, then delivers', async () => {
@@ -315,7 +315,7 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     const byChannel = Object.fromEntries(global.__ledgerStore.map((r) => [r.channel, r]));
     expect(byChannel.sms.metadata.delivered).toBe(true);
     expect(byChannel.email.metadata.delivered).not.toBe(true);
-    expect(result).toEqual({ sent: true, termId: 'term-1', complete: false });
+    expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
   });
 
   test('collections policy denial on every selected channel reverses the credit and releases the claim (no ledger write)', async () => {
@@ -327,9 +327,37 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
 
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
-    expect(result).toEqual({ sent: false, reason: 'collections_policy_denied' });
+    expect(result).toEqual({ sent: false, termId: 'term-1', complete: false });
     expect(global.__ledgerStore).toHaveLength(0);
     expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable channel choice sends nothing, reverses the credit and releases the claim', async () => {
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    const releaseQ = query();
+    const failingPrefs = query();
+    failingPrefs.first = jest.fn(async () => { throw new Error('connection reset'); });
+    setDbQueues({ ...standardQueues({ extraTermRows: [releaseQ] }), notification_prefs: [failingPrefs] });
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(result).toEqual({ sent: false, reason: 'notification_prefs_unavailable' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(global.__ledgerStore).toHaveLength(0);
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
+    expect(releaseQ.update).toHaveBeenCalled();
+  });
+
+  test('the draft invoice amount rides offLedgerBalanceCents into every leg policy check', async () => {
+    const railGuard = require('../services/collections/rail-guard');
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['sms', 'email'] } }));
+
+    await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(railGuard.collectionsChannelPermitted).toHaveBeenCalledTimes(2);
+    for (const [args] of railGuard.collectionsChannelPermitted.mock.calls) {
+      expect(args).toMatchObject({ invoiceId: null, offLedgerBalanceCents: 39204 });
+    }
   });
 });

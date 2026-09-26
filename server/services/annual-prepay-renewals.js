@@ -5424,31 +5424,9 @@ async function sendExplicitPaymentReminderChannels({
   // Same off-ledger carve-out as the legacy sms-only path (codex r7): this
   // reminder's invoice is persisted 'draft' by the plan selector, which the
   // collections eligibility loader never admits — invoiceId stays null and
-  // the validated plan amount rides offLedgerBalanceCents instead. Checked
-  // per channel (rail-guard: do_not_text/do_not_email are independent), and
-  // BEFORE the shared rail's own (channel-generic, invoiceId:null) check —
-  // that inner check never sees this amount and is a no-op while
-  // GATE_COLLECTIONS_POLICY is off, so this outer check is what actually
-  // enforces the balance-aware policy today.
-  const { collectionsChannelPermitted } = require('./collections/rail-guard');
-  const allowedChannels = [];
-  for (const channel of explicitChannels) {
-    const permitted = await collectionsChannelPermitted({
-      customerId: customer.id,
-      invoiceId: null,
-      channel,
-      purpose: 'balance_reminder',
-      offLedgerBalanceCents: Math.round(amountDue * 100),
-      logTag: 'annual-prepay',
-    });
-    if (permitted) allowedChannels.push(channel);
-  }
-  if (!allowedChannels.length) {
-    await reverseReminderCredit();
-    await releaseClaim();
-    return { sent: false, reason: 'collections_policy_denied' };
-  }
-
+  // the validated plan amount rides offLedgerBalanceCents into the shared
+  // rail's per-leg policy check (which also excludes this episode's own
+  // earlier reservations from recent-contact spacing).
   const { sendReminderChannels, reminderProgress } = require('./billing-reminder-delivery');
   const source = 'annual_prepay_payment_reminder';
   const eventKey = paymentReminderEventKey(claimedTerm.id, daysOut);
@@ -5458,7 +5436,7 @@ async function sendExplicitPaymentReminderChannels({
   // across a multi-day replay: once ANY leg reached the customer quoting the
   // post-credit balance, this run's freshly-applied credit must stand even
   // if a SIBLING leg (e.g. email) is still pending.
-  const priorProgress = await reminderProgress(customer.id, source, allowedChannels);
+  const priorProgress = await reminderProgress(customer.id, source, explicitChannels);
   const priorEvent = priorProgress.find((event) => event.metadata.notificationEventKey === eventKey);
   const hadPriorDelivery = !!(priorEvent && priorEvent.delivered.size > 0);
   const result = await sendReminderChannels({
@@ -5467,7 +5445,8 @@ async function sendExplicitPaymentReminderChannels({
     source,
     purpose: 'balance_reminder',
     eventKey,
-    channels: allowedChannels,
+    channels: explicitChannels,
+    offLedgerBalanceCents: Math.round(amountDue * 100),
     metadata: {
       original_message_type: source,
       annual_prepay_term_id: claimedTerm.id,
@@ -5475,16 +5454,14 @@ async function sendExplicitPaymentReminderChannels({
     },
     send: (channel, ledger) => {
       if (channel === 'email') {
-        // No purpose-built email template exists for this specific reminder
-        // (billing.previsit_balance is documented as never sent "for
-        // one-time invoice debt" — which an annual prepay invoice is — and
-        // its past-due framing doesn't match this pre-visit, not-yet-due
-        // notice; no other email template covers "annual prepay invoice
-        // still open ahead of first visit"). Leaving this uninvented (per
-        // instructions) means the leg stays pending/retried, never
-        // fabricated customer-facing copy.
-        logger.warn(`[annual-prepay] payment reminder email leg has no suitable template yet for term ${claimedTerm.id} — leg left pending`);
-        return Promise.resolve({ ok: false, skipped: true, reason: 'no_email_template_mapping' });
+        // No email template exists for this reminder (billing.previsit_balance
+        // is documented as never sent for one-time invoice debt, which an
+        // annual prepay invoice is). Settle the leg as a terminal
+        // template_unavailable refusal rather than inventing customer-facing
+        // copy or retrying a leg that can never send; the invoice email
+        // already carries the pay link.
+        logger.warn(`[annual-prepay] payment reminder has no email template; Email leg resolved for term ${claimedTerm.id}`);
+        return Promise.resolve({ ok: false, skipped: true, reason: 'template_unavailable' });
       }
       return sendCustomerMessage({
         to: customer.phone,
@@ -5670,9 +5647,9 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
 
     // Explicit per-customer billing-channel selection (router core, PR
     // #4843 — dark until GATE_BILLING_NOTIFICATION_CHANNELS; explicitChannels
-    // is null while dark or unset, since the write path refuses to persist
-    // these arrays until then). A lookup failure degrades to the SAME null
-    // (byte-identical legacy path below) rather than blocking the reminder.
+    // is null while no array is stored). An unreadable choice must not fall
+    // through to the legacy SMS path (that would ignore a stored selection):
+    // undo this attempt and let the next scan retry.
     let explicitChannels = null;
     try {
       const { explicitBillingChannels } = require('./billing-delivery-channels');
@@ -5680,7 +5657,9 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       explicitChannels = explicitBillingChannels(prefs || {}, 'billing');
     } catch (err) {
       logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${customer.id}: ${err.message}`);
-      explicitChannels = null;
+      await reverseReminderCredit();
+      await releaseClaim();
+      return { sent: false, reason: 'notification_prefs_unavailable' };
     }
     if (explicitChannels) {
       return await sendExplicitPaymentReminderChannels({

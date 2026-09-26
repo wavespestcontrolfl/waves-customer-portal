@@ -83,6 +83,9 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
+    // No stored billing channel choice unless a test queues one: the
+    // legacy SMS path these tests pin runs only when the lookup is empty.
+    if (table === 'notification_prefs' && !tableQueues.has(table)) return query();
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
