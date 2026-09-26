@@ -152,18 +152,26 @@ describe('rankRelatedPosts — ranking', () => {
 });
 
 describe('candidateFromRow', () => {
-  test('prefers astro_live_url as the canonical path when present', () => {
+  test('prefers astro_live_url as the canonical path when present, and marks it pathVerified', () => {
     const row = { id: '1', title: 'T', keyword: 'k', tag: 'Termites', category: 'termite', slug: 'leaf', city: 'Sarasota', target_sites: null, status: 'published', astro_status: 'live', astro_live_url: '/termite/leaf/' };
     const c = candidateFromRow(row);
     expect(c.path).toBe('/termite/leaf/');
     expect(c.workflowStatus).toBe('published');
+    expect(c.pathVerified).toBe(true);
   });
 
-  test('falls back to a slug-derived path when astro_live_url is absent (legacy row)', () => {
+  test('falls back to a slug-derived GUESS when astro_live_url is absent (legacy row) — and marks it NOT verified', () => {
+    // The exact incident this guards against (migration 20260830000030): a
+    // pre-publish slug shipped as a live link and 404'd because the real
+    // route was category-prefixed, not the bare slug. candidateFromRow still
+    // returns the guessed path (useful for other registry consumers), but
+    // pathVerified:false means getRelatedPostsForBrief must never treat it
+    // as a safe link target.
     const row = { id: '2', title: 'T2', keyword: 'k2', tag: null, category: null, slug: 'old-flat-slug', city: null, target_sites: null, status: 'published', astro_status: 'draft', astro_live_url: null };
     const c = candidateFromRow(row);
     expect(c.path).toBe('/old-flat-slug/');
     expect(c.workflowStatus).toBe('published');
+    expect(c.pathVerified).toBe(false);
   });
 
   test('a non-published, non-live row is not workflow_status published', () => {
@@ -177,16 +185,22 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     return jest.fn(() => ({ select: jest.fn().mockResolvedValue(rows) }));
   }
 
-  test('queries blog_posts, filters to published/live, and ranks the rest', async () => {
+  test('queries blog_posts, filters to published/live with a confirmed URL, and ranks the rest', async () => {
     const rows = [
       { id: 'a', title: 'Termite Bait Stations Explained', keyword: 'termite bait stations', tag: 'Termites', category: 'termite', slug: 'bait-stations', city: null, target_sites: null, status: 'published', astro_status: 'live', astro_live_url: '/termite/bait-stations/' },
       { id: 'b', title: 'Queued Termite Draft', keyword: 'termite draft', tag: 'Termites', category: 'termite', slug: 'queued-draft', city: null, target_sites: null, status: 'queued', astro_status: 'draft', astro_live_url: null },
       { id: 'c', title: 'Unrelated Rodent Post', keyword: 'rats in attic', tag: 'Rodents', category: 'rodent', slug: 'attic-noises', city: null, target_sites: null, status: 'published', astro_status: 'live', astro_live_url: '/rodent/attic-noises/' },
+      // The exact garage-door incident shape (migration 20260830000030):
+      // status='published' but no astro_live_url — the bare-slug guess is
+      // NOT the real category-prefixed route. Must be excluded even though
+      // workflowStatus normalizes to 'published'.
+      { id: 'd', title: 'Legacy Termite Post (unverified slug)', keyword: 'termite legacy post', tag: 'Termites', category: 'termite', slug: 'termite-legacy-slug', city: null, target_sites: null, status: 'published', astro_status: 'draft', astro_live_url: null },
     ];
     const database = fakeDb(rows);
     const out = await getRelatedPostsForBrief({ service: 'termite', keyword: 'termite bait stations' }, { database });
     expect(database).toHaveBeenCalledWith('blog_posts');
     expect(out.map((r) => r.path)).toEqual(['/termite/bait-stations/']);
+    expect(out.some((r) => r.path.includes('termite-legacy-slug'))).toBe(false);
   });
 
   test('a DB read failure propagates (the caller is responsible for the fallback-to-empty catch)', async () => {

@@ -13,8 +13,14 @@
  * real, live posts it may link — never a guess. The source of truth is the
  * same `blog_posts` table + `content-registry` URL-derivation the rest of
  * the content pipeline already trusts (dbBlogRowToItem: astro_live_url when
- * the astro pipeline has one, the legacy slug-derived path otherwise), so an
- * allowed related-post link can never be dead. Domain eligibility mirrors
+ * the astro pipeline has one, a legacy slug-derived GUESS otherwise). Only
+ * the astro_live_url case is trusted as a link target here — a bare-slug
+ * guess is exactly the failure a real incident hit (migration
+ * 20260830000030: a pre-publish slug shipped as a live link and 404'd,
+ * because the real route was category-prefixed, not the bare slug), and a
+ * related-post link is a NEW allowance the UNKNOWN_INTERNAL_ROUTE gate
+ * accepts unchecked, so it may only ever point at a pipeline-confirmed URL.
+ * Domain eligibility mirrors
  * the spoke-fleet per-post targeting rule (server/services/content-astro/
  * spoke-sites.js): a candidate with no target_sites (or an empty one)
  * renders everywhere; otherwise it must render on every domain the NEW post
@@ -175,6 +181,15 @@ function candidateFromRow(row) {
     category: item.category,
     targetSites: row.target_sites,
     workflowStatus: item.workflow_status,
+    // dbBlogRowToItem's canonical_url falls back to a bare /{slug}/ guess
+    // (content-registry.slugToPath) when astro_live_url is absent. That
+    // guess is exactly the failure a real incident hit (migration
+    // 20260830000030: a pre-publish slug shipped as a live link and 404'd —
+    // the actual route was category-prefixed, not the bare slug). A
+    // related-post link is a NEW allowance the gate will accept unchecked,
+    // so it may only ever point at the pipeline-CONFIRMED URL, never a
+    // guess — pathVerified gates that at the call site below.
+    pathVerified: Boolean(row.astro_live_url),
   };
 }
 
@@ -193,7 +208,9 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       try { return candidateFromRow(row); }
       catch { return null; }
     })
-    .filter((c) => c && c.path && c.workflowStatus === 'published');
+    // published (or astro-live) AND a pipeline-confirmed URL — never the
+    // bare-slug guess a legacy row without astro_live_url would produce.
+    .filter((c) => c && c.path && c.pathVerified && c.workflowStatus === 'published');
   return rankRelatedPosts(target, candidates, { limit });
 }
 
