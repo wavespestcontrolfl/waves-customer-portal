@@ -13738,14 +13738,19 @@ export function CompletionPanel({
   // (admin-dispatch completion + Charge-now). Mirror that here so the tech UI's
   // willInvoice / pay-link prediction, AI recap framing, and review suppression
   // match the report-only/no-invoice completion the server actually performs.
-  // Outside a real WaveGuard membership, monthlyRate is a DUES figure, not a
+  // Outside the monthly-membership LANE, monthlyRate is a DUES figure, not a
   // per-visit price — falling back to it for an unpriced per-application /
   // per-visit visit predicted a phantom invoice at the annual/12 equivalent
   // (this mirrors billing-lane.js completionInvoiceAmount, which never uses
-  // monthlyRate outside billingMode === 'monthly_membership').
+  // monthlyRate outside billingMode === 'monthly_membership'). Gated on the
+  // resolved lane, not tier presence: a WaveGuard tier does not by itself
+  // mean monthly membership (a per-application customer can carry one), and
+  // an explicit monthly-membership customer with no tier stamped must not
+  // read as unpriced either (codex pre-push P1).
+  const isMonthlyMembershipLane = service.billingLane?.mode === 'monthly_membership';
   const invoiceAmount = hasVisitPrice
     ? Number(completionVisitPrice)
-    : isCallback || !service.waveguardTier
+    : isCallback || !isMonthlyMembershipLane
       ? 0
       : Number(service.monthlyRate || 0);
   const autopayCoversVisit =
