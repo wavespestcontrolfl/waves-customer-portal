@@ -60,6 +60,7 @@ function visitMatchesPrimary(row, customer, primary) {
 }
 
 function visitPinIsSafeToReplace(row, customer, primary) {
+  if (row.property_id != null && String(row.property_id) === String(primary.id)) return true;
   if (row.lat == null || row.lng == null) return true;
   const rowLat = Number(row.lat);
   const rowLng = Number(row.lng);
@@ -267,12 +268,12 @@ async function updatePrimaryVisits(trx, customer, primary, after, latitude, long
 
 async function clearMatchingPins(trx, customer, primary, storedReview, visitContext) {
   if (storedReview?.latitude == null || storedReview?.longitude == null) {
-    return { customer: 0, property: 0, visits: 0, templates: 0 };
+    return { customer: 0, property: 0, visits: 0, templates: 0, visitIds: [] };
   }
   const latitude = Number(storedReview.latitude);
   const longitude = Number(storedReview.longitude);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return { customer: 0, property: 0, visits: 0, templates: 0 };
+    return { customer: 0, property: 0, visits: 0, templates: 0, visitIds: [] };
   }
   const customerCount = await trx('customers')
     .where({ id: customer.id, latitude, longitude })
@@ -284,11 +285,12 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
   const visitLongitude = pinAtScale(longitude, 6);
   const visitIds = visitContext.visits
     .filter(row => visitMatchesPrimary(row, customer, primary))
-    .filter(row => pinAtScale(row.lat, 6) === visitLatitude && pinAtScale(row.lng, 6) === visitLongitude)
+    .filter(row => (row.property_id != null && String(row.property_id) === String(primary.id))
+      || (pinAtScale(row.lat, 6) === visitLatitude && pinAtScale(row.lng, 6) === visitLongitude))
     .map(row => row.id);
   const visits = visitIds.length ? await trx('scheduled_services')
     .whereIn('id', visitIds)
-    .where({ customer_id: customer.id, lat: visitLatitude, lng: visitLongitude })
+    .where({ customer_id: customer.id })
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString())
     .update({ lat: null, lng: null, zone: null, route_order: null, updated_at: new Date() }) : 0;
@@ -296,8 +298,9 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
   for (const parent of visitContext.parents) {
     const effective = { ...parent, ...recurringServiceAddress(parent) };
     if (!visitMatchesPrimary(effective, customer, primary)
-      || pinAtScale(effective.lat, 6) !== visitLatitude
-      || pinAtScale(effective.lng, 6) !== visitLongitude) continue;
+      || ((effective.property_id == null || String(effective.property_id) !== String(primary.id))
+        && (pinAtScale(effective.lat, 6) !== visitLatitude
+          || pinAtScale(effective.lng, 6) !== visitLongitude))) continue;
     templates += await trx('scheduled_services')
       .where({ id: parent.id, customer_id: customer.id })
       .update({
@@ -309,7 +312,7 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
         ),
       });
   }
-  return { customer: customerCount, property: propertyCount, visits, templates };
+  return { customer: customerCount, property: propertyCount, visits, templates, visitIds };
 }
 
 module.exports = {
