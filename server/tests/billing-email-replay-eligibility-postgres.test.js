@@ -4,7 +4,9 @@ jest.mock('../models/db', () => (...args) => mockPg(...args));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({
   invoiceStillCollectible: jest.fn(async () => ({ eligible: true })),
 }));
-jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: () => async () => ({ ok: true }) }));
+jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'), selfPayAtDispatch: () => async () => ({ ok: true }),
+}));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn(async () => ({ allowed: true, durable: false })) }));
 
 const { randomUUID } = require('node:crypto');
@@ -37,11 +39,26 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
     await mockPg.schema.createTable('collections_contact_ledger', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
-      table.text('source').notNullable(); table.jsonb('metadata');
+      table.text('source').notNullable(); table.jsonb('metadata'); table.text('channel'); table.jsonb('invoice_ids');
     });
     await mockPg.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
       table.text('status'); table.date('scheduled_date'); table.text('service_type');
+      table.integer('payer_id'); table.text('po_number'); table.boolean('self_pay_override');
+    });
+    await mockPg.schema.createTable('customers', (table) => {
+      table.uuid('id').primary(); table.integer('payer_id'); table.text('billing_mode');
+      table.text('waveguard_tier'); table.decimal('monthly_rate'); table.integer('billing_day');
+    });
+    await mockPg.schema.createTable('payers', (table) => {
+      table.integer('id').primary(); table.boolean('active');
+    });
+    await mockPg.schema.createTable('invoices', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id'); table.integer('payer_id');
+      table.text('status'); table.decimal('total'); table.decimal('credit_applied');
+    });
+    await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
+      table.uuid('invoice_id'); table.text('status');
     });
   }, 30000);
 
@@ -50,6 +67,10 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     await mockPg('collections_contact_ledger').delete();
     await mockPg('scheduled_services').delete();
+    await mockPg('customers').delete();
+    await mockPg('payers').delete();
+    await mockPg('invoices').delete();
+    await mockPg('invoice_followup_sequences').delete();
   });
 
   afterAll(async () => {
@@ -112,5 +133,50 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await expect(billingEmailReplayEligible(meta)).resolves.toEqual({ eligible: true });
     await mockPg('scheduled_services').where({ id: visitId }).update(change);
     await expect(billingEmailReplayEligible(meta)).resolves.toMatchObject({ eligible: false, retryable: false });
+  });
+
+  async function previsitFixture() {
+    const invoiceIds = [randomUUID(), randomUUID()];
+    const date = etDateString(addETDays(new Date(), 1));
+    await mockPg('customers').insert({ id: customerId, billing_mode: 'per_visit' });
+    await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId,
+      status: 'confirmed', scheduled_date: date, service_type: 'Pest Control' });
+    await mockPg('invoices').insert(invoiceIds.map((id, index) => ({
+      id, customer_id: customerId, status: 'sent', total: index ? '60.00' : '40.00', credit_applied: '0.00',
+    })));
+    await mockPg('collections_contact_ledger').insert(row(ownId, {
+      source: 'previsit_balance_reminder', channel: 'email', invoice_ids: JSON.stringify(invoiceIds),
+    }));
+    return { ...metadata(), source_entry_point: 'previsit_balance_reminder',
+      appointment_id: visitId, appointment_date: date, appointment_service_type: 'Pest Control',
+      appointment_rendered_on: etDateString(), rendered_amount: '100.00', invoice_ids: invoiceIds };
+  }
+
+  test('paid debt invalidates the saved quote while a fresh quote can reuse its reservation', async () => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    const meta = await previsitFixture();
+    await expect(billingEmailReplayEligible(meta, mockPg)).resolves.toEqual({ eligible: true });
+    await mockPg('invoices').where({ id: meta.invoice_ids[0] }).update({ status: 'paid' });
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+    await expect(billingEmailReplayEligible({ ...meta, invoice_ids: [meta.invoice_ids[1]], rendered_amount: '60.00' }, mockPg))
+      .resolves.toEqual({ eligible: true });
+  });
+
+  test('stopped dunning refuses a frozen aggregate with policy dark', async () => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    const meta = await previsitFixture();
+    await mockPg('invoice_followup_sequences').insert({ invoice_id: meta.invoice_ids[0], status: 'stopped' });
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+  });
+
+  test('canonical account payer reassignment invalidates the previsit reminder', async () => {
+    const meta = await previsitFixture();
+    const payerId = 17;
+    await mockPg('payers').insert({ id: payerId, active: true });
+    await mockPg('customers').where({ id: customerId }).update({ payer_id: payerId });
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-visit-payer-billed', retryable: false });
   });
 });

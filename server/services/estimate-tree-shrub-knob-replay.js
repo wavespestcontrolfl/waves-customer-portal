@@ -28,6 +28,7 @@ const NEUTRAL_TREE_SHRUB_KNOBS = {
   densityFactor: 1,
   perPalmAnnual: 0,
   minutesPerPalmVisit: 0,
+  largePalmFactor: 1,
   callbackReservePerVisit: 0,
 };
 
@@ -62,6 +63,9 @@ function treeShrubKnobSignalForReplay(estData = {}) {
     densityFactor: pick('densityFactor'),
     perPalmAnnual: pick('perPalmAnnual'),
     minutesPerPalmVisit: pick('minutesPerPalmVisit'),
+    // A stamp from before the large-palm factor existed priced no large
+    // palms, so neutral 1 replays it exactly.
+    largePalmFactor: pick('largePalmFactor'),
     callbackReservePerVisit: pick('callbackReservePerVisit'),
   };
 }
@@ -307,7 +311,11 @@ function treeShrubPalmProvenanceForReplay(estData = {}) {
 function applyTreeShrubPalmReplay(v1Input, estData = {}) {
   const treeShrub = v1Input?.services?.treeShrub;
   if (!treeShrub || typeof treeShrub !== 'object' || treeShrub.palmCount === undefined) return v1Input;
-  if (treeShrubPalmProvenanceForReplay(estData) === 'legacy') delete treeShrub.palmCount;
+  if (treeShrubPalmProvenanceForReplay(estData) === 'legacy') {
+    delete treeShrub.palmCount;
+    // Large palms are a subset of the palm count; they go with it.
+    delete treeShrub.largePalmCount;
+  }
   return v1Input;
 }
 

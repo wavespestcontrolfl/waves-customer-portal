@@ -1,7 +1,19 @@
+// Keep the real ledgerCall (GATE_LLM_CALL_LEDGER is unset in tests, so it's
+// already a real no-DB no-op) but spy on ledgerCallRejected so the malformed-
+// relevance tests below can assert the ledger row gets flipped.
+jest.mock('../services/llm-dispatch-metrics', () => {
+  const actual = jest.requireActual('../services/llm-dispatch-metrics');
+  return { ...actual, ledgerCallRejected: jest.fn() };
+});
+
 const scorer = require('../services/seo/prospect-scorer');
+const { ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 const KEY = process.env.ANTHROPIC_API_KEY;
-beforeEach(() => { delete process.env.ANTHROPIC_API_KEY; }); // force deterministic heuristic path
+beforeEach(() => {
+  delete process.env.ANTHROPIC_API_KEY; // force deterministic heuristic path
+  ledgerCallRejected.mockClear();
+});
 afterEach(() => { if (KEY === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = KEY; });
 
 describe('heuristicClassify', () => {
@@ -105,6 +117,100 @@ describe('scoreCandidates (end-to-end, heuristic + injected contact)', () => {
   });
 });
 
+// Codex r13 on #4884: the mapper coerced every field but the two the
+// validator checked — `!!"false"` read as true and could put a prospect in the
+// HARO lane, and Number(""/false/[]) made an explicit tier 0. Every consumed
+// field now goes through parseClassifiedEntry: parseable forms are read
+// correctly, an absent field keeps its designed default, and a present
+// off-contract value keeps that default AND fails the ledger row.
+describe('classifyBatch — every consumed field is parsed, not coerced (Codex r13 on #4884)', () => {
+  const VALID = { i: 0, domain: 'x.com', intent_class: 'editorial', relevance_0_100: 80, is_local_swfl: true, lead_value_tier: 2, is_haro_platform: false, target_topic: 'pest', suggested_anchor: 'pest tips', reason: 'local blog' };
+  const run = async (extra) => {
+    const fake = { messages: { create: async () => ({ content: [{ text: JSON.stringify([{ ...VALID, ...extra }]) }] }) } };
+    const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: fake });
+    return c;
+  };
+
+  test('a fully conforming entry is used as-is and not flagged', async () => {
+    const c = await run({});
+    expect(c).toMatchObject({ intent_class: 'editorial', relevance_0_100: 80, is_local_swfl: true, lead_value_tier: 2, is_haro_platform: false, target_topic: 'pest', suggested_anchor: 'pest tips', reason: 'local blog' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('"false" strings read as false (not true) — the prospect stays out of the HARO lane — and are not flagged', async () => {
+    const c = await run({ is_haro_platform: 'false', is_local_swfl: 'false' });
+    expect(c.is_haro_platform).toBe(false);
+    expect(c.is_local_swfl).toBe(false);
+    expect(scorer.contactGate(c, { has_contact_path: true }).lane).not.toBe('haro_platform');
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('"true" strings read as true; absent booleans default to false without a flag', async () => {
+    expect((await run({ is_local_swfl: 'TRUE' })).is_local_swfl).toBe(true);
+    const { is_local_swfl, is_haro_platform, ...noBools } = VALID;
+    const fake = { messages: { create: async () => ({ content: [{ text: JSON.stringify([noBools]) }] }) } };
+    const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: fake });
+    expect(c.is_local_swfl).toBe(false);
+    expect(c.is_haro_platform).toBe(false);
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('an unparseable boolean defaults to false and fails the row', async () => {
+    const c = await run({ is_haro_platform: 'maybe' });
+    expect(c.is_haro_platform).toBe(false);
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+
+  test('a null tier stays undefined (intent fallback) without a flag; a numeric-string tier is read', async () => {
+    expect((await run({ lead_value_tier: null })).lead_value_tier).toBeUndefined();
+    expect((await run({ lead_value_tier: '3' })).lead_value_tier).toBe(3);
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test.each([['empty string', ''], ['false', false], ['an array', []], ['out of range', 7], ['fractional', 2.5], ['a word', 'high']])(
+    'a %s tier is off-contract: undefined (never an explicit 0), and the row fails', async (_label, tier) => {
+      const c = await run({ lead_value_tier: tier });
+      expect(c.lead_value_tier).toBeUndefined();
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    },
+  );
+
+  test('an out-of-range relevance is clamped and fails the row', async () => {
+    expect((await run({ relevance_0_100: 150 })).relevance_0_100).toBe(100);
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+
+  test('an off-enum intent takes the heuristic intent and fails the row; a near-valid one is canonicalized without a flag', async () => {
+    const c = await run({ intent_class: 'blog post' });
+    expect(c.intent_class).toBe(scorer.classifyLinkType('x.com', undefined));
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    ledgerCallRejected.mockClear();
+    expect((await run({ intent_class: 'Guest-Post' })).intent_class).toBe('guest_post');
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('an off-enum topic falls back to general and fails the row', async () => {
+    expect((await run({ target_topic: 'bees' })).target_topic).toBe('general');
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+
+  test('a non-string anchor or reason is dropped and fails the row; the word "null" is just no anchor', async () => {
+    expect((await run({ suggested_anchor: 42 })).suggested_anchor).toBeNull();
+    expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
+    ledgerCallRejected.mockClear();
+    expect((await run({ reason: { why: 'x' } })).reason).toBe('llm');
+    expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
+    ledgerCallRejected.mockClear();
+    expect((await run({ suggested_anchor: 'null' })).suggested_anchor).toBeNull();
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('an anchor longer than anchor_planned (varchar 255) is dropped and fails the row', async () => {
+    expect((await run({ suggested_anchor: 'x'.repeat(256) })).suggested_anchor).toBeNull();
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+});
+
 describe('classifyBatch LLM path', () => {
   test('parses a JSON array from the model and maps by index', async () => {
     const fakeAnthropic = {
@@ -147,5 +253,86 @@ describe('classifyBatch LLM path', () => {
     const [c] = await scorer.classifyBatch([{ domain: 'helpareporter.com' }], { anthropic: boom });
     expect(c.reason).toBe('heuristic');
     expect(c.is_haro_platform).toBe(true);
+  });
+
+  // Codex r8 on #4884: isClassifiedEntry used Number.isFinite(Number(x)), and
+  // Number() coerces false/''/'   '/[] all to 0 (finite) — so a non-answer
+  // for relevance_0_100 read as a real classification and was never sent to
+  // the heuristic fallback or counted against the ledger.
+  describe('relevance_0_100 must be an actual number, not anything Number() coerces to one (Codex r8 on #4884)', () => {
+    const respondWith = (relevance) => ({
+      messages: {
+        create: async () => ({
+          content: [{ text: JSON.stringify([{ i: 0, domain: 'x.com', intent_class: 'resource', relevance_0_100: relevance }]) }],
+        }),
+      },
+    });
+
+    test.each([
+      ['false', false],
+      ['empty string', ''],
+      ['whitespace string', '   '],
+      ['an array', []],
+      ['null', null],
+      ['non-numeric string', 'high'],
+    ])('%s is rejected as not-a-real-number → heuristic fallback', async (_label, relevance) => {
+      const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: respondWith(relevance) });
+      expect(c.reason).toBe('heuristic');
+    });
+
+    test.each([
+      ['a plain number', 85],
+      ['zero (falsy but a real number)', 0],
+      ['a numeric string', '42'],
+      ['a numeric string with surrounding whitespace', '  42.5 '],
+    ])('%s is accepted as a real classification', async (_label, relevance) => {
+      const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: respondWith(relevance) });
+      expect(c.reason).not.toBe('heuristic');
+      expect(c.relevance_0_100).toBe(Math.max(0, Math.min(100, Number(relevance))));
+    });
+
+    test('a chunk where every entry is a non-answer is recorded as a ledger failure', async () => {
+      const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: respondWith('') });
+      expect(c.reason).toBe('heuristic');
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('a partially classified chunk (one real hit + junk) is flagged — the heuristic filled part of it', async () => {
+      const fake = {
+        messages: {
+          create: async () => ({
+            content: [{
+              text: JSON.stringify([
+                { i: 0, domain: 'x.com', intent_class: 'resource', relevance_0_100: '' },
+                { i: 1, domain: 'y.com', intent_class: 'editorial', relevance_0_100: 70 },
+              ]),
+            }],
+          }),
+        },
+      };
+      const [a, b] = await scorer.classifyBatch([{ domain: 'x.com' }, { domain: 'y.com' }], { anthropic: fake });
+      expect(a.reason).toBe('heuristic');
+      expect(b.reason).not.toBe('heuristic');
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('a fully classified chunk is NOT flagged', async () => {
+      const fake = {
+        messages: {
+          create: async () => ({
+            content: [{
+              text: JSON.stringify([
+                { i: 0, domain: 'x.com', intent_class: 'resource', relevance_0_100: 40 },
+                { i: 1, domain: 'y.com', intent_class: 'editorial', relevance_0_100: 70 },
+              ]),
+            }],
+          }),
+        },
+      };
+      const [a, b] = await scorer.classifyBatch([{ domain: 'x.com' }, { domain: 'y.com' }], { anthropic: fake });
+      expect(a.reason).not.toBe('heuristic');
+      expect(b.reason).not.toBe('heuristic');
+      expect(ledgerCallRejected).not.toHaveBeenCalled();
+    });
   });
 });

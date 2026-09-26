@@ -15,7 +15,23 @@ const {
 
 const { phoneMatchDigits } = require('../utils/phone');
 const { lockCustomerComms, withSmsConsentLock } = require('../utils/customer-comms-lock');
+
+const { stripTrailingSignature } = require('./messaging/sms-signoff');
 const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
+// Two-segment ceiling for the agent's text, STOP line included (policy.js
+// maxSegments for customer SMS; the send pipeline itself only advises).
+const LEAD_RESPONSE_MAX_SEGMENTS = 2;
+
+// The same body normalization sendCustomerMessage applies to lead SMS before
+// audit and dispatch (URL scheme stripped, typographic punctuation to GSM),
+// so what the agent gets back and what the report saves match what Twilio
+// received.
+function asSentSmsText(text) {
+  if (!text) return text;
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  return normalizeGsmPunctuation(stripSmsUrlScheme(text));
+}
 
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
@@ -270,6 +286,53 @@ async function executeLeadTool(toolName, input, context) {
     case 'send_lead_response': {
       const customer = subject.customer;
       if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
+      // An empty draft would send the STOP line alone and spend the phone's
+      // one automated text on it.
+      if (typeof input.message !== 'string' || !input.message.trim()) {
+        return { error: 'Message is empty. Write the reply and call send_lead_response again.', validationError: true };
+      }
+      // Customer texts are never signed (owner ruling 2026-09-26).
+      const message = stripTrailingSignature(input.message, { addresseeFirstName: customer.first_name });
+      if (!message) return { error: 'Message is empty once the sign-off is removed', validationError: true };
+
+      // Owner ruling 2026-09-26: exactly one automated text ever reaches a
+      // new website lead — the agent's reply replaces the standard
+      // lead_auto_reply_biz reply, and inherits its once-per-person-ever
+      // rule (owner ruling 2026-08-05). Both share ONE first-touch claim on
+      // the phone. Winning it means this is provably the customer's first
+      // automated text: it carries the first-touch opt-out line. Losing it
+      // (an earlier automated reply, a concurrent run, a repeated call, or a
+      // dedup lookup that could not be read — fail closed) means NO send:
+      // the lead goes to the owner instead.
+      const { claimLeadFirstTouch, resolveLeadAutoReplyClaim, isDeliveredSms, clearServiceMenuIntakeState } = require('./lead-auto-reply');
+      // Customer texts stay within two SMS segments, and the STOP line below
+      // is added after the agent drafts. Measure the composed text before
+      // taking the claim, so the agent can shorten and retry.
+      // The unsigned text plus the first-touch opt-out line.
+      const messageBody = `${message}\n\nReply STOP to opt out.`;
+      const { countSegments } = require('./messaging/segment-counter');
+      const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+      // Measured as it will go out: the send pipeline swaps typographic
+      // punctuation (em dash, curly quotes) for GSM before dispatch.
+      const { segmentCount, encoding, perSegmentLimit } = countSegments(normalizeGsmPunctuation(messageBody));
+      if (segmentCount > LEAD_RESPONSE_MAX_SEGMENTS) {
+        const footerLength = '\n\nReply STOP to opt out.'.length;
+        const maxChars = perSegmentLimit * LEAD_RESPONSE_MAX_SEGMENTS - footerLength;
+        return {
+          error: `Message too long: with the required "Reply STOP to opt out." line it is ${segmentCount} SMS segments (max ${LEAD_RESPONSE_MAX_SEGMENTS}). Keep it under ${maxChars} characters${encoding === 'UCS_2' ? ' and drop the emoji or special characters (they shrink every segment)' : ''}, then call send_lead_response again.`,
+          validationError: true,
+        };
+      }
+      const firstTouch = await claimLeadFirstTouch(customer.phone, customer.id);
+      if (!firstTouch.claimed) {
+        return {
+          sent: false,
+          blocked: true,
+          code: 'FIRST_TOUCH_ALREADY_SENT',
+          reason: 'This number already had its one automated text (or it could not be verified). Queue the lead for the owner instead of texting.',
+          name: customer.first_name,
+        };
+      }
 
       // Routed through the customer-message middleware so consent /
       // suppression / identity / voice / segment checks all apply, and
@@ -284,9 +347,9 @@ async function executeLeadTool(toolName, input, context) {
       // Canonical preparation runs without a pinned transaction. The provider
       // invokes this local guard around only the actual SDK request, then
       // releases its locks before global-database audit and bookkeeping.
-      const result = await sendCustomerMessage({
+      const sendResult = await sendCustomerMessage({
         to: customer.phone,
-        body: input.message,
+        body: messageBody,
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',
@@ -301,11 +364,27 @@ async function executeLeadTool(toolName, input, context) {
           }
           return dispatch(trx);
         }),
-      }).catch(err => {
-        if (!err.providerOutcome?.sent) throw err;
+      }).catch(async (err) => {
+        if (!err.providerOutcome?.sent) {
+          // Settle (keep/release) the first-touch claim on the SAME
+          // fail-closed rules resolveLeadAutoReplyClaim always applies —
+          // an unknown/thrown outcome is ambiguous and keeps the claim.
+          await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, err.providerOutcome || null);
+          throw err;
+        }
         logger.warn('[lead-agent] Response audit failed after provider acceptance', { leadId: context.leadId });
         return err.providerOutcome;
       });
+
+      await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, sendResult);
+      // A success-shaped sentinel (template disabled, gate, owner silence)
+      // reached nobody: record it as a block, so the lead is not marked
+      // contacted, the agent does not report auto_sent, and the standard
+      // reply can still go out (the claim was released just above).
+      const result = sendResult.sent && !isDeliveredSms(sendResult)
+        ? { ...sendResult, sent: false, blocked: true, code: sendResult.code || 'NOT_DELIVERED' }
+        : sendResult;
+      if (result.sent) await clearServiceMenuIntakeState(customer.id);
 
       // No quiet-hours requeue: lead_response_auto_reply is a
       // customer-action entry point (owner ruling 2026-08-29) — the agent
@@ -384,6 +463,9 @@ async function executeLeadTool(toolName, input, context) {
         logger.info(`[lead-agent] Auto-sent response (customerId=${customer.id} leadId=${input.lead_id || 'n/a'} auditLogId=${result.auditLogId || 'n/a'})`);
         return {
           sent: true,
+          // The text actually sent: sign-off stripped, then the send
+          // pipeline's own SMS normalization. Save this, not the draft.
+          message: asSentSmsText(message),
           to: customer.phone,
           name: customer.first_name,
           providerMessageId: result.providerMessageId,
@@ -598,7 +680,8 @@ async function executeLeadTool(toolName, input, context) {
             lead_id: input.lead_id,
             customer_id: input.customer_id,
             action_taken: input.action_taken,
-            response_message: input.response_message,
+            // Same addressee as the send, so the saved text matches what went out.
+            response_message: asSentSmsText(stripTrailingSignature(input.response_message, { addresseeFirstName: subject.customer?.first_name })) || null,
             response_time_seconds: input.response_time_seconds,
             triage_summary: input.triage_summary,
             follow_up_scheduled: input.follow_up_scheduled || false,
