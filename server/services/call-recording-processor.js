@@ -15342,7 +15342,11 @@ const CallRecordingProcessor = {
               scheduledDate = null;
             }
 
-            const callDateET = etDateString(call.created_at || new Date());
+            // The call's own ET date, from its START (callStartedAt), not
+            // created_at: a recovery row inserted after ET midnight for a call
+            // made the evening before would otherwise reject that evening's
+            // agreed slot as "before the call date" (codex #4919 pre-push P1).
+            const callDateET = etDateString(callStartedAt(call) || call.created_at || new Date());
             // A same-day start that had already passed when the call was
             // placed (a 6:30 PM caller accepting "between 6 and 9 tonight")
             // is never booked at its stale start — it goes to the office

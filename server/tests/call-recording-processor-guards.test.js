@@ -1842,3 +1842,24 @@ describe('clarify-draft target phone (owner directive 2026-09-26: both direction
     })).toBe('+19145234413');
   });
 });
+
+// codex #4919 pre-push P1: the "before the call date" guard reads the call's
+// ET date from its START, so a recovery row inserted after ET midnight for a
+// call made the evening before does not reject that evening's agreed slot.
+describe('call-date guard anchors on the call start, not created_at (codex #4919)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  test('callDateET derives from callStartedAt(call)', () => {
+    expect(src).toContain('const callDateET = etDateString(callStartedAt(call) || call.created_at || new Date());');
+    expect(src).not.toContain('const callDateET = etDateString(call.created_at || new Date());');
+  });
+  test('a recovery row inserted after ET midnight still dates the call to the prior evening', () => {
+    const { callStartedAt } = require('../utils/call-timeline');
+    const { etDateString } = require('../utils/datetime-et');
+    const row = {
+      created_at: '2026-09-27T04:10:00Z', // 00:10 ET 9/27 — recovery insert
+      duration_seconds: 300,
+      metadata: { source: 'recording_recovery', provider_started_at: '2026-09-26T21:00:00Z', provider_ended_at: '2026-09-26T21:05:00Z' },
+    };
+    expect(etDateString(callStartedAt(row))).toBe('2026-09-26');
+  });
+});
