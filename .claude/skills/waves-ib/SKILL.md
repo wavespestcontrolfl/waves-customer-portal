@@ -72,19 +72,19 @@ max_tokens for field speed.
   "how many active customers?" even if it's the SEO page.
 - **Tech portal is isolated.** Only `tech-tools` loads. All read-only.
   Field-speed max_tokens.
-- **Write operations require UI confirmation (issue #1568).** With
-  `GATE_IB_UI_CONFIRM=true` (prod default), write tools never execute from
-  the model loop: the call returns a preview, the route persists a pending
-  action (`ib_pending_actions` — actor-bound, 10-min expiry, payload hash,
-  single-use), and the client renders a Confirm/Cancel card
+- **Write operations require UI confirmation (issue #1568).** The trust
+  boundary is unconditional (`GATE_IB_UI_CONFIRM` is retired and ignored);
+  the emergency stop is `IB_WRITES_DISABLED=true`. Write tools never execute
+  from the model loop: the call returns a preview, the route persists a
+  pending action (`ib_pending_actions` — actor-bound, 10-min expiry, payload
+  hash, single-use), and the client renders a Confirm/Cancel card
   (`PendingActionsCard`). Only the operator's click commits, via
   `/confirm-action` — never a model tool, and the pending id is never
   model-visible. The gated tool list lives in
   `services/intelligence-bar/write-gates.js`, mirrored by
   `tests/intelligence-bar-write-gate-contract.test.js`. New write tools MUST
   be added to those sets — load the **ib-write-tools skill** for the full
-  procedure. With the gate off (local dev), the legacy conversational
-  `confirmed: true` two-step applies.
+  procedure.
 - **Admin contexts use `GlobalCommandPalette`.** `AdminLayoutV2` mounts
   the palette; update the palette's route context mapping instead of adding another
   page-level embed. The former admin embeds were retired. The dedicated

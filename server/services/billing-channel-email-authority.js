@@ -161,7 +161,7 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;
-  await dispatch();
+  await dispatch(trx);
   state.providerAccepted = true;
   return { ok: true };
 }
