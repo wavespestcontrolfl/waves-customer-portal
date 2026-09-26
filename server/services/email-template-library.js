@@ -19,6 +19,8 @@ const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../co
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
+const PROVIDER_REQUEST_NOT_STARTED_PREFIX = 'Provider request not started: ';
+const PROVIDER_OUTCOME_UNKNOWN_PREFIX = 'Provider outcome unknown: ';
 const DEDUPE_STATUSES = new Set([
   'sent',
   'delivered',
@@ -861,7 +863,8 @@ function providerRetryHoldErrorForExistingMessage(message) {
   if (status === 'queued' && Number(message?.provider_retry_count || 0) > 0) {
     deliveryOutcome = 'uncertain';
     reason = 'provider_retry_in_progress';
-  } else if (status === 'failed' && message?.provider_retry_exhausted_at) {
+  } else if (status === 'failed' && message?.provider_retry_exhausted_at
+      && !String(message.error_message || '').startsWith(PROVIDER_REQUEST_NOT_STARTED_PREFIX)) {
     deliveryOutcome = 'uncertain';
     reason = 'provider_retry_exhausted';
   } else if (status === 'failed' && message?.provider_retry_next_at) {
@@ -995,8 +998,13 @@ function retryClaimQuery(message) {
     .where({ id: message.id, status: message.status })
     // A provider-block webhook can schedule a failed row without changing
     // its status or attempt token. Keep that schedule in the provider rail.
-    .whereNull('provider_retry_next_at')
-    .whereNull('provider_retry_exhausted_at');
+    .whereNull('provider_retry_next_at');
+  if (message.provider_retry_exhausted_at == null) query.whereNull('provider_retry_exhausted_at');
+  else {
+    query.where({ provider_retry_exhausted_at: message.provider_retry_exhausted_at });
+    if (message.error_message == null) query.whereNull('error_message');
+    else query.where({ error_message: message.error_message });
+  }
   if (message.send_attempt_token == null) return query.whereNull('send_attempt_token');
   return query.where({ send_attempt_token: message.send_attempt_token });
 }
@@ -1336,6 +1344,11 @@ async function sendTemplate({
     error_message: null,
     queued_at: new Date(),
     updated_at: new Date(),
+    ...(retryMessage?.provider_retry_exhausted_at ? {
+      provider_retry_count: 0,
+      provider_retry_next_at: null,
+      provider_retry_exhausted_at: null,
+    } : {}),
   };
   let message;
   if (retryMessage) {
@@ -1667,6 +1680,8 @@ module.exports = {
   shouldRetryExistingMessage,
   queuedRowInFlight,
   ABORTED_BEFORE_DISPATCH,
+  PROVIDER_REQUEST_NOT_STARTED_PREFIX,
+  PROVIDER_OUTCOME_UNKNOWN_PREFIX,
   QUEUED_IN_FLIGHT_MS,
   createDraftVersion,
   publishVersion,

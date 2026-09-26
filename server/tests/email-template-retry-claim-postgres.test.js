@@ -29,7 +29,8 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const { sendTemplate } = require('../services/email-template-library');
-const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+const { handleEmailMessageEvent, handleEvent } = require('../routes/webhooks-sendgrid');
+const providerRetry = require('../services/transactional-email-provider-retry');
 const sendgrid = require('../services/sendgrid-mail');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -68,6 +69,16 @@ postgres('email template retry claims (PostgreSQL)', () => {
       t.uuid('email_message_id'); t.string('provider'); t.string('provider_event_id');
       t.string('event_type'); t.jsonb('raw_event'); t.timestamp('occurred_at');
     });
+    await mockPg.schema.createTable('sendgrid_webhook_events', (t) => {
+      t.string('event_id').primary(); t.string('event_type'); t.string('message_id');
+      t.string('email'); t.string('status'); t.timestamp('processed_at'); t.timestamp('updated_at');
+    });
+    await mockPg.schema.createTable('newsletter_send_deliveries', (t) => {
+      t.uuid('id').primary(); t.string('provider_message_id'); t.string('email');
+    });
+    await mockPg.schema.createTable('automation_step_sends', (t) => {
+      t.uuid('id').primary(); t.string('sendgrid_message_id');
+    });
     await mockPg.schema.createTable('email_messages', (t) => {
       t.uuid('id').primary(); t.uuid('template_id'); t.uuid('template_version_id');
       ['provider', 'provider_message_id', 'template_key', 'send_attempt_token', 'status',
@@ -95,6 +106,7 @@ postgres('email template retry claims (PostgreSQL)', () => {
     await mockPg('email_messages').delete();
     await mockPg('email_suppressions').delete();
     await mockPg('email_message_events').delete();
+    await mockPg('sendgrid_webhook_events').delete();
     await mockPg('email_messages').insert({ id: messageId, template_id: templateId,
       template_version_id: versionId, template_key: 'billing.notice', idempotency_key: key,
       recipient_email_snapshot: 'fixture@example.com', status: 'failed', send_attempt_token: 'prior-attempt',
@@ -139,6 +151,37 @@ postgres('email template retry claims (PostgreSQL)', () => {
       .toMatchObject({ status: 'failed', provider_retry_next_at: scheduled, subject_snapshot: 'Original snapshot' });
   });
 
+  test('cannot replay a definitely-unsent exhaustion after its evidence becomes uncertain', async () => {
+    const firstExhaustedAt = new Date(Date.now() - 60000);
+    await mockPg('email_messages').where({ id: messageId }).update({ provider_retry_count: 3,
+      provider_retry_exhausted_at: firstExhaustedAt, error_message: 'Provider request not started: unblock failed' });
+    mockAfterSnapshot = () => mockPg('email_messages').where({ id: messageId }).update({
+      error_message: 'Provider outcome unknown: connection closed after request',
+    });
+
+    await expect(send()).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await mockPg('email_messages').where({ id: messageId }).first())
+      .toMatchObject({ provider_retry_exhausted_at: firstExhaustedAt,
+        error_message: 'Provider outcome unknown: connection closed after request' });
+  });
+
+  test('stale-claim recovery refunds a claim without erasing prior uncertainty', async () => {
+    const now = new Date();
+    await mockPg('email_messages').where({ id: messageId }).update({
+      status: 'queued', provider_retry_count: 1, provider_retry_next_at: null,
+      provider_retry_exhausted_at: null, provider_message_id: null, sent_at: null,
+      queued_at: new Date(now.getTime() - 60 * 60 * 1000),
+      error_message: 'Provider outcome unknown: prior request timed out',
+    });
+
+    await expect(providerRetry.recoverStaleClaims(now)).resolves.toBe(1);
+    expect(await mockPg('email_messages').where({ id: messageId }).first()).toMatchObject({
+      status: 'failed', provider_retry_count: 0, provider_retry_next_at: now,
+      error_message: 'Provider outcome unknown: prior request timed out',
+    });
+  });
+
   test('reports the accepted winner without overwriting or sending again', async () => {
     mockAfterSnapshot = () => mockPg('email_messages').where({ id: messageId }).update({
       status: 'sent', send_attempt_token: 'accepted-attempt', provider_message_id: 'winner-provider-id' });
@@ -175,6 +218,44 @@ postgres('email template retry claims (PostgreSQL)', () => {
       .toMatchObject({ status: 'active', suppression_type: 'unsubscribe', group_key: null });
     expect(await mockPg('email_messages').where({ id: messageId }).first())
       .toMatchObject({ status: 'sent', provider_message_id: 'qa-provider-acceptance' });
+  });
+
+  test.each([
+    ['unsubscribe', 'unsubscribe', null, null, 'service_operational', null],
+    ['group unsubscribe', 'group_unsubscribe', 'service_operational', null, 'service_operational', null],
+    ['spam report', 'spamreport', null, null, 'service_operational', null],
+    ['unsubscribe after a recipient rewrite', 'unsubscribe', null, 'new-destination@example.com', 'service_operational', null],
+    ['precise marketing group unsubscribe', 'group_unsubscribe', 'marketing_referral', null, 'marketing_referral', 'qa-newsletter'],
+  ])('a stale custom-arg %s records only its address suppression after retry rebinding',
+  async (_label, event, groupKey, newDestination, snapshotGroup, asmGroupId) => {
+    await send();
+    await mockPg('email_messages').where({ id: messageId }).update({
+      suppression_group_key_snapshot: snapshotGroup,
+      ...(newDestination ? { recipient_email_snapshot: newDestination } : {}),
+    });
+
+    const priorNewsletterGroup = process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+    if (asmGroupId) process.env.SENDGRID_ASM_GROUP_NEWSLETTER = asmGroupId;
+    try {
+      await expect(handleEvent({
+        event, email: 'fixture@example.com', sg_event_id: `qa-old-attempt-${event}-${snapshotGroup}`,
+        sg_message_id: 'old-provider-id.filter', email_message_id: messageId, asm_group_id: asmGroupId,
+        send_attempt_token: 'prior-attempt', timestamp: Math.floor(Date.now() / 1000),
+      })).resolves.toBeUndefined();
+    } finally {
+      if (priorNewsletterGroup === undefined) delete process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+      else process.env.SENDGRID_ASM_GROUP_NEWSLETTER = priorNewsletterGroup;
+    }
+
+    expect(await mockPg('email_suppressions').where({ email: 'fixture@example.com' }).first())
+      .toMatchObject({ status: 'active', suppression_type: event === 'spamreport' ? 'spam_complaint' : 'unsubscribe',
+        group_key: groupKey });
+    if (newDestination) expect(await mockPg('email_suppressions').where({ email: newDestination }).first()).toBeUndefined();
+    expect(await mockPg('email_messages').where({ id: messageId }).first())
+      .toMatchObject({ status: 'sent', provider_message_id: 'qa-provider-acceptance',
+        recipient_email_snapshot: newDestination || 'fixture@example.com' });
+    expect(await mockPg('email_message_events').where({ provider_event_id: `qa-old-attempt-${event}-${snapshotGroup}` }))
+      .toHaveLength(0);
   });
 
   test.each([null, 'prior-attempt'])('still retries an unowned failed row with prior token %s', async (token) => {

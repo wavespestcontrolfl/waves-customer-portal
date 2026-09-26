@@ -10,6 +10,10 @@ const MAX_RETRIES = RETRY_DELAYS_MS.length;
 const CLAIM_LIMIT = 10;
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
+function providerOutcomeWasUncertain(message) {
+  return String(message?.error_message || '').startsWith(emailTemplates.PROVIDER_OUTCOME_UNKNOWN_PREFIX);
+}
+
 function asArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string') return [];
@@ -156,7 +160,10 @@ async function recoverStaleClaims(now = new Date()) {
       // provider id nor a sent timestamp, so refund the interrupted claim and
       // let the next worker consume the same bounded attempt slot.
       provider_retry_count: db.raw('GREATEST(provider_retry_count - 1, 0)'),
-      error_message: 'Interrupted provider retry claim recovered',
+      error_message: db.raw('CASE WHEN error_message LIKE ? THEN error_message ELSE ? END', [
+        `${emailTemplates.PROVIDER_OUTCOME_UNKNOWN_PREFIX}%`,
+        'Interrupted provider retry claim recovered',
+      ]),
       updated_at: now,
     });
   return Number(requeued || 0) + uncertain;
@@ -206,10 +213,18 @@ async function alertIfProviderRetriesExhausted(message, ev) {
   );
 }
 
-async function markRetryFailure(message, err, now = new Date()) {
-  const reason = emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed')).slice(0, 1000);
+async function markRetryFailure(message, err, now = new Date(), { providerAttempted = true } = {}) {
+  const rawReason = emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed'));
   const retryCount = Number(message.provider_retry_count || 0);
   const exhausted = retryCount >= MAX_RETRIES;
+  // Exhaustion alone cannot say whether Mail Send ran. Preserve that fact in
+  // the durable row so a later direct replay can retry only a known pre-send
+  // failure, while an ambiguous provider handoff remains held.
+  const uncertain = providerAttempted || providerOutcomeWasUncertain(message);
+  const outcomePrefix = uncertain
+    ? emailTemplates.PROVIDER_OUTCOME_UNKNOWN_PREFIX
+    : (exhausted ? emailTemplates.PROVIDER_REQUEST_NOT_STARTED_PREFIX : '');
+  const reason = `${outcomePrefix}${rawReason}`.slice(0, 1000);
   const nextAt = exhausted ? null : new Date(now.getTime() + RETRY_DELAYS_MS[retryCount]);
   const [updated] = await db('email_messages')
     .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
@@ -234,7 +249,7 @@ async function markRetryFailure(message, err, now = new Date()) {
 // for the office to reconcile (no sent_at, no provider id, not the
 // pre-dispatch abort marker), and the exhausted alert names it.
 async function markRetryUncertain(message, err, now = new Date()) {
-  const reason = `Provider outcome unknown: ${emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed'))}`.slice(0, 1000);
+  const reason = `${emailTemplates.PROVIDER_OUTCOME_UNKNOWN_PREFIX}${emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed'))}`.slice(0, 1000);
   // The row's settlement and the summary's transition commit together: a
   // failure between them leaves the row queued for stale-claim recovery
   // (which settles it the same way) instead of exhausted beside a summary
@@ -255,10 +270,14 @@ async function markRetryUncertain(message, err, now = new Date()) {
 // summary's aggregate is settled from the ledger since no webhook follows.
 async function stopRetry(message, { status, reason, exhaustedAlert = false }) {
   const isSummary = message.template_key === 'service.visit_summary';
+  const storedReason = providerOutcomeWasUncertain(message)
+    ? message.error_message
+    : (status === 'failed' ? `${emailTemplates.PROVIDER_REQUEST_NOT_STARTED_PREFIX}${reason}`.slice(0, 1000) : reason);
   const settle = async (trx) => {
     const [row] = await trx('email_messages')
       .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-      .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
+      .update({ status, error_message: storedReason,
+        provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
       .returning('*');
     if (row && isSummary) {
       // The ledger terminalization and the summary settlement commit
@@ -300,7 +319,7 @@ async function retrySummaryThroughHandoff(message, dispatchToProvider, state) {
     }
     if (!state.dispatchStarted) {
       // Fail closed, the same way an unreadable suppression ledger does.
-      await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`));
+      await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`), new Date(), { providerAttempted: false });
       return { outcome: { sent: false, error: err } };
     }
     logger.warn(`[email-provider-retry] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
@@ -361,7 +380,7 @@ async function retryOne(message) {
     suppression = await activeSuppressionForMessage(message);
   } catch (err) {
     // Fail closed: never send when the suppression ledger cannot be checked.
-    await markRetryFailure(message, new Error(`Suppression check failed: ${err.message}`));
+    await markRetryFailure(message, new Error(`Suppression check failed: ${err.message}`), new Date(), { providerAttempted: false });
     return { sent: false, error: err };
   }
   if (suppression) {
@@ -483,7 +502,7 @@ async function retryOne(message) {
       await markRetryUncertain(message, err).catch((again) => logger.error(`[email-provider-retry] uncertain settlement failed twice for ${message.id}: ${again.message}`));
       return { sent: false, uncertain: true, error: err };
     }
-    await markRetryFailure(message, err);
+    await markRetryFailure(message, err, new Date(), { providerAttempted: state.dispatchStarted });
     return { sent: false, error: err };
   }
 }
@@ -513,6 +532,7 @@ module.exports = {
   HANDOFF_PENDING,
   RETRY_DELAYS_MS,
   MAX_RETRIES,
+  providerOutcomeWasUncertain,
   asArray,
   isProviderBlockedEvent,
   isTransactionalRetryEligible,

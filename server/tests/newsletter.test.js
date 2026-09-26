@@ -1508,6 +1508,14 @@ describe('email template send history webhook updates', () => {
     });
   });
 
+  test('a later provider block cannot erase an earlier unknown provider outcome', () => {
+    const prior = 'Provider outcome unknown: earlier request timed out';
+    expect(computeEmailMessageEventUpdates({ event: 'blocked', response: 'later definite block' }, fresh({
+      recipient_email_snapshot: 'customer@example.com', subject_snapshot: 'Tracked email',
+      suppression_group_key_snapshot: 'service_operational', provider_retry_count: 1, error_message: prior,
+    }), now)).toMatchObject({ status: 'failed', error_message: prior });
+  });
+
   test('complaints and unsubscribes update customer-facing send history status', () => {
     expect(computeEmailMessageEventUpdates({ event: 'spamreport' }, fresh(), now)).toEqual({
       status: 'spam_report',

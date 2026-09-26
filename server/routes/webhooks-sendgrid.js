@@ -251,6 +251,7 @@ async function handleEvent(ev) {
       })
       .first()
     : null;
+  let suppressionOnlyEmailMessage = null;
   // Fallback: tracked sends carry custom_args.email_message_id (+ send_attempt_token),
   // echoed on every event. If the X-Message-Id isn't bound yet (a webhook can race
   // the post-send provider_message_id write), resolve the row by that id and backfill.
@@ -260,13 +261,18 @@ async function handleEvent(ev) {
   // send_attempt_token matches the row's current token. Otherwise a delayed event
   // from a prior attempt could mis-terminalize the row or mis-trigger recovery.
   if (!emailMessage && !newsletterDelivery && !automationSend && ev.email_message_id) {
-    const candidate = await db('email_messages')
+    const candidateById = await db('email_messages')
       .where({ id: String(ev.email_message_id) })
-      .modify((q) => {
-        if (email) q.whereRaw('LOWER(recipient_email_snapshot) = ?', [String(email).toLowerCase()]);
-      })
       .first()
       .catch(() => null);
+    // A signed event's own custom-arg id plus provider-evidenced email remain
+    // trustworthy address-level evidence even after a newer retry has rebound
+    // this row or changed its recipient snapshot. The event email is required
+    // so suppression can never fall back to that newer destination.
+    suppressionOnlyEmailMessage = candidateById && email ? candidateById : null;
+    const candidateEmailMatches = candidateById && (!email
+      || String(candidateById.recipient_email_snapshot || '').toLowerCase() === String(email).toLowerCase());
+    const candidate = candidateEmailMatches ? candidateById : null;
     const boundHere = candidate?.provider_message_id
       && String(candidate.provider_message_id) === String(messageId || '');
     const tokenMatches = candidate?.send_attempt_token && ev.send_attempt_token
@@ -391,6 +397,20 @@ async function handleEvent(ev) {
           .catch((err) => logger.error(`[sendgrid-webhook] recovery commit failed for ${messageId}: ${err.message}`));
       }
     }
+    return;
+  }
+  if (suppressionOnlyEmailMessage) {
+    await processWebhookEvent(ev, messageId, email, async (trx) => {
+      const snapshotGroup = await groupKeyForEmailMessage(suppressionOnlyEmailMessage, trx);
+      const asmGroup = automationSuppressionGroupKeyForEvent(ev);
+      // Keep precise streams such as marketing_referral when they agree with
+      // SendGrid's broad marketing/service ASM lane. If a rewritten row now
+      // points at the other lane, prefer the signed event's lane.
+      const sameLane = !asmGroup || !snapshotGroup
+        || String(asmGroup).startsWith('marketing_') === String(snapshotGroup).startsWith('marketing_');
+      const groupKey = sameLane ? (snapshotGroup || asmGroup) : asmGroup;
+      await recordEmailSuppressionForEvent(ev, suppressionOnlyEmailMessage, groupKey, eventOccurredAt(ev), trx);
+    });
     return;
   }
   // Fully untracked send (direct sendgrid.sendOne callers) — no ledger row to
@@ -608,12 +628,15 @@ function eventOccurredAt(ev, fallback = new Date()) {
 
 function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
   if (providerRetry.isProviderBlockedEvent(ev)) {
+    const providerReason = (ev.reason || ev.response || ev.type || '').toString().slice(0, 1000);
     return {
       // Provider/IP/content rejection, not a bad recipient address. `failed`
       // remains retryable when the owning workflow runs again and, unlike
       // `bounced`, does not claim that the mailbox itself is invalid.
       status: 'failed',
-      error_message: (ev.reason || ev.response || ev.type || '').toString().slice(0, 1000),
+      error_message: providerRetry.providerOutcomeWasUncertain(message)
+        ? message.error_message
+        : providerReason,
       ...providerRetry.retryStateForProviderBlock(message, now),
       updated_at: now,
     };
@@ -1068,5 +1091,6 @@ module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
 module.exports.handleNewsletterEvent = handleNewsletterEvent;
 module.exports.handleEmailMessageEvent = handleEmailMessageEvent;
+module.exports.handleEvent = handleEvent;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;
 module.exports.shouldRecordNewsletterSuppression = shouldRecordNewsletterSuppression;

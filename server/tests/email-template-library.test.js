@@ -992,7 +992,8 @@ describe('email template library rendering', () => {
     ],
     [
       'an exhausted uncertain row',
-      { status: 'failed', provider_retry_count: 3, provider_retry_exhausted_at: new Date() },
+      { status: 'failed', provider_retry_count: 3, provider_retry_exhausted_at: new Date(),
+        error_message: 'Provider outcome unknown: socket closed after request' },
       { deliveryOutcome: 'uncertain', reason: 'provider_retry_exhausted' },
     ],
   ])('sendTemplate holds %s for the provider retry rail', async (_label, state, expected) => {
@@ -1021,6 +1022,31 @@ describe('email template library rendering', () => {
       },
     });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('sendTemplate replays an exhausted row that durably proves no provider request started', async () => {
+    const exhaustedAt = new Date('2026-09-26T06:00:00Z');
+    const failed = { id: 'msg-pre-provider-exhausted', status: 'failed', provider_retry_count: 3,
+      provider_retry_exhausted_at: exhaustedAt, send_attempt_token: 'old-token',
+      error_message: 'Provider request not started: unblock timed out', idempotency_key: 'retry:pre-provider' };
+    const queued = { ...failed, status: 'queued', send_attempt_token: 'new-token' };
+    const sent = { ...queued, status: 'sent', provider_message_id: 'sg-replay' };
+    const claim = chain({ returning: [queued] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [chain({ first: failed }), claim, chain({ returning: [sent] })],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-replay' });
+
+    await expect(sendEstimate(failed.idempotency_key)).resolves.toMatchObject({ sent: true });
+    expect(claim.where).toHaveBeenCalledWith({ provider_retry_exhausted_at: exhaustedAt });
+    expect(claim.where).toHaveBeenCalledWith({ error_message: failed.error_message });
+    expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued', provider_retry_count: 0, provider_retry_next_at: null, provider_retry_exhausted_at: null,
+    }));
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
   });
 
   test.each([

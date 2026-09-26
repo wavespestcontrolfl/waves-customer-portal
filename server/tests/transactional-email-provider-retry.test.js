@@ -7,6 +7,8 @@ jest.mock('../services/sendgrid-mail', () => ({
   sendOne: jest.fn(),
 }));
 jest.mock('../services/email-template-library', () => ({
+  PROVIDER_REQUEST_NOT_STARTED_PREFIX: 'Provider request not started: ',
+  PROVIDER_OUTCOME_UNKNOWN_PREFIX: 'Provider outcome unknown: ',
   loadTemplateByKey: jest.fn(),
   activeSuppressionFor: jest.fn(),
   redactEmailAddresses: jest.fn((value) => String(value).replace(/\b[^\s@]+@[^\s@]+\b/g, '[redacted-email]')),
@@ -165,7 +167,7 @@ describe('transactional email provider retry classification', () => {
       .toHaveBeenCalledWith(expect.objectContaining({ id: 'message-1', template_key: 'service.visit_summary' }), db);
   });
 
-  test('a failure clearing the provider block before the visit summary request keeps the ordinary retry schedule', async () => {
+  test('an exhausted failure before provider dispatch records durable definitely-unsent evidence', async () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
@@ -176,10 +178,71 @@ describe('transactional email provider retry classification', () => {
     emailTemplates.activeSuppressionFor.mockResolvedValue(null);
     sendgrid.clearBlockedAddress.mockRejectedValueOnce(new Error('unblock timed out'));
     const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
-      send_attempt_token: 'attempt-5', provider_retry_count: 0 });
+      send_attempt_token: 'attempt-5', provider_retry_count: retry.MAX_RETRIES });
     expect(await retry.retryOne(stored)).toMatchObject({ sent: false });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: expect.any(Date) }));
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null,
+      provider_retry_exhausted_at: expect.any(Date), error_message: expect.stringMatching(/^Provider request not started: /) }));
+  });
+
+  test('an exhausted provider request records durable uncertain evidence', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValueOnce({ cleared: true });
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('socket closed'));
+
+    await expect(retry.retryOne(message({ send_attempt_token: 'attempt-ambiguous',
+      provider_retry_count: retry.MAX_RETRIES }))).resolves.toMatchObject({ sent: false });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: null,
+      provider_retry_exhausted_at: expect.any(Date), error_message: expect.stringMatching(/^Provider outcome unknown: /) }));
+  });
+
+  test('a later pre-send exhaustion cannot erase an earlier unknown provider outcome', async () => {
+    const chain = {};
+    const writes = [];
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn((data) => { writes.push(data); return chain; });
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValueOnce({ cleared: true });
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('socket closed after request'));
+
+    await retry.retryOne(message({ send_attempt_token: 'attempt-unknown', provider_retry_count: 1 }));
+    const firstFailure = writes.find((data) => data.status === 'failed');
+    expect(firstFailure).toMatchObject({ provider_retry_next_at: expect.any(Date),
+      error_message: expect.stringMatching(/^Provider outcome unknown: /) });
+
+    writes.length = 0;
+    sendgrid.clearBlockedAddress.mockRejectedValueOnce(new Error('unblock failed'));
+    await retry.retryOne(message({ send_attempt_token: 'attempt-final', provider_retry_count: retry.MAX_RETRIES,
+      error_message: firstFailure.error_message }));
+    expect(writes.find((data) => data.status === 'failed')).toMatchObject({ provider_retry_next_at: null,
+      provider_retry_exhausted_at: expect.any(Date), error_message: expect.stringMatching(/^Provider outcome unknown: /) });
+  });
+
+  test('template unavailability preserves an earlier unknown provider outcome', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue(null);
+
+    await retry.retryOne(message({ send_attempt_token: 'attempt-template-missing',
+      error_message: 'Provider outcome unknown: prior timeout' }));
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed',
+      error_message: expect.stringMatching(/^Provider outcome unknown: /) }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('a visit summary retry whose bookkeeping fails after SendGrid accepted settles as uncertain, never requeued', async () => {
@@ -298,7 +361,12 @@ describe('transactional email provider retry classification', () => {
     await retry.recoverStaleClaims();
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
       error_message: expect.stringMatching(/^Provider outcome unknown/) }));
-    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ error_message: 'Interrupted provider retry claim recovered' }));
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      error_message: expect.objectContaining({ __raw: expect.stringContaining('CASE WHEN error_message LIKE') }),
+    }));
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('CASE WHEN error_message LIKE'), [
+      'Provider outcome unknown: %', 'Interrupted provider retry claim recovered',
+    ]);
   });
 
   test('other templates never consult the visit summary fence', async () => {
