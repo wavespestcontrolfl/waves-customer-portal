@@ -4162,6 +4162,21 @@ describe('annual prepay renewal helpers', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  // Fallback-audit P1: each termite sub-pass is isolated — a failing
+  // obligation candidate query never skips the escalation safety nets.
+  test('runTermiteNoticePass: a failing obligation-candidate query still runs every escalation pass', async () => {
+    const failingCandidates = query();
+    failingCandidates.then = (resolve, reject) => Promise.reject(new Error('candidate query down')).then(resolve, reject);
+    const late = query({ rows: [] });
+    const undelivered = query({ rows: [] });
+    const missed = query({ rows: [] });
+    setDbQueues({ annual_prepay_terms: [failingCandidates, late, undelivered, missed] });
+    const allCols = new Proxy({}, { get: () => ({}) });
+    await expect(_private.runTermiteNoticePass('2026-09-26', allCols)).resolves.toBe(0);
+    expect(late.whereNotNull).toHaveBeenCalled();
+    expect(missed.where).toHaveBeenCalled();
+  });
+
   // Codex #4921 r4 P1: a transient columnInfo() failure used to be cached as
   // {} for the life of the process, silently disabling every column-gated
   // path until a restart.

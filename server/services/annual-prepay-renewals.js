@@ -6688,38 +6688,45 @@ async function escalateMissedNotice(term) {
 // genuinely unexpected error — a missing column is already excluded by the
 // readiness gate) must never skip the unrelated generic 30/15/7 loop.
 // Returns how many notices went out (or were recovered).
-async function runTermiteNoticePass(today, termCols) {
-  let sent = 0;
+// One termite sub-pass: its candidate query AND per-row work isolated, so a
+// failure (even the candidate query itself) never skips the independent
+// safety-net passes that follow it the same day.
+async function runTermiteSubPass(label, loadCandidates, fn) {
   try {
-    sent = await forEachTermIsolated(
-      await termiteNoticeObligationCandidates({ today }),
-      'termite notice-obligation pass failed',
-      async (term) => (await processTermiteNoticeObligations(term, today)).sent,
-    );
-    await forEachTermIsolated(
-      await termiteLateNoticeEscalationCandidates(),
-      'termite late-notice escalation retry failed',
-      retryLateNoticeEscalations,
-    );
-    // Gated on its own two columns (20260926000108) so a DB that has not
-    // run that migration yet still gets every other part of this pass.
-    if (termCols[TERMITE_45_UNDELIVERED_ESCALATION_COLUMN] && termCols[TERMITE_30_UNDELIVERED_ESCALATION_COLUMN]) {
-      await forEachTermIsolated(
-        await termiteUndeliveredNoticeEscalationCandidates({ today }),
-        'termite undelivered-notice escalation failed',
-        (term) => escalateUndeliveredRungs(term, today),
-      );
-    }
-    // Durable staff escalation, atomically deduped via notifyAdmin's own
-    // dedupeKey (never a standalone SELECT).
-    await forEachTermIsolated(
-      await termiteMissedNoticeEscalationCandidates({ today }),
-      'termite missed-notice escalation failed',
-      escalateMissedNotice,
-    );
+    return await forEachTermIsolated(await loadCandidates(), `${label} failed`, fn);
   } catch (err) {
-    logger.error(`[annual-prepay] termite notice-obligation pass aborted: ${err.message}`);
+    logger.error(`[annual-prepay] ${label} aborted: ${err.message}`);
+    return 0;
   }
+}
+
+async function runTermiteNoticePass(today, termCols) {
+  const sent = await runTermiteSubPass(
+    'termite notice-obligation pass',
+    () => termiteNoticeObligationCandidates({ today }),
+    async (term) => (await processTermiteNoticeObligations(term, today)).sent,
+  );
+  await runTermiteSubPass(
+    'termite late-notice escalation retry',
+    () => termiteLateNoticeEscalationCandidates(),
+    retryLateNoticeEscalations,
+  );
+  // Gated on its own two columns (20260926000108) so a DB that has not
+  // run that migration yet still gets every other part of this pass.
+  if (termCols[TERMITE_45_UNDELIVERED_ESCALATION_COLUMN] && termCols[TERMITE_30_UNDELIVERED_ESCALATION_COLUMN]) {
+    await runTermiteSubPass(
+      'termite undelivered-notice escalation',
+      () => termiteUndeliveredNoticeEscalationCandidates({ today }),
+      (term) => escalateUndeliveredRungs(term, today),
+    );
+  }
+  // Durable staff escalation, atomically deduped via notifyAdmin's own
+  // dedupeKey (never a standalone SELECT).
+  await runTermiteSubPass(
+    'termite missed-notice escalation',
+    () => termiteMissedNoticeEscalationCandidates({ today }),
+    escalateMissedNotice,
+  );
   return sent;
 }
 
@@ -7285,6 +7292,7 @@ module.exports = {
   // schedule is built from (codex r17 on #4786).
   inferCoverageCadence,
   _private: {
+    runTermiteNoticePass,
     noticeWitnessColumn,
     PENDING_COMPLETION_REVERSAL_IDENTITIES,
     dateOnly,
