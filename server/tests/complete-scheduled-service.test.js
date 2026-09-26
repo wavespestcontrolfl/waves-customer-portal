@@ -36,6 +36,14 @@ const {
 const completionObservationCatalog = require('../../shared/service-completion-observations.json');
 const { etDateString } = require('../utils/datetime-et');
 
+const TREE_SHRUB_VISIBLE_STRESS_IDS = [
+  'yellow-foliage', 'discolored-foliage', 'leaf-spots', 'leaf-chewing',
+  'distorted-growth', 'premature-leaf-drop', 'sparse-canopy', 'branch-dieback',
+  'deadwood', 'wilted-foliage', 'sticky-sooty-coating',
+  'trunk-damage', 'bark-cracking', 'frond-discoloration', 'dead-fronds',
+  'abnormal-new-growth',
+];
+
 const SERVICE_ID = '00000000-0000-4000-8000-000000000101';
 const TECH_ID = '00000000-0000-4000-8000-000000000102';
 const actor = { techRole: 'technician', technicianId: TECH_ID };
@@ -122,12 +130,18 @@ describe('customer-safe routine completion observations', () => {
     ['exterior', ['no-live-exterior', 'live-exterior']],
     ['trend', ['activity-reduced', 'activity-increased']],
   ])('rejects opposite activity observations for the same %s scope', async (_scope, ids) => {
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
     const observations = completionObservationCatalog.recurring_pest
       .filter(([id]) => ids.includes(id))
       .map(([, label]) => label);
     const result = await complete({ structuredObservations: observations });
     expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
-    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+    expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'fixture-attempt' }),
+      expect.objectContaining({ message: 'conflicting_structured_observations' }),
+      db,
+    );
   });
 
   test('the completion path rejects arbitrary text submitted as a routine structured observation', async () => {
@@ -136,20 +150,36 @@ describe('customer-safe routine completion observations', () => {
     const result = await complete({ structuredObservations: ['Technician-only custom note.'] });
 
     expect(result).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
+    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'fixture-attempt' }),
+      expect.objectContaining({ message: 'invalid_structured_observation' }),
+      db,
+    );
   });
 
-  test.each([false, true])('rejects contradictory tree stress observations before claiming completion: typed=%s', async (typed) => {
+  test.each(TREE_SHRUB_VISIBLE_STRESS_IDS)('rejects no visible plant stress with the explicit %s symptom on the production path', async (stressId) => {
     service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
     resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
-      serviceKey: 'tree_shrub_6week', ...(typed ? { findingsType: 'tree_shrub' } : {}),
+      serviceKey: 'tree_shrub_6week',
     });
     const result = await complete({
       structuredObservations: completionObservationCatalog.tree_shrub
-        .filter(([id]) => ['no-visible-stress', 'wilted-foliage'].includes(id)).map(([, label]) => label),
-      ...(typed ? { structuredFindings: { type: 'tree_shrub', values: { plant_groups: ['Shrubs'], landscape_condition: 'Good' } } } : {}),
+        .filter(([id]) => ['no-visible-stress', stressId].includes(id)).map(([, label]) => label),
     });
     expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
-    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+    expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  });
+
+  test.each(['scale-like-insects', 'live-insects', 'root-exposure', 'fungal-like-growth', 'dry-soil', 'saturated-soil', 'standing-water', 'uneven-irrigation'])('does not treat %s as a visible plant-stress contradiction', async (conditionId) => {
+    service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'tree_shrub_6week' });
+    const result = await complete({
+      structuredObservations: completionObservationCatalog.tree_shrub
+        .filter(([id]) => ['no-visible-stress', conditionId].includes(id)).map(([, label]) => label),
+    });
+    expect(result.body?.code).not.toBe('conflicting_structured_observations');
   });
 
   test('the completion path rejects a routine observation on typed and specialty closeouts', async () => {
@@ -208,6 +238,40 @@ describe('customer-safe routine completion observations', () => {
 
     expect(result.body?.code).not.toBe('invalid_structured_observation');
     expect(result).toMatchObject({ status: 400, body: { code: 'tree_shrub_typed_compliance' } });
+  });
+
+  test('a lost-response retry replays the accepted completion after its observation profile changes', async () => {
+    const acceptedObservation = completionObservationCatalog.recurring_pest[0][1];
+    const payload = { success: true, serviceRecordId: 'accepted-record' };
+    const currentProfile = {
+      serviceKey: 'one_time_pest_control', billingType: 'one_time', completionMode: 'service_report',
+    };
+    expect(completionStructuredObservationAllowlist({
+      reportServiceLine: 'pest', completionProfile: currentProfile,
+    }).has(acceptedObservation)).toBe(false);
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce(currentProfile);
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+
+    await expect(complete({ idempotencyKey: 'lost-response-key', structuredObservations: [acceptedObservation] }))
+      .resolves.toEqual({ status: 200, body: payload });
+    expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+  });
+
+  test('a tampered same-key retry reaches the request-hash conflict before current observation validation', async () => {
+    const payload = { code: 'completion_idempotency_conflict', error: 'Completion payload changed.' };
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'conflict', status: 409, payload });
+
+    await expect(complete({ idempotencyKey: 'accepted-key', structuredObservations: ['Tampered custom finding.'] }))
+      .resolves.toEqual({ status: 409, body: payload });
+    expect(attempts.hashCompletionRequest).toHaveBeenCalledWith(expect.objectContaining({
+      structuredObservations: ['Tampered custom finding.'],
+    }));
+    expect(attempts.claimCompletionAttempt).toHaveBeenCalledWith({
+      serviceId: SERVICE_ID,
+      idempotencyKey: 'accepted-key',
+      requestHash: 'synthetic-request-hash',
+    }, db);
+    expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
   });
 });
 

@@ -8,6 +8,28 @@ const ROUTINE_SERVICE_OBSERVATIONS = Object.freeze(Object.fromEntries(
   ]),
 ));
 
+// These rows explicitly describe a visible plant symptom, damage, or decline.
+// Pest signs/presence, surface roots, nearby fungal growth, soil
+// and irrigation conditions can coexist with a plant with no visible stress.
+const TREE_SHRUB_VISIBLE_STRESS_IDS = new Set([
+  'yellow-foliage',
+  'discolored-foliage',
+  'leaf-spots',
+  'leaf-chewing',
+  'distorted-growth',
+  'premature-leaf-drop',
+  'sparse-canopy',
+  'branch-dieback',
+  'deadwood',
+  'wilted-foliage',
+  'sticky-sooty-coating',
+  'trunk-damage',
+  'bark-cracking',
+  'frond-discoloration',
+  'dead-fronds',
+  'abnormal-new-growth',
+]);
+
 function observationsForRoutineService(family) {
   return Object.prototype.hasOwnProperty.call(ROUTINE_SERVICE_OBSERVATIONS, family)
     ? ROUTINE_SERVICE_OBSERVATIONS[family]
@@ -30,11 +52,12 @@ function conflictingRoutineObservations(observations = []) {
   if (trends.every((label) => selected.has(label))) {
     return 'Choose either reduced or increased activity compared with the previous documented visit.';
   }
-  const plantStress = catalog.tree_shrub
-    .filter(([id]) => id === 'no-visible-stress' || id === 'wilted-foliage')
-    .map(([, label]) => label);
-  if (plantStress.every((label) => selected.has(label))) {
-    return 'Choose either no visible plant stress or wilted foliage for the inspected plants.';
+  const noVisiblePlantStress = catalog.tree_shrub.find(([id]) => id === 'no-visible-stress')?.[1];
+  const visiblePlantStress = catalog.tree_shrub
+    .filter(([id]) => TREE_SHRUB_VISIBLE_STRESS_IDS.has(id))
+    .find(([, label]) => selected.has(label));
+  if (selected.has(noVisiblePlantStress) && visiblePlantStress) {
+    return 'Choose either no visible plant stress or a visible plant stress or symptom finding for the inspected plants.';
   }
   return null;
 }
