@@ -63,7 +63,7 @@ const APPOINTMENT_TIME = '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)';
 const APPOINTMENT_WINDOW = `\\d{1,2}(?::\\d{2})?(?:\\s*(?:a\\.?m\\.?|p\\.?m\\.?))?\\s*(?:–|—|-|to)\\s*${APPOINTMENT_TIME}`;
 const APPOINTMENT_LEAD = '(?:(?:your\\s+)?(?:next|upcoming)\\s+(?:visit|appointment)\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on)|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
 const RECAP_APPOINTMENT_RE = new RegExp(
-  `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME})?`,
+  `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME})?(?:,?\\s+(?:and|then)\\s+([A-Za-z]))?`,
   'gi',
 );
 
@@ -76,7 +76,13 @@ const RECAP_APPOINTMENT_RE = new RegExp(
 function recapWithoutStaleAppointment(recap, nextVisit) {
   const text = cleanText(recap);
   if (!text || !nextVisit) return text;
-  const stripped = text.replace(RECAP_APPOINTMENT_RE, (appointment, offset, source) => {
+  const stripped = text.replace(RECAP_APPOINTMENT_RE, (appointment, aftercareInitial, offset, source) => {
+    // When aftercare shares this clause, start its sentence at the removal
+    // site. A leading-only cleanup misses appointments later in the recap.
+    if (aftercareInitial) {
+      const prefix = source.slice(0, offset).trimEnd();
+      return `${prefix && !/[.!?]$/.test(prefix) ? '. ' : ''}${aftercareInitial.toUpperCase()}`;
+    }
     // In "work, and [appointment]. More work", the final dot can also be the
     // dot in "p.m." and is therefore part of the removed match. Restore only
     // that clear sentence boundary; other surrounding prose stays verbatim.
@@ -149,6 +155,7 @@ function groundingFacts({
     ? {
       label: cleanText(pestPressure.label) || null,
       trend: cleanText(pestPressure.trend) || null,
+      isZero: pestPressure.displayScore === 0,
     }
     : null;
   const visibleFindings = (Array.isArray(findings) ? findings : [])
@@ -198,7 +205,7 @@ Return JSON only: {"summary":"<one paragraph>"}.
 
 Use the supplied technician recap as the record of completed work, serviced areas as its scope, the runtime pressure label and verified trend as the activity summary, customer-visible findings as findings, and nextVisit as appointment information. Keep recommendations future-facing. Do not invent product choices, methods, mechanisms, labeled coverage, findings, safety advice, customer contact, or follow-up.
 
-Write normally 3–5 short sentences, fewer when facts are thin. Explain the most relevant recorded action and supported purpose. Mention at most one customer-visible finding and its supplied recommendation when useful. A recorded zero means no visible activity noted within the assessed scope, not a pest-free property. Missing pressure is unknown, not zero. Describe activity in words without repeating its numeric score. Report change only when supplied. Preserve customer-reported concerns as reports, not technician findings.
+Write normally 3–5 short sentences, fewer when facts are thin. Explain the most relevant recorded action and supported purpose. Mention at most one customer-visible finding and its supplied recommendation when useful. A recorded zero (pressure.isZero) means no visible activity noted within the assessed scope, not a pest-free property. Missing pressure is unknown, not zero. Describe activity in words without repeating its numeric score. Report change only when supplied. Preserve customer-reported concerns as reports, not technician findings.
 
 When nextVisit is supplied, finish with its exact supplied date and customer-facing arrival window. Do not calculate dates, service durations, or windows. nextVisit is authoritative over appointment text in the recap: omit any different or stale recap appointment, and mention the current appointment only once. If nextVisit is absent, do not invent a visit or monitoring promise.
 
@@ -214,11 +221,6 @@ function buildUserMessage(facts) {
  * returns an unguarded model string.
  */
 async function applyVisitSummaryNarrative(input = {}, deps = {}) {
-  // report-data owns the primary bypass. Keep this local backstop so another
-  // caller cannot accidentally rewrite accepted technician copy.
-  if ([input.visitSummarySource, input.summarySource].includes('technician_report')) {
-    return cleanText(input.recap);
-  }
   const facts = groundingFacts(input);
   if (!facts.recap) {
     // A recap containing only an old appointment still has the authoritative

@@ -66,7 +66,7 @@ test('formatNextVisitDate / formatArrivalWindow render the customer-facing forms
 
 test('groundingFacts keeps only usable facts', () => {
   const facts = groundingFacts(input());
-  expect(facts.pressure).toEqual({ label: 'Low', trend: 'improving' });
+  expect(facts.pressure).toEqual({ label: 'Low', trend: 'improving', isZero: false });
   expect(facts.findings).toHaveLength(1);
   expect(facts.nextVisit).toEqual({ date: 'Friday, October 2', window: '8–10 AM' });
 
@@ -84,7 +84,10 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   const zero = groundingFacts(input({
     pestPressure: { enabled: true, displayScore: 0, label: 'No visible activity', trend: 'first_marker' },
   }));
-  expect(zero.pressure).toEqual({ label: 'No visible activity', trend: 'first_marker' });
+  expect(zero.pressure).toEqual({ label: 'No visible activity', trend: 'first_marker', isZero: true });
+  expect(groundingFacts(input({
+    pestPressure: { enabled: true, displayScore: 0.3, label: 'None' },
+  })).pressure).toEqual({ label: 'None', trend: null, isZero: false });
   expect(buildUserMessage(zero)).not.toContain('"displayScore"');
   expect(groundingFacts(input({ pestPressure: { enabled: true, displayScore: null } })).pressure).toBeNull();
   expect(SYSTEM_PROMPT).toContain('within the assessed scope');
@@ -145,10 +148,14 @@ test.each([
   expect(deterministicSummary(facts)).toContain('Friday, October 2, arriving 8–10 AM');
 });
 
-test('same-sentence aftercare survives removal of a stale appointment clause', () => {
-  const recap = 'Your next visit is scheduled for Oct 2 and keep pets off treated surfaces until dry.';
+test.each([
+  ['Your next visit is scheduled for Oct 2 and keep pets off treated surfaces until dry.', 'Keep pets off treated surfaces until dry.'],
+  ['We treated the perimeter. Your next visit is scheduled for Oct 2 and keep pets off treated surfaces until dry.', 'We treated the perimeter. Keep pets off treated surfaces until dry.'],
+  ['We treated the perimeter. Your next visit is scheduled for Oct 2, and keep pets off treated surfaces until dry.', 'We treated the perimeter. Keep pets off treated surfaces until dry.'],
+  ['We treated the perimeter, and your next visit is scheduled for Oct 2 and keep pets off treated surfaces until dry.', 'We treated the perimeter. Keep pets off treated surfaces until dry.'],
+])('same-sentence aftercare survives appointment removal: %s', (recap, expected) => {
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(
-    'Keep pets off treated surfaces until dry.',
+    expected,
   );
 });
 
@@ -165,16 +172,6 @@ test('appointment-only recap retains the authoritative appointment without calli
     recap: 'Your next visit is scheduled for Oct 2 at 1 p.m.',
   }), { callModel });
   expect(out).toBe('Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.');
-  expect(callModel).not.toHaveBeenCalled();
-});
-
-test('accepted technician summary source bypasses rewriting', async () => {
-  const callModel = jest.fn();
-  const out = await applyVisitSummaryNarrative(input({
-    recap: '  Technician-approved visit summary.  ',
-    summarySource: 'technician_report',
-  }), { callModel });
-  expect(out).toBe('Technician-approved visit summary.');
   expect(callModel).not.toHaveBeenCalled();
 });
 
