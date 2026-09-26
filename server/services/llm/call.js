@@ -27,6 +27,7 @@
 
 const logger = require('../logger');
 const { PROVIDER } = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
 const agentContext = require('../agent-control/context');
 // Top-level (not lazy) so the ledger shares this module's agent-control
 // context instance; every use below is wrapped so it can never break a call.
@@ -505,14 +506,20 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
   const content = [...withImageLabels(images, toAnthropicImage, (label) => ({ type: 'text', text: label })),
     ...documents.map((doc) => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data } }))];
   if (text) content.push({ type: 'text', text });
-  const req = { model, max_tokens: maxTokens, messages: [{ role: 'user', content }] };
+  // The wire cap clears always-on thinking (anthropic-wire.js); the caller's
+  // maxTokens still sizes the reply it asked for.
+  const req = { model, max_tokens: anthropicMaxTokens(model, maxTokens), messages: [{ role: 'user', content }] };
   // Ephemeral cache breakpoint on the system prompt (tools render before
   // system, so this caches both). Repeat callers with the same prompt reuse
   // it at ~0.1x input price; prompts under the model's cacheable minimum
   // are silently not cached — harmless.
   if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
   if (tools) req.tools = tools;
-  if (jsonMode && jsonSchema) req.output_config = { format: { type: 'json_schema', schema: anthropicSchema(jsonSchema) } };
+  const outputConfig = {};
+  if (jsonMode && jsonSchema) outputConfig.format = { type: 'json_schema', schema: anthropicSchema(jsonSchema) };
+  const effort = anthropicEffortFor(model);
+  if (effort) outputConfig.effort = effort;
+  if (Object.keys(outputConfig).length) req.output_config = outputConfig;
   return req;
 }
 
@@ -564,7 +571,7 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
       : await client.messages.create(req)) || {};
     const out = anthropicText(resp);
     const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
-    const code = anthropicVerdict(resp, maxTokens);
+    const code = anthropicVerdict(resp, req.max_tokens);
     if (code) return failedLeg(base, served, code);
     return settleLeg(base, served, out, jsonMode, { model, usage: served.usage, response: resp });
   } catch (err) {

@@ -30,11 +30,14 @@ silently (broken payments, SMS, GPS, email-event sync).
 
 These are automated server-to-server (or first-party app) callers that **cannot solve a
 JS/CAPTCHA challenge** — a bot/WAF rule would black-hole them. Their app-layer auth
-**varies** (see the **Auth in app** column), so the edge bypass is not uniformly backed
-by a replay-safe signature:
+**varies** (see the **Auth in app** column), so the edge bypass is not uniformly
+backed by the same authentication or replay controls:
 
-- **Provider signature (replay-safe):** Stripe (`/api/stripe/webhook`), SendGrid, Resend,
-  Twilio. These are the strongest — a forged request fails the signature check.
+- **Provider signature-authenticated:** Stripe (`/api/stripe/webhook`), SendGrid,
+  Resend, and Twilio. When signature enforcement is enabled, validation
+  authenticates the signed request contents. Freshness, replay rejection, and
+  duplicate-side-effect protection depend on the provider and endpoint;
+  Twilio's shared signature middleware has no replay-rejection check.
 - **First-party bearer:** Stripe Terminal (`/api/stripe/terminal/*`) — a scoped Bearer
   JWT issued to the WavesPay iOS app, not an external provider.
 - **Shared-secret header (no replay protection):** Bouncie and the voice-agent callback.

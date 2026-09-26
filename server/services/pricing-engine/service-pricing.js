@@ -310,7 +310,10 @@ function resolveTermiteFootprint(property = {}, options = {}) {
     manualValue,
     missingReason: 'missing_termite_footprint',
     invalidReason: 'invalid_termite_footprint',
-    propertySources: [
+    // A unit-scoped profile's footprint/homeSqFt is one unit's interior
+    // floor area — only a measurement the operator entered may price
+    // termite work (codex r3 P1 #4862).
+    propertySources: property.unitScoped === true ? [] : [
       ['property_footprint', property.footprint],
       ['property_footprint', property.footprintSqFt],
       ['property_alias', property.buildingFootprintSqFt],
@@ -387,7 +390,10 @@ function resolvePropertyPerimeter(property = {}, options = {}) {
     options.useComputedPerimeter
   );
   const perimeterSourceIsComputed = property.perimeterSource === 'computed_from_footprint';
-  const propertyPerimeter = perimeterSourceIsComputed && !allowComputedPerimeter
+  // "Estimate from footprint" cannot apply to one unit inside a building:
+  // its footprint is interior floor area, not the structure's exterior
+  // (codex r3 P1 #4862).
+  const propertyPerimeter = perimeterSourceIsComputed && (!allowComputedPerimeter || property.unitScoped === true)
     ? undefined
     : property.perimeter;
   return resolvePositiveMeasurement({
