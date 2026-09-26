@@ -39,8 +39,21 @@ const STATION_HINTS = [
 const _stationCache = { lastHour: null, lastDay: null };
 const _stationCacheTime = { lastHour: 0, lastDay: 0 };
 let _lastSnapshot = null;
-let _lastRainSnapshot = null;
 const CACHE_TTL = 15 * 60 * 1000;
+
+// getRecentRainfall()'s last-good fallback, keyed per requested coordinate
+// (not a single global) so a failure for one location never serves another
+// location's station reading, and bounded by age so a multi-hour FAWN
+// outage doesn't preserve a stale wet/dry signal indefinitely (Codex
+// review, 2026-09-26).
+const _recentRainfallCache = new Map(); // key -> { at, snapshot }
+const RAIN_FALLBACK_MAX_AGE = 6 * 60 * 60 * 1000; // 6h
+
+function coordKey({ latitude, longitude } = {}) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  return Number.isFinite(lat) && Number.isFinite(lon) ? `${lat.toFixed(2)},${lon.toFixed(2)}` : 'unknown';
+}
 
 function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
@@ -118,6 +131,36 @@ function rainfallInches(station = {}) {
   return numberOrNull(firstDefined(station.Rain_Tot, station.rainfall_in, station.precipitation));
 }
 
+// FAWN's documented temperature fields (t2m_avg, tsoil_avg) are °C, and wind
+// (ws_avg) is km/hr — confirmed live 2026-09-26 against the columns doc.
+// AirTemp_Avg / SoilTemp4_Avg / Wind_Avg / *_f / *_mph are defensive
+// fallbacks for any shape that already reports imperial units (e.g. test
+// fixtures) — never seen on the live API, so never double-converted.
+function celsiusToF(value) {
+  const c = numberOrNull(value);
+  return c != null ? (c * 9) / 5 + 32 : null;
+}
+
+function kmhToMph(value) {
+  const kmh = numberOrNull(value);
+  return kmh != null ? kmh / 1.60934 : null;
+}
+
+function tempF(station = {}) {
+  const direct = numberOrNull(firstDefined(station.AirTemp_Avg, station.air_temp, station.temp_f));
+  return direct != null ? direct : celsiusToF(station.t2m_avg);
+}
+
+function soilTempF(station = {}) {
+  const direct = numberOrNull(firstDefined(station.SoilTemp4_Avg, station.soil_temp_f));
+  return direct != null ? direct : celsiusToF(station.tsoil_avg);
+}
+
+function windMph(station = {}) {
+  const direct = numberOrNull(firstDefined(station.Wind_Avg, station.wind_mph, station.wind_speed));
+  return direct != null ? direct : kmhToMph(station.ws_avg);
+}
+
 function distanceMiles(from, to) {
   if (!from || !to) return null;
   if ([from.latitude, from.longitude, to.latitude, to.longitude].some((value) => !Number.isFinite(Number(value)))) return null;
@@ -179,11 +222,11 @@ function normalizeStationSnapshot(station) {
   const name = stationName(station) || hint?.label || 'FAWN SWFL';
   const coords = stationCoordinates(station);
   return {
-    temp_f: numberOrNull(firstDefined(station.AirTemp_Avg, station.air_temp, station.temp_f)),
+    temp_f: tempF(station),
     humidity_pct: numberOrNull(firstDefined(station.RelHum_Avg, station.rh_avg, station.relative_humidity, station.humidity_pct)),
     rainfall_in: rainfallInches(station),
-    soil_temp_f: numberOrNull(firstDefined(station.SoilTemp4_Avg, station.ts4_avg, station.soil_temp_f)),
-    wind_mph: numberOrNull(firstDefined(station.Wind_Avg, station.wind_mph, station.wind_speed)),
+    soil_temp_f: soilTempF(station),
+    wind_mph: windMph(station),
     station: name,
     station_key: hint?.key || null,
     observation_time: firstDefined(station.ObservationTime, station.observation_time, station.startTime, station.DateTime, station.datetime, station.timestamp),
@@ -233,6 +276,7 @@ const FawnWeather = {
    * Returns: { rainfall_in, station, station_key, observation_time }
    */
   async getRecentRainfall(options = {}) {
+    const key = coordKey(options);
     try {
       const data = await fetchStationRows('lastDay');
       const station = selectStation(data, options);
@@ -246,12 +290,14 @@ const FawnWeather = {
         station_key: hint?.key || null,
         observation_time: firstDefined(station.ObservationTime, station.observation_time, station.startTime, station.DateTime, station.datetime, station.timestamp),
       };
-      _lastRainSnapshot = snapshot;
+      _recentRainfallCache.set(key, { at: Date.now(), snapshot });
 
       return snapshot;
     } catch (err) {
       logger.error(`[fawn-weather] Recent-rainfall fetch failed: ${err.message}`);
-      return _lastRainSnapshot || {
+      const cached = _recentRainfallCache.get(key);
+      if (cached && Date.now() - cached.at < RAIN_FALLBACK_MAX_AGE) return cached.snapshot;
+      return {
         rainfall_in: null, station: 'unavailable', station_key: null, observation_time: null,
         error: err.message,
       };

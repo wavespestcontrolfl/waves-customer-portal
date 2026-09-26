@@ -55,6 +55,19 @@ describe('FawnWeather — real API shape', () => {
       expect(snap.rainfall_in).toBeNull();
       expect(snap.error).toMatch(/400/);
     });
+
+    test('converts t2m_avg (C), tsoil_avg (C) and ws_avg (km/hr) to F/F/mph instead of leaving them null', async () => {
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({
+          StationID: '480', t2m_avg: '25.24', tsoil_avg: '27.46', ws_avg: '9.5',
+        })],
+      }));
+      const snap = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
+      expect(snap.temp_f).toBeCloseTo(77.432, 2);
+      expect(snap.soil_temp_f).toBeCloseTo(81.428, 2);
+      expect(snap.wind_mph).toBeCloseTo(5.902, 2);
+    });
   });
 
   describe('getRecentRainfall (lastDay — meaningful rainfall total)', () => {
@@ -115,6 +128,69 @@ describe('FawnWeather — real API shape', () => {
       const snap = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
       expect(snap.rainfall_in).toBeNull();
       expect(snap.error).toMatch(/400/);
+    });
+
+    // These three exercise the bounded fallback with Date.now() mocked so a
+    // SECOND call's failure is a genuinely fresh fetch attempt (the raw
+    // station-rows cache also has a 15min TTL, keyed only by period, not by
+    // coordinate — advancing past it is what makes the second call actually
+    // hit the failing fetch mock instead of silently reusing the first
+    // call's cached rows).
+    const T0 = 1_700_000_000_000;
+
+    test('a later failure at the SAME coordinate reuses the last-good reading (bounded fallback)', async () => {
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(T0);
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({ StationID: '480', rain_sum: '1.27' })],
+      }));
+      const good = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
+      expect(good.rainfall_in).toBeCloseTo(0.5, 5);
+
+      nowSpy.mockReturnValue(T0 + 20 * 60 * 1000); // +20min: past the 15min row-cache TTL, well within the 6h fallback bound
+      global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 503 }));
+      const fallback = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
+      expect(fallback.rainfall_in).toBeCloseTo(0.5, 5);
+      expect(fallback.station).toBe('North Port');
+
+      nowSpy.mockRestore();
+    });
+
+    test('a failure for a DIFFERENT coordinate never serves another location\'s cached station reading', async () => {
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(T0);
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({ StationID: '480', rain_sum: '1.27' })],
+      }));
+      await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 }); // caches North Port
+
+      nowSpy.mockReturnValue(T0 + 20 * 60 * 1000); // past the row-cache TTL
+      global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 503 }));
+      // A coordinate never successfully fetched before — must NOT inherit
+      // the other location's cached rainfall/station.
+      const fallback = await FawnWeather.getRecentRainfall({ latitude: 27.22, longitude: -81.84 });
+      expect(fallback.rainfall_in).toBeNull();
+      expect(fallback.station).toBe('unavailable');
+
+      nowSpy.mockRestore();
+    });
+
+    test('a failure past the fallback\'s max age returns the null/error snapshot, not a stale reading', async () => {
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(T0);
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({ StationID: '480', rain_sum: '1.27' })],
+      }));
+      await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
+
+      // 7 hours later — past the 6h bound — a failure must not reuse it.
+      nowSpy.mockReturnValue(T0 + 7 * 60 * 60 * 1000);
+      global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 503 }));
+      const fallback = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
+      expect(fallback.rainfall_in).toBeNull();
+      expect(fallback.station).toBe('unavailable');
+
+      nowSpy.mockRestore();
     });
   });
 });
