@@ -312,6 +312,26 @@ describe('unified 30d cooldown (HOLD)', () => {
     expect(verdict.reason).toBe('recent_prepay_notice');
   });
 
+  // Codex #4921 fallback-audit P1: the termite notice columns come from
+  // newer migrations — queried only once present, so a rolling deploy that
+  // runs this before them never throws for every customer.
+  test('termite renewal-notice columns join the cooldown only when present', async () => {
+    const { _resetNoticeColumnCacheForTests } = require('../services/campaign-drafts-gate');
+    const present = new Set(['notice_45_sent_at']);
+    db.schema = { hasColumn: jest.fn(async (_t, c) => present.has(c)) };
+    _resetNoticeColumnCacheForTests();
+    enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
+    enqueue('message_drafts', { first: undefined });
+    enqueue('sms_log', { first: undefined });
+    enqueue('annual_prepay_terms', { first: undefined });
+    await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
+    const apt = builders.find((b) => b._table === 'annual_prepay_terms');
+    const cols = apt.orWhere.mock.calls.map((c) => c[0]);
+    expect(cols).toEqual(['notice_30_sent_at', 'notice_15_sent_at', 'notice_7_sent_at', 'notice_45_sent_at']);
+    delete db.schema;
+    _resetNoticeColumnCacheForTests();
+  });
+
   test('excludeDraftId: the draft being approved never trips its own cooldown', async () => {
     enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
     const verdict = await evaluateCampaignSendGate({
