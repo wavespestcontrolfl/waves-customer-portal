@@ -121,13 +121,17 @@ const FALLBACK_RESULT = Object.freeze({
 // paired with a reaction word (plain "ants bite" stays a normal fallback).
 // English + Spanish — the surface explicitly supports Spanish visitors, so
 // every deterministic guard reads both languages.
-const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|swallow(?:ed|ing)|ingest(?:ed|ing)|trag[oó]|ingiri[oó]|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
+const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
 const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?|picad(?:o|a|ura|uras)|pic[oó]|mordedura?s?|mordi[dó]\w*|mordi[oó])\b/i;
 const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|respir\w*|beb[eé])\b/i;
 
+// Swallowing/ingesting is an emergency only when a person or pet did it —
+// "Have the ants ingested the bait?" is pest behavior, not a poisoning.
+const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\b[^.?!]{0,40}?\b(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?)\b|\b(?:me\s+|se\s+)?trag(?:u[eé]|[oó])(?![a-zñáéíóú])|\bingir(?:i[oó]|i[eé]ron|[ií])(?![a-zñáéíóú])/i;
+
 function looksLikeEmergency(text) {
   const t = String(text || '');
-  return EMERGENCY_RE.test(t) || (BITE_STING_RE.test(t) && REACTION_RE.test(t));
+  return EMERGENCY_RE.test(t) || INGESTION_RE.test(t) || (BITE_STING_RE.test(t) && REACTION_RE.test(t));
 }
 
 const EMERGENCY_FALLBACK_RESULT = Object.freeze({
@@ -286,21 +290,25 @@ const NEGATED_HAZARD_ES_RE = /\b(?:no|sin|ning[uú]n|ninguna|cero|nunca|libre\s+
 function safetyClaimIn(text) {
   return POSITIVE_SAFETY_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
 }
-// In a pest-control chat a leading pronoun or a missing subject stands for
-// the treatment; an explicit other subject ("The repaired screen is safe for
-// pets", "Ladybugs that are generally safe…") does not.
-const PRONOUN_LEAD_RE = /^(?:(?:yes|yeah|yep|absolutely|sure|no|and|but|so|well|of\s+course)[,!]?\s+)*(?:it|it['’]s|this|they|they['’]re|everything|all\s+of\s+(?:it|them))\b/i;
-const SUBJECTLESS_SAFE_RE = /^(?:(?:yes|yep|absolutely|sure)[,!]?\s*)?(?:(?:completely|totally|perfectly|100%|very)\s+)?(?:safe|harmless|non-?toxic|risk[-\s]?free)\b|^(?:s[íi][,!]?\s*)?(?:es|son|est[áa]n?)\s+(?:(?:completamente|totalmente|muy)\s+)?(?:segur|inofensiv)/i;
-// Clauses, not just sentences: "Don't worry, it's completely safe".
-function sentencesOf(text) {
+// Model typography (non-breaking / Unicode hyphens, curly quotes, NBSP) is
+// folded to ASCII once, before any matcher runs — "non‑toxic" (U+2011) must
+// read as "non-toxic".
+function foldTypography(text) {
   return String(text || '')
-    .split(/(?<=[.!?])\s+|[,;:—–]\s*|\n+/)
-    .map((part) => part.trim().replace(/^[¿¡"'“”‘’(\s]+/, ''))
-    .filter(Boolean);
+    .normalize('NFKC')
+    .replace(/\u00AD/g, '')
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
+    .replace(/[\u2018\u2019\u201B\u02BC\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201F]/g, '"')
+    .replace(/[\u00A0\u2007\u202F]/g, ' ');
 }
 
 // Any duration unit, glued to digits or not, English or Spanish.
 const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|overnight|segundos?|minutos?|horas?|d[ií]as?|semanas?|seg|h)\b/i;
+// A fixed clock time or time of day ("re-enter at 4:30 PM", "stay off the
+// lawn until noon") is the same fixed window as a duration. Judged only by
+// access wording or a timing question — "we can treat tomorrow" is booking.
+const CLOCK_TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b|\b(?:noon|midday|midnight|tonight|tomorrow|this\s+(?:morning|afternoon|evening)|sunset|sundown|dinner\s*time|bedtime|mediod[ií]a|medianoche|esta\s+(?:tarde|noche)|ma[ñn]ana|la\s+(?:tarde|noche))\b|\blas?\s+\d{1,2}(?::\d{2})?\b/i;
 // A visit / scheduling duration ("The visit takes about 45 minutes", "every
 // 21 days") — exempt only when no drying or re-entry wording is present.
 const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|inspections?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|inspecci[oó]n|cada|programad\w*)\b/i;
@@ -354,6 +362,12 @@ function durationWindow(sentence, index, length) {
 function fixedTimingClaim(reply, contextText, treatmentContext) {
   const visitorAskedTiming = ACCESS_SIGNAL_RE.test(String(contextText || ''));
   for (const sentence of String(reply || '').split(/(?<=[.!?])\s+|[;\n]+/)) {
+    const clock = CLOCK_TIME_RE.exec(sentence);
+    if (clock) {
+      const { near } = durationWindow(sentence, clock.index, clock[0].length);
+      const digitalOnly = DIGITAL_CONTEXT_RE.test(near) && !treatmentContext;
+      if (!digitalOnly && (ACCESS_SIGNAL_RE.test(near) || (visitorAskedTiming && treatmentContext))) return true;
+    }
     const re = new RegExp(DURATION_RE.source, 'gi');
     let m;
     while ((m = re.exec(sentence))) {
@@ -375,22 +389,27 @@ function fixedTimingClaim(reply, contextText, treatmentContext) {
   return false;
 }
 
-function intakeSafetyClaimSupplement(reply, contextText = '') {
-  const t = String(reply || '');
+function intakeSafetyClaimSupplement(rawReply, rawContext = '') {
+  const t = foldTypography(rawReply);
+  const contextText = foldTypography(rawContext);
   if (INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
-  const conversation = `${t}\n${contextText || ''}`;
+  // Topic, not grammar: this is a pest-control chat, so safety wording in a
+  // reply is about the treatment whatever its subject — "Our formula is safe",
+  // "Completely family-safe", "Ladybugs are generally safe". Deciding by
+  // subject never converged (each review round found a new noun or a missing
+  // one), so any blanket-safety or negated-hazard wording gets the reviewed
+  // copy, which is itself a correct answer to any of those questions.
+  if (safetyClaimIn(t)) return true;
+  const conversation = `${t}\n${contextText}`;
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(conversation);
-  if (fixedTimingClaim(t, contextText, treatmentContext)) return true;
-  if (treatmentContext && safetyClaimIn(t)) return true;
-  return sentencesOf(t).some((sentence) => SUBJECTLESS_SAFE_RE.test(sentence)
-    || (PRONOUN_LEAD_RE.test(sentence) && safetyClaimIn(sentence)));
+  return fixedTimingClaim(t, contextText, treatmentContext);
 }
 
 // A flagged reply that directs someone to emergency help keeps emergency
 // guidance (the reviewed emergency script) regardless of the model's intent
 // label — "This product is not safe to ingest; call Poison Control now."
 // must not be replaced with copy that only says to call Waves.
-const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:(?:call|contact|see|consult|reach|phone|ask)\s+(?:a\s+|your\s+|the\s+)?(?:doctor|physician|pediatrician|nurse|medical\s+(?:provider|professional)|health\s*care\s+provider)|(?:llame|consulte|contacte|vea|acuda)\s+(?:a|al)\s+(?:su\s+)?(?:m[eé]dico|doctor|pediatra)|(?<!animal\s)hospital|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
+const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:(?:call|contact|see|consult|reach|phone|ask)\s+(?:a\s+|your\s+|the\s+)?(?:doctor|physician|pediatrician|nurse|medical\s+(?:provider|professional)|health\s*care\s+provider)|(?:llame|consulte|contacte|vea|acuda)\s+(?:a|al)\s+(?:su\s+)?(?:m[eé]dico|doctor|pediatra)|(?:go|get|head|rush|drive|take\s+\S+)\s+(?:straight\s+|right\s+)?to\s+(?:the\s+|a\s+|an\s+)?(?:nearest\s+|closest\s+|local\s+)?(?:hospital|emergency\s+room)|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
 const VET_DIRECTION_RE = /\b(?:vets?|veterinarian|veterinary|animal\s+(?:hospital|poison|emergency|er)|veterinari[oa]s?|cl[ií]nica\s+veterinaria|hospital\s+veterinario)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
@@ -415,14 +434,15 @@ function scrubUnsafeClaims(result, contextText = '') {
   if (!intakeSafetyClaimSupplement(result.reply, contextText)) return result;
   // The visitor's own words count too: a flagged reply to an emergency message
   // gets the emergency script even if the model's reply names no direction.
-  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(result.reply) || looksLikeEmergency(contextText);
-  const vet = VET_DIRECTION_RE.test(result.reply);
+  const folded = foldTypography(result.reply);
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || looksLikeEmergency(foldTypography(contextText));
+  const vet = VET_DIRECTION_RE.test(folded);
   if (result.intent === 'emergency' || human || vet) {
     // Emergency guidance wins — human and/or veterinary, whichever the model
     // gave — and the turn stops offering a quote.
     const parts = [];
     if (human || (result.intent === 'emergency' && !vet)) {
-      parts.push(EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(result.reply) ? POISON_CONTROL_LINE : ''));
+      parts.push(EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(folded) ? POISON_CONTROL_LINE : ''));
     }
     if (vet) {
       parts.push(`${ANIMAL_EMERGENCY_REPLY.trim()} For an urgent pest problem at your home, call us at ${COMPANY.phone}.`);

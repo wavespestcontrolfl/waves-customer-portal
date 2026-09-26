@@ -69,9 +69,6 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
   test.each([
     'Ghost ants are common in Florida kitchens this time of year.',
     'Your technician follows the product label directions for every application.',
-    // Safety wording with an explicit non-treatment subject is pest education.
-    'The repaired screen is safe for pets.',
-    'Ladybugs are generally safe for children to handle.',
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
   });
@@ -210,9 +207,36 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     expect(scrubUnsafeClaims({ ...base, reply: 'Sí, es seguro.' }).reply).toMatch(/instrucciones de la etiqueta/);
   });
 
-  test('a relative "that" clause about a non-treatment subject is untouched', () => {
-    const reply = 'Ladybugs that are generally safe around pets are helpful in gardens.';
-    expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
+  // Topic chokepoint (Codex r10): safety wording is judged by topic, not by
+  // its grammatical subject — subject-based exemptions never converged.
+  test.each([
+    ['The repaired screen is safe for pets.', ''],
+    ['Ladybugs that are generally safe around pets are helpful in gardens.', ''],
+    ['Our formula is safe for pets.', ''],
+    ['Our solution is completely harmless.', ''],
+    ['Completely family-safe.', 'I have children'],
+    ['Our treatment is non\u2011toxic.', ''],
+    ['Our treatment is risk\u2010free.', ''],
+    ['It\u2019s pet\u00ADsafe.', ''],
+  ])('any safety wording gets the reviewed copy, whatever its subject or typography: %s', (reply, context) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions/);
+  });
+
+  test.each([
+    ['You may re-enter the treated room at 4:30 PM.', ''],
+    ['Stay off the lawn until noon.', ''],
+    ['Keep the dog inside until 3pm.', ''],
+    ['Usually by this afternoon.', 'When can I let my dog out after the treatment?'],
+    ['Puede volver a entrar a las 4:30.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
+  ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    ['We can treat your yard tomorrow.', ''],
+    ['Your technician arrives between 8 and 10 AM for the treatment.', ''],
+  ])('a booking time with no access wording is untouched: %s', (reply, context) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toBe(reply);
   });
 
   test('a lone ñ does not make an English reply Spanish', () => {
@@ -328,6 +352,21 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     );
     expect(visitor.intent).toBe('emergency');
     expect(visitor.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test.each([
+    'This treatment is not safe for cats; call a veterinary hospital.',
+    'This treatment is not safe for cats; go to the nearest animal hospital.',
+  ])('a veterinary-hospital direction is not a human emergency: %s', (reply) => {
+    const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: true });
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('911');
+  });
+
+  test('"hospital-grade" wording is not an emergency direction', () => {
+    const out = scrubUnsafeClaims({ reply: 'Our hospital-grade treatment is completely safe.', intent: 'question', service_keys: [], ready_for_quote: true });
+    expect(out.reply).toMatch(/label directions/);
+    expect(out.intent).toBe('question');
   });
 
   test('hospital direction keeps the emergency script', () => {
@@ -1151,6 +1190,10 @@ describe('looksLikeEmergency', () => {
     'reacción alérgica a picadura de abeja',
     'le pica y tiene ronchas por picaduras',
     'mordedura de araña y mucha hinchazón',
+    // ingestion by a person or pet (Codex r10 P2)
+    'My child swallowed some bait',
+    'our dog ingested the granules',
+    'mi hijo se tragó un cebo',
   ])('flags urgent/medical text: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(true);
   });
@@ -1163,6 +1206,8 @@ describe('looksLikeEmergency', () => {
     'how much for pest control?',
     'las hormigas pican en la cocina',
     'picaduras de mosquito en el patio por la tarde',
+    'Have the ants ingested the bait?',
+    'the roaches swallowed the gel bait fast',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
