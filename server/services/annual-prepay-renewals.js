@@ -3157,7 +3157,18 @@ async function termiteGraceCoversVisit(scheduledService, conn, { throwOnError = 
   const visitDate = dateOnly(scheduledService.scheduled_date) || dateOnly(scheduledService.completed_at);
   if (!visitDate) return false;
   try {
-    if (!(await annualPrepayTableExists())) return false;
+    // Codex #4971 round-4 (post-merge audit) P0: annualPrepayTableExists()
+    // catches its own probe error and CACHES false — a transient DB failure
+    // then reads as "table genuinely absent" forever (until the next cache
+    // reset), which resolves this whole function to false and lets a strict
+    // caller's charging guard bill a grace-covered visit instead of seeing
+    // the failure. A strict caller must see the probe error itself, so it
+    // propagates to the catch below and gets rethrown (same shape as the
+    // stamped branch's own direct-probe fix a few hundred lines down). Only
+    // non-strict callers keep the cached, fail-closed probe.
+    if (throwOnError) {
+      if (!(await conn.schema.hasTable('annual_prepay_terms'))) return false;
+    } else if (!(await annualPrepayTableExists())) return false;
     const term = await coveredTermsAsOf(conn, visitDate)
       .where('t.customer_id', scheduledService.customer_id)
       .where('t.status', PAYMENT_PENDING_STATUS)

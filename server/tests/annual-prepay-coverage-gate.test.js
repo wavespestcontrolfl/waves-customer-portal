@@ -157,6 +157,29 @@ describe('annualPrepayCoversVisit — fail-closed completion coverage gate', () 
     await expect(annualPrepayCoversVisit(unstampedVisit)).resolves.toBe(false);
   });
 
+  // Codex #4971 round-4 (post-merge audit) P0: annualPrepayTableExists()
+  // catches a probe error internally and caches false, so the table-exists
+  // check itself never lets a throwOnError caller see the failure — a
+  // DIFFERENT gap than the covered-term query throwing (pinned above). Pin
+  // that a throw from the schema probe ITSELF propagates under throwOnError,
+  // never silently reading as "table absent, not covered".
+  test('an unstamped visit whose termite-grace TABLE PROBE throws, under throwOnError: the probe error propagates', async () => {
+    db.schema = { hasTable: jest.fn().mockRejectedValue(new Error('schema probe unreachable')) };
+    _private.resetCachesForTests();
+    coveredQuery({ forbidQuery: true });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit, db, { throwOnError: true }))
+      .rejects.toThrow('schema probe unreachable');
+  });
+
+  test('the SAME table-probe throw, non-strict: still degrades to NOT covered (annualPrepayTableExists\' own cached fail-closed path)', async () => {
+    db.schema = { hasTable: jest.fn().mockRejectedValue(new Error('schema probe unreachable')) };
+    _private.resetCachesForTests();
+    coveredQuery({ forbidQuery: true });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit)).resolves.toBe(false);
+  });
+
   test('no-config / no-stamp visit: NOT covered (short-circuit, no query)', async () => {
     coveredQuery({ forbidQuery: true });
     await expect(annualPrepayCoversVisit(

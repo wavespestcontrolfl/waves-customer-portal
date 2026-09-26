@@ -107,6 +107,23 @@ postgres('voidInvoice({ requireUnsettled: true }) — real Postgres chokepoint',
     expect(Number(fresh.credit_applied)).toBe(249);
   });
 
+  // Codex #4971 round-4 (post-merge audit) P1: a PARTIAL credit application
+  // (customer-credit.js's auto-apply, or a partial admin apply) leaves the
+  // invoice's own status untouched (never 'prepaid') because the balance is
+  // NOT fully covered — $10 applied to a $249 invoice still leaves $239
+  // due. This is durable (won't clear on its own like an in-flight charge)
+  // but it is genuinely NOT settlement either, so it must get its OWN typed
+  // code — never silently classified as either "settled, retire" or
+  // "unsettled, void normally".
+  test('partial credit applied (some, not fully covering the total): its OWN typed refusal, never treated as settled', async () => {
+    const { invoiceId } = await insertInvoice({ status: 'sent', credit_applied: 10 });
+    await expect(InvoiceService.voidInvoice(invoiceId, { requireUnsettled: true }))
+      .rejects.toMatchObject({ code: 'INVOICE_PARTIAL_CREDIT_REFUSE_VOID' });
+    const fresh = await db('invoices').where({ id: invoiceId }).first('status', 'credit_applied');
+    expect(fresh.status).toBe('sent');
+    expect(Number(fresh.credit_applied)).toBe(10);
+  });
+
   // 'paid' and 'processing' are ALREADY refused unconditionally by
   // assertInvoiceVoidable's own pre-existing transition matrix (an
   // un-typed error, checked before requireUnsettled's own code ever

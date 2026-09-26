@@ -1685,9 +1685,17 @@ async function processGraceLapseSequence(term, conn) {
       // durable settlement, so this defers rather than retires.
       // INVOICE_SEND_IN_PROGRESS is transient (a live send claim clears in
       // seconds) — also worth a retry rather than any permanent outcome.
+      // INVOICE_PARTIAL_CREDIT_REFUSE_VOID (Codex #4971 round-4 post-merge
+      // audit P1) is neither: a partial credit is durable (won't resolve
+      // itself like an in-flight charge), but it is NOT full settlement
+      // either — some money is already committed against this invoice, so
+      // auto-voiding and restoring the credit is a decision for a human,
+      // not this sweep. Defer, never retire — this term is left open for
+      // the next scan and staff can see the bell now, not after the lapse
+      // was already marked done.
       if ([
         'INVOICE_PAYMENT_IN_FLIGHT', 'INVOICE_PROCESSING_REFUSE_VOID', 'INVOICE_SEND_IN_PROGRESS',
-        'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGE_IN_PROGRESS',
+        'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGE_IN_PROGRESS', 'INVOICE_PARTIAL_CREDIT_REFUSE_VOID',
       ].includes(err.code)) {
         logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred at the void chokepoint — invoice ${term.prepay_invoice_id}: ${err.message}`);
         await ringRenewalBell(term, 'lapse_reconciliation_pending', err.message);
@@ -1797,6 +1805,35 @@ async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
 // or a fresh bell's delivery failed) — only a truthy return may stamp the
 // leg's own exclusion column; false must stay retryable.
 async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
+  // Codex #4971 round-4 (post-merge audit) P1: the FINAL parent check
+  // right before the Stripe call (decideAndCharge's own
+  // withParentDecisionLock re-check, a few hundred lines up) correctly
+  // blocks Stripe when a cancellation wins the race against an
+  // already-claimed attempt fence — but that block leaves the successor
+  // in EXACTLY the shape this leg selects on (renewal_charge_attempted_at
+  // set, no stripe_invoice_charge_attempts row, still payment_pending),
+  // and this leg never re-checked the parent at all before delivering the
+  // draft renewal invoice — a payment demand for a renewal the customer
+  // (or staff) already cancelled. Revalidate with the SAME allow-list
+  // (resolveParentEligibility) before ANY delivery. An ineligible parent
+  // is a DURABLE outcome (a decided cancellation doesn't un-decide
+  // itself) — bell staff with the real reason and stamp the handled
+  // marker so this successor is never re-selected, but never deliver.
+  if (successor.renewed_from_term_id) {
+    const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
+    const parentEligibility = await resolveParentEligibility(conn, parent);
+    if (!parentEligibility.eligible) {
+      const belled = await ringRenewalBell(
+        successor,
+        'ineligible',
+        `the renewal charge was claimed but never reached Stripe, and the parent is no longer eligible (${parentEligibility.reason}) — no invoice sent`,
+      );
+      // Same "staff were never actually told" guard as the normal path
+      // below — a bell delivery failure must stay retryable, never
+      // stamped handled.
+      return !!belled;
+    }
+  }
   const result = await ringRenewalBell(
     successor,
     'ambiguous',

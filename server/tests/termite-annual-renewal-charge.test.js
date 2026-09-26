@@ -1694,6 +1694,44 @@ describe('termite annual renewal charge', () => {
       }));
     });
 
+    // Codex #4971 round-4 (post-merge audit) P1: a PARTIAL account credit
+    // landing on the invoice between the eligibility re-check and the void
+    // itself (invoice.js's assertInvoiceGenuinelyUnsettledLocked, at the
+    // actual chokepoint) is neither full settlement (retire) nor a clean
+    // void (some money is already committed) — must DEFER, same shape as
+    // the reconciliation-pending case above, never silently retire a lapse
+    // whose renewal the customer only partly paid.
+    test('P1: partial account credit lands on the invoice at the void chokepoint — DEFERRED, never retired, never voided a second way', async () => {
+      mockCommon();
+      const partialCreditErr = new Error('Invoice carries partial account credit ($10.00 of $249.00)');
+      partialCreditErr.code = 'INVOICE_PARTIAL_CREDIT_REFUSE_VOID';
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+        voidInvoiceImpl: async () => { throw partialCreditErr; },
+      });
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const { conn, startedUpdate, completedUpdate } = makeLapseConn({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'sent', paid_at: null },
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(startedUpdate).toHaveBeenCalledTimes(1); // provenance stamped regardless
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled(); // never treated as a genuine non-payment lapse
+      expect(recordDecision).not.toHaveBeenCalled(); // parent never cancelled — the partial payment is real money
+      expect(completedUpdate).not.toHaveBeenCalled(); // stays started-but-not-completed, for staff to resolve
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/partial account credit/), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:lapse_reconciliation_pending',
+      }));
+    });
+
     test('a resumed lapse (started_at already set) does NOT re-stamp started_at, but still runs the rest', async () => {
       mockCommon();
       const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps();
@@ -2179,6 +2217,12 @@ describe('termite annual renewal charge', () => {
       const neverReachedStripe = tableQuery([successor]);
 
       const undeliveredInvoice = { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ status: 'draft', sent_at: null, sms_sent_at: null, email_sent_at: null }) })) };
+      // Codex #4971 round-4 (post-merge audit) P1: leg 7b now revalidates
+      // the parent's eligibility before delivering — an eligible parent
+      // (still 'active', undecided, no linked invoice) matches this test's
+      // intent (a safe, still-eligible recovery) and lets it exercise the
+      // SAME delivery path as before the fix.
+      const eligibleParentQuery = { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ status: 'active', renewal_decision: null, prepay_invoice_id: null }) })) };
       let asTCall = 0;
       const conn = jest.fn((table) => {
         if (table === 'annual_prepay_terms as t') {
@@ -2186,6 +2230,7 @@ describe('termite annual renewal charge', () => {
           const order = [empty, empty, empty, empty, empty, empty, empty, neverReachedStripe];
           return order[Math.min(asTCall - 1, order.length - 1)];
         }
+        if (table === 'annual_prepay_terms') return eligibleParentQuery;
         if (table === 'invoices') return undeliveredInvoice;
         throw new Error(`unexpected table ${table}`);
       });
@@ -2221,6 +2266,7 @@ describe('termite annual renewal charge', () => {
       const empty = tableQuery([]);
       const neverReachedStripe = tableQuery([successor]);
       const deliveredInvoice = { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ status: 'sent', sent_at: new Date('2026-10-01T00:00:00Z'), sms_sent_at: null, email_sent_at: null }) })) };
+      const eligibleParentQuery = { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ status: 'active', renewal_decision: null, prepay_invoice_id: null }) })) };
 
       let asTCall = 0;
       const conn = jest.fn((table) => {
@@ -2229,6 +2275,7 @@ describe('termite annual renewal charge', () => {
           const order = [empty, empty, empty, empty, empty, empty, empty, neverReachedStripe];
           return order[Math.min(asTCall - 1, order.length - 1)];
         }
+        if (table === 'annual_prepay_terms') return eligibleParentQuery;
         if (table === 'invoices') return deliveredInvoice;
         throw new Error(`unexpected table ${table}`);
       });
@@ -2253,7 +2300,18 @@ describe('termite annual renewal charge', () => {
     // audit P1) — default is "never delivered" (a draft with no sent
     // stamps), so a test must pass one showing evidence to exercise the
     // "already delivered, no fresh attempt needed" path.
-    function makeLeg7bConn(successor, invoice = { status: 'draft', sent_at: null, sms_sent_at: null, email_sent_at: null }) {
+    // `parent` defaults to still-eligible (Codex #4971 round-4 post-merge
+    // audit P1: leg 7b now revalidates parent eligibility before any
+    // delivery) — every pre-existing 6b test below is exercising the
+    // delivery/dedupe/stamp logic, not the eligibility revalidation, so
+    // the default keeps them on the SAME "safe to deliver" path as before
+    // that fix. The dedicated eligibility tests pass their own ineligible
+    // parent.
+    function makeLeg7bConn(
+      successor,
+      invoice = { status: 'draft', sent_at: null, sms_sent_at: null, email_sent_at: null },
+      parent = { status: 'active', renewal_decision: null, prepay_invoice_id: null },
+    ) {
       const empty = tableQuery([]);
       const neverReachedStripe = tableQuery([successor]);
       const stampUpdate = jest.fn().mockResolvedValue(1);
@@ -2266,7 +2324,12 @@ describe('termite annual renewal charge', () => {
           return asTCall === 1 ? empty : neverReachedStripe;
         }
         if (table === 'annual_prepay_terms') {
-          return { where: jest.fn(() => ({ whereNull: jest.fn(() => ({ update: stampUpdate })) })) };
+          return {
+            where: jest.fn(() => ({
+              whereNull: jest.fn(() => ({ update: stampUpdate })),
+              first: jest.fn().mockResolvedValue(parent),
+            })),
+          };
         }
         if (table === 'invoices') {
           return { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue(invoice) })) };
@@ -2368,6 +2431,34 @@ describe('termite annual renewal charge', () => {
     // retrying delivery, permanently excluding a row the customer was
     // never actually sent an invoice for. With no persisted evidence, a
     // deduped bell must still attempt delivery.
+    // The exact race the audit caught: a cancellation won against an
+    // already-claimed attempt fence — decideAndCharge's own final parent
+    // check (withParentDecisionLock, right before the Stripe call)
+    // correctly blocked Stripe, but that leaves EXACTLY leg 7b's own
+    // selection shape (attempted_at set, no stripe_invoice_charge_attempts
+    // row). Leg 7b must revalidate the parent itself before delivering —
+    // never send a payment demand for a renewal that's already cancelled.
+    test('6b P1: the parent was cancelled after the attempt fence was stamped — NO delivery, NO stamp-as-normal, staff belled with the real reason', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: false, suppressed: false }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+
+      const successor = baseSuccessor({ renewed_from_term_id: 'parent-1', annual_plan_version: 'v3' });
+      const cancelledParent = { status: 'cancelled', renewal_decision: 'cancel', prepay_invoice_id: null };
+      const { conn, stampUpdate } = makeLeg7bConn(successor, undefined, cancelledParent);
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { reconcileNeverReachedStripeBelled: 0 };
+      await _private.reconcileStuckSuccessors({ conn, limit: 200, counts });
+
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled(); // never a payment demand for a cancelled renewal
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/parent_decided_cancel|no longer eligible/), expect.any(Object));
+      expect(stampUpdate).toHaveBeenCalledTimes(1); // still marked handled — never re-selected
+      expect(counts.reconcileNeverReachedStripeBelled).toBe(0); // 'delivered' only counts an actual send
+    });
+
     test('6b P1: a deduped bell with NO persisted delivery evidence still retries delivery — the bug the audit caught', async () => {
       mockCommon();
       const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: true }));

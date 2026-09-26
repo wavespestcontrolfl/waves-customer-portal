@@ -3136,7 +3136,7 @@ function rodentSetupRebillMarker(invoiceId) {
 // settled) or INVOICE_SETTLED_REFUSE_VOID (durable paid/prepaid evidence).
 async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
   const lockedInvoice = await trx("invoices").where({ id }).forUpdate()
-    .first("status", "paid_at", "credit_applied");
+    .first("status", "paid_at", "credit_applied", "total");
   if (!lockedInvoice) throw new Error("Invoice not found");
   const lockedStatusKey = String(lockedInvoice.status || "").toLowerCase();
   // 'processing' (an ACH debit mid-clearing) is durably neither paid nor
@@ -3150,11 +3150,39 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
     err.invoiceStatus = lockedInvoice.status;
     throw err;
   }
-  if (["paid", "prepaid"].includes(lockedStatusKey)
-    || lockedInvoice.paid_at
-    || parseFloat(lockedInvoice.credit_applied || 0) > 0) {
-    const err = new Error(`Invoice already reads ${lockedInvoice.status}${lockedInvoice.paid_at ? " (paid_at set)" : ""}${parseFloat(lockedInvoice.credit_applied || 0) > 0 ? " (credit applied)" : ""} — refusing to void a settled invoice`);
+  if (["paid", "prepaid"].includes(lockedStatusKey) || lockedInvoice.paid_at) {
+    const err = new Error(`Invoice already reads ${lockedInvoice.status}${lockedInvoice.paid_at ? " (paid_at set)" : ""} — refusing to void a settled invoice`);
     err.code = "INVOICE_SETTLED_REFUSE_VOID";
+    err.invoiceStatus = lockedInvoice.status;
+    throw err;
+  }
+  // Codex #4971 round-4 (post-merge audit) P1: ANY positive credit_applied
+  // used to read as full settlement here, but partial application is a
+  // supported, ordinary state (customer-credit.js's auto-apply, or a
+  // partial admin apply) — $10 applied to a $249 invoice still leaves $239
+  // due, and the invoice's own `status` stays whatever it was (never
+  // 'prepaid') for exactly that reason; see invoiceAmountDue's own doc.
+  // Settled means the balance is FULLY covered (amount due <= 0, i.e.
+  // credit + payments >= total) — checked here against credit alone since
+  // a real payment already returned above via paid_at/status. A credit
+  // that covers the total is the SAME durable settlement as before. A
+  // credit that does NOT cover it is genuinely ambiguous — some money is
+  // already committed against this invoice, so this caller must not
+  // silently void-and-restore it (that is a different operator-driven
+  // "un-prepay" contract, not this one) nor mark its own lapse retired —
+  // it gets its OWN typed code so the caller defers for staff review
+  // instead of either voiding or completing.
+  const creditAppliedAmt = parseFloat(lockedInvoice.credit_applied || 0);
+  if (creditAppliedAmt > 0) {
+    const totalAmt = parseFloat(lockedInvoice.total || 0);
+    if (creditAppliedAmt >= totalAmt) {
+      const err = new Error(`Invoice already reads ${lockedInvoice.status} (credit applied) — refusing to void a settled invoice`);
+      err.code = "INVOICE_SETTLED_REFUSE_VOID";
+      err.invoiceStatus = lockedInvoice.status;
+      throw err;
+    }
+    const err = new Error(`Invoice carries partial account credit ($${creditAppliedAmt.toFixed(2)} of $${totalAmt.toFixed(2)}) — neither settled nor cleanly voidable; refusing until staff review`);
+    err.code = "INVOICE_PARTIAL_CREDIT_REFUSE_VOID";
     err.invoiceStatus = lockedInvoice.status;
     throw err;
   }
