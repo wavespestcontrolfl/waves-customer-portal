@@ -312,14 +312,10 @@ export function labelsPresentInMarkerNotes(notes, labels) {
 }
 // The completion route reads [Protocol] / [Protocol optional] / [Action]
 // marker lines back out of the technician notes as completed actions, so a
-// label dropped at submit must leave the submitted notes too. Only the
-// markers for `labels` go; every other line (a free-typed action included)
-// stays.
+// dropped label must leave the notes too. Only the markers for `labels` go;
+// every other line (a free-typed action included) stays.
 function withoutProtocolMarkerLines(notes, labels) {
-  const drop = new Set((Array.isArray(labels) ? labels : [])
-    .map((label) => String(label || "").trim().toLowerCase())
-    .filter(Boolean));
-  if (!drop.size) return notes;
+  const drop = new Set(labels.map((label) => String(label || "").trim().toLowerCase()));
   return String(notes || "")
     .split("\n")
     .filter((line) => {
@@ -7286,9 +7282,9 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         !isLawn && protocolProgram
           ? adminFetch(
-              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}${
-                visitMonth ? `&month=${visitMonth}` : ""
-              }`,
+              // An unknown date sends an empty month, which the route reads
+              // as none (the rule visit).
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}&month=${visitMonth}`,
             )
           : Promise.resolve(null),
       ]);
@@ -13024,11 +13020,6 @@ export function CompletionPanel({
   // completion submit an action the tech deleted from the restored notes
   // (codex r77).
   const preGenerationChipDetachedRef = useRef(false);
-  // A pre-change completion draft (no protocolVisitMonth) restored while the
-  // completion list was still loading — bound once the list says whether the
-  // program is month-keyed (see restoreDraft and the effect after the
-  // completion-actions load).
-  const pendingLegacyProtocolRef = useRef(null);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -14390,29 +14381,31 @@ export function CompletionPanel({
     treatmentPlanMixItems,
     lawnCompletionDefaults,
   ]);
-  // Finishes restoreDraft's January binding for a pre-change draft restored
-  // before the list arrived: a month-keyed program drops that draft's
-  // protocol selections and their markers and invalidates a report written
-  // from them, exactly as restoreDraft does when the list is already loaded.
-  // An "Any" program, a January visit, or a failed list keeps them.
+  // A month-keyed program (tree & shrub) serves the appointment month's own
+  // action list. Once it has loaded, a selected action it doesn't offer came
+  // from another list (a draft saved before the visit moved months or the
+  // protocol changed): drop it with its marker lines, and invalidate a
+  // report written from it (untouched → the pre-generation notes; edited →
+  // kept as the technician's text). An empty or unloaded list leaves the
+  // fallback chips as the selector, and "Any" programs never change by month.
   useEffect(() => {
-    const pending = pendingLegacyProtocolRef.current;
-    if (!pending || protocolActionsLoading) return;
-    pendingLegacyProtocolRef.current = null;
-    const loadedMonth = protocolActionsLoaded ? protocolActionMeta?.visit?.month : null;
-    if (!loadedMonth || loadedMonth === "Any" || protocolMonthForService(service) === "Jan") return;
+    const listMonth = protocolActionMeta?.visit?.month;
+    if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length || !listMonth || listMonth === "Any") return;
+    const offered = new Set(protocolActions.map((action) => (action.label || action.note || action.raw || "").trim()));
+    const stale = selectedProtocolActionLabels.filter((label) => !offered.has(String(label).trim()));
+    if (!stale.length) return;
     if (typeof preGenerationNotesRef.current === "string") {
-      preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, pending.labels);
+      preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, stale);
     }
     invalidateGeneratedReportOnTypedEdit();
-    setNotes((current) => withoutProtocolMarkerLines(current, pending.labels));
-    setSelectedProtocolActionLabels((current) => current.filter((label) => !pending.labels.includes(label)));
+    setNotes((current) => withoutProtocolMarkerLines(current, stale));
+    setSelectedProtocolActionLabels((current) => current.filter((label) => !stale.includes(label)));
     setActionScopeByLabel((current) => {
       const next = { ...current };
-      pending.labels.forEach((label) => { delete next[label]; });
+      stale.forEach((label) => { delete next[label]; });
       return next;
     });
-  }, [protocolActionsLoading, protocolActionsLoaded, protocolActionMeta]);
+  }, [isLawn, generating, protocolActionsLoaded, protocolActions, protocolActionMeta, selectedProtocolActionLabels]);
 
   useEffect(() => {
     // The flag decides whether this request carries completion defaults; a
@@ -14814,10 +14807,6 @@ export function CompletionPanel({
         // (billing-409 detour, reload) or the resumed completion records
         // aiDraftUsed: false for an AI-installed report (codex r17).
         aiReportUsed,
-        // The protocol visit the action selections (and any report written
-        // from them) came from: a month-keyed list binds them to its month
-        // ("Apr"); "Any" or no list binds nothing (see restoreDraft).
-        protocolVisitMonth: protocolActionMeta?.visit?.month || null,
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
@@ -14927,7 +14916,6 @@ export function CompletionPanel({
     parkedNext,
     chipLinesDetached,
     aiReportUsed,
-    protocolActionMeta,
     nextVisitNote,
     showNextVisitNote,
     treeShrubCloseout,
@@ -14972,37 +14960,7 @@ export function CompletionPanel({
       ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
       : {};
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
-    // A month-keyed program (tree & shrub) offers the appointment month's own
-    // protocol actions. A draft saved under another month's visit (the visit
-    // moved since) restores none of those selections: their marker lines
-    // leave the restored notes, and a report written from them is
-    // invalidated below (restorePruned). Lawn keeps its plan reconciliation.
-    const draftProtocolLabels = Array.isArray(savedDraft.selectedProtocolActionLabels)
-      ? savedDraft.selectedProtocolActionLabels
-      : [];
-    // A draft saved before the month was recorded carries the list every
-    // tree & shrub completion showed until then: visit 1 (January). Only the
-    // loaded completion list says whether this visit's program is month-keyed
-    // (palm care is tree & shrub, palm injection is "Any"), so such a draft
-    // restored before that list arrives is bound when it does
-    // (pendingLegacyProtocolRef), never on a guess.
-    const legacyProtocolDraft = !Object.hasOwn(savedDraft, "protocolVisitMonth") && !isTypedFindings;
-    const loadedVisitMonth = protocolActionsLoaded ? protocolActionMeta?.visit?.month || null : null;
-    const draftProtocolVisitMonth = !legacyProtocolDraft
-      ? savedDraft.protocolVisitMonth
-      : loadedVisitMonth && loadedVisitMonth !== "Any" ? "Jan" : null;
-    pendingLegacyProtocolRef.current = legacyProtocolDraft && !isLawn && protocolActionsLoading
-      && draftProtocolLabels.length > 0
-      ? { labels: draftProtocolLabels }
-      : null;
-    const protocolVisitMoved = !isLawn
-      && typeof draftProtocolVisitMonth === "string"
-      && draftProtocolVisitMonth !== "Any"
-      && draftProtocolVisitMonth !== protocolMonthForService(service);
-    const restoredProtocolLabels = protocolVisitMoved ? [] : draftProtocolLabels;
-    setNotes(protocolVisitMoved
-      ? withoutProtocolMarkerLines(savedDraft.notes || "", draftProtocolLabels)
-      : savedDraft.notes || "");
+    setNotes(savedDraft.notes || "");
     // A draft restored while the plan request has already failed carries the
     // suggestions saved under an earlier plan, and the reconcile effect stays
     // off during a plan error — withdraw them exactly as the failed request
@@ -15175,9 +15133,13 @@ export function CompletionPanel({
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
     );
     setCustomerConcern(savedDraft.customerConcern || "");
-    setSelectedProtocolActionLabels(restoredProtocolLabels);
+    setSelectedProtocolActionLabels(
+      Array.isArray(savedDraft.selectedProtocolActionLabels)
+        ? savedDraft.selectedProtocolActionLabels
+        : [],
+    );
     setActionScopeByLabel(
-      !protocolVisitMoved && savedDraft.actionScopeByLabel && typeof savedDraft.actionScopeByLabel === "object"
+      savedDraft.actionScopeByLabel && typeof savedDraft.actionScopeByLabel === "object"
         ? savedDraft.actionScopeByLabel
         : {},
     );
@@ -15222,9 +15184,7 @@ export function CompletionPanel({
       ? savedDraft.generatedReportText
       : null;
     preGenerationNotesRef.current = typeof savedDraft.preGenerationNotes === "string"
-      ? protocolVisitMoved
-        ? withoutProtocolMarkerLines(savedDraft.preGenerationNotes, draftProtocolLabels)
-        : savedDraft.preGenerationNotes
+      ? savedDraft.preGenerationNotes
       : null;
     preGenerationChipDetachedRef.current = savedDraft.preGenerationChipDetached === true;
     stationAutoCountsRef.current = savedDraft.stationAutoCounts
@@ -15260,11 +15220,6 @@ export function CompletionPanel({
       && 'generationLawnAssessmentId' in savedDraft
       && ((savedDraft.generationLawnAssessmentId ?? null) !== (lawnAssessmentId ?? null)
         || (savedDraft.generationLawnAssessmentRevision ?? null) !== (lawnAssessmentRevision ?? null))) {
-      restorePruned = true;
-    }
-    // ... and for protocol actions dropped because the visit moved months:
-    // the installed prose describes the old month's work.
-    if (generatedReportTextRef.current && protocolVisitMoved && draftProtocolLabels.length) {
       restorePruned = true;
     }
     const restoredFindings =
@@ -17224,41 +17179,20 @@ export function CompletionPanel({
       // Specialty preset lanes (any service) accept only the preset's own
       // actions — a restored label from a previously served list is stale
       // and must not reach the customer report (codex P2 r7 #3701).
-      // A month-keyed program (tree & shrub) serves the appointment month's
-      // own list, so once that list has loaded, a label restored from a
-      // draft saved for another month's visit is stale the same way. An
-      // empty or unloaded list leaves the fallback chips as the selector,
-      // so those labels stay.
-      const monthKeyedProtocolList =
-        !isLawn &&
-        protocolActionsLoaded &&
-        protocolActions.length > 0 &&
-        !!protocolActionMeta?.visit?.month &&
-        protocolActionMeta.visit.month !== "Any";
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
       ).filter(
         (label) =>
           specialtyProtocolActions.length > 0
             ? specialtyProtocolActions.some((action) => action.label === label)
-            : (!isLawn && !monthKeyedProtocolList) ||
-              (isLawn && completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
+            : !isLawn ||
+              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
               (protocolActionsLoaded &&
                 protocolActions.some(
                   (action) =>
                     (action.label || action.note || action.raw || "") === label,
                 )),
       );
-      // The route merges the notes' [Protocol] markers back into the
-      // completed actions, so a stale month label's marker leaves the
-      // submitted notes with it. Its product rows stay: they are the
-      // application record, each with its own remove control.
-      const staleMonthProtocolLabels = monthKeyedProtocolList
-        ? activeSelectedLabels(selectedProtocolActionLabels).filter(
-            (label) => !reportProtocolActions.includes(label),
-          )
-        : [];
-      const submittedNotes = withoutProtocolMarkerLines(notes, staleMonthProtocolLabels);
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
@@ -17313,7 +17247,7 @@ export function CompletionPanel({
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
-        technicianNotes: submittedNotes,
+        technicianNotes: notes,
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
@@ -17371,7 +17305,7 @@ export function CompletionPanel({
               // Don't fall back to the hidden customerRecap state (auto-generated /
               // restored, never reviewed) — use the tech's note or the typed notes.
               customerNote:
-                treeShrubCloseout.customerNote || submittedNotes || "",
+                treeShrubCloseout.customerNote || notes || "",
             }
           : null,
         oneTimeRecapOnly,

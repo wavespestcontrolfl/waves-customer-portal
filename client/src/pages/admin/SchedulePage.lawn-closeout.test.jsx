@@ -194,7 +194,6 @@ it('drops a restored tree & shrub protocol action the month\'s current list no l
   const visit = shrubsOn('2026-05-12');
   completionActions = monthList(5, 'May', 'May palm fertilizer');
   saveDraft(visit, {
-    protocolVisitMonth: 'May',
     notes: '[Protocol] Retired May line\n[Protocol] May palm fertilizer\n[Protocol] Pruned dead fronds',
     selectedProtocolActionLabels: ['Retired May line', 'May palm fertilizer'],
   });
@@ -209,17 +208,16 @@ it('drops a restored tree & shrub protocol action the month\'s current list no l
 });
 
 it.each([
-  ['a recorded April visit', 'Tree & Shrub Care', { protocolVisitMonth: 'Apr' }],
-  ['an unrecorded month (drafts before the fix listed January)', 'Tree & Shrub Care', {}],
-  ['an unrecorded month on palm care, which runs the tree & shrub program', 'Palm Care', {}],
-])('a draft saved under another month (%s) restores without its protocol actions and clears the report written from them', async (_, serviceType, month) => {
+  ['tree & shrub', 'Tree & Shrub Care'],
+  ['palm care, which runs the tree & shrub program,', 'Palm Care'],
+])('a restored %s action the month\'s list doesn\'t offer is dropped and the report written from it is cleared', async (_, serviceType) => {
   const visit = shrubsOn('2026-05-12', serviceType);
   completionActions = monthList(5, 'May', 'May palm fertilizer');
-  // Saved after Generate: the notes are the untouched AI report, the
-  // pre-generation notes still carry the earlier visit's chip marker.
+  // Saved after Generate under another visit's list (the visit moved months,
+  // or the protocol changed): the notes are the untouched AI report, the
+  // pre-generation notes still carry that list's chip marker.
   const report = 'WHAT WE DID:\nApplied palm fertilizer.\nWHAT WE FOUND:\nPalms looked healthy.';
   saveDraft(visit, {
-    ...month,
     notes: report, generatedReportText: report, aiReportUsed: true, chipLinesDetached: true,
     preGenerationNotes: '[Protocol] Earlier palm fertilizer\nChecked the side-yard palms.',
     selectedProtocolActionLabels: ['Earlier palm fertilizer'],
@@ -232,7 +230,7 @@ it.each([
   expect(body.technicianNotes).toBe('Checked the side-yard palms.');
 });
 
-it('a draft with no recorded month keeps its protocol action on a January visit', async () => {
+it('a restored tree & shrub action the month\'s list still offers is kept', async () => {
   const visit = shrubsOn('2026-01-13');
   completionActions = monthList(1, 'Jan', 'January palm fertilizer');
   saveDraft(visit, {
@@ -245,21 +243,8 @@ it('a draft with no recorded month keeps its protocol action on a January visit'
   expect(body.technicianNotes).toBe('[Protocol] January palm fertilizer');
 });
 
-it('a palm injection draft with no recorded month keeps its protocol action: its visits are not month-keyed', async () => {
-  const visit = shrubsOn('2026-05-12', 'Palm Injection');
-  completionActions = monthList(1, 'Any', 'Injected palm trunk', 'palm_injection');
-  saveDraft(visit, {
-    notes: '[Protocol] Injected palm trunk',
-    selectedProtocolActionLabels: ['Injected palm trunk'],
-  });
-  await restoreAndSubmit(visit, 'Injected palm trunk');
-  const body = await submittedBody();
-  expect(body.protocolActionsCompleted).toEqual(['Injected palm trunk']);
-  expect(body.technicianNotes).toBe('[Protocol] Injected palm trunk');
-});
-
 // Restore clicked while the completion list is still loading: only the list
-// can say whether the program is month-keyed, so binding waits for it.
+// can say whether the program is month-keyed, so reconciling waits for it.
 function holdCompletionList() {
   let release;
   actionsGate = new Promise((resolve) => { release = resolve; });
@@ -270,7 +255,7 @@ const detachedReportDraft = (report, preGenerationNotes, label) => ({
   preGenerationNotes, selectedProtocolActionLabels: [label],
 });
 
-it('a pre-change tree & shrub draft restored before its list arrives is cleared once the month list lands', async () => {
+it('a tree & shrub draft restored before its list arrives is reconciled once the list lands', async () => {
   const releaseList = holdCompletionList();
   completionActions = monthList(5, 'May', 'May palm fertilizer');
   const visit = shrubsOn('2026-05-12');
@@ -285,23 +270,23 @@ it('a pre-change tree & shrub draft restored before its list arrives is cleared 
   expect(body.technicianNotes).toBe('Checked the side-yard palms.');
 });
 
-it('a pre-change palm injection draft restored before its list arrives keeps its action and report', async () => {
+it('a palm injection action its "Any" list doesn\'t offer is kept with its report: those visits are not month-keyed', async () => {
   const releaseList = holdCompletionList();
   completionActions = monthList(1, 'Any', 'Injected palm trunk', 'palm_injection');
   const visit = shrubsOn('2026-05-12', 'Palm Injection');
-  const report = 'WHAT WE DID:\nInjected the palm trunk.\nWHAT WE FOUND:\nCrown looked healthy.';
-  saveDraft(visit, detachedReportDraft(report, '[Protocol] Injected palm trunk', 'Injected palm trunk'));
+  const report = 'WHAT WE DID:\nChecked the trunk ports.\nWHAT WE FOUND:\nCrown looked healthy.';
+  saveDraft(visit, detachedReportDraft(report, '[Protocol] Checked trunk ports', 'Checked trunk ports'));
   render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   releaseList();
   await screen.findByRole('option', { name: /Injected palm trunk/ });
   const body = await submittedBody();
   expect(screen.queryByText(/the draft\s+was cleared/)).toBeNull();
-  expect(body.protocolActionsCompleted).toEqual(['Injected palm trunk']);
+  expect(body.protocolActionsCompleted).toEqual(['Checked trunk ports']);
   expect(body.technicianNotes).toBe(report);
 });
 
-it('a pre-change draft restored after its completion list failed keeps its protocol action', async () => {
+it('a draft restored after its completion list failed keeps its protocol action', async () => {
   failActions = true;
   const visit = shrubsOn('2026-05-12');
   saveDraft(visit, { notes: '[Protocol] Earlier palm fertilizer', selectedProtocolActionLabels: ['Earlier palm fertilizer'] });
