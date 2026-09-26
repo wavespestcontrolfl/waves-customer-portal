@@ -121,7 +121,7 @@ const FALLBACK_RESULT = Object.freeze({
 // paired with a reaction word (plain "ants bite" stays a normal fallback).
 // English + Spanish — the surface explicitly supports Spanish visitors, so
 // every deterministic guard reads both languages.
-const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|(?:not|isn'?t|aren'?t|stopped|stops|quit)\s+breathing|no\s+(?:est[aá]\s+)?respira(?:ndo)?|dej[oó]\s+de\s+respirar|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|(?:at|in|to|from)\s+(?:the\s+)?hospital|need\s+(?:a\s+|an\s+|to\s+(?:go\s+to|get\s+to|see)\s+(?:a\s+|an\s+|the\s+)?)?(?:hospital|doctor|ambulance|er)\b|necesit\w*\s+(?:un\s+|una\s+|ir\s+al\s+)?(?:hospital|m[eé]dico|doctor|ambulancia)|hospitali[sz]\w*|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)|envenen\w*|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
+const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|(?:not|isn'?t|aren'?t|stopped|stops|quit)\s+breathing|no\s+(?:est[aá]\s+)?respira(?:ndo)?|dej[oó]\s+de\s+respirar|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|(?:is|was|were|are|went|go|going|taken|took|rushed|admitted|ended\s+up|brought|sent|stayed|staying|lying)\s+(?:\S+\s+){0,2}?(?:to|in|at|into)\s+(?:the\s+)?(?:hospital|emergency\s+room|er)\b|need\s+(?:a\s+|an\s+|to\s+(?:go\s+to|get\s+to|see)\s+(?:a\s+|an\s+|the\s+)?)?(?:hospital|doctor|ambulance|er)\b|necesit\w*\s+(?:un\s+|una\s+|ir\s+al\s+)?(?:hospital|m[eé]dico|doctor|ambulancia)|hospitali[sz]\w*|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)|envenen\w*|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
 const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?|picad(?:o|a|ura|uras)|pic[oó]|mordedura?s?|mordi[dó]\w*|mordi[oó])\b/i;
 const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|respir\w*|beb[eé])\b/i;
 
@@ -140,7 +140,7 @@ const NEGATED_REACTION_RE = /\b(?:no|not|without|never|sin|isn'?t|aren'?t|doesn'
 const PRODUCT_NOUN = '(?:baits?|granul\\w*|pellets?|gel|pesticid\\w*|poison\\w*|spray|insecticid\\w*|chemicals?|products?|rodenticid\\w*|repellent\\w*|fertiliz\\w*|herbicid\\w*|traps?|stations?|cebos?|veneno\\w*|gr[aá]nulos?|productos?|qu[ií]mic\\w*|pesticida\\w*|insecticida\\w*|raticida\\w*|fertilizante\\w*)';
 const EXPOSURE_SUBJECT = '(?:i|we|he|she|someone|somebody|my|our|his|her|their|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|husband|wife|mi|su|nuestr[oa]|hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|perr[oa]s?|gat[oa]s?|mascotas?)';
 const NON_PEST_GAP = '(?:(?!(?:ants?|roach\\w*|cockroach\\w*|bugs?|mice|rats?|rodents?|pests?|termites?|spiders?|insects?|flies|fleas?|squirrels?|birds?|wasps?|bees?|hormigas?|cucarachas?|ratas?|ratones?|plagas?|insectos?)\\b)\\S+\\s+){0,4}?';
-const EAT_EXPOSURE_RE = new RegExp(`\\b${EXPOSURE_SUBJECT}\\s+${NON_PEST_GAP}(?:ate|eaten|eating|drank|drunk|drinking|chewed|chewing|licked|licking|(?:se\\s+)?comi[oó]|(?:se\\s+)?bebi[oó]|mastic[oó]|lami[oó])(?![a-zñáéíóú])[^.?!]{0,30}?\\b${PRODUCT_NOUN}(?![a-zñáéíóú])|\\b${PRODUCT_NOUN}\\b[^.?!]{0,30}?\\b(?:eaten|drunk|chewed|licked|comid[oa]s?|bebid[oa]s?)\\s+(?:by|por)\\s+(?:(?:my|our|the|his|her|their|mi|su|el|la)\\s+)?${EXPOSURE_SUBJECT}\\b`, 'i');
+const EAT_EXPOSURE_RE = new RegExp(`\\b${EXPOSURE_SUBJECT}\\s+${NON_PEST_GAP}(?:ate|eaten|eating|drank|drunk|drinking|chewed|chewing|licked|licking|(?:se\\s+)?comi[oó]|(?:se\\s+)?bebi[oó]|mastic[oó]|lami[oó]|inhal\\w*|breathed\\s+in|breathing\\s+in|sniffed|inhal[oó]|respir[oó])(?![a-zñáéíóú])[^.?!]{0,30}?\\b${PRODUCT_NOUN}(?![a-zñáéíóú])|\\b${PRODUCT_NOUN}\\b[^.?!]{0,30}?\\b(?:eaten|drunk|chewed|licked|comid[oa]s?|bebid[oa]s?)\\s+(?:by|por)\\s+(?:(?:my|our|the|his|her|their|mi|su|el|la)\\s+)?${EXPOSURE_SUBJECT}\\b`, 'i');
 
 // A product in someone's eyes, mouth or on their skin is an exposure
 // ("My child got rat poison in his eyes", "le cayó pesticida en los ojos").
@@ -261,7 +261,7 @@ function scrubPriceTalk(result) {
 const UNSAFE_CLAIM_REPLY_ES = `No puedo dar una garantía general de seguridad ni un tiempo fijo para volver a entrar — depende del producto y de su hogar. Su técnico sigue las instrucciones de la etiqueta del producto y puede explicarle los detalles para su propiedad. Para algo urgente, llámenos al ${COMPANY.phone}.`;
 // Two or more distinctly Spanish words (single words like "son" or "es" are
 // ambiguous with English), or Spanish-only punctuation.
-const SPANISH_WORD_RE = /(?:^|[^\p{L}])(?:sí)(?![\p{L}])|\b(?:el|los|las|para|puede|pueden|usted|seguro|segura|seguros|producto|productos|tratamiento|mascotas|niños|horas|minutos|está|están|también|después|hora|salir|volver|entrar|seco|seca|secarse|tarda|inofensiv[oa]s?|inocu[oa]s?|pesticidas?|insecticidas?|químic[oa]s?|perros?|gatos?|completamente|totalmente|muy|sin|riesgos?|peligros?|tratad[oa]s?|césped|casa|cebos?|ustedes|nuestr[oa]s?|mediante|aprobad[oa]s?|mantenga|espere)\b/giu;
+const SPANISH_WORD_RE = /(?:^|[^\p{L}])(?:sí)(?![\p{L}])|\b(?:el|los|las|para|puede|pueden|usted|seguro|segura|seguros|producto|productos|tratamiento|mascotas|niños|horas|minutos|está|están|también|después|hora|salir|volver|entrar|seco|seca|secarse|tarda|inofensiv[oa]s?|inocu[oa]s?|pesticidas?|insecticidas?|químic[oa]s?|perros?|gatos?|completamente|totalmente|muy|sin|riesgos?|peligros?|tratad[oa]s?|césped|casa|cebos?|ustedes|nuestr[oa]s?|mediante|aprobad[oa]s?|mantenga|espere|sus|molest[ao]|irrit[ao]|daño|mascotas|niños|hace|hará)\b/giu;
 function looksSpanish(text) {
   const t = String(text || '');
   // ¿/¡ are unambiguous; otherwise two distinctly Spanish words. A lone ñ
@@ -348,7 +348,7 @@ const ACCESS_SIGNAL_RE = new RegExp([
   '\\b(?:let|allow|keep|bring|take)\\s+(?:your\\s+|the\\s+|my\\s+)?(?:pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|kids?|children|child|family|people|everyone|you|yourself|guests)\\s+(?:\\S+\\s+){0,2}?(?:out|in|back|off|away|outside|inside|indoors|on)\\b',
   '\\b(?:pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|kids?|children|child|family|people|everyone|you|yourself|guests)\\s+(?:can|may|should|could|will\\s+be\\s+able\\s+to|are\\s+(?:free|ok|okay|fine)\\s+to|is\\s+(?:free|ok|okay|fine)\\s+to)\\s+(?:\\S+\\s+){0,2}?(?:go|come|be|play|walk|return|head|get|use|enter|touch)\\b',
   '\\b(?:stay|keep)\\s+(?:off|out\\s+of|away\\s+from|clear\\s+of)\\b',
-  '\\b(?:use|walk\\s+on|play\\s+(?:on|in))\\s+(?:the|your)\\s+(?:lawn|yard|grass|room|area|pool|patio|deck|house|home|garden|kitchen|space|treated)\\b',
+  '\\b(?:use|walk\\s+on|walk\\s+in|play\\s+(?:on|in)|mow|sit\\s+(?:on|in)|swim\\s+in)\\s+(?:the|your|my|our|his|her|their)\\s+(?:lawn|yard|grass|room|area|pool|patio|deck|house|home|garden|kitchen|space|treated)\\b',
   '\\bwait\\w*\\s+(?:\\S+\\s+){0,3}?(?:before|until|after)\\b',
   '\\bbefore\\s+(?:letting|walking|going|allowing|touching|entering|returning|using)\\b',
   '\\b(?:treated|sprayed)\\s+(?:area|areas|room|rooms|lawn|yard|surfaces?)\\b',
@@ -421,7 +421,24 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
 }
 
 const AFFIRMATION_RE = /^\W*(?:yes|yeah|yep|yup|absolutely|sure|of\s+course|definitely|correct|certainly|indeed|totally|exactly|that'?s\s+(?:right|correct)|you\s+(?:can|may|bet)|s[ií]|claro|por\s+supuesto|exact[oa]|correct[oa]|desde\s+luego|as[ií]\s+es|puede)(?![a-zñáéíóú])/i;
+const HARM_QUESTION_RE = /\b(?:safe(?:ly|ty)?|harm\w*|hurt\w*|toxic|poison\w*|danger\w*|risk\w*|affect\w*|irritat\w*|bother\w*|sick|segur\w*|peligr\w*|t[oó]xic\w*|da[ñn]\w*|riesgo\w*|afect\w*|molest\w*|irrit\w*|inocu\w*|inofensiv\w*)(?![a-zñáéíóú])/i;
 const SAFETY_QUESTION_RE = /\b(?:safe(?:ly|ty)?|harm\w*|hurt\w*|toxic|poison\w*|danger\w*|risk\w*|okay|ok|fine|alright|affect\w*|segur\w*|peligr\w*|t[oó]xic\w*|da[ñn]\w*|riesgo\w*|afect\w*|inocu\w*|inofensiv\w*)(?![a-zñáéíóú])/i;
+// A terse reply takes its claim from the visitor's active question.
+function terseClaim(t, activeMessage) {
+  // A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
+  // the visitor asked — so when the ACTIVE question carries a safety or
+  // re-entry proposition, the affirmation is that claim.
+  if (AFFIRMATION_RE.test(t) && (SAFETY_QUESTION_RE.test(activeMessage)
+    || ((ACCESS_SIGNAL_RE.test(activeMessage) || ACCESS_TOPIC_RE.test(activeMessage)) && (DURATION_RE.test(activeMessage) || CLOCK_TIME_RE.test(activeMessage) || ANY_TIME_FIGURE_RE.test(activeMessage))))) return true;
+  // A short answer of EITHER polarity ("No.", "No, it cannot.", "At 4 PM.",
+  // "Tomorrow.") to an active harm or physical-access question is itself the
+  // claim — polarity words never ended, so length decides.
+  const physicalActive = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
+  if (t.split(/\s+/).filter(Boolean).length <= 6
+    && (HARM_QUESTION_RE.test(activeMessage) || ACCESS_SIGNAL_RE.test(physicalActive) || ACCESS_TOPIC_RE.test(physicalActive))) return true;
+  return false;
+}
+
 function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawContext) {
   const t = foldTypography(rawReply);
   const contextText = foldTypography(rawContext);
@@ -434,13 +451,14 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawC
   // one), so any blanket-safety or negated-hazard wording gets the reviewed
   // copy, which is itself a correct answer to any of those questions.
   if (safetyClaimIn(t)) return true;
-  // A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
-  // the visitor asked — so when the ACTIVE question carries a safety or
-  // re-entry proposition, the affirmation is that claim.
-  if (AFFIRMATION_RE.test(t) && (SAFETY_QUESTION_RE.test(activeMessage)
-    || ((ACCESS_SIGNAL_RE.test(activeMessage) || ACCESS_TOPIC_RE.test(activeMessage)) && (DURATION_RE.test(activeMessage) || CLOCK_TIME_RE.test(activeMessage) || ANY_TIME_FIGURE_RE.test(activeMessage))))) return true;
-  const conversation = `${t}\n${contextText}`;
-  const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(conversation);
+  if (terseClaim(t, activeMessage)) return true;
+  const physicalActive = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
+  // Treatment context comes from the reply and the ACTIVE message — an old
+  // "tell me about your treatment" must not make "About 2 hours." (answering
+  // "How long is the inspection?") a re-entry figure.
+  const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${activeMessage}`);
+  if (!treatmentContext && !INTAKE_TREATMENT_CONTEXT_RE.test(t) && SCHEDULING_DURATION_RE.test(activeMessage)
+    && !ACCESS_SIGNAL_RE.test(physicalActive) && !ACCESS_TOPIC_RE.test(physicalActive)) return false;
   return fixedTimingClaim(t, contextText, treatmentContext, activeMessage);
 }
 
@@ -455,7 +473,7 @@ const VET_DIRECTION_RE = /\b(?:call|contact|see|consult|visit|reach|phone|ask|go
 const PET_SUBJECT_RE = /\b(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
-const POISON_CONTROL_LINE = ' If someone swallowed a product, call Poison Control at 1-800-222-1222. / Si alguien ingirió un producto, llame a Control de Envenenamientos al 1-800-222-1222.';
+const POISON_CONTROL_LINE = ' If someone swallowed or breathed in a product, or got it in their eyes or on their skin, call Poison Control at 1-800-222-1222. / Si alguien ingirió o inhaló un producto, o le cayó en los ojos o la piel, llame a Control de Envenenamientos al 1-800-222-1222.';
 
 const REVIEWED_REPLIES = new Set([
   PRICE_REDIRECT_REPLY,

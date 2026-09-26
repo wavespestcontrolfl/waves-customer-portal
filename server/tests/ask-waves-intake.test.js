@@ -745,6 +745,8 @@ describe('normalizeIntakeResult', () => {
     'The roach put a bait pellet in its mouth',
     'La hormiga se metió el cebo en la boca',
     'Which hospital do you service?',
+    'We need pest control at the hospital',
+    'I work in the hospital and need roach control',
     );
     expect(out.reply).toMatch(/Get my price/);
   });
@@ -756,6 +758,37 @@ describe('normalizeIntakeResult', () => {
   ])('a bare affirmation of a safety or re-entry question is replaced: %s', (reply, active) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply)
       .toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    ['No.', 'Will your treatment harm my child?'],
+    ['No, it cannot.', 'Can the spray hurt my dog?'],
+    ['At 4 PM.', 'When can I use my yard after pest control?'],
+    ['At 4 PM.', 'When can I walk on my lawn after the application?'],
+  ])('a short answer of either polarity to a harm or access question is replaced: %s', (reply, active) => {
+    expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply)
+      .toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test('"No molesta a sus mascotas." gets the Spanish replacement', () => {
+    expect(scrubUnsafeClaims({ reply: 'No molesta a sus mascotas.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Mascotas?').reply)
+      .toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test('an old treatment mention does not make an inspection length a re-entry figure', () => {
+    const reply = 'About 2 hours.';
+    const out = normalizeIntakeResult(
+      { reply, intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      'Tell me about your pest treatment\nHow long is the inspection?',
+      'How long is the inspection?',
+    );
+    expect(out.reply).toBe(reply);
+  });
+
+  test('an eye exposure gets a Poison Control line that fits (not swallow-only)', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is not safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My child got rat poison in his eyes');
+    expect(out.reply).toMatch(/in their eyes or on their skin, call Poison Control at 1-800-222-1222/);
   });
 
   test('a bare "Yes." to an ordinary question is untouched', () => {
@@ -1490,6 +1523,8 @@ describe('looksLikeEmergency', () => {
     'Ingerí el pesticida',
     'I need a hospital now',
     'My child got rat poison in his eyes',
+    'My child inhaled rat poison',
+    'My dog breathed in rat poison',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
   ])('flags urgent/medical text: %s', (text) => {
