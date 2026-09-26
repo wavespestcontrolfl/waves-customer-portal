@@ -220,10 +220,25 @@ describe('buildAnswer — disagreement', () => {
 });
 
 describe('buildAnswer — tier', () => {
-  test('unusable photo quality forces needs_more_evidence even at pretty_sure', () => {
-    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9)], qualityUsable: false }));
-    expect(built.answer.wording).toBe('pretty_sure');
+  test('unusable photo quality forces needs_more_evidence and caps the wording at likely, with a next photo (Codex #4916 r4)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], qualityUsable: false }));
+    expect(built.answer.wording).toBe('likely');
     expect(built.tier).toBe('needs_more_evidence');
+    expect(built.nextPhoto).not.toBeNull();
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(v1.report_contract.identification).toMatchObject({ confidence: 'moderate', contested: true });
+  });
+
+  test('a subject conflict also caps the wording below pretty_sure (Codex #4916 r4)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], subjectConflict: true }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('a trait cited as both seen and not seen supports neither side (Codex #4916 r4)', () => {
+    const c = engine.resolveCandidate({ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2, 9], traits_not_visible: [1, 3] });
+    expect(c.traitsVisible).toEqual([2]);
+    expect(c.traitsNotVisible).toEqual([3]);
   });
 
   test('multiple_subjects forces needs_more_evidence', () => {
@@ -895,8 +910,10 @@ describe('identifyPestV2 — combined photo quality (Codex round-0 P1, round 3)'
       });
 
     const result = await identifyPestV2([PHOTO]);
-    expect(result.v2.answer.wording).toBe('pretty_sure'); // agreement bumps confidence to 0.90
-    expect(result.v2.tier).toBe('needs_more_evidence'); // but OpenAI's quality finding still forces this
+    // Agreement bumps confidence to 0.90, but OpenAI's quality finding forces
+    // needs_more_evidence, which also caps the wording (Codex #4916 r4).
+    expect(result.v2.answer.wording).toBe('likely');
+    expect(result.v2.tier).toBe('needs_more_evidence');
   });
 });
 

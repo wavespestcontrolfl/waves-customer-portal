@@ -202,8 +202,9 @@ function resolveCandidate(raw) {
   // `verified` — that check also cited at least one visible trait, which
   // is what "pretty sure" requires (Codex round-0 P1, rounds 12–18).
   if (entry) {
+    const cleaned = cleanTraitCitations(entry, traitsVisible, traitsNotVisible);
     return {
-      slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, checked: false, verified: false,
+      slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, ...cleaned, checked: false, verified: false,
     };
   }
   return {
@@ -388,6 +389,20 @@ function citesARealTrait(entry, traitsVisible) {
   return (traitsVisible || []).some((n) => Number.isInteger(n) && n >= 1 && n <= count);
 }
 
+/** A provider's trait citations, cleaned against the entry's real traits:
+ * whole numbers in range, each once, and none cited as BOTH seen and not
+ * seen — a self-contradicting citation supports neither side (Codex #4916
+ * r4). Everything downstream (verified, evidence, contradiction) reads the
+ * cleaned lists. */
+function cleanTraitCitations(entry, visible, notVisible) {
+  const count = entry?.traits?.length || 0;
+  const valid = (list) => [...new Set((list || []).filter((n) => Number.isInteger(n) && n >= 1 && n <= count))];
+  const seen = valid(visible);
+  const unseen = valid(notVisible);
+  const both = new Set(seen.filter((n) => unseen.includes(n)));
+  return { traitsVisible: seen.filter((n) => !both.has(n)), traitsNotVisible: unseen.filter((n) => !both.has(n)) };
+}
+
 function mergeVerify(candidates, verifyResult) {
   const bySlug = new Map();
   if (verifyResult?.ok && Array.isArray(verifyResult.json?.candidates)) {
@@ -404,12 +419,12 @@ function mergeVerify(candidates, verifyResult) {
     // `unansweredTrigger` caps it below pretty_sure if OpenAI doesn't
     // answer either.
     if (!v) return c;
-    const traitsVisible = v.traits_visible.filter(Number.isFinite);
+    const { traitsVisible, traitsNotVisible } = cleanTraitCitations(c.entry, v.traits_visible, v.traits_not_visible);
     return {
       ...c,
       confidence: clamp01(v.confidence),
       traitsVisible,
-      traitsNotVisible: v.traits_not_visible.filter(Number.isFinite),
+      traitsNotVisible,
       checked: true,
       verified: citesARealTrait(c.entry, traitsVisible),
     };
@@ -816,7 +831,12 @@ function buildAnswer(ctx) {
   // to report empty trait arrays in that case) — same pretty_sure cap as
   // an unanswered trigger, for the same underlying reason: no real
   // verification happened.
-  const blockPrettySure = unansweredTrigger || !!openaiStoodInAlone;
+  // Anything that forces needs_more_evidence also rules out "pretty sure":
+  // an unusable or multi-subject photo, or legs that disagree on what the
+  // photos show (Codex #4916 r4). Otherwise the answer read "pretty sure"
+  // with a needs-more-evidence tier, no next photo, and high v1 confidence.
+  const evidenceBlocked = !qualityUsable || qualityIssue === 'multiple_subjects' || !!subjectConflict;
+  const blockPrettySure = unansweredTrigger || !!openaiStoodInAlone || evidenceBlocked;
   const top = candidates[0] || null;
 
   const picked = disagreed
@@ -928,8 +948,12 @@ function mapToV1(built) {
   const v2Entry = topEntrySlug ? catalog.getEntry(topEntrySlug) : null;
 
   const category = v1Item ? v1Item.category : (topEntrySlug ? categoryForV2Slug(topEntrySlug) : 'other');
-  const confidence = built.answer.wording === 'pretty_sure' ? 'high' : (built.answer.wording === 'likely' ? 'moderate' : 'low');
-  const contested = built.tier === 'needs_more_evidence' && !!built.disagreed;
+  const wordingConfidence = built.answer.wording === 'pretty_sure' ? 'high' : (built.answer.wording === 'likely' ? 'moderate' : 'low');
+  const confidence = built.tier === 'needs_more_evidence' && wordingConfidence === 'high' ? 'moderate' : wordingConfidence;
+  // A tier that needs more evidence is never stored as settled in v1: the
+  // v1 consumers (public label, history, next steps) read `contested` and
+  // `confidence` to decide whether to hedge (Codex #4916 r4).
+  const contested = built.tier === 'needs_more_evidence';
 
   const safety = v1Item ? v1Item.safety : (v2Entry ? v1SafetyFallback(v2Entry) : DEFAULT_SAFETY);
   const serviceLine = v1Item ? v1Item.service_line : (v2Entry ? (v2Entry.service?.line || 'pest') : 'pest');
