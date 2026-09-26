@@ -170,13 +170,27 @@ const REPORT_ACCESS_CODE_RES = [
   /\b(?:passphrase|passcode|password|keypad|lock\s?box)\b\s*:?\s*(?!(?:is|was|were|for|the|we|to|that|this|will|should|of|and|or|in|on|at|has|have|had|used|works?|worked|changed|updated|remains?|stays?|near|by)\b)[a-z][a-z0-9#*]{1,11}\b/i,
 ];
 
+// An explicit credential noun outranks a unit-shaped suffix: "gate code
+// 2468ft" is still a credential, even though "400 ft" beside a gate can be
+// legitimate work detail. Inspect the original text before measurement
+// suppression and count digits in compact or grouped numeric tokens.
+const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = /\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?([#*]?(?:[A-Za-z#*]*\d[A-Za-z0-9#*]*|\d+(?:[\s–—-]+\d+)+))/gi;
+
+function containsExplicitNumericCredential(text) {
+  for (const match of String(text || '').matchAll(REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE)) {
+    const digitCount = match[1].replace(/\D/g, '').length;
+    if (digitCount >= 2 && digitCount <= 8) return true;
+  }
+  return false;
+}
+
 // Remove explicit measurements before looking for device-adjacent numbers.
 // The access patterns intentionally treat bare numbers near a gate as private,
 // so the unit is the evidence that quantities such as "400 sqft" and "100 ml"
 // are treatment details. Bare "in" stays out because it is commonly a
 // preposition ("2468 in the morning"), not reliable evidence of inches.
 const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
-  String.raw`\b(?:\d+(?:\.\d+)?|\d(?:[\s-]+\d){2,7})\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)(?=\s|[.,;:!?)]|$)`,
+  String.raw`\b(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)(?=\s|[.,;:!?)]|$)`,
   'gi',
 );
 
@@ -184,20 +198,21 @@ const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
 // by every contextual detector above. This covers compact alphanumeric tokens
 // on either side of the digits and individually separated digits without
 // teaching each gate/action/shorthand branch another token spelling.
-const REPORT_CREDENTIAL_TOKEN_RE = /(^|[^A-Za-z0-9])(\d(?:[\s-]+\d){2,7}|[#*]?[A-Za-z0-9#*]{3,16})(?=$|[^A-Za-z0-9])/g;
+const REPORT_CREDENTIAL_TOKEN_RE = /(^|[^A-Za-z0-9])([#*]?\d+(?:[\s–—-]+\d+)+|[#*]?[A-Za-z0-9#*]{3,16})(?=$|[^A-Za-z0-9])/g;
 
 function accessCodeDetectionText(text) {
   return String(text || '')
     .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]')
     .replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
       const digits = token.replace(/\D/g, '');
-      const credentialShape = /[A-Za-z#*]/.test(token) || /[\s-]/.test(token);
+      const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
       if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
       return `${prefix}${digits}`;
     });
 }
 
 function containsReportAccessCode(text) {
+  if (containsExplicitNumericCredential(text)) return true;
   const value = accessCodeDetectionText(text);
   return REPORT_ACCESS_CODE_RES.some((re) => re.test(value));
 }

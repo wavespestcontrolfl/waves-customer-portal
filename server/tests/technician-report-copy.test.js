@@ -54,6 +54,13 @@ describe('custom action credential screening', () => {
     'rear gate 2468A',
     'rear gate: AB2468',
     'Rear gate: 2-4-6-8',
+    'Rear gate: 24-68',
+    'Rear gate: 24–68',
+    'Opened side gate with 24 68',
+    'Rear gate #24-68',
+    'Used gate code 2468ft for entry',
+    'Gate code is 2468ml',
+    'Used gate code 2468oz for entry',
     'side gate: 2468',
     'Open side gate with 2468 in the morning',
     'Opened side gate with 2468 in the morning',
@@ -71,6 +78,7 @@ describe('custom action credential screening', () => {
     'Inspected gatehouse #2468 and treated 120 linear feet',
     'Opened the gate onto 400 sqft of treated turf',
     'Opened rear gate, applied 100 ml around hinges',
+    'Inspected the rear gate 120–150 feet from the lanai',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
