@@ -110,6 +110,22 @@ test('a suppression sentinel (sent:true but nothing left) releases the week for 
   expect(mockDel).toHaveBeenCalledTimes(1);
 });
 
+test('a release that keeps failing is surfaced as claim_release_failed, never swallowed (Codex r7)', async () => {
+  claimed();
+  mockSend.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SEGMENTS_EXCEEDED', reason: 'too long', deliveryOutcome: 'not_sent' });
+  mockDel.mockRejectedValue(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
+  await expect(sendBriefingSmsOnce('x'.repeat(900))).rejects.toMatchObject({ code: 'claim_release_failed' });
+  expect(mockDel).toHaveBeenCalledTimes(3);
+});
+
+test('a transient release failure is retried and the week is freed', async () => {
+  claimed();
+  mockSend.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SEGMENTS_EXCEEDED', reason: 'too long', deliveryOutcome: 'not_sent' });
+  mockDel.mockRejectedValueOnce(new Error('connection reset')).mockResolvedValueOnce(1);
+  await expect(sendBriefingSmsOnce('x'.repeat(900))).resolves.toMatchObject({ sent: false, blocked: true });
+  expect(mockDel).toHaveBeenCalledTimes(2);
+});
+
 test('no ADAM_PHONE: nothing is claimed and nothing is sent', async () => {
   delete process.env.ADAM_PHONE;
   await expect(sendBriefingSmsOnce('📊')).resolves.toEqual({ error: 'ADAM_PHONE not set' });

@@ -44,14 +44,39 @@ describeOrSkip('save_weekly_report on PostgreSQL', () => {
     action_items: 'none',
   });
 
+  // Only Date is faked, so each save's created_at is controlled; the pg pool
+  // and its timers run for real.
+  const at = (iso) => jest.setSystemTime(new Date(iso));
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask'] }));
+  afterEach(() => jest.useRealTimers());
+
   test('a second save in the same ET week replaces the week\'s report instead of adding one', async () => {
     const ROLLBACK = new Error('rollback');
     await expect(knex.transaction(async (trx) => {
       mockTrx = trx;
+      at('2026-09-28T09:00:00Z');
       const first = await executeBITool('save_weekly_report', report('first run'));
+      at('2026-09-28T09:05:00Z');
       const second = await executeBITool('save_weekly_report', report('retried run'));
       expect(first).toMatchObject({ saved: true });
       expect(second).toMatchObject({ saved: true, reportId: first.reportId });
+      const rows = await trx('weekly_bi_reports').where({ week_of: etWeekStart() }).select('summary');
+      expect(rows).toEqual([{ summary: 'retried run' }]);
+      throw ROLLBACK;
+    })).rejects.toBe(ROLLBACK);
+  });
+
+  test('an older save that lands after a newer one never overwrites it (Codex r7)', async () => {
+    const ROLLBACK = new Error('rollback');
+    await expect(knex.transaction(async (trx) => {
+      mockTrx = trx;
+      // The retry (issued later) lands first; the save abandoned at the
+      // deadline (issued earlier) lands after it.
+      at('2026-09-28T09:05:00Z');
+      const retry = await executeBITool('save_weekly_report', report('retried run'));
+      at('2026-09-28T09:00:00Z');
+      const abandoned = await executeBITool('save_weekly_report', report('abandoned run'));
+      expect(abandoned).toMatchObject({ saved: false, superseded: true, reportId: retry.reportId });
       const rows = await trx('weekly_bi_reports').where({ week_of: etWeekStart() }).select('summary');
       expect(rows).toEqual([{ summary: 'retried run' }]);
       throw ROLLBACK;

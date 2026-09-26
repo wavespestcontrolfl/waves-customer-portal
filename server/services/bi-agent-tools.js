@@ -440,7 +440,17 @@ async function executeBITool(toolName, input) {
         // deadline, replaces the week's row instead of adding a second
         // (Codex r6).
         week_of: etWeekStart(),
-      }).onConflict('week_of').merge().returning('*');
+      }).onConflict('week_of').merge()
+        // Only a NEWER save replaces the week's row, so a save abandoned at
+        // the deadline that finishes after a retry's never overwrites the
+        // retry's report (Codex r7).
+        .where('weekly_bi_reports.created_at', '<', db.raw('excluded.created_at'))
+        .returning('*');
+      if (!report) {
+        const newer = await db('weekly_bi_reports').where({ week_of: etWeekStart() }).first('id');
+        logger.info(`[bi-agent] Weekly report not saved: a newer report for this week already exists (${newer?.id || 'unknown'})`);
+        return { saved: false, superseded: true, reportId: newer?.id || null, reason: 'A newer report for this week is already saved.' };
+      }
 
       logger.info(`[bi-agent] Weekly report saved: ${report.id}`);
       return { saved: true, reportId: report.id };

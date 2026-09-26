@@ -43,9 +43,23 @@ async function claimWeek(claimKey) {
   return (claim?.rows || []).length > 0;
 }
 
-function releaseWeek(claimKey) {
-  return db('sms_send_claims').where({ claim_key: claimKey }).del()
-    .catch((err) => logger.warn(`[bi-agent] Briefing SMS claim release failed (${err?.code || err?.name || 'error'})`));
+// A release that fails leaves the week claimed with nothing sent, and every
+// later attempt that week would be skipped. Retry a transient failure, then
+// surface it as an error rather than swallowing it (Codex r7).
+const RELEASE_ATTEMPTS = 3;
+async function releaseWeek(claimKey) {
+  let lastErr;
+  for (let attempt = 1; attempt <= RELEASE_ATTEMPTS; attempt += 1) {
+    try {
+      await db('sms_send_claims').where({ claim_key: claimKey }).del();
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < RELEASE_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+    }
+  }
+  logger.error(`[bi-agent] Briefing SMS claim release failed for ${claimKey}; this week's text stays blocked until the claim is cleared (${lastErr?.code || lastErr?.name || 'error'})`);
+  throw Object.assign(new Error(`Briefing SMS claim release failed for ${claimKey}: ${lastErr?.message || 'unknown error'}`), { code: 'claim_release_failed' });
 }
 
 async function sendBriefingSmsOnce(message) {
