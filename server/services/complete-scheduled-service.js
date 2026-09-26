@@ -11136,6 +11136,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && String(invoice.annual_prepay_covered_term_id || '') === String(svc.annual_prepay_term_id)) {
       await billAnnualPrepayAddons({ coveredInvoiceId: invoice.id });
     }
+    // A settled invoice on the covered visit — paid, or prepaid other than
+    // this term's covered-base settlement (the resume branch above bills
+    // beside that one) — keeps its settlement, but it stands for the
+    // visit's add-ons only when it bills exactly them (invoiceBillsExactExtras).
+    // An office invoice paid for some of the add-ons, or for the covered
+    // base with them, leaves a remainder nobody else bills: the office is
+    // told, and the text never says "all paid".
+    const settledStatus = String(invoice?.status || '').toLowerCase();
+    if (annualPrepayAddonBilling && !annualPrepayAddonsHandled && annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
+      && !recapReviewOnly && visitPerformed && !terminalCompletionInvoice
+      && ['paid', 'prepaid'].includes(settledStatus)
+      && !(settledStatus === 'prepaid' && svc.annual_prepay_term_id
+        && String(invoice.annual_prepay_covered_term_id || '') === String(svc.annual_prepay_term_id))) {
+      let settledAddons = null;
+      let settledExtras = null;
+      try {
+        settledAddons = await annualPrepayAddonRows(svc);
+        if (settledAddons.priced) {
+          settledExtras = await annualPrepayExtrasForVisit({ ...svc, ...(await db('scheduled_services').where({ id: svc.id }).first()) }, settledAddons);
+        }
+      } catch (lookupErr) {
+        if (!settledAddons) annualPrepayLookupError = lookupErr;
+        logger.warn(`[dispatch] annual-prepay add-ons unreadable against settled invoice ${invoice.id} for visit ${svc.id}: ${lookupErr.message}`);
+      }
+      if (settledAddons?.priced && !invoiceBillsExactExtras(invoice, settledAddons, settledExtras)) {
+        await alertAnnualPrepayAddons(`invoice ${invoice.invoice_number || invoice.id} is already ${settledStatus} but does not bill exactly the visit's add-ons${settledExtras && !settledExtras.ambiguous ? ` (the visit prices them at $${settledExtras.total.toFixed(2)})` : ''} — check what is still owed`, { invoiceId: invoice.id, addonTotal: settledExtras?.total ?? null });
+      }
+    }
     // A retry that found an invoice on the visit (the add-ons bill an earlier
     // pass minted, perhaps paid or credited since) never revisited that
     // void: its other charges still await the office's re-bill, so they are

@@ -585,6 +585,24 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(PAID_TEXTS).not.toContain(retry.body?.completionSmsType);
   });
 
+  test('an office invoice already paid for only one of two add-ons stays paid, and the office is told about the other — never "all paid" (pre-push P1)', async () => {
+    const f = await coveredVisit({ secondAddon: true, invoiceLines: (x) => [addonLine(x)], invoiceStatus: 'paid' });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('paid');
+    expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
+  test('an office invoice already paid for exactly the add-ons needs nothing more', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)], invoiceStatus: 'paid' });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
+    expect(await addonsAlert(f)).toBeUndefined();
+  });
+
   test('a covered visit with a refunded invoice alerts the office to bill the add-ons once the refund is final (GitHub r1 P1)', async () => {
     const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)], invoiceStatus: 'refunded' });
     const out = await complete(f, { sendCompletionSms: true });
