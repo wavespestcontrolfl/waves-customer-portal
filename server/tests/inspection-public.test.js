@@ -3341,3 +3341,72 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
     expect(eligibility).toEqual({ state: 'already_booked', visit: null, rescheduleUrl: null });
   });
 });
+
+// consultationEligibleForLead (router._internals) — the estimate-page
+// consultation offer's own eligibility check: the SAME lead-wide
+// resolveEligibility() as GET/computeConsultationSlotsForLead, WITHOUT the
+// geocoder/availability search. Fail-closed: false on any ineligibility or
+// thrown error; true only on a live catalog row over an 'ok' eligibility.
+describe('consultationEligibleForLead (P1 lane: estimate-page consultation offer)', () => {
+  const { consultationEligibleForLead } = inspectionPublicRouter._internals;
+
+  test('missing lead → false', async () => {
+    firstResults.leads = null;
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(false);
+  });
+
+  test('readEligibility not ok (already_booked: an open non-terminal assessment) → false', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [
+      { id: 'svc-1', scheduled_date: '2027-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok' },
+    ];
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(false);
+  });
+
+  test('readEligibility not ok (converted) → false', async () => {
+    firstResults.leads = { ...LEAD_ROW, converted_at: new Date() };
+    firstResults.customers = null;
+    listResults.scheduled_services = [];
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(false);
+  });
+
+  test('readEligibility not ok (gone: a closed lead) → false', async () => {
+    firstResults.leads = { ...LEAD_ROW, status: 'disqualified' };
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(false);
+  });
+
+  test('catalog with no serviceId (retired/archived/booking-disabled) → false even on an otherwise-ok lead', async () => {
+    firstResults.leads = LEAD_ROW;
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', is_active: false };
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(false);
+  });
+
+  test('catalog row entirely missing → false', async () => {
+    firstResults.leads = LEAD_ROW;
+    listResults.scheduled_services = [];
+    firstResults.services = null;
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(false);
+  });
+
+  test('a thrown error anywhere (e.g. the lead lookup blowing up) → false, never propagates', async () => {
+    firstResults.leads = () => { throw new Error('db exploded'); };
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(false);
+  });
+
+  test('happy path: an open lead, no customer, live catalog row → true', async () => {
+    firstResults.leads = LEAD_ROW; // status 'new', no customer_id
+    listResults.scheduled_services = [];
+    // firstResults.services is the default live catalog row from beforeEach.
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(true);
+  });
+
+  test('never calls the geocoder or the availability builder — eligibility only, no slot search', async () => {
+    firstResults.leads = LEAD_ROW;
+    listResults.scheduled_services = [];
+    await expect(consultationEligibleForLead(LEAD_ID)).resolves.toBe(true);
+    expect(mockGeocode).not.toHaveBeenCalled();
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
+});

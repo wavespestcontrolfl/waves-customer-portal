@@ -22,6 +22,16 @@ describe('ConsultationOfferSection', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('renders nothing when url is an empty string (falsy, not just missing)', () => {
+    const { container } = render(<ConsultationOfferSection consultationOffer={{ url: '' }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders nothing when consultationOffer itself is undefined (prop omitted)', () => {
+    const { container } = render(<ConsultationOfferSection />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it('renders the section and links to the server-provided url in a new tab', () => {
     render(<ConsultationOfferSection consultationOffer={{ url: 'https://portal.wavespestcontrol.com/inspection/abc.123.sig' }} />);
     expect(screen.getByText('Want us to come look first?')).toBeInTheDocument();
