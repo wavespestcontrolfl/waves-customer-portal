@@ -55,20 +55,18 @@ function triageMatchesSchema(t) {
 // triageMatchesSchema, so a suggestion that was only a signature ("— Adam")
 // is a blank reply there — a failed answer that falls back — instead of a
 // successful triage with no reply (Codex r1 on #4975).
-// The shared stripper knows only the Waves signers, so a sign-off by any
-// other name ("— Sarah", "Sarah, Waves Team" on its own last line) is removed
-// here too (Codex r2 on #4975). Only a signature context counts, right after
-// a finished sentence: a dash-led name, or a last line that is only a name —
-// one or two capitalized words, optionally ", <Company>" in capitalized words. A dash inside a sentence ("We serve your area —
-// Sarasota.") or a list line ("Ants, roaches, or something else?") is text.
+// The shared stripper knows only the Waves signers, so a dash sign-off by any
+// other name ("We can help. — Sarah", "— Sarah, Waves Team") is removed here
+// too (Codex r2 on #4975). Only the unambiguous form counts: a dash-led name —
+// one or two capitalized words, optionally ", <Company>" in capitalized words —
+// ending the reply right after a sentence that ends in "." or "!", or standing
+// alone. A dash inside a sentence ("We serve your area — Sarasota."), after a
+// question ("Which service? — Lawn Care"), or a bare last line is left as text.
 const NAME_TOKEN = "[A-Z][\\p{L}'-]+";
 const SIGN_OFF_TAIL = `${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?(?:\\s*,\\s*${NAME_TOKEN}(?:\\s+${NAME_TOKEN}){0,3})?\\s*[!.🌊]?\\s*$`;
-const DASH_SIGN_OFF_RE = new RegExp(`(^|[.!?])\\s*[—–-]{1,2}\\s*${SIGN_OFF_TAIL}`, 'u');
-// A sign-off line only follows a finished sentence; a line after "with:" or
-// "will be" is the answer itself (pre-push audit on #4975).
-const LINE_SIGN_OFF_RE = new RegExp(`([.!?])\\s*\\n\\s*(?:[—–-]{1,2}\\s*)?${SIGN_OFF_TAIL}`, 'u');
+const DASH_SIGN_OFF_RE = new RegExp(`(^|[.!])\\s*[—–-]{1,2}\\s*${SIGN_OFF_TAIL}`, 'u');
 function stripAnySignOff(text) {
-  return text.trim().replace(DASH_SIGN_OFF_RE, '$1').replace(LINE_SIGN_OFF_RE, '$1').trim();
+  return text.trim().replace(DASH_SIGN_OFF_RE, '$1').trim();
 }
 
 function unsignedTriage(parsed, firstName) {

@@ -143,8 +143,7 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
   test.each([
     ['We can help. — Sarah', 'We can help.'],
     ['We can help!\n— Sarah', 'We can help!'],
-    ['We can help.\n\nSarah', 'We can help.'],
-    ['We can help.\n\nSarah Jones, Waves Team', 'We can help.'],
+    ['We can help.\n\n— Sarah Jones, Waves Team', 'We can help.'],
   ])('%j is stripped to %j and the triage kept', async (suggestedReply, expected) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
     const out = await aiTriageLead(LEAD);
@@ -170,6 +169,10 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     'Thanks, Sarah!',
     'We can help with:\nLawn Care',
     'Your technician will be\nAdam',
+    'Who will be coming?\nAdam',
+    'Which service would help?\nLawn Care',
+    'Which service? — Lawn Care',
+    'We can help.\n\nSarah',
   ])('ordinary text is kept as written: %j', async (suggestedReply) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
     expect((await aiTriageLead(LEAD)).suggestedReply).toBe(suggestedReply);
