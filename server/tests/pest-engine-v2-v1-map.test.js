@@ -62,6 +62,16 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
     expect(r?.node?.slug).not.toBe('brazilian-free-tailed-bat');
   });
 
+  test('a bare genus never lands on a sign entry (Codex #4974 r8)', () => {
+    expect(catalog.resolveName('Rattus')?.node?.kind).not.toBe('sign');
+  });
+
+  test('a sign-only read lists no organism among the other possibilities (Codex #4974 r8)', () => {
+    const built = buildAnswer({ ...ctx([cand('subterranean-termite', 0.9), cand('termite-mud-tubes', 0.5)]), signOnly: true });
+    expect(built.entry?.kind).not.toBe('organism');
+    expect(built.candidatesBlock.map((c) => c.slug)).not.toContain('subterranean-termite');
+  });
+
   test('bats get the exclusion-only referral, never a trapper', () => {
     expect(catalog.getEntry('brazilian-free-tailed-bat').service.referral).toBe('bat_exclusion');
     expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/never trapped or handled/);

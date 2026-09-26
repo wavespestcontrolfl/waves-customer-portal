@@ -373,7 +373,12 @@ function buildNameIndices() {
   const commonPairs = [];
   const nodePairs = [];
   for (const e of CATALOG.entries.values()) {
-    for (const part of String(e.scientific_name || '').split('/')) {
+    // A sign's "scientific name" describes the sign ("Rattus / Mus (sign)"),
+    // not a taxon, so it never answers a genus or species query — those
+    // resolve to the organism (Codex #4974 r8).
+    const taxonNames = e.kind === 'sign' ? '' : String(e.scientific_name || '');
+    for (const part of taxonNames.split('/')) {
+      if (!part.trim()) continue;
       scientificPairs.push([part, e.slug]);
       // "Phyllophaga spp." also answers to its bare genus.
       const genus = part.trim().match(/^([A-Z][a-z]+) spp?\.?$/);

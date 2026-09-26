@@ -836,7 +836,8 @@ function entryLevelAnswer(candidates, top, blockPrettySure) {
   // merge path proving it never lets an unchecked number through.
   const blocked = blockPrettySure || !top.verified;
   const named = (wording) => ({
-    level: 'entry', wording, nodeId: top.slug, subhead: top.entry.scientific_name || null,
+    // A sign has no species of its own to name in the subhead (Codex #4974 r8).
+    level: 'entry', wording, nodeId: top.slug, subhead: top.entry.kind === 'sign' ? null : (top.entry.scientific_name || null),
     headline: `${wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${top.entry.common_name}`,
     entry: top.entry,
   });
@@ -910,7 +911,9 @@ function buildAnswer(ctx) {
 
   const group = groupBlockFor(level, nodeId, entry);
   const evidence = evidenceFor(candidatesSupporting(candidates, level, nodeId));
-  const candidatesBlock = candidatesBlockFor(candidates, currentMonth);
+  // On a sign-only read the photos show no animal, so no organism is listed
+  // as another possibility either (Codex #4974 r8).
+  const candidatesBlock = candidatesBlockFor(signOnly ? candidates.filter((c) => c.entry?.kind !== 'organism') : candidates, currentMonth);
   const nextPhoto = nextPhotoFor(wording, candidates, level, nodeId);
 
   // Contract delta 2026-09-26 #3: a chosen pair no single photo can settle

@@ -201,7 +201,7 @@
       "key": null,
       "label": "Wildlife Referral",
       "inspection_first": false,
-      "referral": "wildlife_trapper"
+      "referral": null
     },
     "urgency": "low",
     "copy": {
