@@ -133,6 +133,15 @@ describe('analyzePhoto — Gemini first, ChatGPT only for a second look', () => 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
+  it('two different kinds of hazard (fire ant vs termite) still count as a different risk', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, best_match: 'fire ant', alternates: ['subterranean termite'] }));
+    openaiAnswers({ ...GEMINI_ID, best_match: 'fire ant' });
+
+    await analyzePhoto('base64photo', 'image/jpeg');
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
   it('a runner-up of the same risk does not escalate', async () => {
     global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, alternates: ['bigheaded ant', 42] }));
 

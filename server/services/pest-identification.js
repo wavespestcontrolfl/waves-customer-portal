@@ -496,28 +496,58 @@ function escalateBelow() {
   return Number.isFinite(value) && value > 0 && value <= 1 ? value : DEFAULT_ESCALATE_BELOW;
 }
 
-function isRisky(entry) {
-  return !!entry && !!(entry.inspection_required || entry.safety.stinging
-    || entry.safety.venomous || entry.safety.structural_threat || entry.safety.disease_vector);
+// Each risk dimension separately, so two hazards of different kinds (fire ant
+// vs termite) still read as a different risk (Codex #4865 r3).
+function riskProfile(entry) {
+  if (!entry) return 'none';
+  const { stinging, venomous, structural_threat: structural, disease_vector: disease } = entry.safety;
+  return [entry.inspection_required, stinging, venomous, structural, disease].map((flag) => (flag ? 1 : 0)).join('');
 }
 
 // Unsure = the score is under the bar (with no usable score, anything short of
 // "high"). A sure answer still gets a second look when one of its own
-// alternates differs from the pick in risk: an ant with a termite as the
-// runner-up, a beneficial with a stinging insect.
+// alternates differs from the pick in any risk dimension: an ant with a
+// termite as the runner-up, a beneficial with a stinging insect.
 function needsSecondLook(result) {
   const score = result.confidence_score;
   const sure = typeof score === 'number'
     ? score >= escalateBelow()
     : clampEnum(result.confidence, CONFIDENCES) === 'high';
   if (!sure) return true;
-  const pickRisky = isRisky(resolveLibraryMatch(result.best_match));
+  const pickRisk = riskProfile(resolveLibraryMatch(result.best_match));
   return (Array.isArray(result.alternates) ? result.alternates : [])
     .filter((name) => typeof name === 'string')
     .some((name) => {
       const alternate = resolveLibraryMatch(name);
-      return !!alternate && isRisky(alternate) !== pickRisky;
+      return !!alternate && riskProfile(alternate) !== pickRisk;
     });
+}
+
+const URGENCY_RANK = { low: 0, moderate: 1, high: 2 };
+
+// What stays true whichever of the candidates it really is: a safety flag
+// only if every candidate has it, the lowest urgency, and the service only
+// when every candidate routes to the same one. A group-only answer carries
+// these instead of one disputed species' facts (Codex #4865 r3).
+function sharedFacts(list) {
+  const [first] = list;
+  const safety = {};
+  for (const key of Object.keys(first.safety)) safety[key] = list.every((facts) => !!facts.safety[key]);
+  const urgency = list.reduce((lowest, facts) => (URGENCY_RANK[facts.urgency] < URGENCY_RANK[lowest] ? facts.urgency : lowest), first.urgency);
+  const sameService = first.service && list.every((facts) => facts.service
+    && facts.service.line === first.service.line && facts.service.key === first.service.key && facts.service.label === first.service.label);
+  const service = sameService
+    ? { ...first.service, inspection_required: list.every((facts) => facts.service.inspection_required) }
+    : null;
+  return { safety, urgency, service };
+}
+
+function entryFacts(entry) {
+  return {
+    safety: entry.safety,
+    urgency: entry.urgency,
+    service: { line: entry.service_line, key: entry.service_key, label: entry.service_label, inspection_required: entry.inspection_required },
+  };
 }
 
 function downgrade(confidence) {
@@ -573,7 +603,8 @@ function mergeModelResults(openai, gemini) {
       // collapse to category-generic.
       if (a.match.group === b.match.group) {
         const category = a.match.category === b.match.category ? a.match.category : 'other';
-        return { ...base, entry: null, group: a.match.group, confidence: 'low', category, agreement: 'group' };
+        const shared = sharedFacts([entryFacts(a.match), entryFacts(b.match)]);
+        return { ...base, entry: null, group: a.match.group, shared, confidence: 'low', category, agreement: 'group' };
       }
       const category = a.category === b.category ? a.category : 'other';
       return { ...base, entry: null, confidence: 'low', category, agreement: 'conflict' };
@@ -635,9 +666,11 @@ function aggregateIdentification(perPhoto) {
     const group = groups.length === 1
       && perPhoto.every((r) => r.group === groups[0] || (r.category === 'other' && r.agreement !== 'conflict'))
       ? groups[0] : null;
+    const sharedList = group ? perPhoto.filter((r) => r.group === group && r.shared).map((r) => r.shared) : [];
     return {
       entry: null,
       group,
+      shared: sharedList.length ? sharedFacts(sharedList) : null,
       confidence: 'low',
       category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
       contested: false,
@@ -710,6 +743,9 @@ async function identifyPest(photos = []) {
 function buildPestReportContract(result) {
   const { identification, observations, distinguishing_features: features, alternate_slugs: alternates } = result;
   const item = identification.entry;
+  // A group-only answer carries the facts every candidate shares
+  // (sharedFacts); an unmatched one carries none.
+  const shared = !item && identification.shared ? identification.shared : null;
   return {
     contract_version: 'pest_id_v1',
     identification: {
@@ -720,11 +756,11 @@ function buildPestReportContract(result) {
       confidence: identification.confidence,
       contested: !!identification.contested,
     },
-    safety: item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false },
-    urgency: item ? item.urgency : 'low',
+    safety: item ? item.safety : (shared ? shared.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false }),
+    urgency: item ? item.urgency : (shared ? shared.urgency : 'low'),
     service: item
       ? { line: item.service_line, key: item.service_key, label: item.service_label, inspection_required: item.inspection_required }
-      : { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true },
+      : ((shared && shared.service) || { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true }),
     observations,
     distinguishing_features: features,
     alternate_slugs: alternates,
@@ -792,7 +828,9 @@ function buildPublicPestReport(row = {}) {
   const service = contract.service || {};
   const notAPest = ident.category === 'not_a_pest' || (item && item.category === 'not_a_pest');
 
-  const safety = item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false };
+  // No species entry: the contract's own flags (all false for an unmatched
+  // answer; the shared ones for a group-only answer).
+  const safety = item ? item.safety : (contract.safety || { stinging: false, venomous: false, disease_vector: false, structural_threat: false });
   const contact = parseJson(row.contact_snapshot, {});
   const address = parseJson(row.address_snapshot, {});
   const firstName = contact.first_name
@@ -853,12 +891,13 @@ function buildPestTeaser(contract = {}) {
   const generic = item
     ? (GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category])
     : (GROUP_GENERIC[ident.group] || CATEGORY_GENERIC[category] || CATEGORY_GENERIC.other);
+  const teaserSafety = item ? item.safety : contract.safety;
   return {
     identified_teaser: `We identified ${generic}.`,
     identified_specific: Boolean(item && ident.confidence !== 'low'),
     category,
     urgency,
-    safety_flag: Boolean(item && (item.safety.venomous || item.safety.stinging || item.safety.structural_threat || item.safety.disease_vector)),
+    safety_flag: Boolean(teaserSafety && (teaserSafety.venomous || teaserSafety.stinging || teaserSafety.structural_threat || teaserSafety.disease_vector)),
   };
 }
 

@@ -81,11 +81,40 @@ describe('mergeModelResults', () => {
     const merged = mergeModelResults(claude({ confidence: 'moderate' }), claude({ best_match: 'fire ant', confidence: 'high' }));
     const contract = buildPestReportContract({ ...merged, identification: _test.aggregateIdentification([merged]) });
     expect(contract.identification).toMatchObject({ slug: null, group: 'ants', category: 'insect', confidence: 'low' });
+    // Only what both ants share: fire ant's sting is not claimed, the lower
+    // urgency stands, and both route to the same general pest service.
     expect(contract.safety).toEqual({ stinging: false, venomous: false, disease_vector: false, structural_threat: false });
-    expect(contract.urgency).toBe('low');
-    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
+    expect(contract.urgency).toBe('moderate');
+    expect(contract.service).toMatchObject({ line: 'pest', key: 'pest', inspection_required: false });
     expect(publicIdentificationLabel(contract)).toEqual({ label: 'an ant species', hedged: true, specificity: 'generic' });
     expect(buildPestTeaser(contract)).toMatchObject({ identified_teaser: 'We identified an ant species.', identified_specific: false, safety_flag: false });
+  });
+
+  // Codex #4865 r3: a split between two species of a hazardous group keeps
+  // every hazard they share instead of reading as "no emergency".
+  test('a termite split keeps the shared structural hazard, urgency and inspection-first service', () => {
+    const split = mergeModelResults(claude({ best_match: 'subterranean termite' }), claude({ best_match: 'drywood termite' }));
+    expect(split).toMatchObject({ entry: null, group: 'termites', agreement: 'group' });
+    const contract = buildPestReportContract({ ...split, identification: _test.aggregateIdentification([split]) });
+    expect(contract.safety.structural_threat).toBe(true);
+    expect(contract.urgency).toBe('high');
+    expect(contract.service).toMatchObject({ line: 'termite', key: null, inspection_required: true });
+    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
+    expect(report.identified.label).toBe('signs consistent with termite activity');
+    expect(report.safety.structural_threat).toBe(true);
+    expect(report.next_step).not.toMatch(/No emergency/);
+    expect(report.recommendation.note).toMatch(/termite activity/);
+    expect(buildPestTeaser(contract).safety_flag).toBe(true);
+  });
+
+  test('two stinging species keep the sting; photos of different pairs keep only what all share', () => {
+    const wasps = mergeModelResults(claude({ best_match: 'paper wasp' }), claude({ best_match: 'yellowjacket' }));
+    expect(buildPestReportContract({ ...wasps, identification: _test.aggregateIdentification([wasps]) }).safety.stinging).toBe(true);
+    const ghostFire = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
+    const ghostBighead = mergeModelResults(claude(), claude({ best_match: 'bigheaded ant' }));
+    const identification = _test.aggregateIdentification([ghostFire, ghostBighead]);
+    expect(identification.group).toBe('ants');
+    expect(identification.shared.safety.stinging).toBe(false);
   });
 
   test('a group survives cross-photo aggregation only when every photo agrees on it', () => {
