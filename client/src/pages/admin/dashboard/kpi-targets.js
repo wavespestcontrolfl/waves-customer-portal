@@ -4,10 +4,10 @@
 // @kpi-targets alias below) so the server (bi-agent-tools.js
 // get_operations_snapshot) reads the exact same defaults and tone rule the
 // dashboard tiles do — same precedent as @lawn-scores / @proposal-bid.
-// Imported (for resolveTargetDef's own use below) and re-exported so every
-// existing import of this module keeps working.
-import { DEFAULT_KPI_TARGETS, kpiTargetTone } from '@kpi-targets';
-export { DEFAULT_KPI_TARGETS, kpiTargetTone };
+// Import DEFAULT_KPI_TARGETS from '@kpi-targets' directly rather than from
+// this module — every caller does (AGENTS.md: no re-export shims for callers
+// this repo controls).
+import { DEFAULT_KPI_TARGETS } from '@kpi-targets';
 
 // Owner-facing labels for the Settings tab + tile tooltips, in dashboard
 // section order. Metrics without a default target still appear so the owner

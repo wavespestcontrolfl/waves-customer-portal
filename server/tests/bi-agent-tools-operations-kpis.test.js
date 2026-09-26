@@ -47,6 +47,14 @@ const mockComputeCoreKpis = jest.fn();
 jest.mock('../routes/admin-dashboard', () => ({ computeCoreKpis: (...a) => mockComputeCoreKpis(...a) }));
 
 const { executeBITool } = require('../services/bi-agent-tools');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+// Windows now end YESTERDAY (ET), not today (Codex P1, bi-agent-tools.js:121)
+// — computed the same way the fix does, never a hardcoded literal (a
+// near-today literal goes stale the day the ET calendar passes it).
+const yesterday = etDateString(addETDays(new Date(), -1));
+const last7From = etDateString(addETDays(new Date(), -7));
+const last30From = etDateString(addETDays(new Date(), -30));
 
 // Only the paths get_operations_snapshot's kpis actually read.
 function kpiSet({ completion = 80, callback = 3, response = 64, conversion = 22, stops = 4.2, rpmh = 90, margin = 38, arDays = 34, retention = 88, collection = 65 } = {}) {
@@ -75,11 +83,13 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
 
     const result = await executeBITool('get_operations_snapshot', {});
 
-    expect(mockComputeCoreKpis).toHaveBeenCalledWith('last_7');
-    expect(mockComputeCoreKpis).toHaveBeenCalledWith('last_30');
+    // Both windows end YESTERDAY (ET) — never today — so a Monday-morning run
+    // never counts Monday's not-yet-done appointments as an incomplete.
+    expect(mockComputeCoreKpis).toHaveBeenCalledWith('last_7', { from: last7From, to: yesterday });
+    expect(mockComputeCoreKpis).toHaveBeenCalledWith('last_30', { from: last30From, to: yesterday });
     expect(result.kpiWindow).toEqual({
-      last7: 'rolling 7 days ending today (ET)',
-      baseline: 'rolling 30 days ending today (ET)',
+      last7: '7 days ending yesterday (ET)',
+      baseline: '30 days ending yesterday (ET)',
       current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
     });
 

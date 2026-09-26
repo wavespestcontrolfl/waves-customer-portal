@@ -457,9 +457,24 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     // numerator stays valid — no historical reconstruction needed.
     const start = (range && range.from) || periodStartDate(period);
 
+    // Optional window END override (range.to, an ET YYYY-MM-DD string) — lets
+    // a caller close a window BEFORE today, e.g. the Weekly BI Briefing ending
+    // its Monday-morning windows yesterday so Monday's not-yet-done jobs never
+    // count as an incomplete in completion_rate's denominator (Codex P1,
+    // bi-agent-tools.js:121). Every existing caller omits range.to, so
+    // endDate === todayStr and every query below is byte-identical to before
+    // this change. A `to` later than today is clamped to today (never look
+    // into the future); a `to` before `start` collapses the window to a
+    // single day (start..start) rather than an inverted range.
+    let endDate = todayStr;
+    if (range && range.to) {
+      endDate = range.to < todayStr ? range.to : todayStr;
+      if (endDate < start) endDate = start;
+    }
+
     // Service completion rate — scheduled_services in window
     const svcAgg = await db('scheduled_services')
-      .where('scheduled_date', '>=', start).where('scheduled_date', '<=', todayStr)
+      .where('scheduled_date', '>=', start).where('scheduled_date', '<=', endDate)
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
@@ -478,7 +493,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
 
     // Callback rate — service_records.is_callback in window
     const cbAgg = await db('service_records')
-      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+      .where('service_date', '>=', start).where('service_date', '<=', endDate)
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE is_callback = true) as callbacks")
@@ -516,7 +531,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     // Both per-job average AND revenue-weighted gross margin so a $50 callback
     // at 100% can't visually offset a $5,000 job at 30%.
     const srFin = await db('service_records')
-      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+      .where('service_date', '>=', start).where('service_date', '<=', endDate)
       .whereNotNull('revenue')
       .select(
         db.raw("SUM(revenue) as rev_total"),
@@ -572,7 +587,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
           db('leads').whereNull('deleted_at').modify(scopeToProspects),
           'first_contact_at',
           start,
-          todayStr,
+          endDate,
         )
       ).select(
           db.raw("COUNT(*) as total"),
@@ -668,7 +683,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
             )
         )`)
         .whereRaw(`${issueDateET} >= ?`, [start])
-        .whereRaw(`${issueDateET} <= ?`, [todayStr])
+        .whereRaw(`${issueDateET} <= ?`, [endDate])
         // Collected keys on status='paid' (cash), NOT paid_at IS NOT NULL:
         // prepaid credit closures stamp paid_at but stay status='prepaid'
         // (already excluded above), and a status='paid' invoice with null paid_at
@@ -825,7 +840,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     if (retentionOk) try {
       const newRow = await db('customers')
         .where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
-        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [todayStr])
+        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [endDate])
         .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
       const newCount = parseInt(newRow?.c || 0);
       const newMRR = parseFloat(newRow?.mrr || 0);
@@ -841,7 +856,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     let leaderboard = [];
     try {
       leaderboard = await db('service_records')
-        .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+        .where('service_date', '>=', start).where('service_date', '<=', endDate)
         .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
         .groupBy('technicians.id', 'technicians.name')
         .select(
@@ -889,7 +904,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         .whereNotNull('waveguard_tier')
         .whereNotIn('waveguard_tier', ['none', 'None', 'One-Time', 'Commercial'])
         .where('member_since', '>=', start)
-        .where('member_since', '<=', todayStr)
+        .where('member_since', '<=', endDate)
         .count('* as n').first();
       membershipsSold = parseInt(m?.n || 0, 10);
     } catch (err) { logger.error(`[admin-dashboard] memberships query failed: ${err.message}`); }
@@ -901,7 +916,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     try {
       const cc = await db('call_log').where('direction', 'inbound')
         .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls are not customers
-        .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, todayStr))
+        .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, endDate))
         .count('* as n').first();
       inboundCalls = parseInt(cc?.n || 0, 10);
       // null (not 0%) when the lead-metrics query failed — booked is a stale 0
@@ -927,7 +942,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         db.raw("COUNT(*) FILTER (WHERE status = 'received' AND amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0) > 0) as on_hand_count"),
       );
       const [window] = await db('estimate_deposits')
-        .modify((qb) => applyETTimestampWindow(qb, 'received_at', start, todayStr))
+        .modify((qb) => applyETTimestampWindow(qb, 'received_at', start, endDate))
         // Collected = CASH that arrived in the window: face value + the
         // card surcharge captured with it (amount stays face-only by
         // design — it is the credit authority; the fee rides

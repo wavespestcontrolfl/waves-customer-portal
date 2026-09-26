@@ -117,9 +117,18 @@ async function buildOperationsKpis() {
   // is a large route module and this tool needs only the one already-exported
   // computeCoreKpis accessor, not a load-time dependency on it.
   const { computeCoreKpis } = require('../routes/admin-dashboard');
+  // Windows END YESTERDAY (ET), not today (Codex P1, bi-agent-tools.js:121).
+  // The briefing runs Monday 05:00 ET (scheduler.js); computeCoreKpis's default
+  // "ends today" window would put Monday's not-yet-run appointments into
+  // completion_rate's denominator as an incomplete before the day's work has
+  // even started, producing a false completion miss every single week. Passing
+  // an explicit range.to = yesterday closes every window the day before this
+  // runs, so a run that happens to land LATER than 05:00 ET still reports the
+  // same numbers a 05:00 run would have.
+  const yesterday = daysAgo(1);
   const [k7, k30, storeTargets] = await Promise.all([
-    computeCoreKpis('last_7'),
-    computeCoreKpis('last_30'),
+    computeCoreKpis('last_7', { from: daysAgo(7), to: yesterday }),
+    computeCoreKpis('last_30', { from: daysAgo(30), to: yesterday }),
     loadOperationsKpiTargets(),
   ]);
   return OPERATIONS_KPI_KEYS.map((metric) => {
@@ -316,13 +325,17 @@ async function executeBITool(toolName, input) {
       const total = parseInt(weekServices?.total || 0);
       const completed = parseInt(weekServices?.completed || 0);
 
-      // Ops KPIs: last 7 days vs a rolling 30-day baseline (or, for a
-      // 'current'-window metric like ar_days, a single live snapshot) vs
-      // owner targets. computeCoreKpis has no historical-window replay, so
-      // this is a rolling "as of today" comparison — never described as
-      // "last week vs the week before" (see kpiWindow below). A computation
-      // failure still resolves targets (independent of computeCoreKpis) so
-      // every targeted metric reads as UNAVAILABLE, never as "all on target".
+      // Ops KPIs: 7 days ending yesterday vs a rolling 30-day baseline ending
+      // yesterday (or, for a 'current'-window metric like ar_days, a single
+      // live snapshot) vs owner targets. Windows end YESTERDAY (ET), not
+      // today — this briefing runs Monday morning, and a window ending today
+      // would count Monday's not-yet-run appointments as incomplete before
+      // the day's work has even started (see buildOperationsKpis). computeCoreKpis
+      // has no historical-window replay, so this is still a rolling "as of
+      // yesterday" comparison — never described as "last week vs the week
+      // before" (see kpiWindow below). A computation failure still resolves
+      // targets (independent of computeCoreKpis) so every targeted metric
+      // reads as UNAVAILABLE, never as "all on target".
       let kpis = [];
       try {
         kpis = await buildOperationsKpis();
@@ -344,8 +357,8 @@ async function executeBITool(toolName, input) {
         kpis,
         opsLine,
         kpiWindow: {
-          last7: 'rolling 7 days ending today (ET)',
-          baseline: 'rolling 30 days ending today (ET)',
+          last7: '7 days ending yesterday (ET)',
+          baseline: '30 days ending yesterday (ET)',
           current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
         },
       };
@@ -648,6 +661,13 @@ async function executeBITool(toolName, input) {
     }
 
     case 'save_weekly_report': {
+      // The operations_section carries the ops KPI table (Codex P2,
+      // bi-agent-config.js:151) — reject a missing/blank value instead of
+      // silently saving a report with no ops record. Checked before the
+      // insert so a bad call never creates a partial row.
+      if (!input.operations_section || !String(input.operations_section).trim()) {
+        return { error: 'operations_section is required', validationError: true };
+      }
       const [report] = await db('weekly_bi_reports').insert({
         summary: input.summary,
         revenue_section: input.revenue_section,
