@@ -114,6 +114,7 @@ describe('card-expiry replay eligibility', () => {
   test('keeps the pinned current-month card for a live customer', async () => {
     const { meta, database } = expiryFixture();
     await expect(billingEmailReplayEligible(meta, database)).resolves.toEqual({ eligible: true });
+    expect(getCardExpiryExemptions).toHaveBeenCalledWith('2026-10-31', database);
   });
 
   test('refuses a changed pin and a relationship that no longer exists', async () => {
@@ -139,10 +140,12 @@ describe('card-expiry replay eligibility', () => {
 
 describe('invoice replay eligibility', () => {
   test('uses canonical collectibility for reminder sources, but lets paid-invoice receipts reach ownership', async () => {
+    const database = databaseWith();
     invoiceStillCollectible.mockResolvedValueOnce({ eligible: false, reason: 'invoice-terminal:paid' });
     await expect(billingEmailReplayEligible({ customer_id: customerId, invoice_id: 'inv-1',
-      source_entry_point: 'invoice_followup_sequence' }, databaseWith()))
+      source_entry_point: 'invoice_followup_sequence' }, database))
       .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
+    expect(invoiceStillCollectible).toHaveBeenCalledWith(expect.objectContaining({ invoice_id: 'inv-1' }), database);
 
     invoiceStillCollectible.mockClear();
     await expect(billingEmailReplayEligible({ customer_id: customerId, invoice_id: 'inv-paid',
@@ -217,11 +220,13 @@ describe('collections-policy replay eligibility', () => {
 
   test('derives exclusions from the persisted own event and ignores producer-supplied sibling ids', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const database = databaseWith({ collections_contact_ledger: ledger });
     await expect(billingEmailReplayEligible({ ...meta,
-      collections_sibling_ledger_ids: ['untrusted-id'] }, databaseWith({ collections_contact_ledger: ledger })))
+      collections_sibling_ledger_ids: ['untrusted-id'] }, database))
       .resolves.toEqual({ eligible: true });
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
       customerId, channel: 'email', purpose: 'late_payment', excludeLedgerIds: ['own-email', 'sibling-sms'], detail: true,
+      database,
     }));
   });
 

@@ -1416,11 +1416,11 @@ async function contactSlotStillAuthorized(meta, label) {
 
 // Shared: deferred invoice pay-link/dunning replays must confirm the
 // invoice is still collectible and (for dunning) the sequence not stopped.
-async function invoiceStillCollectible(meta) {
+async function invoiceStillCollectible(meta, database = db) {
   try {
     if (!meta.invoice_id) return { eligible: true };
     const { isTerminalInvoice } = require('../invoice-followups');
-    const inv = await db('invoices').where({ id: meta.invoice_id }).first();
+    const inv = await database('invoices').where({ id: meta.invoice_id }).first();
     if (!inv) return { eligible: false, reason: 'invoice-missing' };
     if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
     // Third-party Bill-To adopted overnight: payer-billed invoices route
@@ -1436,7 +1436,7 @@ async function invoiceStillCollectible(meta) {
       return { eligible: false, reason: 'payer-billed-withdrawn' };
     }
     if (meta.followup_sequence_id) {
-      const seq = await db('invoice_followup_sequences')
+      const seq = await database('invoice_followup_sequences')
         .where({ id: meta.followup_sequence_id })
         .first('status');
       if (seq && String(seq.status || '') === 'stopped') {

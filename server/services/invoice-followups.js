@@ -2016,8 +2016,8 @@ async function hasActiveSequence(invoiceId) {
  * texts. `hasActiveSequence` deliberately excludes 'stopped' (a stopped sequence is no
  * longer "active"/handling the invoice), so this is a separate, explicit check.
  */
-async function isDunningStopped(invoiceId) {
-  const seq = await db('invoice_followup_sequences')
+async function isDunningStopped(invoiceId, database = db) {
+  const seq = await database('invoice_followup_sequences')
     .where({ invoice_id: invoiceId, status: 'stopped' })
     .first();
   return !!seq;

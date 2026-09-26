@@ -102,14 +102,14 @@ async function expiryWindowRefusal(meta, customer, method, database) {
   return null;
 }
 
-async function expiryExemptionRefusal(meta, customer, method) {
+async function expiryExemptionRefusal(meta, customer, method, database) {
   const { getCardExpiryExemptions } = require('../annual-prepay-renewals');
   const { isCardExpiryExemptMethod } = require('../card-expiry-exemptions');
   const [year, month] = etDateString().split('-').map(Number);
   const horizon = meta.source_entry_point === 'payment_expiry_workflow'
     ? new Date(Date.UTC(year, month + 1, 0)).toISOString().slice(0, 10)
     : etDateString(addETDays(new Date(), 60));
-  const exemptions = await getCardExpiryExemptions(horizon);
+  const exemptions = await getCardExpiryExemptions(horizon, database);
   return isCardExpiryExemptMethod(exemptions, customer.id, method.id) ? refused('prepay-covered') : null;
 }
 
@@ -121,7 +121,7 @@ async function expiryRefusal(meta, database) {
   if (methodCheck.refusal) return methodCheck.refusal;
   const windowRefusal = await expiryWindowRefusal(meta, customerCheck.customer, methodCheck.method, database);
   if (windowRefusal) return windowRefusal;
-  return expiryExemptionRefusal(meta, customerCheck.customer, methodCheck.method);
+  return expiryExemptionRefusal(meta, customerCheck.customer, methodCheck.method, database);
 }
 
 async function balanceReminderVisitRefusal(meta, database) {
@@ -146,7 +146,7 @@ async function balanceReminderVisitRefusal(meta, database) {
 async function invoiceRefusal(meta, database) {
   if (!meta.invoice_id) return null;
   if (INVOICE_GUARDS.has(meta.source_entry_point)) {
-    const verdict = await require('./deferred-replay-registry').invoiceStillCollectible(meta);
+    const verdict = await require('./deferred-replay-registry').invoiceStillCollectible(meta, database);
     if (verdict.eligible !== true) return refused(verdict.reason, verdict.retryable === true);
   }
   const ownership = await require('../invoice-helpers').selfPayAtDispatch(meta.invoice_id, database)();
@@ -175,6 +175,7 @@ async function collectionsPolicyRefusal(meta, database) {
     logTag: 'billing-email-obligation-replay',
     excludeLedgerIds: await persistedLedgerExclusions(meta, database),
     detail: true,
+    database,
   });
   return permitted?.allowed === true ? null : refused('collections-policy-denied', permitted?.durable !== true);
 }
