@@ -602,6 +602,41 @@ function InsightLine({ label, value, strong }) {
   );
 }
 
+function WeekPlanCallout({ weekPlan, aftercare }) {
+  if (!weekPlan?.title) return null;
+  const canCreditWaterIn = aftercare?.creditableWaterIn === true;
+  // Week membership cannot establish whether a timed restriction has ended.
+  // Keep the full plan conditional on the recorded restriction and its windows.
+  const planCondition = aftercare?.needsReview === true
+    ? 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.'
+    : aftercare?.wateringHold === true
+      ? 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.'
+      : null;
+  const credited = canCreditWaterIn && weekPlan.visitInPlanWeek === true
+    && weekPlan.prescribesRun === true && weekPlan.afterTreatment;
+  const shown = credited ? weekPlan.afterTreatment : weekPlan;
+
+  return (
+    <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
+      {planCondition ? (
+        <div data-testid="lawn-week-plan-condition" style={{ marginBottom: 6, fontSize: 14, color: BODY }}>
+          {aftercare.watering ? <div>{aftercare.watering}</div> : null}
+          <strong>{planCondition}</strong>
+        </div>
+      ) : null}
+      {canCreditWaterIn && weekPlan.visitInPlanWeek === true ? (
+        <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={weekPlan.prescribesRun === true ? 'run' : 'hold'} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
+          {weekPlan.prescribesRun === true
+            ? 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.'
+            : 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.'}
+        </div>
+      ) : null}
+      <div data-testid="lawn-week-plan-title" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{shown.title}</div>
+      {shown.detail ? <div data-testid="lawn-week-plan-detail" style={{ marginTop: 3 }}>{shown.detail}</div> : null}
+    </div>
+  );
+}
+
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
 export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null }) {
   const mounted = useMounted();
@@ -730,29 +765,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           current week's runs (codex gh-r14). A HOLD plan has no run to
           cover — treatment-first still, but no "counts as a run" claim
           (codex gh-r16). */}
-      {water.weekPlan && water.weekPlan.title ? (
-        <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
-          {aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true ? (
-            <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={water.weekPlan.prescribesRun === true ? 'run' : 'hold'} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
-              {water.weekPlan.prescribesRun === true
-                ? 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.'
-                : 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.'}
-            </div>
-          ) : null}
-          {/* A credited watering-in REDUCES the plan shown — never the
-              unreduced run under the credit note (codex gh-r24). */}
-          {(() => {
-            const credited = aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true && water.weekPlan.prescribesRun === true && water.weekPlan.afterTreatment;
-            const shown = credited ? water.weekPlan.afterTreatment : water.weekPlan;
-            return (
-              <>
-                <div data-testid="lawn-week-plan-title" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{shown.title}</div>
-                {shown.detail ? <div data-testid="lawn-week-plan-detail" style={{ marginTop: 3 }}>{shown.detail}</div> : null}
-              </>
-            );
-          })()}
-        </div>
-      ) : null}
+      <WeekPlanCallout weekPlan={water.weekPlan} aftercare={aftercare} />
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (
         <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>

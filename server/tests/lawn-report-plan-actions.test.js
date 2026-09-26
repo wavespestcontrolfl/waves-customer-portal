@@ -5,6 +5,7 @@
  */
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
 const { buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN } = require('../services/service-report/lawn-report-v2');
+const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
 
 const PLAN = { title: 'This week: check the rain before you water', detail: '…', action: 'run', conditionalOnForecast: true };
 const RUN_PLAN = { title: 'This week: 25 minutes per turf zone', detail: '…', action: 'run', conditionalOnForecast: false };
@@ -43,9 +44,10 @@ describe('root cause defers to the plan', () => {
 });
 
 describe('surplus aftercare clause', () => {
-  test('source pin: with a plan the watering-in exception points at the plan, not "the reduced schedule"', () => {
+  test('source pin: only a recorded instruction points at the plan, never a reduced schedule', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'lawn-report-v2.js'), 'utf8');
-    expect(src).toMatch(/after it, follow this week’s watering plan\.'/);
+    expect(src).toMatch(/After completing that product-specific instruction, follow this week’s approved watering plan\.'/);
+    expect(src).not.toMatch(/return to the reduced schedule/);
     expect(src).toMatch(/weekPlan: water \? water\.weekPlan : null \}\);/);
   });
 });
@@ -56,11 +58,181 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
     expect(buildAftercare([{ product: { irrigation_required: true } }])).toMatchObject({ neutral: false, waterInRequired: true });
     expect(buildAftercare([{ product: { irrigation_notes: 'Do not water for 24 hours.' } }])).toMatchObject({ neutral: false, watering: 'Do not water for 24 hours.' });
   });
+  test('a circular catalog note cannot credit required watering against the plan', () => {
+    for (const irrigationNotes of [
+      'Watering or rainfall may be needed after application when directed by the service report.',
+      'Follow the service report for any watering instructions after application.',
+    ]) {
+      expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
+        .toMatchObject({
+          watering: expect.stringMatching(/does not include a specific amount or timing/i),
+          waterInRequired: true,
+          evidenceSource: 'incomplete_product_instruction',
+          needsReview: true,
+        });
+    }
+  });
+  test('specific amount and timing survive an otherwise deferred "as directed" qualifier', () => {
+    const watering = 'Water in with 0.25 inches within 24 hours as directed by your technician.';
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: watering } }]))
+      .toMatchObject({
+        watering,
+        waterInRequired: true,
+        evidenceSource: 'product_instruction',
+        needsReview: false,
+        creditableWaterIn: true,
+      });
+  });
+  test('numbers and timing words do not turn conditional report references into instructions', () => {
+    for (const irrigationNotes of [
+      'Watering may be needed within 24 hours when directed by the service report.',
+      'Follow the service report for watering instructions within 24 hours.',
+      'Follow the service report for watering instructions today.',
+    ]) {
+      expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
+        .toMatchObject({
+          waterInRequired: true,
+          evidenceSource: 'incomplete_product_instruction',
+          needsReview: true,
+          creditableWaterIn: false,
+        });
+    }
+  });
+  test('required watering needs a positive amount or timing before it can be credited', () => {
+    for (const irrigationNotes of ['Water in.', 'Do not water for 24 hours.']) {
+      expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
+        .toMatchObject({
+          waterInRequired: true,
+          evidenceSource: 'incomplete_product_instruction',
+          needsReview: true,
+        });
+    }
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: 'Water after service.' } }]))
+      .toMatchObject({ evidenceSource: 'product_instruction', needsReview: false, creditableWaterIn: true });
+    expect(buildAftercare([{ product: { irrigation_required: false, irrigation_notes: 'Do not water for 24 hours.' } }]))
+      .toMatchObject({ evidenceSource: 'product_instruction', needsReview: false, creditableWaterIn: false });
+  });
   test('source pin: with a plan the neutral copy is rewritten, label copy untouched', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'lawn-report-v2.js'), 'utf8');
     expect(src).toMatch(/if \(aftercare\.neutral && water && water\.weekPlan && water\.weekPlan\.title\) \{\s*aftercare\.watering = NEUTRAL_AFTERCARE_WITH_PLAN;/);
-    expect(NEUTRAL_AFTERCARE_WITH_PLAN).toMatch(/follow this week’s watering plan/);
+    expect(NEUTRAL_AFTERCARE_WITH_PLAN).toMatch(/Follow this week’s approved watering plan/);
     expect(NEUTRAL_AFTERCARE_WITH_PLAN).not.toMatch(/normal schedule/);
+  });
+});
+
+describe('multi-product aftercare keeps compatible catalog constraints (codex PR4892 r5)', () => {
+  const aceleprynRainPrecaution = 'Avoid application when rainfall is forecast within 48 hours to reduce runoff.';
+  const driveWateringHold = 'For best results, do not water or irrigate for 24 hours after application.';
+
+  test('Acelepryn plus Drive retains both constraints and records the explicit no-water hold', () => {
+    const aftercare = buildAftercare([
+      { product: { name: 'Acelepryn Xtra', epa_reg_number: '100-1680', irrigation_notes: aceleprynRainPrecaution } },
+      { product: { name: 'Drive XLR8', epa_reg_number: '7969-272', irrigation_notes: driveWateringHold } },
+    ]);
+    expect(aftercare).toMatchObject({ wateringHold: true, evidenceSource: 'product_instruction', needsReview: false });
+    expect(aftercare.watering).toContain(aceleprynRainPrecaution);
+    expect(aftercare.watering).toContain(driveWateringHold);
+  });
+
+  test('a standalone explicit rainfall precaution survives while circular placeholders remain review copy', () => {
+    expect(buildAftercare([{ product: { irrigation_notes: aceleprynRainPrecaution } }])).toMatchObject({
+      watering: aceleprynRainPrecaution,
+      wateringHold: false,
+      evidenceSource: 'product_instruction',
+      needsReview: false,
+    });
+  });
+
+  test('different positive water-in directions require review before earning plan credit', () => {
+    const first = 'Water within 1 hour after application.';
+    const second = 'Water only after 24 hours have passed.';
+    const aftercare = buildAftercare([
+      { product: { irrigation_required: true, irrigation_notes: first } },
+      { product: { irrigation_required: true, irrigation_notes: second } },
+    ]);
+    expect(aftercare).toMatchObject({
+      wateringHold: false,
+      waterInRequired: true,
+      evidenceSource: 'conflicting_product_instructions',
+      needsReview: true,
+    });
+    expect(aftercare.watering).toContain(first);
+    expect(aftercare.watering).toContain(second);
+  });
+
+  test('the same complete instruction on two required products stays creditable', () => {
+    const product = { irrigation_required: true, irrigation_notes: 'Water in with 0.25 inches within 24 hours.' };
+    expect(buildAftercare([{ product }, { product }])).toMatchObject({
+      watering: product.irrigation_notes,
+      evidenceSource: 'product_instruction',
+      needsReview: false,
+      wateringHold: false,
+      creditableWaterIn: true,
+    });
+  });
+
+  test('keep watering is a positive instruction rather than a prohibition', () => {
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: 'Keep watering for 20 minutes after application.' } }])).toMatchObject({
+      wateringHold: false,
+      evidenceSource: 'product_instruction',
+      needsReview: false,
+    });
+  });
+
+  test('a circular follow-up sentence does not discard an explicit hold or its duration', () => {
+    expect(buildAftercare([{ product: { irrigation_notes: 'Do not water for 24 hours. Follow the service report for further instructions.' } }])).toMatchObject({
+      watering: 'Do not water for 24 hours.',
+      wateringHold: true,
+      evidenceSource: 'product_instruction',
+      needsReview: false,
+    });
+  });
+
+  test('opposing positive and hold directions preserve both constraints but require review', () => {
+    const positive = 'Water after service.';
+    const hold = 'Do not water for 24 hours after service.';
+    const aftercare = buildAftercare([
+      { product: { irrigation_required: true, irrigation_notes: positive } },
+      { product: { irrigation_required: false, irrigation_notes: hold } },
+    ]);
+    expect(aftercare).toMatchObject({ wateringHold: true, evidenceSource: 'conflicting_product_instructions', needsReview: true });
+    expect(aftercare.watering).toContain(positive);
+    expect(aftercare.watering).toContain(hold);
+    expect(aftercare.watering).toMatch(/Confirm the directions/);
+  });
+
+  test.each([true, false])('the assistant conditions the full plan on the recorded restriction ending (visitInPlanWeek=%s)', (visitInPlanWeek) => {
+    const aftercare = buildAftercare([
+      { product: { name: 'Acelepryn Xtra', epa_reg_number: '100-1680', irrigation_notes: aceleprynRainPrecaution } },
+      { product: { name: 'Drive XLR8', epa_reg_number: '7969-272', irrigation_notes: driveWateringHold } },
+    ]);
+    const data = { reportV2: { aftercare, water: { weekPlan: {
+      title: 'This week: run once', detail: 'Run each turf zone for 20 minutes tonight.',
+      visitInPlanWeek, prescribesRun: true,
+    } } } };
+    for (const question of ['Should I water after today’s treatment?', 'How should I water this week?']) {
+      const answer = answerServiceReportQuestion({ question, data });
+      expect(answer).toContain(driveWateringHold);
+      expect(answer).toMatch(/only after that restriction has ended/);
+      expect(answer).toMatch(/only within the plan’s listed days and watering windows/);
+      expect(answer).toContain('This week: run once');
+      expect(answer.indexOf(driveWateringHold)).toBeLessThan(answer.indexOf('This week: run once'));
+    }
+  });
+
+  test('review-required watering directions need confirmation before the full plan applies', () => {
+    const aftercare = buildAftercare([
+      { product: { irrigation_required: true, irrigation_notes: 'Water within 1 hour after application.' } },
+      { product: { irrigation_required: true, irrigation_notes: 'Water only after 24 hours have passed.' } },
+    ]);
+    const answer = answerServiceReportQuestion({ question: 'How should I water this week?', data: { reportV2: {
+      aftercare,
+      water: { weekPlan: { title: 'This week: run once', detail: 'Run for 20 minutes.', visitInPlanWeek: true, prescribesRun: true,
+        afterTreatment: { title: 'No further turf runs this week', detail: 'Already covered.' } } },
+    } } });
+    expect(answer).toContain('Confirm the product watering directions with your technician before applying the plan below');
+    expect(answer).toContain('This week: run once');
+    expect(answer).not.toContain('No further turf runs');
   });
 });
 
