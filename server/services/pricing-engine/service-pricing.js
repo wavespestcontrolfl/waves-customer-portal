@@ -3310,6 +3310,11 @@ function priceCommercialPest(property = {}, options = {}) {
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
   // A defaulted footprint (exterior-only priced off an explicit perimeter)
   // is always LOW confidence — the building size itself is unverified.
+  // A commercial suite sized off the business-type default is caught too,
+  // but centrally — generateEstimate's single post-pricing pass grades
+  // EVERY commercial line LOW when input.footprintSizeEstimated is true
+  // (primary review of PR #4840 r5 P1: threading it into each pricer
+  // individually left commercial termite-bait/rodent-bait ungraded).
   const pricingConfidence = (defaulted || footprint > cfg.lowConfidenceFootprintSf) ? 'LOW' : 'MEDIUM';
 
   return {

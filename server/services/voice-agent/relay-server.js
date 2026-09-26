@@ -428,7 +428,19 @@ function attachVoiceRelay(httpServer) {
             callTokenVerified: true, // verified and burned at upgrade, never setup-frame input
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
-            language: msg.lang || p.lang || null,
+            // Flux Multilingual sandbox leg (relay-profiles.js
+            // flux_multilingual_es_v1, cell 10): the TwiML's own
+            // language="multi" tells Twilio's STT/TTS to auto-detect — it is
+            // not a real BCP-47 language, so if Twilio ever echoes it back
+            // as msg.lang on the setup frame it must never win over the
+            // <Parameter lang=es> marker that leg's own TwiML carries
+            // (sandboxRelayXml, mirroring the Spanish-menu vestibule's same
+            // marker) — this.language drives isSpanish() everywhere (the
+            // Spanish prompt addendum, deterministic fallback copy, and the
+            // streaming-hold check), and "multi" would match none of it,
+            // silently running the whole session in English (codex r1 P1 on
+            // #4947).
+            language: (msg.lang && msg.lang !== require('./relay-profiles').FLUX_MULTILINGUAL_LANGUAGE) ? msg.lang : (p.lang || null),
             // Telemetry labels only (the TwiML that rendered this call put
             // them on the <Parameter>s); nothing acts on them.
             relayProfileId: typeof p.relay_profile === 'string' ? p.relay_profile : null,

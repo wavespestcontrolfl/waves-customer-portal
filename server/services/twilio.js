@@ -727,6 +727,29 @@ const TwilioService = {
         };
       }
 
+      // A missing recipient is only ever legitimate for a push-only leg —
+      // send-customer-message.js's App-only billing leg calls sendSMS(null,
+      // …, { explicitPushOnly: true }) precisely because the customer has no
+      // phone, and PushRouting.attemptPushFirst below tolerates `to: null`
+      // by design. Any other caller reaching here with no `to` would
+      // otherwise fall through every guard/handoff step below and hand
+      // Twilio's SDK a `to: null` request it cannot fulfill — a wasted API
+      // call, not a customer send, but refused here rather than left to a
+      // provider-boundary failure downstream.
+      if (!to && !options.explicitPushOnly) {
+        logger.warn(
+          `[twilio] Cannot send SMS — no recipient (messageType=${options.messageType || "n/a"}, bodyLen=${body?.length || 0})`,
+        );
+        return {
+          success: false,
+          sid: null,
+          blocked: true,
+          guardBlocked: true,
+          code: "MISSING_RECIPIENT",
+          error: "SMS recipient is required",
+        };
+      }
+
       const { isEnabled } = require("../config/feature-gates");
       if (!isEnabled("twilioSms")) {
         logger.info(
@@ -820,6 +843,8 @@ const TwilioService = {
         applies: providerCoordination.directCoordinationApplies({
           messageType: options.messageType,
           reservationOwner: options.providerReservationOwner,
+          to,
+          explicitPushOnly: options.explicitPushOnly === true,
         }),
         reservation: {
           to: providerCoordination.normalizeRecipient(to),
@@ -981,6 +1006,7 @@ const TwilioService = {
           explicitPushOnly: options.explicitPushOnly,
           notificationEventKey: options.notificationEventKey,
           invoiceId: options.invoiceId,
+          billingDeliveryCategory: options.billingDeliveryCategory,
           requestNotification: options.requestNotification,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
@@ -1041,6 +1067,11 @@ const TwilioService = {
       // handoff (codex #3495): entry-time capture predates template/
       // customer lookups and the push-first attempt, so a START received
       // during that preparation wrongly outranked the rejection.
+      // The visit and its property snapshotted BEFORE the provider handoff:
+      // a property switch that commits while the send is in flight must not
+      // re-scope an SMS already handed off (Codex #4816 r49/r50). Not inside
+      // dispatch(): the provider call stays the handoff's last await.
+      const noticeScopeStamp = await require('./messaging/notice-scope').noticeScope(options.appointmentId);
       let message;
       let dispatchStarted = false;
       // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an
@@ -1338,6 +1369,12 @@ const TwilioService = {
               : {}),
             ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
             ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+            // The visit this send is about, on the primary row itself: the
+            // messaging audit is best-effort, and readers that scope by
+            // property (SMS commitment evidence) must not depend on it
+            // (Codex #4816 r41). Same key the push proof row uses.
+            // The visit and its send-time property (Codex #4816 r41/r49).
+            ...noticeScopeStamp,
           }),
         });
       } catch (logErr) {
