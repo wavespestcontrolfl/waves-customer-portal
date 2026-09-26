@@ -635,6 +635,33 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('keeps provider preparation and rewritten snapshot writes on the handoff connection', async () => {
+    const queued = { id: 'msg-held-connection', status: 'queued', subject_snapshot: 'S' };
+    const snapshotWrite = chain();
+    const database = jest.fn(() => snapshotWrite);
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queued] }), chain({ returning: [{ ...queued, status: 'sent' }] })],
+    });
+    sendgrid.sendOne.mockResolvedValueOnce({
+      messageId: 'sg-held', html: '<p>Portal home</p>', text: 'Portal home', withheldLinksRewritten: ['estimate-1'],
+    });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      withProviderHandoff: async (dispatch) => { await dispatch(database); return { ok: true }; },
+    });
+    expect(result.sent).toBe(true);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ database }));
+    expect(database).toHaveBeenCalledWith('email_messages');
+    expect(snapshotWrite.where).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id, status: 'queued' }));
+    expect(snapshotWrite.update).toHaveBeenCalledWith(expect.objectContaining({
+      html_snapshot: '<p>Portal home</p>', text_snapshot: 'Portal home',
+    }));
+  });
+
   test('deduplicates membership.started categories before provider send', async () => {
     const queuedMessage = {
       id: 'msg-membership-started',
