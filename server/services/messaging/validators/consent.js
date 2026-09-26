@@ -176,8 +176,14 @@ async function checkConsentForPurpose(input, policy, contactState) {
   const { billingDeliveryCategory, usesBillingDeliveryPreferences, preferenceChangeHold } = require('../billing-channel-routing');
   const { explicitBillingChannels } = require('../../billing-delivery-channels');
   const usesExplicitBilling = usesBillingDeliveryPreferences(input, contactState);
+  // Only a Text leg still carries a phone, so this is the customer's phone
+  // changing between the fan-out's recipient check and this fresh read. It
+  // is the same mid-dispatch race as a preference change, so it returns the
+  // same schedulable hold: the producer's replay re-fans-out against the
+  // customer's current phone instead of losing a one-shot notice (Codex r6
+  // P1 on #4843).
   if (input.metadata?.billingDeliveryLeg && !usesExplicitBilling) {
-    return { ok: false, code: 'BILLING_RECIPIENT_CHANGED', reason: 'Billing recipient no longer matches the selected delivery route' };
+    return { ok: false, ...preferenceChangeHold({ reason: 'Billing recipient changed before delivery' }) };
   }
   const explicitChannels = usesExplicitBilling
     ? explicitBillingChannels(prefs, billingDeliveryCategory(input)) : null;

@@ -416,6 +416,13 @@ async function recordBell(customerId, messageType, body, dedupeKey, appointmentI
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
+// App notices whose producers own a durable replay; other App-first families
+// keep their existing fallback policy.
+function hasDurableAppReplay(messageType, billingDeliveryCategory) {
+  return Boolean(billingDeliveryCategory)
+    || ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType]);
+}
+
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
@@ -469,6 +476,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' };
+      // notifyCustomer returns null only when its dedupe lock/read or the
+      // notification insert failed, before any bell or push exists. For a
+      // notice with a durable replay owner that is an infrastructure failure
+      // to retry, not "no device" (Codex r6 P1 on #4843).
+      if (appNotification === null && hasDurableAppReplay(messageType, billingDeliveryCategory)) {
+        return { delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' };
+      }
     }
     if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
@@ -485,8 +499,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (!delivered) {
       // These App notices have durable replay owners. Other App-first
       // families retain their existing fallback policy.
-      if (explicitPushOnly && appNotification?.push?.retryable
-        && (billingDeliveryCategory || ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType]))) {
+      if (explicitPushOnly && appNotification?.push?.retryable && hasDurableAppReplay(messageType, billingDeliveryCategory)) {
         return { delivered: false, retryable: true, deliveryOutcome: 'uncertain', reason: 'native_provider_retryable',
           retryAfterMs: appNotification.push.retryAfterMs || 60000 };
       }

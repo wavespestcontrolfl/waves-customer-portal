@@ -1037,14 +1037,14 @@ describe('explicit billing channel combinations', () => {
     }
   });
 
-  test('a phone change mid-dispatch never blocks Email/App; the Text leg still refuses/rechecks per existing rules (Codex r3 P1 on #4843)', async () => {
+  test('a phone change mid-dispatch never blocks Email/App; the Text leg returns a replay hold (Codex r3 + r6 P1 on #4843)', async () => {
     // The top-level fan-out decision already verified input.to belongs to
     // the account holder before dispatchBillingChannels ever ran. Email and
     // App no longer carry that phone snapshot into their own legs (P1 B), so
     // a phone change landing mid-dispatch can't misfire their fresh
     // usesBillingDeliveryPreferences recheck — only Text, which still needs
-    // a real phone, is exposed to the race, and it keeps its existing
-    // terminal BILLING_RECIPIENT_CHANGED refusal (unaffected by this fix).
+    // a real phone, is exposed to the race, and it returns the schedulable
+    // preference-change hold so the producer replays it (Codex r6 P1).
     prefs.payment_receipt_channels = ['email', 'push', 'sms'];
     Twilio.sendSMS.mockImplementation(async (_to, _body, options) => {
       if (options.explicitPushOnly) {
@@ -1059,7 +1059,10 @@ describe('explicit billing channel combinations', () => {
     const result = await sendCustomerMessage(input);
     expect(result.channelResults.email).toMatchObject({ sent: true });
     expect(result.channelResults.push).toMatchObject({ sent: true });
-    expect(result.channelResults.sms).toMatchObject({ sent: false, code: 'BILLING_RECIPIENT_CHANGED' });
+    expect(result.channelResults.sms).toMatchObject({ sent: false, code: 'BILLING_PREFERENCES_CHANGED',
+      deferred: true, retryable: true, deliveryOutcome: 'not_sent' });
+    expect(result).toMatchObject({ code: 'BILLING_PREFERENCES_CHANGED', deferred: true });
+    expect(Date.parse(result.nextAllowedAt)).toBeGreaterThan(Date.now());
   });
 
   test('a missing phone suppresses only the selected Text leg', async () => {
