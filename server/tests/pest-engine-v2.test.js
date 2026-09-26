@@ -231,6 +231,14 @@ describe('buildAnswer — tier', () => {
     expect(v1.report_contract.identification).toMatchObject({ confidence: 'moderate', contested: true });
   });
 
+  test('an entry with no look-alike still gets retake guidance when the photo is unusable (pre-push audit, Codex #4916 r5)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('gopher-tortoise', 0.9, { traitsVisible: [1] })], qualityUsable: false }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.tier).toBe('needs_more_evidence');
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(true);
+  });
+
   test('a subject conflict also caps the wording below pretty_sure (Codex #4916 r4)', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], subjectConflict: true }));
     expect(built.answer.wording).toBe('likely');

@@ -728,9 +728,14 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
       return { ask: np?.ask || null, why: np?.why || null, photo_can_confirm: true };
     }
     const fallbackPair = firstApprovedLookAlike(top.entry);
-    return fallbackPair
-      ? { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false }
-      : null;
+    if (fallbackPair) {
+      return { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false };
+    }
+    // No usable pair: the entry's group prompt, then the general retake
+    // prompt, so an uncertain entry answer always carries guidance
+    // (pre-push audit on Codex #4916 r5).
+    const groupPrompt = catalog.nextPhoto(top.entry.group) || catalog.nextPhoto('other');
+    return groupPrompt ? { ask: groupPrompt.ask || null, why: groupPrompt.why || null, photo_can_confirm: true } : null;
   }
   // Node level (group/subgroup/category): the catalog's own authored
   // prompt has no per-pair confirmability of its own — always
