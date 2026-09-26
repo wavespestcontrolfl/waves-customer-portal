@@ -821,6 +821,11 @@ async function retireSamePropertyOpenAgreements(customerId, estimate) {
   let keptReplacement = false;
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+    // Customer row before any contract row: the event inserts below take a
+    // key lock on the customer, so contract-first cycled with the paths that
+    // lock customer → contract (/:token/sign, /:id/cancel, createShareLink,
+    // expireDocumentRequests, the annual close-out).
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
     // Active-version truth is read UNDER the lock (both template rows
     // FOR UPDATE) — a v3 published after the caller's snapshot can't get a
     // freshly issued current request branded stale and cancelled here.
@@ -1251,6 +1256,11 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // duplicate drafts — the advisory xact lock + in-transaction re-check
       // make the dedupe atomic (pre-push P1).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
+      // Customer row before any contract row: the event inserts below take a
+      // key lock on the customer, so contract-first cycled with the paths that
+      // lock customer → contract (/:token/sign, /:id/cancel, createShareLink,
+      // expireDocumentRequests, the annual close-out).
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
       // Revalidate the template's active version under the lock: an admin
       // publish/reactivation between the pre-transaction reads and here
       // must not let us insert (and autosend) an agreement rendered from a
@@ -1456,6 +1466,10 @@ async function cancelStaleSource(row, conn = db) {
   // our transaction commits (the cancel already applied to a genuinely
   // stale request). No MVCC-snapshot window remains.
   return conn.transaction(async (trx) => {
+    // Customer first — the same order issuance holds (advisory → customer →
+    // templates → contracts) and the sign/cancel paths hold (customer →
+    // contract); the cancel event below takes the customer FK key lock.
+    if (row.customer_id) await trx('customers').where({ id: row.customer_id }).forUpdate().first('id');
     if (row.document_template_version_id && row.document_template_key) {
       const template = await trx('document_templates')
         .where({ template_key: row.document_template_key })
