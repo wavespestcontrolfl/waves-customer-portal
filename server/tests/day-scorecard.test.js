@@ -151,8 +151,48 @@ describe('getDayScorecard', () => {
       new Date('2026-09-08T12:00:00Z'));
     const row = result.days[0].byTech[0];
     expect(row.planned).toMatchObject({ stops: 2, onSiteMinutes: 90, driveMinutes: 25, returnMinute: 600 });
-    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: 30, driveTrips: 2, spanMinutes: 120, idleMinutes: 45 });
+    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: 30, driveTrips: 2, spanMinutes: 120 });
+    // No idle metric: mileage_log has no per-trip timestamps, so a day's
+    // drive total can include outbound/return legs outside the recorded
+    // arrival-to-completion span — span - onSite - drive is not a real
+    // number on that mixed basis (Codex P1) and must never be computed.
+    expect(row.actual).not.toHaveProperty('idleMinutes');
+    // Drive share / stops-per-hour on the actual side are never derived from
+    // a (possibly partial) actual on-site sum — planned-only fields.
+    expect(row.actual).not.toHaveProperty('driveShare');
+    expect(row.actual).not.toHaveProperty('stopsPerHour');
     expect(dayStopsQuery).not.toHaveBeenCalled(); // past rows never re-query raw stops
+  });
+
+  test('a partial on-site sum never inflates coverage or a no-idle claim', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 4, plannedServiceMinutes: 180, plannedDriveMinutes: 40,
+        plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 700, driveModel: 'legacy',
+        stops: [
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540 },
+          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null },
+          { durationEvidence: 'unverified_timing', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null },
+          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null },
+        ],
+      }],
+    });
+    // A full-day mileage total (60m) that legitimately exceeds the recorded
+    // 45m on-site + the arrival-to-completion span (60m): span(60) -
+    // onSite(45) - drive(60) would be -45 if computed — proof the field
+    // really is gone, not just usually positive in the other fixtures.
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([{ technician_id: 'tech1', trip_date: date, minutes: '60', trips: '3' }]),
+      new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech[0];
+    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 4 }, driveMinutes: 60, spanMinutes: 60 });
+    expect(row.actual).not.toHaveProperty('idleMinutes');
+    expect(row.actual).not.toHaveProperty('driveShare');
+    expect(row.actual).not.toHaveProperty('stopsPerHour');
   });
 
   test('a past tech-day with no saved snapshot reports planned:null instead of inventing one', async () => {

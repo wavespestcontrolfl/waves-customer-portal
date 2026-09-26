@@ -51,24 +51,54 @@ it('a future/today row is one Board row with a physical-stop count and no Actual
   expect(screen.queryByText('Actual')).not.toBeInTheDocument();
 });
 
-it('a past row shows Planned and Actual side by side, with unknown for null metrics', async () => {
-  mockAdminFetch.mockResolvedValue(ok({
+function pastPayload(actual) {
+  return {
     driveModel: 'legacy',
     days: [{
       date: '2026-09-01',
       byTech: [{
         technicianId: 'tech1', technician: 'Adam',
         planned: { stops: 2, physicalStops: null, onSiteMinutes: 90, driveMinutes: 25, waitMinutes: 5, driveShare: null, stopsPerHour: null, returnMinute: 600, lateVisits: null },
-        actual: { onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: null, driveTrips: null, spanMinutes: null, idleMinutes: null },
+        actual,
       }],
     }],
-  }));
+  };
+}
+
+it('a partial actual on-site sum shows its coverage and is marked partial', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: null, driveTrips: null, spanMinutes: null,
+  })));
   render(<DayScorecardPanel />);
   await screen.findByText('2026-09-01');
   expect(screen.getByText('Planned')).toBeInTheDocument();
   const actualRow = screen.getByText('Actual').closest('tr');
-  expect(within(actualRow).getByText('45m')).toBeInTheDocument();
-  // A null drive share/stops-per-hour/drive-minutes on the ACTUAL side reads
-  // as "unknown", never 0 or a blank cell.
+  expect(within(actualRow).getByText('45m · 1/2 recorded (partial)')).toBeInTheDocument();
+  // Drive share, stops-per-hour and (no longer sent at all) idle must never
+  // be derived from that partial sum — they read "unknown" on the actual
+  // side regardless (Codex P1).
+  expect(within(actualRow).getAllByText('unknown').length).toBeGreaterThan(0);
+  expect(screen.queryByText(/idle/i)).not.toBeInTheDocument();
+});
+
+it('full actual coverage shows the count with no "(partial)" marker', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130,
+  })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  const actualRow = screen.getByText('Actual').closest('tr');
+  expect(within(actualRow).getByText('1h 30m · 2/2 recorded')).toBeInTheDocument();
+  expect(within(actualRow).queryByText(/partial/)).not.toBeInTheDocument();
+});
+
+it('zero recorded coverage reads as fully unknown, never "0m"', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: null, onSiteCoverage: { covered: 0, total: 3 }, driveMinutes: null, driveTrips: null, spanMinutes: null,
+  })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  const actualRow = screen.getByText('Actual').closest('tr');
+  expect(within(actualRow).queryByText(/recorded/)).not.toBeInTheDocument();
   expect(within(actualRow).getAllByText('unknown').length).toBeGreaterThan(0);
 });

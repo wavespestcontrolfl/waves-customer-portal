@@ -40,11 +40,23 @@ function fmtCount(value) {
   return Number.isFinite(value) ? value : 'unknown';
 }
 
+// On-site minutes, ACTUAL side: the sum is only ever over the recorded rows
+// (RECORDED_EVIDENCE on the server), so it's shown with its own coverage
+// rather than as a plain total that could pass for a complete day. No
+// recorded stop at all reads as fully unknown, never "0m".
+function fmtOnSite(m) {
+  if (!m?.onSiteCoverage) return fmtMinutes(m?.onSiteMinutes); // planned side — no coverage concept
+  const { covered, total } = m.onSiteCoverage;
+  if (!covered) return 'unknown';
+  const text = `${fmtMinutes(m.onSiteMinutes)} · ${covered}/${total} recorded`;
+  return covered < total ? `${text} (partial)` : text;
+}
+
 // One metric column shared by the planned and actual sub-rows so the two
 // never drift into different formatting.
 const METRICS = [
   { key: 'stops', label: 'Stops', format: (m) => fmtCount(m?.physicalStops ?? m?.stops) },
-  { key: 'onSiteMinutes', label: 'On-site', format: (m) => fmtMinutes(m?.onSiteMinutes) },
+  { key: 'onSiteMinutes', label: 'On-site', format: fmtOnSite },
   { key: 'driveMinutes', label: 'Drive', format: (m) => fmtMinutes(m?.driveMinutes) },
   { key: 'driveShare', label: 'Drive share', format: (m) => fmtPercent(m?.driveShare) },
   { key: 'stopsPerHour', label: 'Stops/hr', format: (m) => fmtRate(m?.stopsPerHour) },

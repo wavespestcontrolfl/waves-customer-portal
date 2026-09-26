@@ -113,22 +113,30 @@ function plannedPastRow(plan) {
 }
 
 // Past, ACTUAL: on-site minutes summed from evidence-graded recorded
-// durations (coverage reported alongside so a partial day never reads as a
-// short one), drive minutes summed from mileage_log (null, not 0, when no
-// trip rows exist), and idle only when span + on-site + drive are ALL known.
+// durations (coverage reported alongside so a partial sum never reads as a
+// complete one — see onSiteCoverage on the client) and drive minutes summed
+// from mileage_log (null, not 0, when no trip rows exist).
+//
+// No idle metric: mileage_log has no per-trip timestamps, only a day total,
+// so a day's drive minutes include the outbound/return legs OUTSIDE the
+// first-arrival-to-last-completion span, not just the driving that happened
+// between recorded stops. span - onSite - drive on that mixed basis can run
+// negative on an ordinary day (1 stop, 60m on-site + 30m of drive that
+// includes the drive home => -30), so it is not computed at all rather than
+// shown as a wrong number. driveShare/stopsPerHour are PLANNED-only for the
+// same reason drive has no dependable actual denominator here — never
+// derived from a possibly-partial actual on-site sum.
 function actualPastRow(plan, mileage) {
   const driveMinutes = mileage ? mileage.minutes : null;
   const driveTrips = mileage ? mileage.trips : null;
-  if (!plan) return { onSiteMinutes: null, onSiteCoverage: null, driveMinutes, driveTrips, spanMinutes: null, idleMinutes: null };
+  if (!plan) return { onSiteMinutes: null, onSiteCoverage: null, driveMinutes, driveTrips, spanMinutes: null };
   const recorded = plan.stops.filter(stop => RECORDED_EVIDENCE.has(stop.durationEvidence) && Number.isFinite(stop.recordedServiceMinutes));
   const onSiteMinutes = recorded.length ? recorded.reduce((sum, stop) => sum + stop.recordedServiceMinutes, 0) : null;
   const arrivals = plan.stops.map(stop => stop.recordedArrivalMinute).filter(Number.isFinite);
   const completions = plan.stops.map(stop => stop.recordedCompletionMinute).filter(Number.isFinite);
   const spanMinutes = arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null;
-  const idleMinutes = Number.isFinite(spanMinutes) && Number.isFinite(onSiteMinutes) && Number.isFinite(driveMinutes)
-    ? spanMinutes - onSiteMinutes - driveMinutes : null;
   return { onSiteMinutes, onSiteCoverage: { covered: recorded.length, total: plan.stops.length },
-    driveMinutes, driveTrips, spanMinutes, idleMinutes };
+    driveMinutes, driveTrips, spanMinutes };
 }
 
 async function mileageByTechDay(conn, techs, from, to) {
