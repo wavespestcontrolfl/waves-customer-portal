@@ -6,8 +6,9 @@
 // the site whose referrer path is that post), onward views per post view, and
 // where they went. Both sides are page views, so a visit that reads two posts
 // counts two post views and up to two onward views. Only fresh navigations
-// count: reloads, back/forward, bfcache restores and in-page (History API)
-// jumps are skipped, and so is a post referring to itself.
+// count (link clicks, including cached, prefetched and prerendered ones):
+// reloads, back/forward, bfcache restores and client-side route changes are
+// skipped, and so is a post referring to itself.
 //
 // Cloudflare RUM is cookieless and counts every visitor (GA4 and PostHog only
 // see visitors who accept cookies), but it samples, so small counts are
@@ -77,15 +78,25 @@ function classifyPath(path) {
   return 'other';
 }
 
-// Cloudflare's navigation types: only a fresh navigation (or an older browser
-// that reports none) is a real page view here. Reloads, back/forward and bfcache
-// restores re-show a page, and "routing-apis" is a History-API URL change
-// (in-page jump links), not a new page.
-const COUNTED_NAVIGATION_TYPES = new Set(['navigate', 'unknown']);
+// Cloudflare's navigation types (developers.cloudflare.com/web-analytics/
+// data-metrics/dimensions/#navigation-types). A fresh navigation is a link
+// click or form submit, whether the document came from the network, the HTTP
+// cache, the prefetch cache or a prerender; "unknown" is a browser that reports
+// no type. Reloads, back/forward, bfcache restores and client-side route
+// changes (soft navigation / routing APIs: in-page jumps on this static site)
+// re-show or re-address a page and are not new page views.
+const COUNTED_NAVIGATION_TYPES = new Set([
+  'navigate',
+  'navigate-cache',
+  'navigate-prefetch-cache',
+  'prerender',
+  'unknown',
+]);
 
 function countsAsPageView(navigationType) {
   if (navigationType == null || navigationType === '') return true;
-  return COUNTED_NAVIGATION_TYPES.has(String(navigationType).toLowerCase());
+  const key = String(navigationType).trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return COUNTED_NAVIGATION_TYPES.has(key);
 }
 
 function isInternalHost(host) {

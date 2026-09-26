@@ -110,18 +110,34 @@ describe('summarize', () => {
     const s = summarize([
       { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'navigate', views: 10 },
       { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'reload', views: 4 },
+      { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'reload-cache', views: 4 },
       { path: '/contact/', ...base, navigationType: 'navigate', views: 2 },
       { path: '/contact/', ...base, navigationType: 'reload', views: 3 },
       { path: '/contact/', ...base, navigationType: 'back-forward', views: 5 },
+      { path: '/contact/', ...base, navigationType: 'back-forward-cache', views: 5 },
       { path: '/contact/', ...base, navigationType: 'restore', views: 6 },
       { path: '/pest-control/b/', ...base, navigationType: 'routing-apis', views: 7 },
+      { path: '/pest-control/b/', ...base, navigationType: 'soft-navigation', views: 7 },
       { path: '/pest-control/b/', ...base, navigationType: 'unknown', views: 1 },
     ]);
     expect(s.totals).toEqual({ blogEntries: 10, blogViews: 11, onwardClicks: 3, onwardRate: 3 / 11 });
+  });
+
+  test('cached, prefetched and prerendered link clicks count as fresh navigations', () => {
+    const base = { refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/a/' };
+    const s = summarize([
+      { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'navigate-cache', views: 3 },
+      { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'prerender', views: 2 },
+      { path: '/pest-control/b/', ...base, navigationType: 'navigate-prefetch-cache', views: 1 },
+      { path: '/contact/', ...base, navigationType: 'Navigate Cache', views: 1 },
+    ]);
+    expect(s.totals).toEqual({ blogEntries: 5, blogViews: 6, onwardClicks: 2, onwardRate: 2 / 6 });
     expect(countsAsPageView('navigate')).toBe(true);
-    expect(countsAsPageView('Navigate')).toBe(true);
+    expect(countsAsPageView('Navigate Prefetch Cache')).toBe(true);
+    expect(countsAsPageView('navigate_cache')).toBe(true);
     expect(countsAsPageView(undefined)).toBe(true);
-    expect(countsAsPageView('prerender')).toBe(false);
+    expect(countsAsPageView('reload-cache')).toBe(false);
+    expect(countsAsPageView('soft-navigation')).toBe(false);
   });
 
   test('handles empty input', () => {
