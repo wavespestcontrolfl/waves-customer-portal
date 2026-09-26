@@ -315,6 +315,15 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
   });
 
+  test('a one-way curated pair is found from the runner-up\'s side (Codex #4916 r3)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.6, { traitsVisible: [1] }), cand('one-way-ant', 0.3)] }));
+    expect(built.nextPhoto).toEqual({
+      ask: 'A close-up of the head from above.',
+      why: 'One-way ants have a squarish head; fire ants do not.',
+      photo_can_confirm: true,
+    });
+  });
+
   test('a photo-unconfirmable pair blocks pretty_sure even while its other side is unapproved (Codex round-0 P1, round 19)', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-c', 0.95, { traitsVisible: [1] })] }));
     expect(built.answer.wording).toBe('likely');

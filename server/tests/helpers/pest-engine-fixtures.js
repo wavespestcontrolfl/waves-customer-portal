@@ -245,6 +245,20 @@ const FIXTURE = buildFixtureCatalog({
       urgency: 'low', review: APPROVED, verification: [],
     },
     {
+      // Lists fire-ant as a look-alike, but fire-ant doesn't list it back
+      // (bigheaded ant -> fire ant in the live catalog; Codex #4916 r3).
+      slug: 'one-way-ant', common_name: 'One-Way Ant', scientific_name: 'Testus unidirectionalis', kind: 'organism',
+      group: 'ants', subgroup: null, verdict: 'watch', role: 'nuisance', risk: 'low', action: 'monitor',
+      safety_line: null, safety: { stings: false, venomous: false, structural: false, toxic_to_pets: false, disease_vector: false, irritant: false },
+      range: 'common', active_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      traits: ['Squarish head'],
+      look_alikes: [{ slug: 'fire-ant', difference: 'One-way ants have a squarish head; fire ants do not.', next_photo: 'A close-up of the head from above.', photo_can_confirm: true }],
+      copy: { what_it_means: 'W.', fact: 'W.' },
+      links: {},
+      service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_first: false, referral: null },
+      urgency: 'low', review: APPROVED, verification: [],
+    },
+    {
       // bed bug vs a still-planned bat bug: the pair is photo-unconfirmable
       // while its other side is unapproved (Codex round-0 P1, round 19).
       slug: 'no-photo-pair-c', common_name: 'No Photo Pair C', scientific_name: 'Testus c', kind: 'organism',

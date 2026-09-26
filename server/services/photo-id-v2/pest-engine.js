@@ -638,9 +638,21 @@ function candidatesBlockFor(candidates, currentMonth) {
 // (false when no single photo separates the pair — the pair's `next_photo`
 // text says what DOES confirm it instead) rides on the object; a node-level
 // prompt (no specific pair) is always `photo_can_confirm: true`.
-function pairIfBothApproved(entry, targetSlug) {
-  const pair = (entry.look_alikes || []).find((l) => l.slug === targetSlug);
-  return pair && isApproved(catalog.getEntry(targetSlug)) ? pair : null;
+/** The curated pair between two entries, looked up in either direction —
+ * catalog look-alikes are sometimes one-way (bigheaded ant lists fire ant,
+ * not the reverse; Codex #4916 r3). A reverse pair is returned with `slug`
+ * pointing at `other`, so callers can treat it like `entry`'s own. */
+function pairBetween(entry, other) {
+  if (!entry || !other) return null;
+  const own = (entry.look_alikes || []).find((l) => l.slug === other.slug);
+  if (own) return own;
+  const reverse = (other.look_alikes || []).find((l) => l.slug === entry.slug);
+  return reverse ? { ...reverse, slug: other.slug } : null;
+}
+
+function pairIfBothApproved(entry, other) {
+  const pair = pairBetween(entry, other);
+  return pair && isApproved(catalog.getEntry(pair.slug)) ? pair : null;
 }
 
 /** The entry's own first look-alike whose TARGET is also approved (the
@@ -663,8 +675,7 @@ const NO_PHOTO_CONFIRMS = Object.freeze({
  * published yet (Codex round-0 P1, round 19: bed bug vs a still-planned
  * bat bug). Callers must not surface an unapproved target's identity. */
 function governingPair(top, second) {
-  const las = top?.entry?.look_alikes || [];
-  return (second?.entry && las.find((la) => la.slug === second.entry.slug)) || las[0] || null;
+  return (second?.entry && pairBetween(top?.entry, second.entry)) || (top?.entry?.look_alikes || [])[0] || null;
 }
 
 function firstApprovedLookAlike(entry) {
@@ -683,7 +694,7 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // common name, so this is only used when both sides are approved — an
   // unapproved look-alike must not surface even indirectly through it.
   if (top?.entry && second?.entry && isApproved(top.entry) && isApproved(second.entry)) {
-    const pair = pairIfBothApproved(top.entry, second.entry.slug);
+    const pair = pairIfBothApproved(top.entry, second.entry);
     if (pair) return { ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
   }
   // Entry level with no usable second-candidate pair: the SAME fallback
@@ -742,7 +753,7 @@ function entryLevelAnswer(candidates, top, blockPrettySure) {
   // (unapproved, or simply not each other's look-alike) still falls back
   // to the top entry's own first-approved look-alike, the same as having
   // no second candidate at all.
-  const applicablePair = (second?.entry && pairIfBothApproved(top.entry, second.entry.slug)) || firstApprovedLookAlike(top.entry);
+  const applicablePair = (second?.entry && pairIfBothApproved(top.entry, second.entry)) || firstApprovedLookAlike(top.entry);
   const unconfirmablePair = applicablePair?.photo_can_confirm === false
     || governingPair(top, second)?.photo_can_confirm === false;
   // Codex round-0 P1 (rounds 10–15): "pretty sure" is only ever earned by a
