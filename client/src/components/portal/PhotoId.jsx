@@ -804,7 +804,7 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, ret
         <div data-glass="soft" role="status" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
           {retakeBanner.ask && <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text, lineHeight: 1.4 }}>{retakeBanner.ask}</div>}
           {photos.length >= PHOTO_LIMIT && (
-            <div style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.4 }}>
+            <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.4 }}>
               You're at the 3-photo limit — remove one below to add this one.
             </div>
           )}
@@ -882,7 +882,7 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, ret
 
       {submitError && <div role="alert" style={{ fontSize: 15, color: B.red }}>{submitError}</div>}
 
-      <button type="button" data-glass-accent="" onClick={onSubmit} disabled={!canSubmit} style={{
+      <button type="button" data-glass-accent="" data-glass-size="primary" onClick={onSubmit} disabled={!canSubmit} style={{
         minHeight: 48, borderRadius: 8, border: 'none', fontSize: 16, fontWeight: 700,
         cursor: canSubmit ? 'pointer' : 'not-allowed', fontFamily: FONTS.body,
       }}>
@@ -933,7 +933,7 @@ function NextStepBlock({ nextStep, onOpenRequestCta, onDone }) {
       {nextStep.title && <div style={{ fontSize: 17, fontWeight: 700, color: SHELL.text }}>{nextStep.title}</div>}
       {nextStep.body && <div style={{ fontSize: 15, color: SHELL.muted, lineHeight: 1.5 }}>{nextStep.body}</div>}
       {kind === 'reservice' && nextStep.url && (
-        <a href={nextStep.url} data-glass-accent="" style={{
+        <a href={nextStep.url} data-glass-accent="" data-glass-size="primary" style={{
           minHeight: 48, borderRadius: 8, textDecoration: 'none', display: 'inline-flex',
           alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
         }}>
@@ -941,7 +941,7 @@ function NextStepBlock({ nextStep, onOpenRequestCta, onDone }) {
         </a>
       )}
       {(kind === 'request' || kind === 'inspection' || kind === 'unclear') && (
-        <button type="button" data-glass-accent="" onClick={onOpenRequestCta} style={{
+        <button type="button" data-glass-accent="" data-glass-size="primary" onClick={onOpenRequestCta} style={{
           minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer',
           fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
         }}>
@@ -1135,7 +1135,7 @@ function NextPhotoCard({ nextPhoto, onRetakePhoto }) {
       {nextPhoto.ask && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{nextPhoto.ask}</div>}
       {nextPhoto.why && <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.45 }}>{nextPhoto.why}</div>}
       {canConfirm && (
-        <button type="button" data-glass-accent="" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
+        <button type="button" data-glass-accent="" data-glass-size="primary" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
           minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
         }}>
           Take this photo
