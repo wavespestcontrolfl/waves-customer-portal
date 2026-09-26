@@ -146,6 +146,8 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     ['We can help.\n\n— Sarah Jones, Waves Team', 'We can help.'],
     // Review on #4975: lowercase and non-ASCII signer names.
     ['We can help. — sarah', 'We can help.'],
+    // Codex r3 on #4975: a question with the signer on its own dash line.
+    ['Would you like to schedule?\n— Sarah', 'Would you like to schedule?'],
     ['We can help. — Élodie', 'We can help.'],
   ])('%j is stripped to %j and the triage kept', async (suggestedReply, expected) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));

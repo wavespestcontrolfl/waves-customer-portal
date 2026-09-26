@@ -55,28 +55,12 @@ function triageMatchesSchema(t) {
 // triageMatchesSchema, so a suggestion that was only a signature ("— Adam")
 // is a blank reply there — a failed answer that falls back — instead of a
 // successful triage with no reply (Codex r1 on #4975).
-// The shared stripper knows only the Waves signers, so a dash sign-off by any
-// other name ("We can help. — Sarah", "— Sarah, Waves Team") is removed here
-// too (Codex r2 on #4975). Only the unambiguous form counts: a dash-led name —
-// one or two capitalized words, optionally ", <Company>" in capitalized words —
-// ending the reply right after a sentence that ends in "." or "!", or standing
-// alone. A dash inside a sentence ("We serve your area — Sarasota."), after a
-// question ("Which service? — Lawn Care"), or a bare last line is left as text.
-// A single-word name may be any case or script ("— sarah", "— Élodie"); a
-// two-word one, and a company after the comma, must be capitalized words, so
-// a short phrase ("— Tuesday works.") is not read as a name.
-const CAP_TOKEN = "\\p{Lu}[\\p{L}'-]*";
-const ANY_TOKEN = "\\p{L}[\\p{L}'-]*";
-const SIGN_OFF_TAIL = `(?:${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3})?\\s*[!.🌊]?\\s*$`;
-const DASH_SIGN_OFF_RE = new RegExp(`(^|[.!])\\s*[—–-]{1,2}\\s*${SIGN_OFF_TAIL}`, 'u');
-function stripAnySignOff(text) {
-  return text.trim().replace(DASH_SIGN_OFF_RE, '$1').trim();
-}
-
 function unsignedTriage(parsed, firstName) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.suggestedReply !== 'string') return parsed;
-  const known = stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName });
-  return { ...parsed, suggestedReply: stripAnySignOff(known) };
+  // anySigner: the reply is written from an arbitrary public lead message, so
+  // a dash sign-off by any name goes too, not only the Waves signers' (Codex
+  // r2 + r3 on #4975 — extended in the shared stripper, not duplicated here).
+  return { ...parsed, suggestedReply: stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName, anySigner: true }) };
 }
 
 function mapTriage(parsed) {

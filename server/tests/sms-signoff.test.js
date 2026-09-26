@@ -144,3 +144,39 @@ describe('stripTrailingSignature', () => {
     });
   });
 });
+
+// #4975: opt-in `anySigner` for text a model writes from arbitrary input —
+// a dash sign-off by a name the patterns do not know, in unambiguous form only.
+describe('stripTrailingSignature — anySigner', () => {
+  const any = (text) => stripTrailingSignature(text, { anySigner: true });
+
+  test.each([
+    ['We can help. — Sarah', 'We can help.'],
+    ['We can help!\n— Sarah', 'We can help!'],
+    ['Would you like to schedule?\n— Sarah', 'Would you like to schedule?'],
+    ['— Sarah', ''],
+    ['We can help. — sarah', 'We can help.'],
+    ['We can help. — Élodie', 'We can help.'],
+    ['We can help.\n\n— Sarah Jones, Waves Team', 'We can help.'],
+  ])('%j → %j', (text, expected) => {
+    expect(any(text)).toBe(expected);
+  });
+
+  test.each([
+    'Which service? — Lawn Care',
+    'We serve your area — Sarasota.',
+    'Totally. — Tuesday works.',
+    'Your technician is — Sarah',
+    'Your technician is\n— Sarah',
+    'Your technician is:\nSarah',
+    'We can help.\n\nSarah',
+    'Thanks, Sarah!',
+    'See you Tuesday — Mike will be your tech.',
+  ])('%j is not a sign-off and is kept', (text) => {
+    expect(any(text)).toBe(text);
+  });
+
+  test('without anySigner an unknown name is left alone (existing callers unchanged)', () => {
+    expect(stripTrailingSignature('We can help. — Sarah')).toBe('We can help. — Sarah');
+  });
+});

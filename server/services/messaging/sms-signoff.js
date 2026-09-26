@@ -78,6 +78,26 @@ function buildSignatureTailRes(addresseeKey) {
 const SIGNATURE_TAIL_RES = { '': buildSignatureTailRes('') };
 for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureTailRes(key);
 
+// Opt-in `anySigner`: a sign-off by a name the patterns above do not know
+// ("— Sarah", "— Élodie, Front Desk"), for callers whose text a model writes
+// from arbitrary input. Only the unambiguous dash form counts — the dash
+// starts its own line (not under a value word: "Your technician is\n— Sarah"
+// is an answer), follows a sentence ending in . or ! on the same line, or is
+// the whole text. A bare name, a closer + name, or a dash after a question on
+// the same line may be the answer or the addressee, so they stay. The name is
+// one word in any case or script, or two capitalized words, optionally
+// ", <Company>" in capitalized words — so a short phrase ("— Tuesday
+// works.") is not read as one.
+const ANY_TOKEN = "\\p{L}[\\p{L}'\\u2019-]*";
+const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
+const ANY_NAME = `(?:${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3})?`;
+const ANY_SIGNER_RE = new RegExp(
+  `(?:^|(?<=[.!]["'\\u201D\\u2019]?)[ \\t]*|(?<!\\b(?:[Ii]s|[Aa]re|[Ww]as|[Ww]ere|[Bb]e|[Aa]s|[Nn]amed|[Cc]alled|[Bb]y))[ \\t]*\\n\\s*)${DASH}\\s*${ANY_NAME}${TAIL}`,
+  // No `i`: under it \p{Lu} matches lowercase too, and "Tuesday works" would
+  // read as a two-word capitalized name.
+  'u',
+);
+
 function addresseeKey(firstName) {
   const key = String(firstName || '').trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(PEOPLE, key) ? key : '';
@@ -118,10 +138,11 @@ const THANKS_BY_NAME_RES = Object.fromEntries(Object.entries(PEOPLE).map(([key, 
 
 // Returns the text without its trailing sign-off. A text with no sign-off
 // comes back exactly as given (quotes and all). Pass the customer's first
-// name when known, so a text addressed to a customer named Adam keeps it.
-function stripTrailingSignature(message, { addresseeFirstName } = {}) {
+// name when known, so a text addressed to a customer named Adam keeps it,
+// and `anySigner: true` to also strip a dash sign-off by any name (above).
+function stripTrailingSignature(message, { addresseeFirstName, anySigner = false } = {}) {
   const key = addresseeKey(addresseeFirstName);
-  const res = SIGNATURE_TAIL_RES[key];
+  const res = anySigner ? [...SIGNATURE_TAIL_RES[key], ANY_SIGNER_RE] : SIGNATURE_TAIL_RES[key];
   const original = String(message || '').trim();
   if (key && THANKS_BY_NAME_RES[key].test(original)) return original;
   let text = original;
