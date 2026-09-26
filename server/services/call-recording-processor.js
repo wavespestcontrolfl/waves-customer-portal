@@ -12759,6 +12759,30 @@ const CallRecordingProcessor = {
         // empty-only rule is equivalent to "fill everything" anyway.
         if (leadId) {
           let current = existingLead || (await db('leads').where({ id: leadId }).first());
+          // The lead-level reason may belong to ANOTHER call on this lead
+          // (codex #4890 r2 P2): settle it only when no other call linked to
+          // the lead or its customer still has an open caller_not_authorized
+          // card — that call's reminder must survive until its own card does.
+          let leadSupersededNeedsConfirmation = [];
+          if (supersededNeedsConfirmation.length) {
+            try {
+              const otherOpenAuthorizationCard = await db('triage_items as t')
+                .join('call_log as c', 'c.id', 't.call_log_id')
+                .where('t.reason_code', 'caller_not_authorized')
+                .whereIn('t.status', ['open', 'in_progress'])
+                .whereNot('t.call_log_id', call.id)
+                .where(function linkedToThisLead() {
+                  this.whereRaw("c.metadata->>'lead_id' = ?", [String(leadId)]);
+                  if (customerId) this.orWhere('c.customer_id', customerId);
+                })
+                .first('t.id');
+              leadSupersededNeedsConfirmation = otherOpenAuthorizationCard ? [] : supersededNeedsConfirmation;
+            } catch (settleErr) {
+              // Fail toward keeping the reminder: a failed check settles nothing.
+              leadSupersededNeedsConfirmation = [];
+              logger.warn(`[call-proc] superseded-reason check failed for ${maskSid(callSid)}: ${settleErr.message}`);
+            }
+          }
           const isEmpty = (v) => v === null || v === undefined || v === '';
           // leads.address is ONE free-text varchar(255) (migration
           // 20260401000095): compose the unit in, or the lead card / pipeline
@@ -12949,7 +12973,7 @@ const CallRecordingProcessor = {
             const priorNeedsConfirmation = Array.isArray(priorExtractedData.needs_confirmation)
               ? priorExtractedData.needs_confirmation
               : [];
-            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, { superseded: supersededNeedsConfirmation });
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, { superseded: leadSupersededNeedsConfirmation });
             // MERGED over the lead's prior payload, never rebuilt wholesale
             // (server/utils/lead-extracted-data-merge.js): a follow-up call
             // that doesn't restate the pest problem or the promised quote must
@@ -13368,7 +13392,7 @@ const CallRecordingProcessor = {
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, supersededNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
+                  { bridgeNeedsConfirmation, supersededNeedsConfirmation: leadSupersededNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;
