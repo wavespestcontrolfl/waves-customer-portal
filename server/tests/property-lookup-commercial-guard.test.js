@@ -1457,6 +1457,16 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(flag.reason).toMatch(/Condo — Upper/);
   });
 
+  test('the kept unit sqft never becomes a slab / attic / perimeter footprint (codex r2 P1)', () => {
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    expect(profile.homeSqFt).toBe(725);
+    expect(profile.footprint).toBe(0);
+    expect(profile.footprintUnknown).toBe(true);
+    expect(profile.estimatedPerimeterLF).toBeNull();
+    expect(profile.estimatedAtticSqFt).toBeNull();
+    expect(profile.estimatedSlabSqFt).toBeNull();
+  });
+
   test('"Apt. 3C" and "#3C" read the same as "Unit 3C"', () => {
     for (const address of [
       '210 Example Harbor Way Apt. 3C, Sarasota, FL 34232',
