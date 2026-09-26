@@ -52,20 +52,29 @@ one. Merge gates are unchanged until then.
   runner, server code can read the checkout's `.env`, which may point at
   production. Talking to the managed stack over HTTP (a browser, `curl`) is
   fine.
-- **Clean starting environment.** Some managed entry points import server
-  modules in their own process before they build the child environment
-  (`scripts/qa/e2e.js` does), so the verifier's shell and worktree must
-  already be clean. Before the first command, both of these must print
-  nothing. If either does, stop and report `BLOCKED`:
+- **Clean checkout at the reviewed SHA.** Before any scenario, in each
+  worktree the verifier runs from, all three must hold, or the verdict is
+  `BLOCKED`. For the base worktree, use its merge-base in place of the
+  reviewed SHA.
 
   ```sh
-  ls .env server/.env 2>/dev/null
-  env | grep -E '^(DATABASE_[A-Z_]*|POSTGRES_[A-Z_]*|PG[A-Z]*|GATE_[A-Z0-9_]+|RAILWAY_[A-Z_]*|JWT_SECRET|(STRIPE|TWILIO|SENDGRID|RESEND|ANTHROPIC|OPENAI|GEMINI|GOOGLE|ELEVENLABS|AWS|SENTRY|BOUNCIE|PERPLEXITY)_[A-Z0-9_]*)=' | cut -d= -f1
+  test "$(git rev-parse HEAD)" = "<reviewed-sha>"
+  test -z "$(git status --porcelain)"
+  test ! -e .env && test ! -e server/.env
+  ```
+- **Allowlisted environment.** Some managed entry points import server
+  modules in their own process before they build the child environment
+  (`scripts/qa/e2e.js` does), so nothing from the verifier's shell may
+  reach them. Start every command with the same allowlist prefix and
+  nothing else in front of it, for example:
+
+  ```sh
+  env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMPDIR" npm run qa:e2e
   ```
 
-  The pattern names the app's own configuration families, so ordinary
-  session variables such as `SSH_AUTH_SOCK` or an agent's own token do not
-  trip it.
+  The managed scripts read the QA database selection from
+  `.tmp/dev/database.env` themselves; no variable is ever added to the
+  prefix.
 - Only a verified dev/preview cluster, per `docs/development.md` §Dev
   database. Never production.
 - Never a real customer's record (CLAUDE.md rule 13) and never a customer
@@ -81,7 +90,10 @@ one. Merge gates are unchanged until then.
    `.tmp/qa/e2e/fixture.json`). Read changed state back through the app's
    own admin routes. Customer login needs the OTP that only `qa:e2e`'s own
    server captures, so a customer-authenticated scenario counts only when
-   `qa:e2e` itself covers it; otherwise it is `Not exercised`.
+   `qa:e2e` itself covers it; otherwise it is `Not exercised`. After the
+   evidence is saved, including after a failure, run `npm run qa:cleanup`
+   if the run seeded a fixture and `npm run worktree:stop` if it started the
+   managed runner, both with the allowlist prefix.
 2. **Real components, synthetic API.** `node scripts/qa/<harness>`,
    `npm run qa:previews`, `npm run audit:estimate-previews`. External
    requests are blocked. This is not database evidence; say so.
@@ -99,7 +111,9 @@ one. Merge gates are unchanged until then.
 
 **Out of trial scope.** Record these as `Not exercised: out of trial
 scope`: behavior behind a `GATE_*` that is off by default (the managed
-runner drops exported `GATE_*`), background jobs and crons, LLM call sites
+runner drops exported `GATE_*`), unless a named harness turns the gate on
+itself (`field-team.cjs` sets `GATE_FIELD_TEAM_PROGRAM`), in which case it is
+in scope through that harness; background jobs and crons, LLM call sites
 and evals, inbound webhooks beyond `qa:e2e`'s own journeys, Intelligence Bar
 tools, and email or SMS rendering outside a harness. If a PR's change lives
 entirely there, the verdict is `BLOCKED`, which is the trial's finding
