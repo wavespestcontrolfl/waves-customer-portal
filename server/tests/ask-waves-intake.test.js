@@ -141,6 +141,19 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     expect(scrubUnsafeClaims({ ...base, reply: "Yes, it's completely safe." }).reply).toMatch(/label directions/);
   });
 
+  test.each([
+    'It dries in 30 minutes.',
+    'You can go inside after 30 minutes.',
+    'Give it about two hours to dry.',
+  ])('an English fixed drying/re-entry time with treatment context is replaced: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, 'How long does your spray take to dry?').reply).toMatch(/label directions/);
+  });
+
+  test('an appointment-window reply with no treatment context is untouched', () => {
+    const reply = 'Your technician arrives in a 2 hour window; you do not need to be home or let them in.';
+    expect(scrubUnsafeClaims({ ...base, reply }, 'When will the tech arrive?').reply).toBe(reply);
+  });
+
   test('the visitor\'s own words supply treatment context', () => {
     const reply = 'Yes — safe for your dog.';
     expect(scrubUnsafeClaims({ ...base, reply }, 'Is your spray okay for my dog?').reply).toMatch(/label directions|instrucciones de la etiqueta/);
@@ -531,19 +544,6 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out.ready_for_quote).toBe(true);
   });
 
-  // Additional-gaps finding: "[the] deterministic emergency recognizer also
-  // runs only after both providers fail; it does not override a successful
-  // but incorrect model intent." (backend-reproductions.json:
-  // emergency_guard_only_on_provider_failure — a mocked live provider
-  // answers "quote" on "My child was stung and cannot breathe.")
-  test('a clear emergency overrides a wrong SUCCESSFUL model intent', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(
-      { reply: 'Get your property quote.', intent: 'quote', service_keys: ['pest'], ready_for_quote: true },
-    ));
-    const out = await processIntakeMessage({ message: 'My child was stung and cannot breathe.' });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
   test('a correct model "emergency" call on a successful turn is left as normalizeIntakeResult produced it', async () => {
     dispatchWithFallback.mockResolvedValue(chainOk(
       { reply: 'Please seek medical care right away for the reaction.', intent: 'emergency', service_keys: [], ready_for_quote: false },
@@ -551,186 +551,6 @@ describe('processIntakeMessage provider ladder', () => {
     const out = await processIntakeMessage({ message: 'My child was stung and cannot breathe.' });
     expect(out.reply).toBe('Please seek medical care right away for the reaction.');
     expect(out.source).toBe('openai');
-  });
-
-  test('an emergency earlier in HISTORY does not pin later successful turns to the emergency script', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({
-      message: 'ok, can I get a quote for the wasp nest?',
-      history: [
-        { role: 'user', content: 'I got stung yesterday and had swelling.' },
-        { role: 'assistant', content: 'If anyone has trouble breathing, call 911.' },
-      ],
-    });
-    expect(out.intent).toBe('quote');
-    expect(out.source).toBe('openai');
-  });
-
-  test('an ordinary successful turn with no emergency wording is never overridden', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message: 'rats in my attic' });
-    expect(out.intent).toBe('quote');
-    expect(out.source).toBe('openai');
-  });
-
-  // Codex round 1 P2 (L423): the SUCCESSFUL-turn emergency override must
-  // require affirmative context — a negation preceding the term, or a bare
-  // institutional noun with no other emergency wording, must not override a
-  // valid model answer. The both-providers-failed floor stays maximally
-  // cautious (untouched, covered by the "chain reports every provider
-  // missed" tests above).
-  test('a negated emergency term does not override a successful non-emergency turn', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(
-      { reply: "Ants are common in Florida kitchens — here's how to handle them.", intent: 'quote', service_keys: ['pest'], ready_for_quote: true },
-    ));
-    const out = await processIntakeMessage({ message: 'I am not having an allergic reaction; I just need ant control' });
-    expect(out.intent).toBe('quote');
-    expect(out.source).toBe('openai');
-  });
-
-  test.each([
-    'No, he can\'t breathe',
-    'I can\'t tell, but he has chest pain',
-  ])('an unrelated negation never voids a real emergency: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
-  test.each([
-    'Do you use rat poison in the attic?',
-    'I\'m allergic to bees, can you treat a nest?',
-  ])('an ordinary pest question with "poison"/"allergic" is not overridden: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out.source).toBe('openai');
-    expect(out.intent).toBe('quote');
-  });
-
-  test('a missing EpiPen is never voided by the negation', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message: "I don't have an EpiPen and he was just stung" });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
-  test.each([
-    'My address is 911 Bayshore Rd, how much for ants?',
-    'We passed out flyers and now see ants everywhere',
-  ])('a 911 street number or "passed out flyers" is not an emergency: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out.source).toBe('openai');
-  });
-
-  test('a later "if" in the message never voids a current sting reaction', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message: "My son was stung and his face is swelling, I don't know if I should call" });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
-  test.each([
-    'My child was stung but has no swelling',
-    'My child was stung and does not have a rash',
-  ])('a denied reaction keeps the model answer: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out.source).toBe('openai');
-  });
-
-  test.each([
-    'If my dog ate rat poison, what should I do?',
-    'My son had anaphylaxis last year, can you remove the wasp nest?',
-  ])('a hypothetical or past direct emergency term keeps the model answer: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out.source).not.toBe('emergency_override');
-  });
-
-  test.each([
-    "I don't know if this matters, but my child cannot breathe",
-    'My child had a reaction last year, but now he cannot breathe',
-  ])('an exclusion in another clause never voids a current emergency: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
-  test.each([
-    'My child was stung but is breathing normally',
-    'My child was stung but has no trouble breathing',
-  ])('ordinary or denied breathing is not an adverse reaction: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out.source).not.toBe('emergency_override');
-  });
-
-  test('"My child cannot breathe" overrides on its own (no sting cue)', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message: 'My child cannot breathe' });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
-  test('a hypothetical sting question is not a current emergency', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message: 'If my child gets stung, can swelling happen?' });
-    expect(out.source).toBe('openai');
-  });
-
-  test('a past sting reaction is not a current emergency', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message: 'My son was stung last year and had swelling, can you remove the wasp nest?' });
-    expect(out.source).toBe('openai');
-  });
-
-  test('an informational sting question is not overridden', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(
-      { reply: 'Stings can cause local swelling; call us if nests are near your home.', intent: 'question', service_keys: ['pest'], ready_for_quote: false },
-    ));
-    const out = await processIntakeMessage({ message: 'Can wasp stings cause swelling?' });
-    expect(out.source).toBe('openai');
-    expect(out.intent).toBe('question');
-  });
-
-  test.each([
-    'Mi perro comió veneno',
-    'Mi hijo tragó pesticida',
-  ])('Spanish poison ingestion overrides a wrong successful intent: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
-  test.each([
-    "I don't have an allergic reaction; I need ant control",
-    'No allergic reaction, just ants',
-    'No trouble breathing, just ants in the kitchen',
-  ])('a governing negation or bare allergy mention keeps the model answer: %s', async (message) => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message });
-    expect(out.source).toBe('openai');
-  });
-
-  test('ingestion of poison still overrides to the emergency script', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
-    const out = await processIntakeMessage({ message: 'My dog ate rat poison from the garage' });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
-  });
-
-  test('a bare institutional "hospitals" mention does not override a successful turn', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(
-      { reply: 'Yes, we service commercial properties including hospitals.', intent: 'question', service_keys: [], ready_for_quote: false },
-    ));
-    const out = await processIntakeMessage({ message: 'Do you provide pest control for hospitals?' });
-    expect(out.intent).toBe('question');
-    expect(out.source).toBe('openai');
-  });
-
-  test('an affirmative emergency term still overrides a wrong SUCCESSFUL model intent ("cannot breathe")', async () => {
-    dispatchWithFallback.mockResolvedValue(chainOk(
-      { reply: 'Get your property quote.', intent: 'quote', service_keys: ['pest'], ready_for_quote: true },
-    ));
-    const out = await processIntakeMessage({ message: 'My child was stung and cannot breathe.' });
-    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
   });
 
   // Codex round 1 P1: this service used to run its own provider-chain +

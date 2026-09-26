@@ -131,101 +131,6 @@ function looksLikeEmergency(text) {
   return EMERGENCY_RE.test(t) || (BITE_STING_RE.test(t) && REACTION_RE.test(t));
 }
 
-// Codex round 1 P2 (L423): looksLikeEmergency is deliberately maximally
-// cautious for the both-providers-failed floor below (unchanged, still calls
-// looksLikeEmergency directly) — but the SUCCESSFUL-turn override further
-// down needs a stricter read: "I am not having an allergic reaction; I just
-// need ant control" and "Do you provide pest control for hospitals?" must
-// not override a valid model answer. This override-only variant (a) requires
-// an affirmative match — only a negation that directly governs the term
-// voids it (see EMERGENCY_OVERRIDE_NEGATION_RE) — and (b) drops the bare
-// institutional nouns (hospital/E.R./emergency room/urgencias) from the
-// term list, since alone they describe a place, not a symptom; the
-// bite/sting + reaction combo below still needs no negation exemption ("my
-// child was stung and cannot breathe" is the symptom itself, not a negated
-// claim of one). "Allergic reaction" alone is left to the model (it drew
-// every negation false positive); breathing trouble, anaphylaxis, throat
-// swelling, collapse and poison ingestion (EN + ES) are the override set.
-// Bare "poison" / "allergic" are not on this list — "do you
-// use rat poison?" and "I'm allergic to bees, can you treat a nest?" are
-// ordinary pest questions; poisoning needs an ingestion or "poisoned" cue.
-const EMERGENCY_OVERRIDE_TERM_RE = /\b(?:(?:call|called|calling|dial|dialed|need|needs)\s+911|(?:can'?t|cannot|can\s+not)\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|(?:he|she|they|i|someone|my\s+\w+|child|son|daughter|kid|baby)\s+(?:has\s+|just\s+|already\s+)?passed\s+out|unconscious|inconsciente|desmay\w*|poisoned|poisoning|envenenad\w*|envenenamiento|(?:swallowed|ate|drank|ingested|licked|got\s+into)\s+(?:some\s+|the\s+|your\s+)?(?:rat\s+)?(?:poison|bait|pesticide|chemicals?)|(?:comi[óo]|trag[óo]|bebi[óo]|se\s+comi[óo]|ingiri[óo]|lami[óo])\s+(?:un\s+poco\s+de\s+|el\s+|la\s+|los\s+|las\s+)?(?:veneno|pesticida|cebo|qu[íi]mico)|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/gi;
-// Only a negation that directly governs the term voids it ("not having an
-// allergic reaction", "no signs of anaphylaxis", "isn't an emergency").
-// Anything looser fails open on real emergencies ("No, he can't breathe",
-// "I can't tell, but he has chest pain"), and this path decides who gets
-// the 911 script — so when in doubt, it fires.
-const EMERGENCY_OVERRIDE_NEGATION_RE = /(?:\b(?:not|never)\s+(?:having|experiencing|had|getting)\s+(?:an?\s+|any\s+)?|\b(?:don['’]t|doesn['’]t|didn['’]t|do\s+not|does\s+not)\s+(?:have|has|had)\s+(?:an?\s+|any\s+)?|\bno\s+signs?\s+of\s+(?:an?\s+)?|\b(?:isn['’]t|is\s+not|wasn['’]t|was\s+not)\s+(?:an?\s+)?|(?:^|[.;,!?]\s*)no\s+|\b(?:has|have|had|with|showing|shows?|there(?:'s|\s+is)|there\s+are)\s+no\s+|\bno\s+(?:tiene|tengo|hay)\s+(?:una\s+)?)$/i;
-
-// A past sting ("was stung last year and swelled up") is history, not a
-// current emergency.
-const PAST_EVENT_RE = /\b(?:last\s+(?:year|month|week|summer|spring|fall|winter|time)|years?\s+ago|months?\s+ago|weeks?\s+ago|in\s+the\s+past|used\s+to|el\s+a[ñn]o\s+pasado|hace\s+(?:un|una|dos|tres|\d+)\s+(?:a[ñn]os?|mes(?:es)?|semanas?))\b/i;
-// A hypothetical ("If my child gets stung, can swelling happen?") is a
-// question, not a current event.
-const CONDITIONAL_RE = /\b(?:if|what\s+if|in\s+case|suppose|en\s+caso\s+de)\b/i;
-// A reaction the visitor denies ("was stung but has no swelling", "does not
-// have a rash") is not affirmed.
-const REACTION_NEGATION_RE = /(?:\bno|\bnot|\bnever|(?:n['’]t|\bnot|\bnever)\s+(?:have|has|had|got|see|notice|show\w*)|\bwithout|\bsin)\s+(?:any\s+|a\s+|an\s+|signs?\s+of\s+)?$/i;
-// Adverse symptoms only — ordinary "breathing" ("is breathing normally") is
-// not a reaction; breathing counts only as trouble/difficulty/short of breath.
-const ADVERSE_REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|(?:trouble|difficulty|hard\s+time)\s+breathing|hard\s+to\s+breathe|short(?:ness)?\s+of\s+breath|(?:can'?t|cannot|can\s+not)\s+breathe|wheez\w*|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|dificultad\s+para\s+respirar|no\s+puede\s+respirar)\b/i;
-function reactionIsAffirmed(t) {
-  const re = new RegExp(ADVERSE_REACTION_RE.source, 'gi');
-  let m;
-  while ((m = re.exec(t))) {
-    const before = t.slice(Math.max(0, m.index - 30), m.index);
-    if (!REACTION_NEGATION_RE.test(before)) return true;
-  }
-  return false;
-}
-
-// Only the clause that carries the sting counts — "…I don't know if I should
-// call" later in the message must not void a real sting.
-// True when the clause containing position `index` is a hypothetical (the
-// conditional leads the clause) or a past event ("last year", "hace un año").
-// Clause boundaries: sentence punctuation, commas, and "but"/"pero" — so
-// "I don't know if this matters, but my child cannot breathe" scopes the
-// conditional to its own clause.
-const CLAUSE_BREAK_RE = /[.;!?,]|\bbut\b|\bpero\b/gi;
-function clauseIsHypotheticalOrPast(t, index) {
-  let start = 0;
-  let end = t.length;
-  CLAUSE_BREAK_RE.lastIndex = 0;
-  let b;
-  while ((b = CLAUSE_BREAK_RE.exec(t))) {
-    if (b.index < index) start = b.index + b[0].length;
-    else { end = b.index; break; }
-  }
-  const clause = t.slice(start, end);
-  const lead = t.slice(start, index);
-  return CONDITIONAL_RE.test(lead) || PAST_EVENT_RE.test(clause);
-}
-function stingClauseIsHypotheticalOrPast(t) {
-  const m = BITE_STING_RE.exec(t);
-  return m ? clauseIsHypotheticalOrPast(t, m.index) : false;
-}
-const PERSONAL_CUE_RE = /\b(?:i|i['’]m|me|my|we|our|us|he|she|his|her|they|their|son|daughter|child|kid|baby|husband|wife|mom|dad|mi|mis|mijo|mija|hijo|hija|ni[ñn]o|ni[ñn]a|esposo|esposa|beb[ée])\b/i;
-
-function looksLikeEmergencyOverride(text) {
-  const t = String(text || '');
-  // Symptom-combo path (e.g. "stung and can't breathe") — no negation
-  // exemption; the reaction word IS the emergency, never a negated claim.
-  // Needs someone actually affected ("my child was stung…", "I got bit…") —
-  // "Can wasp stings cause swelling?" is an informational question.
-  if (BITE_STING_RE.test(t) && reactionIsAffirmed(t) && PERSONAL_CUE_RE.test(t) && !stingClauseIsHypotheticalOrPast(t)) return true;
-  EMERGENCY_OVERRIDE_TERM_RE.lastIndex = 0;
-  let m;
-  while ((m = EMERGENCY_OVERRIDE_TERM_RE.exec(t))) {
-    // "I don't have an EpiPen" is missing medication, not an absent symptom.
-    if (/^epi\s?pen$/i.test(m[0])) return true;
-    const before = t.slice(Math.max(0, m.index - 40), m.index);
-    // Same clause-scoped hypothetical/past exclusions as the sting path ("If
-    // my dog ate rat poison, what should I do?", "…anaphylaxis last year…").
-    if (!EMERGENCY_OVERRIDE_NEGATION_RE.test(before) && !clauseIsHypotheticalOrPast(t, m.index)) return true;
-  }
-  return false;
-}
-
 const EMERGENCY_FALLBACK_RESULT = Object.freeze({
   reply: `If anyone is having a medical reaction — trouble breathing, swelling, or feeling faint — please call 911 or seek medical care right away. For an urgent pest problem at your home, call us now at ${COMPANY.phone} and a real person will help. / Si alguien tiene una reacción médica, llame al 911 o busque atención médica de inmediato. Para una urgencia de plagas, llámenos al ${COMPANY.phone}.`,
   intent: 'emergency',
@@ -362,6 +267,12 @@ const ES_DURATION = `(?:\\d+|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES}
 const ES_DURATION_RE = new RegExp(`\\b${ES_DURATION}\\s+(?:minutos?|horas?)\\b`, 'i');
 const ES_DRY_OR_REENTRY_RE = /\b(?:sec[oa]s?|seca(?:r|rse|do|da)?|se\s+seca|volver|regresar|entrar|reingres\w*|salir|re-?entrada)\b/i;
 const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(t) };
+// English counterpart of the Spanish chokepoint: a duration in minutes/hours
+// plus drying or re-entry wording ("It dries in 30 minutes.", "You can go
+// inside after 30 minutes.") — only with treatment context in the reply or
+// the visitor's words, so an appointment-window reply isn't caught.
+const EN_DURATION_RE = new RegExp(`\\b(?:\\d+(?:\\.\\d+)?|${NUM_WORD}|half\\s+an?|an?)\\s*-?\\s*(?:minutes?|mins?|hours?|hrs?)\\b`, 'i');
+const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
 const INTAKE_EPA_APPROVED_ES_RE = /\baprobad[oa]s?\s+por\s+la\s+epa\b/i;
 
 // In a pest-control chat a pronoun or missing subject ("Yes, it's completely
@@ -373,6 +284,8 @@ const INTAKE_SUBJECTLESS_SAFE_RE = /(?:^|[.!?]\s*)(?:(?:yes|yep|absolutely)[,!]?
 function intakeSafetyClaimSupplement(reply, contextText = '') {
   const t = String(reply || '');
   if (INTAKE_REENTRY_MINUTES_ES_RE.test(t) || INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
+  if (EN_DURATION_RE.test(t) && EN_DRY_OR_REENTRY_RE.test(t)
+    && INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${contextText || ''}`)) return true;
   if (!INTAKE_SAFETY_WORD_RE.test(t)) return false;
   return INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${contextText || ''}`)
     || INTAKE_PRONOUN_SAFE_RE.test(t)
@@ -589,24 +502,6 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
   }
   if (dispatched.ok) result = normalizeIntakeResult(dispatched.json, dispatched.provider, guardText);
 
-  // Additional-gaps finding: the deterministic emergency recognizer used to
-  // run ONLY after both providers missed. A clear medical/urgent emergency in
-  // the visitor's own words must override a wrong SUCCESSFUL model
-  // classification too (e.g. the model calls it "quote" on "my child was
-  // stung and can't breathe") — never the other direction: a correct
-  // "emergency" call from the model is left exactly as normalizeIntakeResult
-  // produced it, and this never fires on the model's judgement alone, only
-  // on the same conservative deterministic guard used below. Only the
-  // CURRENT message is checked here — unlike the both-providers-missed path,
-  // a live model saw the full transcript, and scanning history would pin
-  // every later turn of a conversation that once mentioned a sting reaction
-  // to the emergency script.
-  if (result && result.intent !== 'emergency' && looksLikeEmergencyOverride(cleanText(message, MESSAGE_MAX_LEN))) {
-    // Provenance so overrides can be audited for false positives.
-    result = { ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' };
-    logger.info('[ask-waves] emergency override replaced a successful model reply');
-  }
-
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
     result = looksLikeEmergency(guardText) ? { ...EMERGENCY_FALLBACK_RESULT }
@@ -642,7 +537,6 @@ module.exports = {
     SUPPORT_FALLBACK_RESULT,
     SUPPORT_RE,
     looksLikeEmergency,
-    looksLikeEmergencyOverride,
     MESSAGE_MAX_LEN,
     ASK_WAVES_TURN_BUDGET_MS,
     ASK_WAVES_TURN_BUDGET_MAX_MS,

@@ -1268,16 +1268,11 @@ when both LLM providers miss) read English AND Spanish — the prompt answers
 Spanish visitors in Spanish. Each turn has a wall-clock budget across both
 providers (`ASK_WAVES_TURN_BUDGET_MS`, default 22000) after which the
 deterministic fallback is returned; the conversation log never delays the
-reply. A successful, non-emergency model reply is still replaced with the
-911/call-now script (`source: 'emergency_override'`) when the visitor's
-CURRENT message affirmatively describes a medical emergency (breathing
-trouble, anaphylaxis, collapse, poison ingestion, or an affirmed sting/bite
-reaction) that the model itself misclassified — English and Spanish, with a
-governing negation, hypothetical, past event, or denied reaction exempted.
-Any reply — from either provider, on any intent — that carries a blanket
+reply. Any reply — from either provider, on any intent — that carries a blanket
 safety/EPA-approved claim or a fixed re-entry/drying-time figure
 (`reentrySafetyClaimFinding`, the repo's one product-claim rule set, plus an
-intake-local supplement for pronoun/subjectless and Spanish phrasing) is
+intake-local supplement for pronoun/subjectless phrasing, Spanish, and
+fixed durations with treatment context) is
 replaced wholesale with a reviewed "follow the product label" answer, in
 English or Spanish matching the reply's own language (an emergency-intent
 reply keeps its 911 guidance instead). NOT CORS-open — credentialed allowlist
