@@ -94,6 +94,9 @@ function installModalFetch({
   // /admin/customers?search= results, keyed by the literal search string.
   // Unset -> empty results (no existing test hits this endpoint).
   customerSearchResults,
+  // /admin/estimates/:id/schedule-source responses keyed by estimate id
+  // (codex r1 on #4855). Unset -> 404, the modal's best-effort fallback.
+  scheduleSourceById,
 } = {}) {
   let addressRequests = 0;
   let prepayPreviews = 0;
@@ -169,6 +172,11 @@ function installModalFetch({
     }
     if (url.includes('/properties?context=appointment_address')) {
       return Promise.resolve(jsonResponse({ properties: [], canChangeAppointmentAddress: false }));
+    }
+    if (url.includes('/schedule-source')) {
+      const match = url.match(/\/admin\/estimates\/([^/?]+)\/schedule-source/);
+      const source = match && scheduleSourceById?.[decodeURIComponent(match[1])];
+      return Promise.resolve(source ? jsonResponse(source) : jsonResponse({ error: 'not found' }, { ok: false, status: 404 }));
     }
     if (url.includes('/schedule-estimates')) {
       const match = url.match(/\/admin\/customers\/([^/?]+)\/schedule-estimates/);
@@ -3122,6 +3130,53 @@ describe('lineIsRetiredSale drives the customer-switch effect end to end (codex 
     // Nothing was ever submitted in this test — the drop is a pure client
     // effect, with no server round trip.
     expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
+
+describe('a pinned quote owned by another customer is unlinked on a customer switch (codex r1 on #4855)', () => {
+  const quote = (customerId) => ({
+    id: 'est-9',
+    customerId,
+    status: 'accepted',
+    acceptedAt: '2026-09-01',
+    lines: [{ name: 'Bi-Monthly Tree & Shrub Care', serviceKey: null, serviceId: null, price: 95, cadence: 'bimonthly', duration: 30 }],
+  });
+  const run = async (ownerId) => {
+    installModalFetch({
+      scheduleEstimatesByCustomer: { 'customer-a': [quote(ownerId)] },
+      // After the switch, customer B's list lacks the pinned quote, so the
+      // modal re-reads it through schedule-source (owner beside it).
+      scheduleSourceById: { 'est-9': { estimate: { ...quote(undefined), customerId: undefined }, customerId: ownerId, contact: {} } },
+      customerSearchResults: {
+        Grace: [{ id: 'customer-b', firstName: 'Grace', lastName: 'Hopper', address: '200 Test Ave', phone: '555-0002' }],
+      },
+    });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultEstimateId="est-9"
+      defaultDate={futureDate()}
+      defaultWindowStart="09:00"
+      onClose={vi.fn()}
+      onCreated={vi.fn()}
+      onChange={vi.fn()}
+    />);
+    await waitFor(() => expect(screen.getByLabelText('Repeats for Bi-Monthly Tree & Shrub Care').value).toBe('bimonthly'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selected customer' }));
+    fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Grace' } });
+    fireEvent.click(await screen.findByText('Grace Hopper'));
+  };
+
+  it('drops the quote and the lines it filled when the quote belongs to the previous customer', async () => {
+    await run('customer-a');
+    await waitFor(() => expect(screen.queryByLabelText('Repeats for Bi-Monthly Tree & Shrub Care')).toBeNull());
+  });
+
+  it('keeps an unowned lead quote pinned across the switch', async () => {
+    await run(null);
+    // Give the customer-change effect and the schedule-source re-read time to settle.
+    await waitFor(() => expect(screen.getByText('Grace Hopper')).toBeTruthy());
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(screen.getByLabelText('Repeats for Bi-Monthly Tree & Shrub Care').value).toBe('bimonthly');
   });
 });
 

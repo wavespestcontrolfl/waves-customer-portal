@@ -1577,6 +1577,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!defaultEstimateId) {
       setLinkedEstimate(null);
       autoAppliedScheduleEstimateRef.current = null;
+    } else if (linkedEstimate?.customerId && customerId && String(linkedEstimate.customerId) !== String(customerId)) {
+      // ...but a pinned quote OWNED by a different customer cannot ride this
+      // one: the server refuses it ("Linked estimate belongs to a different
+      // customer"). Unlink it and drop the lines it filled; an unowned lead
+      // quote (customerId null) stays pinned (codex r1 on #4855).
+      const staleId = String(linkedEstimate.id);
+      setLinkedEstimate(null);
+      setServices((arr) => arr.filter((line) => String(line.sourceEstimateId ?? '') !== staleId));
     }
     setScheduleEstimates([]);
     setScheduleEstimateError('');
@@ -1597,7 +1605,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         try {
           const r = await adminFetch(`/admin/estimates/${defaultEstimateId}/schedule-source`);
           if (r?.estimate) {
-            list = [r.estimate, ...list];
+            // schedule-source reports the owner beside the estimate.
+            list = [{ ...r.estimate, customerId: r.estimate.customerId ?? r.customerId ?? null }, ...list];
             const c = r.contact || {};
             // Only stage a new customer to create when the quote is genuinely
             // unowned (r.customerId === null — a lead/standalone estimate). If it
