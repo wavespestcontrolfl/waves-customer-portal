@@ -2,38 +2,39 @@
 ## Waves Pest Control — Complete Discount Key Reference
 
 > Canonical mapping from Square discount line items to `discounts.discount_key` in PostgreSQL.
-
-**Auto-Apply note (2026-09-26):** migration `20260424000017_disable_discount_auto_apply.js`
-seeded every row's `is_auto_apply` to **No** (manual only). The column stays
-admin-toggleable per row from the discounts UI, so live values may differ from
-the seeded default shown below.
+>
+> **Auto-apply status:** The values in the last-but-one column are the
+> original seed defaults. Current source migration `20260424000017` sets
+> `is_auto_apply = false` for every discount, making the library manual-only.
+> This document does not claim that migration has run in any particular live
+> database; verify migration status before describing a deployed environment.
 
 ---
 
 ### Square Catalog → DB Mapping
 
-| Square Discount Name | discount_key | Type | Amount | Eligibility | Auto-Apply | Stack Group |
+| Square Discount Name | discount_key | Type | Amount | Eligibility | Original seed auto-apply | Stack Group |
 |---|---|---|---|---|---|---|
 | Custom Discount (Variable %) | `custom_percent` | percentage | 0 (set at apply) | None — admin assigned | No | — |
 | Custom Discount (Variable $) | `custom_dollar` | fixed_amount | 0 (set at apply) | None — admin assigned | No | — |
 | Family & Friends Discount | `family_friends` | percentage | 15% | Admin assigned | No | relationship |
-| Military Discount | `military` | percentage | 5% | `is_military` flag | No | — |
-| Multi-Home Discount | `multi_home` | percentage | 10% | `has_multi_home` flag | No | — |
+| Military Discount | `military` | percentage | 5% | `is_military` flag | Yes | — |
+| Multi-Home Discount | `multi_home` | percentage | 10% | `has_multi_home` flag | Yes | — |
 | New Customer Discount | `new_customer` | fixed_amount | $149.99 | No completed services | No | promo |
 | Pre-Payment Discount | `prepayment` | percentage | 5% | Prepayment flag | No | — |
-| WaveGuard Gold Discount | `waveguard_gold` | percentage | 15% | Gold tier | No | tier |
+| WaveGuard Gold Discount | `waveguard_gold` | percentage | 15% | Gold tier | Yes | tier |
 | WaveGuard Member Discount | `waveguard_member` | percentage | 15% | Any WaveGuard tier (Bronze+) | No | tier |
-| WaveGuard Member Discount (Termite Inspection) | `waveguard_member_wdo` | percentage | 100% | Any WaveGuard tier + WDO service | No | — |
-| WaveGuard Platinum Discount | `waveguard_platinum` | percentage | 20% | Platinum tier | No | tier |
+| WaveGuard Member Discount (Termite Inspection) | `waveguard_member_wdo` | percentage | 100% | Any WaveGuard tier + WDO service | Yes | — |
+| WaveGuard Platinum Discount | `waveguard_platinum` | percentage | 20% | Platinum tier | Yes | tier |
 | WaveGuard Referral | `referral` | fixed_amount | $25.00 | Referral flag | No | — |
-| WaveGuard Silver Discount | `waveguard_silver` | percentage | 10% | Silver tier | No | tier |
+| WaveGuard Silver Discount | `waveguard_silver` | percentage | 10% | Silver tier | Yes | tier |
 
 ### Also in DB (no Square equivalent)
 
 | discount_key | Name | Notes |
 |---|---|---|
 | `waveguard_bronze` | WaveGuard Bronze | 0% — Bronze tier placeholder (no discount) |
-| `senior` | Senior Discount | 5% for 65+. Not in Square — apply manually or via `is_senior` flag |
+| `senior` | Senior Discount | 5% for 65+. Not in Square; seed eligibility uses `is_senior`, but current source disables auto-apply |
 | `free_termite_inspection` | Free Termite Inspection | Legacy record — now superseded by `waveguard_member_wdo`. Still active for backward compat. |
 
 ---
@@ -52,13 +53,20 @@ Discounts in the same `stack_group` compete — only the highest-priority one wi
 
 ### When to Use `waveguard_member` vs Tier Discounts
 
-The tier-specific discounts (`waveguard_silver`, `waveguard_gold`, `waveguard_platinum`) attach automatically from the customer's `waveguard_tier` field only while a row's `is_auto_apply` is on; with the seeded default (off), a tier discount applies only when it is assigned to the customer (`server/services/discount-engine.js`). The generic `waveguard_member` discount exists for cases where:
+The tier-specific discounts (`waveguard_silver`, `waveguard_gold`,
+`waveguard_platinum`) were originally seeded to auto-apply based on the
+customer's `waveguard_tier` field. In current source they are manual-only after
+migration `20260424000017`. The generic `waveguard_member` discount exists for
+cases where:
 
 1. A customer has an active WaveGuard membership but their tier hasn't been set in the system yet
 2. Square was applying the flat "WaveGuard Member Discount" instead of tier-specific ones
 3. Legacy invoices that used the generic 15% line item
 
-Once all customers have proper tier assignments, `waveguard_member` can be deactivated in favor of the tier-specific discounts.
+Once all customers have proper tier assignments, `waveguard_member` can be
+deactivated in favor of the tier-specific discounts if that operating policy
+is approved. Re-enabling auto-apply would require a separate source and
+migration decision.
 
 ---
 

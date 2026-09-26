@@ -1,6 +1,9 @@
 # Job Scoring Formula
 
-**Summary:** Weighted 0–100 scoring system for job priority in route ordering and slot protection. Higher score = protect the slot. Score drives route position, CSR booking, and revenue-aware dispatch.
+**Summary:** Policy guidance for a 0–100 job-priority score, plus the fixed
+values used by the retained `/api/dispatch/jobs/:id/score` compatibility
+endpoint. The separate technician-matching/auto-dispatch placement score is a
+different algorithm.
 
 **Category:** protocols
 **Tags:** job-score, revenue, upsell, renewal, route-efficiency, priority, scoring
@@ -47,17 +50,14 @@ Job Score (0–100) =
 | First-time customer | 8–12 |
 | One-time / no program | 4–8 |
 
-## Upsell Potential (max 20 pts)
+## Compatibility Endpoint Upsell Points
 
 | Situation | Pts |
 |-----------|-----|
-| New lead / estimate | 18–20 |
-| Inspection job | 16–19 |
-| Platinum member | 12–16 |
-| Gold member | 10–14 |
-| Silver / Bronze | 6–10 |
-| Stable recurring program | 4–8 |
-| One-time only customer | 2–5 |
+| Estimate or WDO-inspection category | 18 |
+| Platinum member outside that category exception | 14 |
+| Gold member outside that category exception | 8 |
+| All other jobs outside that category exception | 8 |
 
 ## Route Efficiency (max 15 pts)
 
@@ -82,6 +82,6 @@ Job Score (0–100) =
 ## Special Adjustments
 
 - Callback / retreat: +15 pts flat (retention value)
-- Canceled account at risk: +20 pts flat (winback value)
-- Inspection with termite evidence found: +10 pts
-- Premium add-on (aeration, mosquito, termite, exclusion, seeding): +8 pts
+- Intended policy, not implemented by the compatibility scorer: canceled account at risk +20 pts flat (winback value)
+- Intended policy, not implemented by the compatibility scorer: inspection with termite evidence found +10 pts
+- Intended policy, not implemented by the compatibility scorer: premium add-on (aeration, mosquito, termite, exclusion, seeding) +8 pts
