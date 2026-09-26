@@ -209,7 +209,7 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
     const needsVisitFence = ['verify_pin', 'outside_service_area', 'revoke'].includes(input.action);
     const includeProtected = ['outside_service_area', 'revoke'].includes(input.action);
     const prelocked = needsVisitFence
-      ? await prelockVisitContext(trx, customerId, { includeProtected })
+      ? await prelockVisitContext(trx, customerId)
       : { visits: [], rootIds: [], seriesIds: [] };
     const proposedAddress = input.action === 'verify_pin' ? reviewAddressPatch(input.address) : null;
     const { customer, primary, visitReference, storedReview } = await lockedContext(
