@@ -965,12 +965,12 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const routing = require('../services/messaging/push-channel-routing');
     const appointmentId = randomUUID();
     expect(await routing.attemptPushFirst({ customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
-      messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, appointmentId,
+      messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, appointmentId, fromNumber: '+19415550199',
       notificationEventKey: `qa:${invoiceId}:visit` })).toMatchObject({ delivered: true });
     const proof = await mockPg('sms_log').where({ from_phone: 'push' }).first();
     // The notification-id back-fill merges: the visit and the event key both survive it.
     expect(proof.metadata).toMatchObject({ channel: 'push', providerAccepted: true, scheduled_service_id: appointmentId,
-      notificationEventKey: `qa:${invoiceId}:visit` });
+      notificationEventKey: `qa:${invoiceId}:visit`, provider_from_number: '+19415550199' });
     expect(proof.metadata.push_notification_id).toBeTruthy();
   });
 
