@@ -527,6 +527,25 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(JSON.parse(second.content[0].text)).toMatchObject({ skipped: true });
   });
 
+  it.each([
+    ['the week is already claimed (skipped)', { sent: false, skipped: true, reason: 'The briefing text already went out this week.' }],
+    ['delivery is uncertain', { sent: false, uncertain: true, code: 'PROVIDER_TIMEOUT' }],
+  ])('an SMS answer that keeps the weekly claim (%s) completes the side effect — a repeat is not executed (Codex r8)', async (_label, firstAnswer) => {
+    mockExecuteBITool.mockResolvedValueOnce(firstAnswer);
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-2', 'send_briefing_sms'),
+      idle('requires_action', ['tool-2']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.smsSent).toBe(false);
+    const second = postsSent().flatMap(p => p.body.events || []).find(e => e.custom_tool_use_id === 'tool-2');
+    expect(JSON.parse(second.content[0].text)).toMatchObject({ skipped: true });
+  });
+
   it('a blocked SMS does not count as sent — the agent may retry it', async () => {
     mockExecuteBITool
       .mockResolvedValueOnce({ sent: false, blocked: true })

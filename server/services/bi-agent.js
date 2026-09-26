@@ -199,7 +199,12 @@ function frameText(data) {
 // under runExclusive (scheduler.js).
 const MAX_TOOL_CALLS = 30;
 const SIDE_EFFECT_DONE = {
-  send_briefing_sms: (result) => result?.sent === true,
+  // Done once the text went out, and also when the week's claim is held
+  // without a send this run (already sent or in flight: skipped; delivery
+  // uncertain): no retry could send, so repeats are answered from here. Only
+  // a definite no-send, whose claim was released, stays open for a retry
+  // (Codex r8).
+  send_briefing_sms: (result) => result?.sent === true || result?.skipped === true || result?.uncertain === true,
   save_weekly_report: (result) => Boolean(result) && !result.error,
 };
 // Run failures that are recorded on the ledger rather than thrown.
