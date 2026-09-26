@@ -205,6 +205,9 @@ describe('invoice follow-up email sidecar', () => {
       metadata: expect.objectContaining({
         original_message_type: 'invoice_followup',
         notificationEventKey: 'invoice-followup:seq-1:d3_friendly',
+        followup_sequence_id: 'seq-1',
+        rendered_amount: '129.00',
+        collections_ledger_id: 'led-1',
       }),
     }));
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({

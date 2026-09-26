@@ -10,7 +10,7 @@ const SOURCES = new Set([
   'late_payment_checker',
 ]);
 const CATEGORIES = new Set(['invoice', 'payment_issue', 'billing', 'payment_receipt']);
-const EXPIRY_STAGES = new Set(['expired', '7_day', '30_day']);
+const EXPIRY_STAGES = new Set(['expired', '7_day', '30_day', '60_day']);
 const STRING_FIELDS = Object.freeze({
   customer_id: 160, invoice_id: 160, source_entry_point: 80, notificationEventKey: 240,
   collections_ledger_id: 160, payment_method_id: 160, expiry_stage: 20,

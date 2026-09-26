@@ -147,6 +147,13 @@ describe('billing channel email adapter', () => {
       .toMatchObject({ appointment_id: 'visit-1', collections_ledger_id: 'ledger-email-1' });
   });
 
+  test('accepts the actual 60-day card-expiry producer stage', () => {
+    expect(sanitizeBillingReplayContext({ schema_version: 1, customer_id: 'cust-1', category: 'billing',
+      source_entry_point: 'autopay_card_expiry_warning', notificationEventKey: 'payment-expiry:pm-1:9:2026:60_day',
+      payment_method_id: 'pm-1', expiry_month: '9', expiry_year: '2026', expiry_stage: '60_day' }))
+      .toMatchObject({ payment_method_id: 'pm-1', expiry_stage: '60_day' });
+  });
+
   test.each([
     ['unsupported receipt source', { entryPoint: 'invoice_receipt_sms', invoiceId: 'inv-1' }],
     ['unsupported payment-issue source', { entryPoint: 'autopay_retry_failed', invoiceId: 'inv-1' }],
