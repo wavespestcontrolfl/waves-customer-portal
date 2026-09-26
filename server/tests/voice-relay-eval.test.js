@@ -980,6 +980,15 @@ describe('voice relay eval — each expect key', () => {
     // r11: a copular plan price ("premium is 150") is a price too.
     [['The enhanced program is $119 per application and premium is 150.'], 'application', 'fail'],
     [['The enhanced program is $119 per application; premium is 12 applications a year.'], 'application', 'pass'],
+    // r13: before YEAR a bare 10–24 is an application count ("doce por año"),
+    // while month/week/quarter keep the two-digit price rule (PR review:
+    // "veinte al mes" is a monthly price, not a frequency).
+    [['El premium cuesta 99 por aplicación, doce por año.'], 'aplicación', 'pass'],
+    [['El premium cuesta 99 por aplicación, 12 al año.'], 'aplicación', 'pass'],
+    [['Premium is $99 per application, 12 per year.'], 'application', 'pass'],
+    [['El premium cuesta 99 por aplicación. Como alternativa, 20 al mes.'], 'aplicación', 'fail'],
+    [['The plan is $99 per application and 20 per month.'], 'application', 'fail'],
+    [['El premium cuesta 99 por aplicación y 30 al año.'], 'aplicación', 'fail'],
   ])('amount_requires_unit: every billed figure needs the unit: %j', (spoken, unit, status) => {
     const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
     expect(SPOKEN_CHECK_RUNNERS.amount_requires_unit({ amount: [119, 99], unit }, {}, { spoken })[0]).toBe(status);
@@ -3285,6 +3294,9 @@ describe('voice relay eval — named spoken checks', () => {
     // The same relative day embedded in an unrelated sentence still needs
     // its subject or predicate, exactly as before.
     ['I could not access your next visit date; a team member will call you tomorrow.', 'pass', null],
+    // r13: "a las <n> <noun>" is a count, not a clock time.
+    ['Voy a explicárselo a las dos personas del equipo.', 'pass', null],
+    ['El técnico llega a las dos de la tarde.', 'fail', null],
   ])('no_visit_time (no time at all): %s', (text, status, phrase) => {
     const check = run('no_visit_time', true, text);
     expect(check.status).toBe(status);
@@ -4717,6 +4729,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['El técnico llega a las 9 am.', 'pass'],
     // ...while English contractions are English ("Don't worry.", curly "It’s").
     ["Don't worry.", 'fail'], ['It’s fine.', 'fail'], ["That's all.", 'fail'],
+    // r13: English tool acknowledgements are English.
+    ['Request received.', 'fail'], ['Reservice request recorded.', 'fail'], ['Logged.', 'fail'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
   });

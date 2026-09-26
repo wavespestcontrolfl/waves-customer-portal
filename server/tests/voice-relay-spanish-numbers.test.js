@@ -56,6 +56,11 @@ describe('normalizeSpanishSpokenText — prices (a number-word run immediately b
     // still left alone — "por ciento" is a percentage, not a price.
     ['cuarenta y nueve por ciento', 'cuarenta y nueve por ciento'],
     ['cuarenta y nueve por hora', 'cuarenta y nueve por hora'],
+    // r13: before YEAR a figure under 25 is an application count and stays
+    // words; every other unit converts from 10 (PR review: "veinte al mes").
+    ['noventa y nueve por aplicación, doce por año', '99 por aplicación, doce por año'],
+    ['veinte al mes', '20 al mes'],
+    ['treinta al año', '30 al año'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });

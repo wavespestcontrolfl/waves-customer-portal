@@ -169,10 +169,11 @@ function convertDigitStrings(text) {
 // ("el premium cuesta noventa y nueve"). Both need a two-digit amount
 // (priceRe's own rule): a smaller one is a count ("dos por mes"), and a
 // count before its noun ("nueve aplicaciones al año") never matches at all.
-// Codex r13: before a time PERIOD ("al año", "por mes") a figure under 25 is
-// a frequency, not a price ("doce por año" = twelve applications a year), so
-// only 25+ converts there; a service unit ("por aplicación") needs 10+.
-const BILLING_UNIT_AHEAD_ES = '(?=(?:por|cada|al|a\\s+la)\\s+(?:(aplicaci[oó]n(?:es)?|tratamientos?|visitas?|servicios?)|(mes(?:es)?|a[ñn]os?|semanas?|trimestres?))(?![a-záéíóúñ]))';
+// Codex r13: before YEAR ("al año", "por año") a figure under 25 is an
+// application count, not a price ("doce por año" = twelve applications a
+// year), so only 25+ converts there. Every other unit needs 10+ — "veinte al
+// mes" is a price (PR review): nothing is applied ten times a month.
+const BILLING_UNIT_AHEAD_ES = '(?=(?:por|cada|al|a\\s+la)\\s+(?:(aplicaci[oó]n(?:es)?|tratamientos?|visitas?|servicios?|mes(?:es)?|semanas?|trimestres?)|(a[ñn]os?))(?![a-záéíóúñ]))';
 const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(?:(d[oó]lares?|pesos?)\\b|${BILLING_UNIT_AHEAD_ES})`, 'gi');
 const PRICE_VERB_ES = '(?:cuestan?|costar[íi]an?|costar[áa]n?|valen?|salen?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a))';
 const PRICE_VERB_WORD_RUN_RE = new RegExp(`(\\b${PRICE_VERB_ES}\\s+(?:de\\s+)?)(${NUMBER_RUN_RE_SRC})`, 'gi');
@@ -196,11 +197,11 @@ function convertWholeAndCents(text) {
 }
 
 function convertPriceWordRuns(text) {
-  const out = convertWholeAndCents(text).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord, serviceUnit, periodUnit) => {
+  const out = convertWholeAndCents(text).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord, otherUnit, yearUnit) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount)) return match;
     if (currencyWord) return `${amount} ${currencyWord}`;
-    const floor = periodUnit ? 25 : 10;
+    const floor = yearUnit ? 25 : 10;
     return amount >= floor ? `${amount} ` : match;
   });
   const convertLed = (t, re) => t.replace(re, (match, lead, run) => {
