@@ -417,32 +417,9 @@ async function executeBITool(toolName, input) {
     }
 
     case 'send_briefing_sms': {
-      if (!process.env.ADAM_PHONE) return { error: 'ADAM_PHONE not set' };
-
-      // Internal-audience send. Routed through the wrapper so the BI
-      // SMS gets the same audit trail as customer/lead messages, but
-      // the policy profile for purpose='internal_briefing' allows
-      // emoji + dollar amounts + 3-segment bodies (the BI Monday SMS
-      // intentionally uses 📊 ↑ ↓ and quotes MRR / revenue figures).
-      // identityTrustLevel='admin_operator' is required for the
-      // internal_briefing policy row.
-      const { sendCustomerMessage } = require('./messaging/send-customer-message');
-      const result = await sendCustomerMessage({
-        to: process.env.ADAM_PHONE,
-        body: input.message,
-        channel: 'sms',
-        audience: 'internal',
-        purpose: 'internal_briefing',
-        identityTrustLevel: 'admin_operator',
-        entryPoint: 'bi_agent_send_briefing_sms',
-      });
-
-      if (result.sent) {
-        logger.info(`[bi-agent] Monday briefing SMS sent (segs=${result.segmentCount}, encoding=${result.encoding})`);
-        return { sent: true, segmentCount: result.segmentCount, encoding: result.encoding };
-      }
-      logger.warn(`[bi-agent] Briefing SMS BLOCKED: ${result.code} — ${result.reason}`);
-      return { sent: false, blocked: !!result.blocked, code: result.code, reason: result.reason };
+      // At most once per ET week, across runs and instances (bi-briefing-sms.js).
+      const { sendBriefingSmsOnce } = require('./bi-briefing-sms');
+      return sendBriefingSmsOnce(input.message);
     }
 
     case 'save_weekly_report': {
@@ -457,7 +434,23 @@ async function executeBITool(toolName, input) {
         anomalies_section: input.anomalies_section,
         action_items: input.action_items,
         created_at: new Date(),
-      }).returning('*');
+        // One report per ET week, the briefing's occurrence (the owner text is
+        // claimed per ET week too, bi-briefing-sms.js). A retried or
+        // overlapping run, or an insert that finished after its run hit the
+        // deadline, replaces the week's row instead of adding a second
+        // (Codex r6).
+        week_of: etWeekStart(),
+      }).onConflict('week_of').merge()
+        // Only a NEWER save replaces the week's row, so a save abandoned at
+        // the deadline that finishes after a retry's never overwrites the
+        // retry's report (Codex r7).
+        .where('weekly_bi_reports.created_at', '<', db.raw('excluded.created_at'))
+        .returning('*');
+      if (!report) {
+        const newer = await db('weekly_bi_reports').where({ week_of: etWeekStart() }).first('id');
+        logger.info(`[bi-agent] Weekly report not saved: a newer report for this week already exists (${newer?.id || 'unknown'})`);
+        return { saved: false, superseded: true, reportId: newer?.id || null, reason: 'A newer report for this week is already saved.' };
+      }
 
       logger.info(`[bi-agent] Weekly report saved: ${report.id}`);
       return { saved: true, reportId: report.id };
