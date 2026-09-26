@@ -205,7 +205,8 @@ describe('buildReportCopyContext deterministic application evidence', () => {
   test.each([
     ['soil_amendment', 'biostimulant', 'soil-support application'],
     ['adjuvant', 'wetting_agent', 'moisture-support application'],
-  ])('approved %s applications use their supported product type', async (category, product_type, role) => {
+    ['IGR', null, 'insect-control application'],
+  ])('approved %s applications use their supported category or product type', async (category, product_type, role) => {
     const result = await buildReportCopyContext({
       customerId: 'c1', serviceType: 'Lawn Care', serviceDate: '2026-07-28',
       products: [{ productId: 'support', applicationMethod: 'broadcast_spray', applicationArea: 'Front lawn' }],
