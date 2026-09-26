@@ -21,6 +21,10 @@ let catalog;
 let optionalOptions;
 let delayFlags;
 let flagResolvers;
+let completionChoicesEnabled;
+let techTipsAvailable;
+let techTipsFailure;
+let previousRecommendations;
 beforeEach(async () => {
   delayFlags = false;
   flagResolvers = [];
@@ -31,6 +35,10 @@ beforeEach(async () => {
   withdrawDefaults = false;
   catalog = products;
   optionalOptions = [];
+  completionChoicesEnabled = false;
+  techTipsAvailable = true;
+  techTipsFailure = false;
+  previousRecommendations = [];
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -68,7 +76,15 @@ beforeEach(async () => {
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
-    if (url.includes('tech-tips')) data = { available: true, groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }] };
+    if (url.includes('tech-tips')) {
+      if (techTipsFailure) throw new Error('Synthetic completion choices outage');
+      data = {
+        available: techTipsAvailable,
+        completionChoicesEnabled,
+        previousRecommendations,
+        groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }],
+      };
+    }
     if (url.includes('generate-report')) data = { report: 'WHAT WE DID:\nApplied the old products.\nWHAT WE FOUND:\nLawn looked fine.' };
     if (url.includes('completion-actions')) data = { actions: [] };
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
@@ -78,6 +94,138 @@ beforeEach(async () => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const mount = () => render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={submit} />);
+
+it.each(['gate off', 'API error'])('keeps the existing completion form on %s', async (mode) => {
+  techTipsAvailable = false;
+  techTipsFailure = mode === 'API error';
+  mount();
+  expect(await screen.findByLabelText('Observations')).toBeTruthy();
+  expect(screen.getByLabelText('Recommendations')).toBeTruthy();
+  expect(screen.queryByRole('combobox', { name: 'Search completed actions' })).toBeNull();
+  expect(screen.queryByRole('combobox', { name: 'Search observations' })).toBeNull();
+});
+
+it('keeps commercial lawn visits on their existing completion form when choices are enabled', async () => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  render(<CompletionPanel
+    service={{ ...service, id: 'commercial-lawn', serviceType: 'Commercial Turf Treatment Program', completionProfile: { serviceKey: 'commercial_lawn', requiresProducts: false } }}
+    products={catalog}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+
+  expect(await screen.findByLabelText('Observations')).toBeTruthy();
+  expect(screen.getByLabelText('Recommendations')).toBeTruthy();
+  expect(screen.queryByRole('combobox', { name: 'Search completed actions' })).toBeNull();
+});
+
+it('shows gated history as a suggestion and records only choices the technician selects', async () => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  previousRecommendations = [{
+    text: 'Homeowner: continue checking the repaired irrigation zone.',
+    serviceDate: '2026-08-20',
+    serviceRecordId: 'prior-record',
+  }];
+  mount();
+  await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe('15'));
+
+  expect(screen.queryByLabelText('Selected recommendations')).toBeNull();
+  const actionSearch = screen.getByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(actionSearch, { target: { value: 'Inspected the serviced turf areas.' } });
+  fireEvent.click(await screen.findByRole('option', { name: 'Inspected the serviced turf areas.' }));
+
+  const observationSearch = screen.getByRole('combobox', { name: 'Search observations' });
+  fireEvent.change(observationSearch, { target: { value: 'Custom lawn observation.' } });
+  fireEvent.keyDown(observationSearch, { key: 'Enter' });
+
+  const recommendationSearch = screen.getByRole('combobox', { name: 'Search recommendations' });
+  fireEvent.change(recommendationSearch, { target: { value: 'continue checking repaired' } });
+  fireEvent.click(await screen.findByRole('option', { name: /continue checking the repaired irrigation zone/i }));
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted).toContain('Inspected the serviced turf areas.');
+  expect(body.observations).toContain('Custom lawn observation.');
+  expect(body.recommendations).toEqual(['Homeowner: continue checking the repaired irrigation zone.']);
+});
+
+it('removes a gated completed action from both selection state and marker notes before submit', async () => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  mount();
+
+  const action = 'Inspected the serviced turf areas.';
+  const actionSearch = await screen.findByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(actionSearch, { target: { value: action } });
+  fireEvent.click(await screen.findByRole('option', { name: action }));
+  expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain(`[Protocol] ${action}`);
+
+  fireEvent.click(screen.getByRole('button', { name: `Remove ${action}` }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted).not.toContain(action);
+  expect(body.technicianNotes).not.toContain(action);
+});
+
+it.each(['gate off', 'API error'])('submits a visible generated-draft action after choices are unavailable on reopen: %s', async (mode) => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  const first = mount();
+
+  const action = 'Custom documented lawn work.';
+  const actionSearch = await screen.findByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(actionSearch, { target: { value: action } });
+  fireEvent.keyDown(actionSearch, { key: 'Enter' });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain('WHAT WE DID'));
+  const key = `waves_completion_draft_${service.id}`;
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key))).toMatchObject({
+    chipLinesDetached: true,
+    selectedProtocolActionLabels: [action],
+  }));
+
+  first.unmount();
+  completionChoicesEnabled = false;
+  techTipsFailure = mode === 'API error';
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  expect(await screen.findByRole('button', { name: `Remove protocol item: ${action}` })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).toContain(action);
+});
+
+it('omits a visible generated-draft action that is outside the current specialty preset', async () => {
+  const specialtyService = {
+    ...service,
+    id: 'specialty-visit',
+    serviceType: 'Mud Dauber Removal',
+    completionProfile: { serviceKey: 'mud_dauber_removal', requiresProducts: false },
+  };
+  const retiredAction = 'Retired specialty protocol action';
+  localStorage.setItem(`waves_completion_draft_${specialtyService.id}`, JSON.stringify({
+    serviceId: specialtyService.id,
+    savedAt: Date.now(),
+    notes: 'WHAT WE DID:\nDocumented the visit.\nWHAT WE FOUND:\nNo active work recorded.',
+    selectedProducts: [],
+    areasServiced: [],
+    selectedProtocolActionLabels: [retiredAction],
+    chipLinesDetached: true,
+  }));
+
+  render(<CompletionPanel service={specialtyService} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  expect(await screen.findByRole('button', { name: `Remove protocol item: ${retiredAction}` })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual([]);
+});
 
 it('prefills the engine mix and submits findings and inspection actions once, with edited quantities', async () => {
   mount();

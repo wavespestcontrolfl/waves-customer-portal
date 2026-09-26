@@ -86,6 +86,8 @@ import {
 } from "../../lib/service-completion-presets";
 import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
+import SearchableCompletionChoices from "../../components/tech/SearchableCompletionChoices";
+import { serviceCompletionChoicesFor } from "../../lib/service-completion-choices";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
 import {
@@ -10540,6 +10542,15 @@ function serviceLineFromType(serviceType = "") {
   return "pest";
 }
 
+function isCommercialServiceIdentity(service = {}) {
+  return String([
+    service.service_type, service.serviceType, service.type,
+    service.service_key, service.serviceKey, service.service_name,
+    service.serviceName, service.name, service.label,
+    service.completionProfile?.serviceKey, service.completionProfile?.serviceName,
+  ].filter(Boolean).join(" ")).toLowerCase().includes("commercial");
+}
+
 // Method inference lives in lib/product-rate-prefill.js (shared with the
 // recap modal); this wrapper only resolves the service LINE from the type.
 export function defaultApplicationMethod(product = {}, serviceType = "", { interiorLane = false } = {}) {
@@ -13151,6 +13162,7 @@ export function CompletionPanel({
   // Textareas until the payload says otherwise: with the gate off (prod
   // today) the panel must paint exactly as before, with no loading swap.
   const techTipsAvailable = techTips?.available === true;
+  const completionChoicesEnabled = techTips?.completionChoicesEnabled === true;
   // Flips true once Generate AI report replaces the notes with clean prose.
   // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
   // selection source of truth (delete a line = deselect); after, the label
@@ -13680,6 +13692,33 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const specialtyCompletion = specialtyCompletionFor(service);
+  const completionChoiceFamily = completionChoicesEnabled
+    && !specialtyCompletion
+    && !isCommercialServiceIdentity(service)
+    ? isLawn
+      ? "lawn"
+      : treeShrubCloseoutOn
+        ? "tree_shrub"
+        : serviceLineForCloseout === "pest" && !isTypedFindings
+          ? "recurring_pest"
+          : null
+    : null;
+  const completionObservationChoices = serviceCompletionChoicesFor(
+    completionChoiceFamily,
+    "observations",
+  );
+  const completionActionChoices = serviceCompletionChoicesFor(
+    completionChoiceFamily,
+    "completedActions",
+  );
+  const completionRecommendationChoices = useMemo(() => [
+    ...(techTips?.previousRecommendations || []).map((item) => ({
+      label: item.text,
+      group: "Previous visit",
+      detail: item.serviceDate ? formatETDateOnly(item.serviceDate) : undefined,
+    })),
+    ...serviceCompletionChoicesFor(completionChoiceFamily, "recommendations"),
+  ], [completionChoiceFamily, techTips]);
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -15602,7 +15641,23 @@ export function CompletionPanel({
     // recommendations the completion submits, so it can't run mid-request
     // and it clears an untouched installed draft.
     if (generating) return;
-    invalidateGeneratedReportOnTypedEdit();
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
+    if (!detachedAfterInvalidation) {
+      const markerTags = kind === "protocol"
+        ? new Set(["protocol", "protocol optional", "action"])
+        : new Set([kind === "observation" ? "found" : "next"]);
+      const normalizedLabel = String(label || "").trim().toLowerCase();
+      setNotes((current) => current
+        .split("\n")
+        .filter((line) => {
+          const match = line.match(/^\s*\[([^\]]+)\]\s+(.+)$/);
+          return !match
+            || !markerTags.has(match[1].trim().toLowerCase())
+            || match[2].trim().toLowerCase() !== normalizedLabel;
+        })
+        .join("\n")
+        .trim());
+    }
     if (kind === "protocol") {
       setSelectedProtocolActionLabels((prev) =>
         prev.filter((item) => item !== label),
@@ -17140,18 +17195,25 @@ export function CompletionPanel({
       // and must not reach the customer report (codex P2 r7 #3701).
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
-      ).filter(
-        (label) =>
-          specialtyProtocolActions.length > 0
-            ? specialtyProtocolActions.some((action) => action.label === label)
-            : !isLawn ||
-              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
-              (protocolActionsLoaded &&
-                protocolActions.some(
-                  (action) =>
-                    (action.label || action.note || action.raw || "") === label,
-                )),
-      );
+      ).filter((label) => {
+        if (specialtyProtocolActions.length > 0) {
+          return specialtyProtocolActions.some((action) => action.label === label);
+        }
+        // The gated searchable control displays every selected value, including
+        // restored/custom entries, so the technician can review or remove it.
+        // Detached labels render as removable pills even if the choices
+        // request fails or its gate turns off after this draft was saved.
+        // Keep those visible, reviewed values; pre-generation hidden labels
+        // still pass through the existing current-action allowlist below.
+        if (completionChoiceFamily || chipLinesDetached) return true;
+        return !isLawn ||
+          (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
+          (protocolActionsLoaded &&
+            protocolActions.some(
+              (action) =>
+                (action.label || action.note || action.raw || "") === label,
+            ));
+      });
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
@@ -17378,7 +17440,7 @@ export function CompletionPanel({
         structuredObservations: specialtyCompletion
           ? activeSelectedLabels(selectedObservationLabels)
           : completionImprovements && isLawn
-            ? activeSelectedLabels(selectedObservationLabels).filter(isLawnFindingSelection)
+            ? reportObservations.filter(isLawnFindingSelection)
             : [],
         recommendations: reportRecommendations,
         lawnAssessmentId,
@@ -17682,6 +17744,12 @@ export function CompletionPanel({
     : completionImprovements && isLawn
       ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
       : protocolActions;
+  const searchableProtocolActions = [
+    ...effectiveProtocolActions,
+    ...completionActionChoices,
+  ].filter((action, index, list) => list.findIndex(
+    (item) => (item.label || item.note) === (action.label || action.note),
+  ) === index);
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   const hideProtocolActionsField =
     isLawn &&
@@ -18147,6 +18215,61 @@ export function CompletionPanel({
         onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); }}
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
         : <LawnPreviousVisitCard service={service} />
+  );
+  const searchableVisitDetails = completionChoiceFamily && !quickComplete && (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18, margin: "4px 0 20px" }}>
+      <div>
+        <div style={{ ...CP_EYEBROW, fontSize: 14, marginBottom: 8 }}>Completed actions</div>
+        <SearchableCompletionChoices
+          label="Completed actions"
+          options={searchableProtocolActions}
+          values={activeSelectedLabels(selectedProtocolActionLabels)}
+          onChange={(next) => {
+            const current = activeSelectedLabels(selectedProtocolActionLabels);
+            current
+              .filter((label) => !next.includes(label))
+              .forEach((label) => removeSelectedLabel("protocol", label));
+            next
+              .filter((label) => !current.includes(label))
+              .forEach((label) => applyProtocolAction(
+                searchableProtocolActions.find(
+                  (action) => (action.label || action.note) === label,
+                ) || { label },
+              ));
+          }}
+          disabled={submitting || generating}
+          helper="Choose only the work completed on this visit."
+        />
+      </div>
+      <div>
+        <div style={{ ...CP_EYEBROW, fontSize: 14, marginBottom: 8 }}>Observations</div>
+        <SearchableCompletionChoices
+          label="Observations"
+          options={completionObservationChoices}
+          values={freeTextLines(observationsText)}
+          onChange={(next) => setObservationsText(next.join("\n"))}
+          disabled={submitting || generating || photoAnalyzing}
+          helper="Choose what you observed or type a specific finding."
+        />
+      </div>
+      <div>
+        <div style={{ ...CP_EYEBROW, fontSize: 14, marginBottom: 8 }}>Recommendations</div>
+        <SearchableCompletionChoices
+          label="Recommendations"
+          options={completionRecommendationChoices}
+          values={freeTextLines(recommendationsText)}
+          onChange={(next) => setRecommendationsText(next.join("\n"))}
+          disabled={submitting || generating}
+          helper={techTipsLoading
+            ? "Loading previous recommendations…"
+            : techTipsError
+              ? "Previous recommendations could not load. Search the service library or add your own."
+              : techTips?.previousRecommendations?.length
+                ? "Previous recommendations are dated suggestions. Select only what still applies."
+                : "Search the service library or add the next step this property needs."}
+        />
+      </div>
+    </div>
   );
   if (isMobile) {
     const M = {
@@ -18985,8 +19108,9 @@ export function CompletionPanel({
                 </Field>
               );
             })}
-            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {!isTypedFindings && !hideProtocolActionsField && (
+            {searchableVisitDetails}
+            {!completionChoiceFamily && completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {!completionChoiceFamily && !isTypedFindings && !hideProtocolActionsField && (
               <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
               <Field label="Protocol actions">
@@ -19054,7 +19178,7 @@ export function CompletionPanel({
                 freeze during photo analysis (codex r9): they're the vision
                 prompt's context on basic completions, and captions returned
                 against a stale snapshot would persist under the photos. */}
-            {techTipsAvailable && (
+            {techTipsAvailable && (!completionChoiceFamily || selectedTipIds.length > 0 || customTip.trim()) && (
               <Field label="Tips from your tech">
                 <TechTipPicker
                   library={techTips}
@@ -19117,7 +19241,7 @@ export function CompletionPanel({
             {/* Gate off: the textareas as today. Gate on: they stay only while
                 they hold text (a draft saved before the gate flipped), so
                 nothing that will submit is ever hidden from the tech. */}
-            {(!techTipsAvailable || observationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || observationsText.trim()) && (
               <Field label="Observations">
                 {" "}
                 <textarea
@@ -19131,7 +19255,7 @@ export function CompletionPanel({
                 />{" "}
               </Field>
             )}
-            {(!techTipsAvailable || recommendationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || recommendationsText.trim()) && (
               <Field label="Recommendations">
                 {" "}
                 <textarea
@@ -21430,8 +21554,9 @@ export function CompletionPanel({
                 </div>
               );
             })}
-            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {!isTypedFindings && !hideProtocolActionsField && (
+          {searchableVisitDetails}
+          {!completionChoiceFamily && completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {!completionChoiceFamily && !isTypedFindings && !hideProtocolActionsField && (
             <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
               <div style={{ marginBottom: 12 }}>
@@ -21493,7 +21618,7 @@ export function CompletionPanel({
             {/* Frozen while an AI draft is in flight (codex P2) — mirrors
                 the mobile variant. Observations also freeze during photo
                 analysis (codex r9): they're the vision prompt's context. */}
-            {techTipsAvailable && (
+            {techTipsAvailable && (!completionChoiceFamily || selectedTipIds.length > 0 || customTip.trim()) && (
               <div style={{ marginBottom: 12 }}>
                 <label style={labelStyle}>Tips from your tech</label>{" "}
                 <TechTipPicker
@@ -21554,7 +21679,7 @@ export function CompletionPanel({
             )}
             {/* Gate off: the textareas as today. Gate on: they stay only while
                 they hold text (a draft saved before the gate flipped). */}
-            {(!techTipsAvailable || observationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || observationsText.trim()) && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{ ...labelStyle, color: D.amber }}>
                   Observations
@@ -21570,7 +21695,7 @@ export function CompletionPanel({
                 />{" "}
               </div>
             )}
-            {(!techTipsAvailable || recommendationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || recommendationsText.trim()) && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{ ...labelStyle, color: D.green }}>
                   Recommendations

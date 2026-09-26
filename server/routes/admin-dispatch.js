@@ -70,6 +70,7 @@ const {
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // The follow-up override chain (German knockdown windows, two-treatment
 // package rules, species gating) lives in ONE place — the obligation module
@@ -284,19 +285,90 @@ function irrigationSettingsOnFile(prefs) {
     || parseConfirmedFields(prefs.irrigation_confirmed_fields).some((f) => IRRIGATION_ON_FILE_CONFIRMED.has(f));
 }
 
+const PREVIOUS_RECOMMENDATION_VISIT_LIMIT = 3;
+const PREVIOUS_RECOMMENDATION_ITEM_LIMIT = 12;
+const PREVIOUS_RECOMMENDATION_SCAN_LIMIT = 500;
+
+function recommendationTextValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .filter((item) => typeof item === 'string' || typeof item === 'number')
+    .map((item) => String(item).replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function recommendationTextsFromRecord(record = {}) {
+  const structured = parseJsonObject(record.structured_notes);
+  const serviceData = parseJsonObject(record.service_data);
+  const snapshot = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
+    ? serviceData.typedReportSnapshot : null;
+  const texts = [
+    ...recommendationTextValues(structured.recommendations),
+    ...recommendationTextValues(snapshot?.recommendations),
+    ...recommendationTextValues(snapshot?.nextStepChips),
+  ];
+  const values = snapshot?.values && typeof snapshot.values === 'object' && !Array.isArray(snapshot.values)
+    ? snapshot.values : {};
+  for (const [key, value] of Object.entries(values)) {
+    if (!/(^|_)(?:recommendation|recommendations|recommended)(?:_|$)/i.test(key)) continue;
+    for (const raw of recommendationTextValues(value)) {
+      if (/^(?:no|false|none|not recommended)$/i.test(raw)) continue;
+      const mapped = ActivityIndicators.customerLabelForValue(key, raw);
+      texts.push(mapped === raw && /^(?:yes|true)$/i.test(raw)
+        ? `${ActivityIndicators.customerLabelForField(key)}: ${raw}`
+        : mapped);
+    }
+  }
+  const seen = new Set();
+  return texts.filter((text) => {
+    const key = text.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function loadPreviousRecommendations({ customerId, serviceType, serviceId, visitDay }) {
+  if (!customerId || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDay || ''))) return [];
+  const visitLine = detectServiceLine(serviceType);
+  const rows = await db('service_records')
+    .where({ customer_id: customerId, status: 'completed' })
+    .where('service_date', '<=', visitDay)
+    .orderBy('service_date', 'desc')
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .limit(PREVIOUS_RECOMMENDATION_SCAN_LIMIT)
+    .select(
+      'id', 'scheduled_service_id', 'service_type', 'service_line', 'service_date',
+      'structured_notes', 'service_data',
+    )
+    .catch(() => []);
+  const priorVisits = rows
+    .filter((row) => String(row.scheduled_service_id || '') !== String(serviceId || ''))
+    .filter((row) => (String(row.service_line || '').trim() || detectServiceLine(row.service_type)) === visitLine)
+    .slice(0, PREVIOUS_RECOMMENDATION_VISIT_LIMIT);
+  const output = [];
+  for (const row of priorVisits) {
+    const serviceDate = String(row.service_date instanceof Date
+      ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
+    for (const text of recommendationTextsFromRecord(row)) {
+      output.push({ text, serviceDate, serviceRecordId: row.id });
+      if (output.length >= PREVIOUS_RECOMMENDATION_ITEM_LIMIT) return output;
+    }
+  }
+  return output;
+}
+
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
-// tip-picker payload (tips-from-your-tech PR 2). Gate-off answers
-// { available: false } and the client keeps the free-text Observations /
-// Recommendations boxes. Gate-on returns the whole registry grouped for the
-// visit's service line and season (tip-library.tipsForVisit — nothing is
-// hidden, the client searches), plus two per-customer facts the picker
-// renders as marks: when each tip was last frozen into one of this
-// customer's reports in the last 90 days (so a repeat is deliberate), and
-// whether the property already has irrigation on file (the portal tip's
-// condition). Read-only.
+// tip-picker payload plus the independently gated completion-choice history.
+// When both gates are off this remains a no-read availability probe. Read-only.
 router.get('/:serviceId/tech-tips', async (req, res, next) => {
   try {
-    if (!techTipsGateOn()) return res.json({ available: false });
+    const completionChoicesEnabled = gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES');
+    const tipsEnabled = techTipsGateOn();
+    if (!tipsEnabled && !completionChoicesEnabled) {
+      return res.json({ available: false, completionChoicesEnabled: false });
+    }
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
       .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id');
@@ -316,6 +388,21 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     const visitDay = svc.scheduled_date
       ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
       : null;
+    const previousRecommendations = completionChoicesEnabled
+      ? await loadPreviousRecommendations({
+        customerId: svc.customer_id,
+        serviceType: svc.service_type,
+        serviceId: svc.id,
+        visitDay,
+      })
+      : [];
+    if (!tipsEnabled) {
+      return res.json({
+        available: false,
+        completionChoicesEnabled: true,
+        previousRecommendations,
+      });
+    }
     const library = tipsForVisit({
       serviceLine: detectServiceLine(svc.service_type),
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
@@ -363,9 +450,11 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     }
     res.json({
       available: true,
+      completionChoicesEnabled,
       ...library,
       lastSent,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
+      ...(completionChoicesEnabled ? { previousRecommendations } : {}),
     });
   } catch (err) { next(err); }
 });
