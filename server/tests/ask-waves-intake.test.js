@@ -1077,6 +1077,8 @@ describe('normalizeIntakeResult', () => {
     'This is not safe; go to the nearest clinic immediately.',
     'It is not safe to swallow; call 9-1-1 now.',
     'It is not safe; dial 9 1 1 right away.',
+    'It is not safe to swallow; call the poison center now.',
+    'It is not safe; contact the poison hotline immediately.',
     'It is not safe to swallow; do not delay calling 911.',
     'It is not safe to swallow; never delay medical care.',
   ])('a hospital referral in the reply keeps the emergency script: %s', (reply) => {
