@@ -1706,6 +1706,32 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Codex round 25 (review of 6eed8bfd87): P1 (:1017) — a later CALLER
+  // turn rejecting or caveating the slot.
+  test.each([
+    "Caller: No, Sunday does not work for me.",
+    "Caller: Actually, can we do Monday instead?",
+    "Caller: Sunday at noon is off.",
+    "Caller: I need to ask my husband first.",
+    "Caller: Let me check and call you back.",
+  ])('Codex round-26 regression: a later caller rejection or caveat holds the call — %s', (later) => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "Caller: Great, see you Sunday at noon.",
+    "Caller: No, that's all, thank you.",
+    "Caller: Perfect, thanks so much. Bye.",
+  ])('Codex round-26: a later caller acknowledgement or closer still grounds — %s', (later) => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",

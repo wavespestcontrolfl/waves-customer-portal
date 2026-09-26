@@ -992,29 +992,63 @@ function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   }
   return false;
 }
+// The caller-side screen (codex round 25): a rejection, hedge, change
+// marker, or authorization caveat holds the call; a caller sentence that
+// names the slot passes only as a plain acknowledgement of the SAME slot
+// ("Great, see you Sunday at noon.") — closed commitment vocabulary plus
+// slot binding — so "Sunday at noon is off." holds. The routine closers
+// "No, that's all." / "Nope, that's it." are not rejections.
+const CALLER_CLOSER_NEGATION_RE = /(?:^| )(?:no|nope|nah)(?: (?:that s|that is) (?:all|it)(?: thanks| thank you)*)(?= |$)/g;
+// Caller-voiced deferrals and the people a caller defers to — "I need to
+// ask my husband first.", "Let me run it by my landlord." A caller naming
+// one of these after the commitment holds the call (fail closed).
+const CALLER_CAVEAT_TERMS = [
+  ' ask my ', ' check with ', ' talk to my ', ' talk with my ', ' run it by ', ' run this by ',
+  ' get back to you ', ' think about it ', ' let you know ',
+  ' husband ', ' wife ', ' landlord ', ' boss ', ' partner ', ' property manager ', ' owner ',
+];
+function laterCallerSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
+  const ns = sentence.ns.replace(CALLER_CLOSER_NEGATION_RE, ' ').trim();
+  if (!ns) return false;
+  const padded = ` ${ns} `;
+  if (turnHasNegationOrHedge(ns)) return true;
+  if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
+  if (RETRACTION_MARKER_TERMS.some((t) => padded.includes(t))) return true;
+  if (CALLER_CAVEAT_TERMS.some((t) => padded.includes(t))) return true;
+  if (laterSentenceNamesSlot(ns)) {
+    return !(!sentence.interrogative
+      && commitmentTurnVocabularyOk(ns)
+      && !turnHasUnresolvedConditional(ns)
+      && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
+  }
+  return false;
+}
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);
   if (!q || q.length < 12) return false;
-  const agentTurns = [];
-  let sawCaller = false;
+  const turns = [];
   for (const line of String(transcript || '').split(/\r?\n/)) {
     if (!line.trim()) continue;
     const m = line.match(/^\s*(agent|caller)\s*:\s*(.*)$/i);
     if (!m) return false;
-    if (m[1].toLowerCase() === 'agent') agentTurns.push(m[2]);
-    else sawCaller = true;
+    turns.push({ agent: m[1].toLowerCase() === 'agent', text: m[2] });
   }
-  if (!agentTurns.length || !sawCaller) return false;
+  if (!turns.some((turn) => turn.agent) || !turns.some((turn) => !turn.agent)) return false;
   const containing = [];
-  for (let t = 0; t < agentTurns.length; t += 1) {
-    const sentences = splitSentences(agentTurns[t]);
+  for (let t = 0; t < turns.length; t += 1) {
+    if (!turns[t].agent) continue;
+    const sentences = splitSentences(turns[t].text);
     for (let i = 0; i < sentences.length; i += 1) {
       const s = sentences[i];
       if (!s.ns.includes(q)) continue;
       const otherSentencesClean = sentences.every((other, j) => j === i
         || otherSentenceIsClean(other, sentences[j - 1]?.ns));
-      const laterTurnsClean = agentTurns.slice(t + 1).every((later) => splitSentences(later)
-        .every((ls) => !laterAgentSentenceRetracts(ls, confirmedStartAt, callStartedAt)));
+      // Codex round 25, P1 (:1017): LATER caller turns too — "Caller: No,
+      // Sunday does not work for me." after the commitment was never read.
+      const laterTurnsClean = turns.slice(t + 1).every((later) => splitSentences(later.text)
+        .every((ls) => !(later.agent
+          ? laterAgentSentenceRetracts(ls, confirmedStartAt, callStartedAt)
+          : laterCallerSentenceRetracts(ls, confirmedStartAt, callStartedAt))));
       containing.push({ ...s, otherSentencesClean: otherSentencesClean && laterTurnsClean });
     }
   }
