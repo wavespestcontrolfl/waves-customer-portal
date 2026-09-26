@@ -255,6 +255,28 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(withFlag.days[0]).toMatchObject({ unallocatedVisits: 2, unallocatedServiceMinutes: 90 });
   });
 
+  // Codex P2 (round 11): the per-technician breakdown behind that total
+  // (opt-in only) lets day-scorecard drop a technician it already renders.
+  test('includeStopExtras also returns the unallocated breakdown per technician group', async () => {
+    const stopFor = (id, technicianId, windowStart) => ({
+      id, technician_id: technicianId, customer_id: `cust-${id}`, visit_id: null,
+      scheduled_date: DATE, window_start: windowStart, window_end: null, time_window: null, route_order: null,
+      status: 'confirmed', reservation_expires_at: null, created_at: '2020-01-01T01:00:00Z',
+      estimated_duration_minutes: 30, service_type: null, is_recurring: false, is_callback: false,
+      lat: 27.5, lng: -82.5, service_address_line1: `${id} Second St`, service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34205',
+      customer_address_line1: `${id} Second St`, customer_address_line2: null,
+      customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205',
+    });
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve([stopFor('g1', 'ghost', '09:00'),
+      stopFor('g2', 'ghost', '11:00'), stopFor('u1', null, '13:00')]) }));
+    const withFlag = await getScheduleQualityMeasurements({ date: DATE, includeStopExtras: true }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(withFlag.days[0]).toMatchObject({ unallocatedVisits: 3, unallocatedServiceMinutes: 90,
+      unallocatedByTechnician: [{ technicianId: 'ghost', visits: 2, serviceMinutes: 60 }, { technicianId: null, visits: 1, serviceMinutes: 30 }] });
+    const withoutFlag = await getScheduleQualityMeasurements({ date: DATE }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(withoutFlag.days[0]).not.toHaveProperty('unallocatedByTechnician');
+  });
+
   // Codex P2 (round 8): a version-2 allocation occupies the SUM of its
   // members (visit-capacity occupiedRows). Treated as a co-visit chain it
   // kept only one member's fallback span — 60 instead of 120 — on a named

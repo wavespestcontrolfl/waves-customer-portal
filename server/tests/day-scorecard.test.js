@@ -513,6 +513,26 @@ describe('getDayScorecard', () => {
     expect(result.days[1].byTech.some(row => row.technicianId === null)).toBe(false);
   });
 
+  // Codex P2 (round 11): an off-board technician rendered as today's
+  // saved-plan row still has their remaining stops in day-quality's
+  // unallocated total — their group comes out of the footer so nothing is
+  // counted twice. Other days keep every group.
+  test("today's footer leaves out an off-board technician already shown as a saved-plan row", async () => {
+    const today = '2026-09-08';
+    const goneId = '123e4567-e89b-12d3-a456-426614174000';
+    const breakdown = [{ technicianId: goneId, visits: 2, serviceMinutes: 90 }, { technicianId: null, visits: 1, serviceMinutes: 30 }];
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'calibrated', days: [
+      { date: today, closed: false, byTech: [], unallocatedVisits: 3, unallocatedServiceMinutes: 120, unallocatedByTechnician: breakdown },
+      { date: '2026-09-09', closed: false, byTech: [], unallocatedVisits: 3, unallocatedServiceMinutes: 120, unallocatedByTechnician: breakdown }] });
+    getSavedDayPlans.mockResolvedValue(new Map([[goneId, { plannedVisits: 3, plannedPhysicalStops: 3, plannedServiceMinutes: 150,
+      plannedDriveMinutes: 40, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 780, driveModel: 'legacy' }]]));
+    const result = await getDayScorecard({ date_from: today, date_to: '2026-09-09' },
+      conn([], [{ id: goneId, name: 'Former Tech' }]), new Date(`${today}T16:00:00Z`));
+    expect(result.days[0].byTech.map(row => row.technicianId)).toEqual([goneId]);
+    expect(result.days[0].unallocated).toEqual({ visits: 1, serviceMinutes: 30 });
+    expect(result.days[1].unallocated).toEqual({ visits: 3, serviceMinutes: 120 });
+  });
+
   test('a range that does not include today never reads saved day plans', async () => {
     getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'legacy', days: [{ date: '2026-09-10', closed: false, byTech: [] }] });
     await getDayScorecard({ date_from: '2026-09-10', date_to: '2026-09-10' }, conn(), new Date('2026-09-08T16:00:00Z'));
@@ -647,6 +667,37 @@ describe('getDayScorecard', () => {
     });
     const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
     expect(result.days[0].byTech[0].actual).toMatchObject({ stops: 2, onSiteCoverage: { covered: 1, total: 1, unbaselined: 1 } });
+  });
+
+  // Codex P2 (round 11): span coverage counts in the same unit as the
+  // Stops cell — a fully timed two-row visit is 1/1 stops timed, not 2/2;
+  // with an unknown physical count it counts rows and says so.
+  test('span coverage counts physical stops when known, rows otherwise', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    const row = (appointmentId, visitId, windowStartMin, completion) => ({ appointmentId, visitId, windowStartMin,
+      arrivalOutcome: visitId ? 'grouped_work_requires_review' : 'on_time', durationEvidence: 'unmatched_or_uncompleted_work',
+      recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null,
+      lifecycleArrivalMinute: 480, lifecycleCompletionMinute: completion });
+    const plan = stops => ({ plans: [{ date, technicianId: 'tech1', plannedVisits: stops.length, plannedServiceMinutes: 60,
+      plannedDriveMinutes: 10, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy', stops }] });
+
+    getRoutePerformance.mockResolvedValueOnce(plan([row('pest', 'v1', 480, 540), row('lawn', 'v1', 480, 545)]));
+    const grouped = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(grouped.days[0].byTech[0].actual).toMatchObject({ physicalStops: 1, spanCoverage: { covered: 1, total: 1, unit: 'stops' } });
+
+    // One member missing its completion leaves the whole visit's end unknown.
+    getRoutePerformance.mockResolvedValueOnce(plan([row('pest', 'v1', 480, 540), row('lawn', 'v1', 480, null)]));
+    const partial = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(partial.days[0].byTech[0].actual.spanCoverage).toEqual({ covered: 0, total: 1, unit: 'stops' });
+
+    // Two ungrouped rows sharing a window start: physical count unknown.
+    getRoutePerformance.mockResolvedValueOnce(plan([row('a', null, 480, 540), row('b', null, 480, 545)]));
+    const unknown = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(unknown.days[0].byTech[0].actual).toMatchObject({ physicalStops: null, spanCoverage: { covered: 2, total: 2, unit: 'rows' } });
   });
 
   test('a span across ET midnight (service-day minutes past 1440) is the real interval', async () => {

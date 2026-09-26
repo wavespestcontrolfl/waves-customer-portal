@@ -405,3 +405,45 @@ it('renders an Unassigned past row with its own basis label', async () => {
   const label = await screen.findByText('Unassigned (no plan)');
   expect(within(label.closest('tr')).getByText('Unassigned')).toBeInTheDocument();
 });
+
+// Codex P2 (round 11): a closed date keeps its flag through flattening — it
+// is labeled, and the planned metrics that simulate an ordinary workday
+// (return, wait, late, stops/hr) read unknown.
+it('labels a closed date and suppresses its simulated planned metrics', async () => {
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'legacy',
+    days: [{ date: '2026-10-01', closed: true, byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'legacy', plannedBasis: 'board',
+      planned: { stops: 2, physicalStops: 2, onSiteMinutes: 90, driveMinutes: 20, waitMinutes: 15, driveShare: 0.18, stopsPerHour: 1.3, returnMinute: 630, lateVisits: 2 },
+      actual: null }] }],
+  }));
+  render(<DayScorecardPanel />);
+  const row = (await screen.findByText('Closed')).closest('tr');
+  expect(within(row).getByText('2026-10-01')).toBeInTheDocument();
+  expect(within(row).getByText('1h 30m')).toBeInTheDocument(); // on-site stands
+  expect(within(row).queryByText('10:30 AM')).not.toBeInTheDocument();
+  expect(within(row).queryByText('1.3')).not.toBeInTheDocument();
+  expect(within(row).queryByText('15m')).not.toBeInTheDocument();
+  expect(within(row).getAllByText('unknown').length).toBeGreaterThanOrEqual(4);
+});
+
+// Codex P2 (round 11): span coverage names its unit — rows when the
+// physical stop count is unknown, never "stops" that disagree with Stops.
+it('labels span coverage in rows when the server counted rows', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    stops: 2, physicalStops: null, onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: 20, driveTrips: 2,
+    spanMinutes: 65, spanCoverage: { covered: 1, total: 2, unit: 'rows' },
+  })));
+  render(<DayScorecardPanel />);
+  expect(await screen.findByText('1h 5m · 1/2 rows timed (partial)')).toBeInTheDocument();
+});
+
+// Codex P2 (round 11): the portal's 14px minimum for readable copy.
+it('renders no scorecard copy below the 14px text size', async () => {
+  mockAdminFetch.mockResolvedValue(ok({ ...pastPayload({ onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130 }),
+    assumptions: { plannedOnSiteMinutes: 'Caveat.' } }));
+  const { container } = render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  // Column headers come from the shared ui/Table TH (its own density-driven
+  // heading style), not this panel's copy.
+  expect(container.querySelector(':not(th).text-11, :not(th).text-12, :not(th).text-13')).toBeNull();
+});

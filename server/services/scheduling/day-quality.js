@@ -188,13 +188,14 @@ function groupedUnallocatedTotals(stops) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(stop);
   }
-  let visits = 0;
-  let minutes = 0;
-  for (const groupStops of groups.values()) {
-    visits += physicalStopCount(groupStops);
-    minutes += coVisitOnSiteMinutes(groupStops);
-  }
-  return { visits, minutes };
+  // Per-technician breakdown too (null = genuinely unassigned) so a caller
+  // that renders one of these technicians elsewhere can leave that group
+  // out of its footer instead of counting it twice (day-scorecard's today
+  // saved-plan rows — Codex P2, round 11).
+  const byTechnician = [...groups].map(([key, groupStops]) => ({ technicianId: key || null,
+    visits: physicalStopCount(groupStops), serviceMinutes: coVisitOnSiteMinutes(groupStops) }));
+  return { visits: byTechnician.reduce((sum, group) => sum + group.visits, 0),
+    minutes: byTechnician.reduce((sum, group) => sum + group.serviceMinutes, 0), byTechnician };
 }
 
 // One branch point, not three, at the getScheduleQualityMeasurements call
@@ -206,7 +207,8 @@ function unallocatedSummary(unallocated, includeStopExtras) {
       unallocatedServiceMinutes: unallocated.reduce((sum, stop) => sum + workDuration(stop), 0) };
   }
   const totals = groupedUnallocatedTotals(unallocated);
-  return { unallocatedVisits: totals.visits, unallocatedServiceMinutes: totals.minutes };
+  return { unallocatedVisits: totals.visits, unallocatedServiceMinutes: totals.minutes,
+    unallocatedByTechnician: totals.byTechnician };
 }
 
 function measureDayQuality(RouteOptimizer, stops, {

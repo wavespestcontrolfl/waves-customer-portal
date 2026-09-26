@@ -97,7 +97,11 @@ const METRICS = [
   // Actual only (first recorded arrival to last recorded completion) — no
   // planned-side equivalent, so a Planned sub-row always reads "unknown"
   // here rather than a fabricated span.
-  { key: 'spanMinutes', label: 'Span', format: (m) => fmtWithCoverage(m?.spanMinutes, m?.spanCoverage, m?.spanCoverage?.covered, 'stops timed') },
+  // Coverage unit follows the server (Codex P2, round 11): physical stops
+  // when the Stops cell shows them, otherwise rows — never "stops" that
+  // disagree with the stop count beside it.
+  { key: 'spanMinutes', label: 'Span', format: (m) => fmtWithCoverage(m?.spanMinutes, m?.spanCoverage, m?.spanCoverage?.covered,
+    m?.spanCoverage?.unit === 'rows' ? 'rows timed' : 'stops timed') },
 ];
 
 // row.driveModel is THIS row's own saved/current drive model, not the
@@ -130,19 +134,34 @@ function basisLabel(row, isPast) {
 // Two stacked sub-rows (Planned / Actual) for a past tech-day, one row for a
 // future/today tech-day (nothing recorded yet). Date and, when more than one
 // technician is in range, the technician name are rowSpan'd across both.
-function TechDayRows({ date, row, isPast, showTechName }) {
+//
+// A closed date (global blackout or scheduled day off — day.closed, Codex
+// P2, round 11) is labeled, and its planned return/wait/lateness/stops-per-
+// hour read unknown: those come from simulating the route as an ordinary
+// workday, which a closed date isn't. Recorded actuals stay as recorded.
+const SIMULATED_KEYS = ['returnMinute', 'waitMinutes', 'lateVisits', 'stopsPerHour'];
+function withoutSimulation(planned) {
+  if (!planned) return planned;
+  return { ...planned, ...Object.fromEntries(SIMULATED_KEYS.map((key) => [key, null])) };
+}
+
+function TechDayRows({ date, closed, row, isPast, showTechName }) {
   const span = isPast ? 2 : 1;
+  const planned = closed ? withoutSimulation(row.planned) : row.planned;
   return (
     <>
       <TR>
-        <TD className="font-medium text-ink-primary" rowSpan={span}>{date}</TD>
+        <TD className="font-medium text-ink-primary" rowSpan={span}>
+          {date}
+          {closed && <div className="text-14 text-ink-secondary">Closed</div>}
+        </TD>
         {showTechName && <TD className="text-ink-secondary" rowSpan={span}>{row.technician || row.technicianId}</TD>}
-        <TD className="text-11 text-ink-tertiary">{basisLabel(row, isPast)}</TD>
-        {METRICS.map((metric) => <TD key={metric.key} nums align="right">{metric.format(row.planned)}</TD>)}
+        <TD className="text-14 text-ink-tertiary">{basisLabel(row, isPast)}</TD>
+        {METRICS.map((metric) => <TD key={metric.key} nums align="right">{metric.format(planned)}</TD>)}
       </TR>
       {isPast && (
         <TR>
-          <TD className="text-11 text-ink-tertiary">Actual</TD>
+          <TD className="text-14 text-ink-tertiary">Actual</TD>
           {METRICS.map((metric) => <TD key={metric.key} nums align="right">{metric.format(row.actual)}</TD>)}
         </TR>
       )}
@@ -187,7 +206,7 @@ export default function DayScorecardPanel() {
   // column to tell their rows apart.
   const technicianIds = new Set(days.flatMap((day) => day.byTech.map((row) => row.technicianId)));
   const showTechName = technicianIds.size > 1;
-  const rows = days.flatMap((day) => day.byTech.map((row) => ({ date: day.date, row })));
+  const rows = days.flatMap((day) => day.byTech.map((row) => ({ date: day.date, closed: Boolean(day.closed), row })));
   // The server's own caveat for past PLANNED on-site minutes (a saved
   // snapshot can't detect a co-visit and may double-count one — see
   // day-scorecard.js PLANNED_ONSITE_NOTE). Shown whenever a saved-plan
@@ -198,7 +217,7 @@ export default function DayScorecardPanel() {
 
   return (
     <div>
-      <div className="text-11 text-ink-tertiary mb-3">
+      <div className="text-14 text-ink-tertiary mb-3">
         {range.from} – {range.to}. Future/today rows are planned only; today shows its saved plan when one
         exists, else the remaining route. Past rows compare the saved
         pre-service plan with recorded work — a null shows as "unknown", never 0.
@@ -215,10 +234,11 @@ export default function DayScorecardPanel() {
               </TR>
             </THead>
             <TBody>
-              {rows.map(({ date, row }) => (
+              {rows.map(({ date, closed, row }) => (
                 <TechDayRows
                   key={`${date}|${row.technicianId}`}
                   date={date}
+                  closed={closed}
                   row={row}
                   isPast={row.actual != null}
                   showTechName={showTechName}
@@ -229,25 +249,25 @@ export default function DayScorecardPanel() {
                 // day) and render zero rows — days.length alone would miss
                 // that and leave a blank table with no empty-state message
                 // (Codex P2).
-                <TR><TD colSpan={2 + METRICS.length + (showTechName ? 1 : 0)} className="text-13 text-ink-tertiary py-6 text-center">No scheduled days in range</TD></TR>
+                <TR><TD colSpan={2 + METRICS.length + (showTechName ? 1 : 0)} className="text-14 text-ink-tertiary py-6 text-center">No scheduled days in range</TD></TR>
               )}
             </TBody>
           </Table>
         </CardBody>
       </Card>
       {days.some((day) => day.unallocated?.visits > 0) && (
-        <div className="text-11 text-ink-tertiary mt-3">
+        <div className="text-14 text-ink-tertiary mt-3">
           Not shown per technician (unassigned, or assigned to an ineligible/offboarding technician): {days
             .filter((day) => day.unallocated?.visits > 0)
             .map((day) => `${day.date} (${day.unallocated.visits} stop${day.unallocated.visits === 1 ? '' : 's'}, ${fmtMinutes(day.unallocated.serviceMinutes)})`)
             .join('; ')}.
         </div>
       )}
-      <div className={cn('text-11 text-ink-tertiary mt-3')}>
+      <div className={cn('text-14 text-ink-tertiary mt-3')}>
         Future/today drive model: {request.data?.driveModel === 'calibrated' ? 'calibrated (fitted from real trips)' : 'legacy (straight-line estimate)'}.
         {' '}Past rows label their own saved model instead. Actual drive minutes exclude personal and commute trips; unclassified trips are counted as day driving.
       </div>
-      {plannedOnSiteNote && <div className="text-11 text-ink-tertiary mt-3">{plannedOnSiteNote}</div>}
+      {plannedOnSiteNote && <div className="text-14 text-ink-tertiary mt-3">{plannedOnSiteNote}</div>}
     </div>
   );
 }

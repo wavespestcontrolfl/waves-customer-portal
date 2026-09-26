@@ -196,9 +196,10 @@ function actualPastRow(plan, mileage, fallbackStops) {
   const spanStops = plan && Array.isArray(plan.unbaselinedStops) ? [...stops, ...plan.unbaselinedStops] : stops;
   const unbaselined = plan && Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
   const completedStops = completedOnRoute.length + unbaselined;
-  return { stops: completedStops, physicalStops: actualPhysicalStops(plan, fallbackStops), onSiteMinutes,
+  const physicalStops = actualPhysicalStops(plan, fallbackStops);
+  return { stops: completedStops, physicalStops, onSiteMinutes,
     onSiteCoverage: { covered: recorded.length, total: completedOnRoute.length, unbaselined },
-    ...drive, ...actualSpan(spanStops) };
+    ...drive, ...actualSpan(spanStops, physicalStops != null) };
 }
 
 // Completed service rows collapsed by visitId — planned-and-completed plan
@@ -225,17 +226,35 @@ function actualPhysicalStops(plan, fallbackStops) {
 // null — could have opened or closed the day, so the span over the rest is
 // only a lower bound. It's still shown, but with covered < total so the UI
 // marks it partial instead of passing it off as the whole day.
-function actualSpan(spanStops) {
+//
+// The coverage unit matches the Stops cell (Codex P2, round 11): when the
+// physical count is known, rows sharing a visitId are ONE stop, timed only
+// when every member row has both boundaries; when it isn't, coverage is
+// over rows and says so (unit 'rows'), never "stops" that disagree with
+// the stop count beside it.
+function actualSpan(spanStops, byPhysicalStop) {
   const completed = spanStops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome));
   const arrivalOf = stop => stop.lifecycleArrivalMinute ?? stop.recordedArrivalMinute;
   const completionOf = stop => stop.lifecycleCompletionMinute ?? stop.recordedCompletionMinute;
   const arrivals = completed.map(arrivalOf).filter(Number.isFinite);
   const completions = completed.map(completionOf).filter(Number.isFinite);
-  const covered = completed.filter(stop => Number.isFinite(arrivalOf(stop)) && Number.isFinite(completionOf(stop))).length;
+  const units = byPhysicalStop ? visitGroups(completed) : completed.map(stop => [stop]);
+  const timed = stop => Number.isFinite(arrivalOf(stop)) && Number.isFinite(completionOf(stop));
   return {
     spanMinutes: arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null,
-    spanCoverage: { covered, total: completed.length },
+    spanCoverage: { covered: units.filter(members => members.every(timed)).length, total: units.length,
+      unit: byPhysicalStop ? 'stops' : 'rows' },
   };
+}
+
+// Rows sharing a visitId as one member list; every other row on its own.
+function visitGroups(stops) {
+  const groups = new Map();
+  stops.forEach((stop, index) => {
+    const key = stop.visitId ? `visit:${stop.visitId}` : `row:${index}`;
+    groups.set(key, [...(groups.get(key) || []), stop]);
+  });
+  return [...groups.values()];
 }
 
 // driveMinutes sums only trips with a known duration (duration_minutes is
@@ -419,6 +438,21 @@ function pastDayRoster(date, techs, idsByDateMaps) {
   return ids;
 }
 
+// The day's unallocated footer, minus any technician rendered as a TODAY
+// saved-plan row (Codex P2, round 11): those rows can name an
+// off-board technician whose remaining stops day-quality still counts as
+// unallocated — their group comes out so no stop is shown twice. Without the
+// per-technician breakdown the day-level totals pass through unchanged.
+function unallocatedFooter(day, byTech) {
+  const rendered = new Set(byTech.filter(row => row.plannedBasis === 'saved_plan').map(row => row.technicianId));
+  if (!Array.isArray(day.unallocatedByTechnician)) {
+    return { visits: day.unallocatedVisits, serviceMinutes: day.unallocatedServiceMinutes };
+  }
+  const shown = day.unallocatedByTechnician.filter(group => !rendered.has(group.technicianId));
+  return { visits: shown.reduce((sum, group) => sum + group.visits, 0),
+    serviceMinutes: shown.reduce((sum, group) => sum + group.serviceMinutes, 0) };
+}
+
 function pastDayRows(date, { techs, idsByDateMaps, nameById, planByKey, mileageByKey, missingBaselineStopsByKey, truncatedPlanningRuns }) {
   const rows = [...pastDayRoster(date, techs, idsByDateMaps)].map(technicianId => pastTechRow(
     { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey,
@@ -470,7 +504,7 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
       // offboarding/ineligible tech that still carries assigned work — Codex
       // P1) never get a named row; day-quality already tallies this at the
       // day level, so it's surfaced instead of a silently missing tech row.
-      unallocated: { visits: day.unallocatedVisits, serviceMinutes: day.unallocatedServiceMinutes } });
+      unallocated: unallocatedFooter(day, byTech) });
   }
   return {
     range: { from, to }, driveModel: quality.driveModel, days, truncatedPlanningRuns,
