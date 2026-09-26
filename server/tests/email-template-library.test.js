@@ -1,8 +1,12 @@
+const mockMarkerDb = jest.fn();
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/marker-db', () => () => mockMarkerDb);
 jest.mock('../services/sendgrid-mail', () => ({
   newsletterGroupId: jest.fn(() => 101),
   serviceGroupId: jest.fn(() => 202),
   sendOne: jest.fn(),
+  isDefiniteRejection: jest.fn((err) => [400, 401, 403, 404, 405, 413, 415, 422, 429]
+    .includes(Number(err?.status))),
 }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
@@ -116,6 +120,11 @@ function version(overrides = {}) {
 describe('email template library rendering', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockMarkerDb.mockImplementation(() => {
+      const marker = chain();
+      marker.update = jest.fn(async () => 1);
+      return marker;
+    });
   });
 
   test('renders service templates through the professional service wrapper', () => {
@@ -360,6 +369,24 @@ describe('email template library rendering', () => {
     ];
 
     expect(JSON.parse(queueInsert.insert.mock.calls[0][0].categories)).toEqual(expectedCategories);
+    expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued',
+      provider_handoff_phase: 'pending',
+      provider_handoff_attempt_token: expect.any(String),
+    }));
+    const marker = mockMarkerDb.mock.results[0].value;
+    expect(marker.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'msg-1',
+      status: 'queued',
+      send_attempt_token: expect.any(String),
+      provider_handoff_phase: 'pending',
+      provider_handoff_attempt_token: expect.any(String),
+    }));
+    expect(marker.update).toHaveBeenCalledWith(expect.objectContaining({
+      provider_handoff_phase: 'started',
+      provider_handoff_attempt_token: expect.any(String),
+    }));
+    expect(marker.update.mock.invocationCallOrder[0]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
       categories: expectedCategories,
     }));
@@ -409,6 +436,91 @@ describe('email template library rendering', () => {
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
     });
     expect(result).toMatchObject({ sent: true, superseded: true, providerAttempted: true, providerAccepted: false });
+  });
+
+  test.each([
+    ['an ambiguous timeout', 'started', new Error('provider response lost')],
+    ['a definite HTTP rejection', 'rejected', Object.assign(new Error('rate limited'), { status: 429 })],
+    ['a missing provider configuration', 'rejected', Object.assign(new Error('SendGrid not configured'), {
+      code: 'SENDGRID_NOT_CONFIGURED',
+    })],
+  ])('a fresh direct send records %s as phase %s', async (_label, expectedPhase, providerError) => {
+    const queuedMessage = { id: `msg-${expectedPhase}`, status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queuedMessage, provider_handoff_phase: 'started' };
+    const failure = chain({ returning: [{ id: queuedMessage.id }] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain({ first: current }), failure],
+      email_message_events: [chain({ first: undefined })],
+      audit_log: [chain()],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw providerError;
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    })).rejects.toBe(providerError);
+
+    expect(failure.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: queuedMessage.id,
+      status: 'queued',
+      send_attempt_token: expect.any(String),
+    }));
+    expect(failure.whereIn).toHaveBeenCalledWith('provider_handoff_phase', ['started']);
+    expect(failure.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      provider_handoff_phase: expectedPhase,
+    }));
+  });
+
+  test.each(['lost claim', 'write failed', 'acknowledgement lost'])(
+    'a marker %s makes no provider request and restores an unsent failure', async (scenario) => {
+    const current = {};
+    const queueInsert = chain();
+    queueInsert.returning.mockImplementation(async () => {
+      Object.assign(current, queueInsert.insert.mock.calls[0][0], { id: 'msg-marker-lost' });
+      return [current];
+    });
+    const failure = chain({ returning: [{ id: 'msg-marker-lost' }] });
+    const marker = chain();
+    marker.update = jest.fn(async () => {
+      if (scenario === 'lost claim') return 0;
+      if (scenario === 'acknowledgement lost') current.provider_handoff_phase = 'started';
+      throw Object.assign(new Error('marker connection lost'), { code: 'ECONNRESET' });
+    });
+    mockMarkerDb.mockReturnValue(marker);
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [queueInsert, chain({ first: current }), failure],
+      email_message_events: [chain({ first: undefined })],
+      audit_log: [chain()],
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    })).rejects.toMatchObject({ code: scenario === 'lost claim' ? 'EMAIL_SEND_IN_PROGRESS' : 'ECONNRESET' });
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(failure.where).toHaveBeenCalledWith(expect.objectContaining({
+      send_attempt_token: current.send_attempt_token,
+      provider_handoff_attempt_token: current.send_attempt_token,
+    }));
+    expect(failure.whereIn).toHaveBeenCalledWith('provider_handoff_phase',
+      scenario === 'lost claim' ? ['pending'] : ['pending', 'started']);
+    expect(failure.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      provider_handoff_phase: 'pending',
+    }));
   });
 
   test.each([['delivered', 'delivered'], ['bounced', 'bounce'], ['failed', 'bounce'], ['failed', 'blocked']])('a matching %s/%s webhook proves acceptance after a lost SDK response', async (status, eventType) => {
@@ -572,7 +684,9 @@ describe('email template library rendering', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(abortUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', error_message: 'aborted_by_caller_before_dispatch' }));
     // Scoped to THIS queued attempt — a reclaimed row (new token) is never marked failed by the old worker.
-    expect(abortUpdate.where).toHaveBeenCalledWith({ id: 'msg-abort', status: 'queued', send_attempt_token: expect.any(String) });
+    expect(abortUpdate.where).toHaveBeenCalledWith({ id: 'msg-abort', status: 'queued',
+      send_attempt_token: expect.any(String), provider_handoff_phase: 'pending',
+      provider_handoff_attempt_token: expect.any(String) });
     expect(result).toEqual(expect.objectContaining({ sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' }));
     expect(result.message.status).toBe('failed');
   });
@@ -1079,6 +1193,286 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test.each([
+    [
+      'a stale queued worker claim',
+      { status: 'queued', provider_retry_count: 1, provider_handoff_phase: 'pending',
+        queued_at: new Date(Date.now() - 60 * 60 * 1000) },
+      'provider_retry_in_progress',
+      false,
+    ],
+    [
+      'a stale queued claim carrying a prior rejected phase',
+      { status: 'queued', provider_retry_count: 1, provider_handoff_phase: 'rejected',
+        queued_at: new Date(Date.now() - 60 * 60 * 1000) },
+      'provider_retry_in_progress',
+      false,
+    ],
+    [
+      'a scheduled definitely-unsent failure',
+      { status: 'failed', provider_retry_next_at: new Date(Date.now() + 60 * 1000),
+        provider_handoff_phase: 'rejected' },
+      'provider_retry_scheduled',
+      true,
+    ],
+    [
+      'an exhausted started attempt',
+      { status: 'failed', provider_retry_count: 3, provider_retry_exhausted_at: new Date(),
+        provider_handoff_phase: 'started' },
+      'provider_retry_exhausted',
+      false,
+    ],
+    [
+      'an exhausted legacy attempt without positive pending evidence',
+      { status: 'failed', provider_retry_count: 3, provider_retry_exhausted_at: new Date(),
+        error_message: 'Provider outcome unknown: socket closed after request' },
+      'provider_retry_exhausted',
+      false,
+    ],
+    [
+      'an exhausted pending phase bound to an older attempt',
+      { status: 'failed', provider_retry_count: 3, provider_retry_exhausted_at: new Date(),
+        provider_handoff_phase: 'pending', provider_handoff_attempt_token: 'older-attempt' },
+      'provider_retry_exhausted',
+      false,
+    ],
+    [
+      'a started attempt awaiting ambiguous settlement',
+      { status: 'failed', provider_retry_count: 1, provider_handoff_phase: 'started' },
+      'provider_retry_ambiguous',
+      false,
+    ],
+    [
+      'a fresh direct attempt with an ambiguous provider handoff',
+      { status: 'failed', provider_retry_count: 0, provider_handoff_phase: 'started',
+        provider_handoff_attempt_token: 'provider-attempt' },
+      'provider_retry_ambiguous',
+      false,
+    ],
+    [
+      'a rejected phase bound to an older direct attempt',
+      { status: 'failed', provider_retry_count: 0, provider_handoff_phase: 'rejected',
+        provider_handoff_attempt_token: 'older-attempt' },
+      'provider_retry_ambiguous',
+      false,
+    ],
+  ])('sendTemplate leaves %s with the provider retry rail', async (_label, state, reason, retryable) => {
+    const existing = {
+      id: 'msg-provider-owned',
+      idempotency_key: 'estimate.extension_notice:provider-owned',
+      send_attempt_token: 'provider-attempt',
+      ...state,
+    };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [chain({ first: existing })],
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e/1', expires_at: 'June 12' },
+      idempotencyKey: existing.idempotency_key,
+    })).rejects.toMatchObject({
+      code: 'EMAIL_PROVIDER_RETRY_HELD',
+      held: true,
+      retryable,
+      deliveryOutcome: 'uncertain',
+      reason,
+      providerOutcome: {
+        sent: false,
+        held: true,
+        retryable,
+        providerAttempted: false,
+        deliveryOutcome: 'uncertain',
+        reason,
+        emailMessageId: existing.id,
+      },
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['pending phase', 'pending', 'definitely unsent'],
+    ['rejected phase', 'rejected', 'definitely unsent'],
+    ['legacy pending marker', null, 'provider_handoff_pending'],
+    ['legacy request-not-started marker', null, 'Provider request not started: block clear failed'],
+  ])(
+    'sendTemplate reclaims an exhausted row with %s evidence that the provider handoff was definitely unsent',
+    async (_label, providerHandoffPhase, errorMessage) => {
+      const exhaustedAt = new Date('2026-09-26T06:00:00Z');
+      const failed = {
+        id: `msg-exhausted-${_label.replaceAll(' ', '-')}`,
+        status: 'failed',
+        provider_retry_count: 3,
+        provider_retry_exhausted_at: exhaustedAt,
+        provider_handoff_phase: providerHandoffPhase,
+        provider_handoff_attempt_token: providerHandoffPhase ? 'old-token' : null,
+        send_attempt_token: 'old-token',
+        error_message: errorMessage,
+        idempotency_key: `retry:${_label}`,
+      };
+      const queued = { ...failed, status: 'queued', provider_handoff_phase: null, send_attempt_token: 'new-token' };
+      const sent = { ...queued, status: 'sent', provider_message_id: 'sg-replay' };
+      const claim = chain({ returning: [queued] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_messages: [chain({ first: failed }), claim, chain({ returning: [sent] })],
+        email_suppressions: [chain({ result: [] })],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-replay' });
+
+      await expect(EmailTemplates.sendTemplate({
+        templateKey: 'estimate.expiring_notice',
+        to: 'sam@example.com',
+        payload: { first_name: 'Sam', estimate_url: 'https://example.com/e/1', expires_at: 'June 12' },
+        idempotencyKey: failed.idempotency_key,
+      })).resolves.toMatchObject({ sent: true });
+
+      expect(claim.where).toHaveBeenCalledWith({ provider_retry_exhausted_at: exhaustedAt });
+      expect(claim.where).toHaveBeenCalledWith({ error_message: failed.error_message });
+      expect(claim.where).toHaveBeenCalledWith({ send_attempt_token: 'old-token' });
+      if (providerHandoffPhase) {
+        expect(claim.where).toHaveBeenCalledWith({ provider_handoff_phase: providerHandoffPhase });
+        expect(claim.where).toHaveBeenCalledWith({ provider_handoff_attempt_token: 'old-token' });
+      } else {
+        expect(claim.whereNull).toHaveBeenCalledWith('provider_handoff_phase');
+        expect(claim.whereNull).toHaveBeenCalledWith('provider_handoff_attempt_token');
+      }
+      expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'queued',
+        provider_retry_count: 0,
+        provider_retry_next_at: null,
+        provider_retry_exhausted_at: null,
+        provider_handoff_phase: 'pending',
+        provider_handoff_attempt_token: expect.any(String),
+      }));
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test('a permitted exhausted reclaim clears provider retry ownership when suppression blocks it', async () => {
+    const exhaustedAt = new Date('2026-09-26T06:00:00Z');
+    const failed = {
+      id: 'msg-exhausted-suppressed',
+      status: 'failed',
+      provider_retry_count: 3,
+      provider_retry_exhausted_at: exhaustedAt,
+      provider_handoff_phase: 'pending',
+      provider_handoff_attempt_token: 'old-token',
+      send_attempt_token: 'old-token',
+      error_message: 'Suppression lookup previously unavailable',
+      idempotency_key: 'retry:exhausted-suppressed',
+    };
+    const blocked = { ...failed, status: 'blocked', provider_retry_count: 0,
+      provider_retry_exhausted_at: null, provider_handoff_phase: null,
+      provider_handoff_attempt_token: null };
+    const claim = chain({ returning: [blocked] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [chain({ first: failed }), claim],
+      email_suppressions: [chain({ result: [{ suppression_type: 'bounce', group_key: null }] })],
+      notifications: [chain({ first: { id: 'existing-alert' } })],
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e/1', expires_at: 'June 12' },
+      idempotencyKey: failed.idempotency_key,
+    })).resolves.toMatchObject({ sent: false, blocked: true });
+
+    expect(claim.where).toHaveBeenCalledWith({ provider_retry_exhausted_at: exhaustedAt });
+    expect(claim.where).toHaveBeenCalledWith({ send_attempt_token: 'old-token' });
+    expect(claim.where).toHaveBeenCalledWith({ provider_handoff_phase: 'pending' });
+    expect(claim.where).toHaveBeenCalledWith({ provider_handoff_attempt_token: 'old-token' });
+    expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked',
+      provider_retry_count: 0,
+      provider_retry_next_at: null,
+      provider_retry_exhausted_at: null,
+      provider_handoff_phase: null,
+      provider_handoff_attempt_token: null,
+    }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a newer provider-worker token', { status: 'queued', send_attempt_token: 'worker-token',
+      provider_retry_count: 1, provider_handoff_phase: 'pending' }],
+    ['a provider retry schedule', { provider_retry_next_at: new Date(), provider_handoff_phase: 'rejected' }],
+  ])('ordinary retry compare-and-set loses to %s', async (_label, winnerState) => {
+    const failed = {
+      id: 'msg-cas-race',
+      status: 'failed',
+      send_attempt_token: 'old-token',
+      idempotency_key: 'estimate.extension_notice:cas-race',
+    };
+    const claim = chain({ returning: [] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: failed }),
+        claim,
+        chain({ first: { ...failed, ...winnerState } }),
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e/1', expires_at: 'June 12' },
+      idempotencyKey: failed.idempotency_key,
+    })).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS', retryable: true });
+
+    expect(claim.where).toHaveBeenCalledWith({ id: failed.id, status: 'failed' });
+    expect(claim.where).toHaveBeenCalledWith({ send_attempt_token: 'old-token' });
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_retry_next_at');
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_retry_exhausted_at');
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_handoff_phase');
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_handoff_attempt_token');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('suppressed retry compare-and-set cannot overwrite a provider-worker claim', async () => {
+    const failed = {
+      id: 'msg-suppression-race',
+      status: 'failed',
+      send_attempt_token: 'old-token',
+      idempotency_key: 'estimate.extension_notice:suppression-race',
+    };
+    const claim = chain({ returning: [] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: failed }),
+        claim,
+        chain({ first: { ...failed, status: 'queued', send_attempt_token: 'worker-token',
+          provider_retry_count: 1, provider_handoff_phase: 'pending' } }),
+      ],
+      email_suppressions: [chain({ result: [{ suppression_type: 'bounce', group_key: null }] })],
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e/1', expires_at: 'June 12' },
+      idempotencyKey: failed.idempotency_key,
+    })).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS' });
+
+    expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+    expect(claim.where).toHaveBeenCalledWith({ send_attempt_token: 'old-token' });
+    expect(claim.whereNull).toHaveBeenCalledWith('provider_handoff_phase');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('sendTemplate dedupes a concurrent idempotency-key insert collision instead of throwing', async () => {
     // Two overlapping callers both pass the pre-insert dedupe check (the row
     // does not exist yet), then race on the unique index. The loser hits a
@@ -1417,6 +1811,9 @@ describe('email template library rendering', () => {
       status: 'failed',
       idempotency_key: 'estimate.extension_notice:est-1',
       error_message: 'provider timeout',
+      provider_handoff_phase: 'rejected',
+      provider_handoff_attempt_token: 'old-token',
+      send_attempt_token: 'old-token',
     };
     const queuedMessage = {
       ...failedMessage,
@@ -1455,6 +1852,8 @@ describe('email template library rendering', () => {
       status: 'queued',
       error_message: null,
       idempotency_key: 'estimate.extension_notice:est-1',
+      provider_handoff_phase: 'pending',
+      provider_handoff_attempt_token: expect.any(String),
     }));
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
       to: 'sam@example.com',
