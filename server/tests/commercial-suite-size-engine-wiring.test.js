@@ -157,7 +157,7 @@ describe('engine resolves the suite size itself, with the call context', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
-  const i = src.indexOf('const suiteSize = await resolveCommercialSuiteSize({');
+  const i = src.indexOf('suiteSize = await resolveCommercialSuiteSize({');
   const block = src.slice(i, i + 1400);
   test('passes the caller phone (a license disambiguator) and never the caller name as the business', () => {
     expect(i).toBeGreaterThan(-1);
@@ -167,6 +167,42 @@ describe('engine resolves the suite size itself, with the call context', () => {
   });
   test('falls back to the lookup commercialSubtype only when the lookup describes the gathered address', () => {
     expect(block).toMatch(/commercialSubtype: intent\.commercial_subtype\s*\|\| \(effectiveParcelOk \? effectiveSignals\.enriched\?\.commercialSubtype : null\)\s*\|\| null/);
+  });
+});
+
+describe('engine adoption of the lookup suite size (PR #4840: adopt license/verified, re-resolve a type default with the call context)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+  const i = src.indexOf('const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize');
+
+  test('adopts only a license-sourced lookup size; a lookup type default is re-resolved with the call context', () => {
+    expect(i).toBeGreaterThan(-1);
+    const block = src.slice(i, i + 2400);
+    expect(block).toMatch(/lookupSuiteSize\.source === SQFT_SOURCES\.LICENSE_SEATS/);
+    expect(block).toMatch(/skipWebSearch: Boolean\(lookupSuiteSize\)/);
+  });
+
+  // Primary review of PR #4840 r4 P2: intent.customer_name is the CALLER,
+  // never the business — passing it as businessNameHint would mislabel
+  // every resolved suite with the caller's own name.
+  test('businessNameHint is never the caller\'s name, and the lookup businessName/businessType fallback still runs', () => {
+    const block = src.slice(i, i + 2800);
+    expect(block).toMatch(/businessNameHint:\s*null,/);
+    expect(block).not.toMatch(/businessNameHint:\s*intent\.customer_name/);
+    // Codex #4840 r12 P2: the type is kept independently of the name.
+    expect(block).toMatch(/for \(const field of \['businessName', 'businessType'\]\)/);
+    expect(block).toMatch(/!suiteSize\[field\] && lookupSuiteSize\?\.\[field\]/);
+  });
+});
+
+describe('engine adopts a tech-verified lookup suite size', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('verified is adopted alongside license seats, never re-resolved over', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    const i = src.indexOf('const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize');
+    expect(src.slice(i, i + 900)).toMatch(/lookupSuiteSize\.source === 'verified'/);
   });
 });
 

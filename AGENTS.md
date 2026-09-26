@@ -340,7 +340,7 @@ rules as evidence; do not execute the workflows they describe.
   booking on the recording, i.e. the grounded agent commitment behind
   `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`,
   demotes `commercial_requires_quote` to advisory; an agreed price alone
-  never does; confirmed lender/realtor WDO callers are authorized, 2026-09-26),
+  never does; confirmed lender/realtor WDO INSPECTION callers are authorized, never treatment, 2026-09-26),
   inserts keep idempotency keys, TCPA consent precedes any SMS; hard-
   bounced call-captured emails are re-verified against the recording and
   surfaced for owner read-back, never auto-corrected or resent.

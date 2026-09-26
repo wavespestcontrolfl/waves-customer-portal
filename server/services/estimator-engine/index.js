@@ -508,6 +508,10 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
         ...(refreshLookup ? { refresh: true } : {}),
         // dryRun replays are documented read-only — no cache rows behind.
         ...(persistLookup ? {} : { persist: false }),
+        // The lookup sizes a commercial suite itself (dark behind
+        // GATE_COMMERCIAL_SUITE_SIZING); the pipeline adopts that result
+        // below instead of resolving the same suite a second time.
+        commercialSuiteSizing: true,
       });
       propertyRecord = lookup?.propertyRecord || null;
       // The normalized profile carries the pricing feature modifiers the raw
@@ -2652,25 +2656,46 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           && (crossPropertyRegather ? fenceExtractionFact(propertyFacts.home, 'address') : propertyFacts.home)?.source
             === SQFT_SOURCES.NONE) {
           try {
-            const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
-            const { suiteAddressParts } = require('../commercial-suite-size/address-parts');
-            const quotedAddressLine = intent.address || result.addressUsed || address;
-            const suiteSize = await resolveCommercialSuiteSize({
-              address: suiteAddressParts(quotedAddressLine),
-              phone: context?.phone || null,
-              // intent.customer_name is the CALLER, not the business; there
-              // is no business-name intent field, so the license / web leg
-              // names the business from the address.
-              businessNameHint: null,
-              commercialRiskType: intent.commercial_risk_type || null,
-              // Intent wins when present; else the lookup's county-derived
-              // subtype, so a medical suite keeps its default — but only
-              // when the lookup describes the gathered address (a wrong-
-              // premise lookup's subtype belongs to another parcel).
-              commercialSubtype: intent.commercial_subtype
-                || (effectiveParcelOk ? effectiveSignals.enriched?.commercialSubtype : null)
-                || null,
-            });
+            // The lookup already sized this suite (gatherPropertySignals asks
+            // it to): adopt a license-seat or tech-verified size as-is, but
+            // only when the lookup describes the gathered address — a
+            // wrong-premise lookup's suite belongs to another parcel. A
+            // lookup type default was chosen without the call's phone (a
+            // license tie-breaker) or composed risk type, so it is
+            // re-resolved with those (no second web search).
+            const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize || null) : null;
+            let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
+              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === 'verified'))
+              ? lookupSuiteSize
+              : null;
+            if (!suiteSize) {
+              const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
+              const { suiteAddressParts } = require('../commercial-suite-size/address-parts');
+              const quotedAddressLine = intent.address || result.addressUsed || address;
+              suiteSize = await resolveCommercialSuiteSize({
+                address: suiteAddressParts(quotedAddressLine),
+                phone: context?.phone || null,
+                // intent.customer_name is the CALLER, not the business; there
+                // is no business-name intent field, so the license / web leg
+                // names the business from the address.
+                businessNameHint: null,
+                commercialRiskType: intent.commercial_risk_type || null,
+                // Intent wins when present; else the lookup's county-derived
+                // subtype, so a medical suite keeps its default — but only
+                // when the lookup describes the gathered address (a wrong-
+                // premise lookup's subtype belongs to another parcel).
+                commercialSubtype: intent.commercial_subtype
+                  || (effectiveParcelOk ? effectiveSignals.enriched?.commercialSubtype : null)
+                  || null,
+              }, { skipWebSearch: Boolean(lookupSuiteSize) });
+              // The re-resolve skips the web leg, so keep what the lookup's
+              // found: the business name and, independently, its type.
+              if (suiteSize) {
+                for (const field of ['businessName', 'businessType']) {
+                  if (!suiteSize[field] && lookupSuiteSize?.[field]) suiteSize = { ...suiteSize, [field]: lookupSuiteSize[field] };
+                }
+              }
+            }
             if (suiteSize && Number(suiteSize.value) > 0) {
               propertyFacts.home = {
                 value: suiteSize.value,

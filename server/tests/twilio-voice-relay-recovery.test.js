@@ -202,6 +202,26 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(res.body).not.toContain('<Hangup');
   });
 
+  // Codex r1 P2 on #4947: without restoring `relay_language`, this reconnect
+  // rendered `language="multi"` (from the restored relayAttrs) but an
+  // ENGLISH resumed greeting and no `<Parameter lang=es>` — the setup frame's
+  // own resolution (relay-server.js) would then run the resumed session in
+  // English, same bug as the P1 finding, just on the second leg.
+  test('a Flux Multilingual sandbox failure reconnects with the SAME language ("multi"), the Spanish resumed greeting, and the <Parameter lang=es> marker restored', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    process.env.SERVER_DOMAIN = 'preview.example.test';
+    const { updates } = primeDb({ firstRow: { metadata: { relay_profile_id: 'flux_multilingual_es_v1', relay_attrs: { transcriptionProvider: 'Deepgram', speechModel: 'flux' }, relay_language: 'multi' } } });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: { sandbox: '1' } }, res);
+    delete process.env.SERVER_DOMAIN;
+    expect(res.body).toContain('language="multi"');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="flux_multilingual_es_v1" />');
+    expect(res.body).toContain('<Parameter name="lang" value="es" />');
+    expect(res.body).toContain('welcomeGreeting="Disculpe, se cortó por un segundo. ¿En qué estábamos?"');
+    // Re-stamped with the SAME language, not dropped on this leg either.
+    expect(updates.some((u) => u.metadata && String(u.metadata.bindings && u.metadata.bindings[0]).includes('"relay_language":"multi"'))).toBe(true);
+  });
+
   test.each(['error', 'timeout'])('an unreadable original profile (%s) returns 503 without a replacement profile stamp', async (mode) => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { builder, updates } = primeDb();
