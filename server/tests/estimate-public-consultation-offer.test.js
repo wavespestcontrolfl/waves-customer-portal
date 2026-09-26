@@ -25,7 +25,7 @@
  *
  * `../routes/inspection-public` is mocked at the same seam
  * estimate-consultation-offer.test.js already uses
- * (`_internals.consultationEligibleForLead`) — its own eligibility logic is
+ * (`_internals.computeConsultationSlotsForLead`) — its own eligibility logic is
  * exhaustively covered by inspection-public.test.js and is not re-tested
  * here.
  */
@@ -75,11 +75,10 @@ jest.mock('../config/feature-gates', () => ({
   leadInspectionLinkLive: () => process.env.GATE_LEAD_INSPECTION_LINK === 'true',
 }));
 
-const mockConsultationEligibleForLead = jest.fn();
+const mockComputeConsultationSlotsForLead = jest.fn();
 jest.mock('../routes/inspection-public', () => ({
   _internals: {
-    consultationEligibleForLead: (...args) => mockConsultationEligibleForLead(...args),
-    computeConsultationSlotsForLead: jest.fn(),
+    computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
   },
 }));
 
@@ -179,7 +178,7 @@ async function withServer(fn) {
 beforeEach(() => {
   dbRows = {};
   dbThrows = {};
-  mockConsultationEligibleForLead.mockReset().mockResolvedValue(true);
+  mockComputeConsultationSlotsForLead.mockReset().mockResolvedValue({ ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false });
   process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'true';
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
 });
@@ -214,7 +213,7 @@ describe('GET /:token/data — consultationOffer wiring', () => {
       expect(res.status).toBe(200);
       expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
       // The `leads` table must never even be touched while dark.
-      expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+      expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
     });
   });
 
@@ -238,7 +237,7 @@ describe('GET /:token/data — consultationOffer wiring', () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
-      expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+      expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
     });
   });
 
@@ -261,7 +260,7 @@ describe('GET /:token/data — consultationOffer wiring', () => {
       const body = await res.json();
       expect(res.status).toBe(404);
       expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
-      expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+      expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
     });
   });
 
@@ -273,7 +272,7 @@ describe('GET /:token/data — consultationOffer wiring', () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
-      expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+      expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
     });
   });
 
@@ -304,7 +303,7 @@ describe('GET /:token/data — consultationOffer wiring', () => {
   });
 
   test('the /inspection page reports the lead ineligible (already booked / converted / gone) → absent', async () => {
-    mockConsultationEligibleForLead.mockResolvedValue(false);
+    mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: false });
     const row = estimateRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
     await withServer(async (baseUrl) => {
@@ -329,8 +328,8 @@ describe('GET /:token/data — consultationOffer wiring', () => {
     });
   });
 
-  test('consultationEligibleForLead rejecting does not 500 the page — the field is simply absent', async () => {
-    mockConsultationEligibleForLead.mockRejectedValue(new Error('inspection-public blew up'));
+  test('computeConsultationSlotsForLead rejecting does not 500 the page — the field is simply absent', async () => {
+    mockComputeConsultationSlotsForLead.mockRejectedValue(new Error('inspection-public blew up'));
     const row = estimateRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
     await withServer(async (baseUrl) => {
@@ -357,7 +356,7 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
     const payload = await composeEstimateDataPayload(row, { adminDraftPreview: true });
     expect(Object.prototype.hasOwnProperty.call(payload, 'consultationOffer')).toBe(false);
-    expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('verifiedStaffPreview (staff Customer View of a published estimate) → absent', async () => {
@@ -365,7 +364,7 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
     const payload = await composeEstimateDataPayload(row, { verifiedStaffPreview: true });
     expect(Object.prototype.hasOwnProperty.call(payload, 'consultationOffer')).toBe(false);
-    expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('isPdfRenderPass (headless document render) → absent', async () => {
@@ -373,7 +372,7 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
     const payload = await composeEstimateDataPayload(row, { isPdfRenderPass: true });
     expect(Object.prototype.hasOwnProperty.call(payload, 'consultationOffer')).toBe(false);
-    expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('none of the three flags set, otherwise eligible → present (control case for the three above)', async () => {

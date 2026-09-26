@@ -26,13 +26,14 @@
  *     a customer is linked — that customer is live and still on the lead's
  *     phone): the SAME chokepoint every consultation-link caller shares;
  *   - the lead wants a recurring plan (leadWantsRecurringPlan);
- *   - the /inspection/:token page's own lead-wide eligibility (booked
- *     already / converted / gone, and a live Waves Assessment catalog row)
- *     says ok — reused via inspection-public.js's
- *     `_internals.consultationEligibleForLead`, the same eligibility the
- *     email block's slot compute runs, minus the geocoder and availability
- *     search: this page only links, so it never pays for a slot search on
- *     a public page view.
+ *   - the /inspection/:token page would actually offer a time: reused via
+ *     inspection-public.js's `_internals.computeConsultationSlotsForLead`
+ *     (the same probe and the same rule the email block uses — eligible
+ *     lead, live catalog, in-area location, at least one open slot; or no
+ *     address on file yet, which the page asks for). It runs last, after
+ *     every cheap check, so only a strongly-linked open recurring lead on an
+ *     accept-active estimate pays for the location/availability lookup,
+ *     once per page load (the page does not poll /data).
  *
  * NO writes: no createShortCode, no DB insert. The long URL only
  * (consultationUrlForLead with NO channel — unverified delivery; this is
@@ -66,8 +67,13 @@ async function buildEstimateConsultationOffer({ leadId, leadLinkage, acceptActiv
 
     // The /inspection/:token page's own lead-wide eligibility, so this
     // offer can never link to a page that would refuse the same lead.
-    const { consultationEligibleForLead } = require('../routes/inspection-public')._internals;
-    if (!(await consultationEligibleForLead(lead.id))) return null;
+    const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
+    const result = await computeConsultationSlotsForLead(lead.id, { count: 1 });
+    // The email block's bookability rule (Codex #4853 r1 P2): a lead with
+    // no address on file can still give one on the page, but any other
+    // empty result — out of area, unresolved address, retired catalog, no
+    // open times — would open a page with nothing to pick.
+    if (!result.ok || (!result.needsAddress && result.slots.length === 0)) return null;
 
     const url = consultationUrlForLead(lead.id);
     if (!url) return null;

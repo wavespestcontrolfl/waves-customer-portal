@@ -21,10 +21,8 @@ const mockDb = jest.fn((table) => mockBuilders[table]);
 jest.mock('../models/db', () => mockDb);
 
 const mockComputeConsultationSlotsForLead = jest.fn();
-const mockConsultationEligibleForLead = jest.fn();
 jest.mock('../routes/inspection-public', () => ({
   _internals: {
-    consultationEligibleForLead: (...args) => mockConsultationEligibleForLead(...args),
     computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
   },
 }));
@@ -67,7 +65,7 @@ beforeEach(() => {
   process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'true';
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
   process.env.LEAD_PREFILL_SECRET = 'test-prefill-secret';
-  mockConsultationEligibleForLead.mockResolvedValue(true);
+  mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false });
 });
 
 afterEach(() => {
@@ -139,7 +137,7 @@ describe('buildEstimateConsultationOffer — hidden cases', () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, status: 'converted', converted_at: new Date() } });
     const result = await buildEstimateConsultationOffer(baseArgs());
     expect(result).toBeNull();
-    expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('leadLinkRefusal: no phone → null', async () => {
@@ -152,11 +150,11 @@ describe('buildEstimateConsultationOffer — hidden cases', () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, service_interest: 'One-Time Pest Control' } });
     const result = await buildEstimateConsultationOffer(baseArgs());
     expect(result).toBeNull();
-    expect(mockConsultationEligibleForLead).not.toHaveBeenCalled();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('inspection-page eligibility says not ok (already booked / converted / gone) → null', async () => {
-    mockConsultationEligibleForLead.mockResolvedValue(false);
+    mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: false });
     const result = await buildEstimateConsultationOffer(baseArgs());
     expect(result).toBeNull();
   });
@@ -167,8 +165,8 @@ describe('buildEstimateConsultationOffer — hidden cases', () => {
     expect(result).toBeNull();
   });
 
-  test('consultationEligibleForLead throwing → null', async () => {
-    mockConsultationEligibleForLead.mockRejectedValue(new Error('boom'));
+  test('computeConsultationSlotsForLead throwing → null', async () => {
+    mockComputeConsultationSlotsForLead.mockRejectedValue(new Error('boom'));
     const result = await buildEstimateConsultationOffer(baseArgs());
     expect(result).toBeNull();
   });
@@ -185,12 +183,18 @@ describe('buildEstimateConsultationOffer — happy path', () => {
     // neither an SMS nor an email send) — 3 segments, never a 4th channel one.
     expect(token.split('.')).toHaveLength(3);
     expect(mockCreateShortCode).not.toHaveBeenCalled();
-    expect(mockConsultationEligibleForLead).toHaveBeenCalledWith(LEAD_ID);
+    expect(mockComputeConsultationSlotsForLead).toHaveBeenCalledWith(LEAD_ID, { count: 1 });
   });
 
-  test('never runs the slot search (geocoder + availability) on a public page view', async () => {
+  test('a lead with no address on file still gets the offer (the page asks for one)', async () => {
+    mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: true });
     const result = await buildEstimateConsultationOffer(baseArgs());
     expect(result).not.toBeNull();
-    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+    expect(result.url).toContain('/inspection/');
+  });
+
+  test('eligible but nothing to pick (out of area, retired catalog, no open times) → null', async () => {
+    mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: false });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 });
