@@ -249,6 +249,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['The EPA okayed this pesticide.', ''],
     ['The EPA gave this product the green light.', ''],
     ['This product got the green light from the EPA.', ''],
+    ['EPA approval was granted for this pesticide.', ''],
+    ['EPA approval is given to all our products.', ''],
     ['The EPA accepts this pesticide for use.', ''],
     ['This pesticide has EPA acceptance.', ''],
     ['This treatment cannot possibly cause any harm.', ''],
