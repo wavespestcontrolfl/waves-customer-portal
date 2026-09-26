@@ -1053,6 +1053,7 @@ function CustomerDirectoryView({
           <CustomerGeocodeReviewPanel
             onSelectCustomer={openCustomerProfile}
             refreshToken={geocodeReviewRefreshToken}
+            onResolved={loadCustomers}
           />
         )}
         {" "}
