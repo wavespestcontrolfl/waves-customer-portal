@@ -2093,6 +2093,8 @@ describe('annual prepay renewal helpers', () => {
       whereNull: jest.fn().mockReturnThis(),
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'term-1', status: 'cancelled', renewal_decision: 'cancel' }]),
+      // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
+      columnInfo: jest.fn().mockResolvedValue({}),
     };
     db.mockReturnValue(chain);
 

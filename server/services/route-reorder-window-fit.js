@@ -400,6 +400,114 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
   return { clock: startMin + workDuration(stop), prev, prevStop: stop, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel), ...startCoVisitChain(stop) };
 }
 
+/**
+ * Reasons a stored order is stale — the shared decomposition behind
+ * arrival-route.js's storedOrderStale (which OR's these together) and the
+ * nightly canonicalization pass's ledger evidence:
+ *   - 'null': some stop carries no route_order.
+ *   - 'duplicate': two DISTINCT non-null positions collide (checked over the
+ *     non-null values only — two null rows are already 'null', not a second,
+ *     coincidental 'duplicate').
+ *   - 'gap': a numeric gap in `members`' positions (1, 3 with no 2) — leftover
+ *     numbering from a stop that left the day. A resumed prefix (4, 5, with
+ *     no 1-3 at all) is NOT a gap on a day already in progress — TODAY's
+ *     remaining stops after earlier ones completed and dropped out of the
+ *     set legitimately start above 1 — so `opts.futureDay` (default false)
+ *     must stay off for that caller. A visit group's members hold
+ *     consecutive positions as one grouped row — checked on the ungrouped
+ *     `members`, exactly as storedOrderStale's own callers pass the
+ *     pre-grouping rows.
+ *   - 'inversion': a later promised arrival (effectiveWindowRange /
+ *     arrivalRange) numbered ahead of an earlier one, read in board order
+ *     (currentOrder) over `rows`.
+ * `members` defaults to `rows` — callers that already grouped visit_id
+ * members into one representative row (arrival-route.js's groupRouteStops)
+ * pass the ungrouped originals separately, same as storedOrderStale.
+ * `opts.futureDay` (default false): a FUTURE tech-day (the nightly/cleanup
+ * canonicalization paths — today is never in that band) has no legitimate
+ * "resumed prefix" excuse, so on a FULLY numbered `members` set (no nulls —
+ * a set with a null member already reads as stale via 'null', and its
+ * numbered subset legitimately starts above 1: that gap is the null row's
+ * own eventual position, not a genuinely distinct defect) a first position
+ * greater than 1 is ALSO a 'gap' (a leading gap, e.g. stored positions
+ * 4,5,6 with nothing before them, previously read as a perfectly fine
+ * sequence since only ADJACENT positions were compared). Callers that can
+ * run on today's already-in-progress day (arrival-route.js) must never
+ * pass this — those leading numbers are exactly the legitimate
+ * remaining-stops case.
+ */
+function staleOrderReasons(rows, members = rows, { futureDay = false } = {}) {
+  const reasons = [];
+  const positions = rows.map((row) => row.route_order);
+  if (positions.some((p) => p == null)) reasons.push('null');
+  const nonNull = positions.filter((p) => p != null).map(Number);
+  if (new Set(nonNull).size !== nonNull.length) reasons.push('duplicate');
+  // Excludes null route_order rows explicitly — Number(null) is 0, a finite
+  // number that would otherwise read as a real position 0 and manufacture a
+  // spurious gap in front of the lowest real number (a null row is already
+  // its own 'null' reason above).
+  const numbered = members.filter((row) => row.route_order != null)
+    .map((row) => Number(row.route_order)).filter(Number.isFinite).sort((a, b) => a - b);
+  // The leading-gap check only applies to a FULLY numbered `members` set —
+  // when some member is null, the numbered subset legitimately starts
+  // above 1 (that null row's own eventual position), already covered by
+  // the 'null' reason above; layering a redundant 'gap' on top of it there
+  // would be a second reason for the same underlying incompleteness, not a
+  // genuinely distinct defect.
+  const leadingGap = futureDay && numbered.length > 0 && numbered.length === members.length
+    && numbered[0] !== 1;
+  if (leadingGap || numbered.some((p, i) => i > 0 && p !== numbered[i - 1] + 1)) reasons.push('gap');
+  const starts = currentOrder(rows).map((row) => (row.arrivalRange || effectiveWindowRange(row))?.startMin)
+    .filter(Number.isFinite);
+  if (starts.some((start, i) => i > 0 && start < starts[i - 1])) reasons.push('inversion');
+  return reasons;
+}
+
+/**
+ * Stops in PROMISED-WINDOW order, ignoring stored route_order entirely: the
+ * nightly canonicalization pass's baseline for a stale tech-day
+ * (route-reorder.js) and arrival-route.js's clockOrder rescue for the
+ * capacity picker (identical behavior — the sort reads the REAL resolved
+ * promise, never currentOrder's window_start-STRING tiebreak, which reads a
+ * legacy time_window-only row as unconstrained and would reproduce the exact
+ * inverted order it is meant to rescue — Codex r1 P1). Sorted by
+ * effectiveWindowRange start (arrivalRange when the row already carries a
+ * capacity-resolved one), then created_at, then id; genuinely unconstrained
+ * rows sort last on the same tiebreak. Same-customer co-visit siblings
+ * (isCoVisitPair) and shared visit_id group members are then pulled adjacent
+ * to their chain — both are one physical stop, and the simulation's co-visit
+ * merge and visit-groups' SUM-of-durations contract only fire for
+ * CONSECUTIVE rows (Codex #4829 r4 P1's fix, generalized to visit_id groups
+ * for a caller — route-reorder.js — that never pre-groups them).
+ */
+function promisedWindowOrder(rows) {
+  const rangeFor = (row) => row.arrivalRange || effectiveWindowRange(row);
+  const sorted = [...rows].sort((a, b) => {
+    const sa = rangeFor(a)?.startMin ?? Infinity;
+    const sb = rangeFor(b)?.startMin ?? Infinity;
+    if (sa !== sb) return sa - sb;
+    const ca = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const cb = b.created_at ? new Date(b.created_at).getTime() : 0;
+    if (ca !== cb) return ca - cb;
+    return String(a.id) < String(b.id) ? -1 : 1;
+  });
+  const isSibling = (prev, row) => isCoVisitPair(rangeFor, prev, row)
+    || (prev.visit_id != null && row.visit_id != null && String(prev.visit_id) === String(row.visit_id));
+  const ordered = [];
+  const remaining = [...sorted];
+  while (remaining.length) {
+    let last = remaining.shift();
+    ordered.push(last);
+    let i = remaining.findIndex((row) => isSibling(last, row));
+    while (i >= 0) {
+      last = remaining.splice(i, 1)[0];
+      ordered.push(last);
+      i = remaining.findIndex((row) => isSibling(last, row));
+    }
+  }
+  return ordered;
+}
+
 /** Repair the demonstrated null-position insertion defect. Keep the relative
  * order of every already-positioned stop, including ties. Only a fully timed,
  * ungrouped, unpinned route qualifies. With a chronological backbone a repair
@@ -701,5 +809,7 @@ module.exports = {
   isCoVisitPair,
   advanceCoVisit,
   startCoVisitChain,
+  staleOrderReasons,
+  promisedWindowOrder,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

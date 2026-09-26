@@ -77,8 +77,9 @@ Built: `internal-context-links.ts` gives every service page up to 12
 category-aware related links and every city hub up to 16; breadcrumbs build a
 topical trail; the portal `internal-link-planner.js` scans the corpus for
 unlinked keyword mentions and opens astro PRs (1 link per source page, 5 per
-run); `hub_link_present` and `P2_TOO_FEW_INTERNAL_LINKS` are hard gates on new
-posts.
+run); `hub_link_present` (`content-quality-gate.js`) is a hard gate on new
+posts. `P2_TOO_FEW_INTERNAL_LINKS` (`seo-completion-gate.js`) is a P2 finding
+that is surfaced for review but never blocks a PR.
 
 Gaps found:
 

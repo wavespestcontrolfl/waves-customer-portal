@@ -291,7 +291,7 @@ test('re-entry recovery: generic existing draft keeps the classic bell (regressi
   await maybeDraftEstimateForCall({ callLogId: 'call-1' });
   const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
   expect(title).toBe('AI estimate draft ready — $120/mo');
-  expect(opts.link).toBe('/admin/estimates');
+  expect(opts.link).toBe('/admin/estimates?estimateId=est-78');
 });
 
 // One-time work prices entirely into onetime_total with monthly_total 0, so

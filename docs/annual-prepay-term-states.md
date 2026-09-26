@@ -31,11 +31,13 @@ this page in the same PR.
 "Decided" = `renewal_decision IS NOT NULL` (one of `renew` / `cancel` /
 `switch_plan`, also CHECK-enforced). The decision column is the **intended**
 terminal latch: every status-mutating path below guards on
-`renewal_decision IS NULL` or on `status IN ACTIVE_STATUSES`, with two known
-exceptions — move 13 (deliberately unguarded), and move 1's existing-row
-re-run, whose decided-status preservation is a snapshot read, not a DB
-guard (the TOCTOU residue below; a decided row overwritten in that window
-could then re-activate through move 2's `payment_pending`-only guard).
+`renewal_decision IS NULL` or on `status IN ACTIVE_STATUSES`, with one known
+exception — move 1's existing-row re-run, whose decided-status preservation
+is a snapshot read, not a DB guard (the TOCTOU residue below; a decided row
+overwritten in that window could then re-activate through move 2's
+`payment_pending`-only guard). Move 13 used to be the other exception
+(deliberately unguarded) until ADMIN-BUG-R16 routed it through the same
+`renewal_decision IS NULL` guard as move 9.
 
 ## Allowed moves
 
@@ -55,11 +57,11 @@ could then re-activate through move 2's `payment_pending`-only guard).
 | 6 | `active` / `renewal_pending` | `renewed` | Operator records decision `renew`. Sets `renewal_decision = 'renew'`. | `R` `recordDecision('renew')` | same as 3 |
 | 7 | `active` / `renewal_pending` | `switch_plan` | Operator records decision `switch_plan`. Sets `renewal_decision = 'switch_plan'`. | `R` `recordDecision('switch_plan')` | same as 3 |
 | 8 | `active` / `renewal_pending` | `cancelled` **(b)** | Operator records decision `cancel` — a renewal lapse. Sets `renewal_decision = 'cancel'`; coverage for the paid window is kept. | `R` `recordDecision('cancel')` | same as 3 |
-| 9 | `payment_pending` / `active` / `renewal_pending` | `cancelled` **(a)** | Prepay invoice voided, refunded, or a `payments` refund lands (`syncTermForRefundedPayment`). Clears prepaid stamps, reverses WaveGuard extension credits, reopens covered visit invoices, resets billing mode. | `R` `syncTermForInvoicePayment` (`nextStatus === 'cancelled'`) | `renewal_decision IS NULL` |
+| 9 | `payment_pending` / `active` / `renewal_pending` | `cancelled` **(a)** | Prepay invoice voided, refunded, or a `payments` refund lands (`syncTermForRefundedPayment`). Clears prepaid stamps, reverses WaveGuard extension credits, reopens covered visit invoices, resets billing mode, restores any switch-superseded invoice / retired setup-fee claim — all inside `cancelTermWithRestorations` (ADMIN-BUG-R16: lifted out to a shared, exported function so move 13 below runs the identical pipeline). | `R` `syncTermForInvoicePayment` → `cancelTermWithRestorations` (`nextStatus === 'cancelled'`) | `renewal_decision IS NULL` |
 | 10 | `active` / `renewal_pending` | `payment_pending` | Dispute opened on the prepay invoice. Stamps `dispute_suspended_at`; coverage suspended (visits bill per-visit) until the dispute resolves. Dispute won → invoice back to paid → move 2 fires; the marker survives until the dues claw-back finishes, then `finishDisputeRecoveryForTerm` clears it. | `R` `suspendActiveTermsForDisputedInvoice` | `status IN ACTIVE_STATUSES` |
 | 11 | `cancelled` **(a)** | `active` | Lost-dispute revival: the dispute-cancelled term's invoice is re-paid in dunning. Restores extension credits. | `R` `syncTermForInvoicePayment` | `status = 'cancelled' AND renewal_decision IS NULL AND dispute_suspended_at IS NOT NULL` |
-| 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row — the only move that can touch a legacy row: move 9's upstream select is limited to `payment_pending`/`active`/`renewal_pending`. Code never writes the legacy names, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
-| 13 | *any* | `cancelled` | Admin removes the annual-prepay flag from an invoice (`DELETE /:id/annual-prepay`). Stamps cleared, attached visits detached; billing mode is NOT reset. **Unguarded** — the only path that can move a decided term. Re-marking the invoice later re-derives the status via move 1 **only for an undecided term**; a decided term stays `cancelled` (`renewal_decision` survives the DELETE and move 1 preserves the status when it is set). | `AI` `DELETE /:id/annual-prepay` | none |
+| 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared, and (ADMIN-BUG-R17) `customers.billing_mode` is reset to the recorded prior mode via `resetBillingModeAfterTermCancel`, pairing the demotion exactly like move 10's dispute-suspend does — the customer no longer stays stranded in `annual_prepay` (serviced free / no monthly dues) until the reopened invoice is actually repaid. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row — the only move that can touch a legacy row: move 9's upstream select is limited to `payment_pending`/`active`/`renewal_pending`. Code never writes the legacy names, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
+| 13 | `payment_pending` / `cancelled` (undecided) | `cancelled` **(a)** | Admin removes the annual-prepay flag from an invoice marked by mistake (`DELETE /:id/annual-prepay`). The invoice survives as an ordinary invoice, so the route refuses (409) whenever the cancel could double-bill: a decided term, a PAID prepay (`status IN ACTIVE_STATUSES` — refund it instead, owner ruling 2026-09-26), and a prepay a flow owns — born from an accepted estimate (`source_estimate_id`, whose card auto-charge job could still collect it), a switch-superseded marker or a setup-fee claim — void it instead. Otherwise it runs the SAME `cancelTermWithRestorations` pipeline as move 9 (ADMIN-BUG-R16): stamps cleared (`throwOnError`), covered visit invoices reopened with their reminders re-armed after commit, credits reversed, `customers.billing_mode` reset to the recorded prior mode; only non-terminal attached visits are detached. Re-marking the invoice later re-derives the status via move 1. | `R` `cancelTermWithRestorations`, called from `AI` `DELETE /:id/annual-prepay` | `renewal_decision IS NULL`; the route refuses `ACTIVE_STATUSES` first |
 | 14 | `active` / `renewal_pending` | `renewed` | Termite annual plan only (`annual_plan_version IS NOT NULL`), dark behind `GATE_TERMITE_ANNUAL_PLAN`: the renewal successor's OWN renewal invoice is genuinely paid — `syncTermForInvoicePayment`'s pending→active transition for a row carrying `renewed_from_term_id` calls `recordDecision('renew')` on the PARENT (`stampParentRenewedForSuccessor`). Deliberately NOT at mint (P2-1 fix, superseding the original slice-6b design below the table) — a minted-but-unpaid successor can still lapse (move 15), and deciding `renew` before that is known would leave a lapsed-and-cancelled successor sitting behind a parent already marked `renewed`. This reuses the SAME writer an operator's manual "renew" click uses (move 6) — it is not a new status-write site in `TR`. | `R` `syncTermForInvoicePayment` (calls `recordDecision('renew')`) | `where({ id: termId }) AND status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
 | 15 | `active` / `renewal_pending` | `cancelled` **(b)** | Termite annual plan only: the renewal successor's own payment grace deadline passes unpaid (its invoice was actually presented to the customer — see `TR`'s grace-lapse pass) — the successor's invoice voids (cascading the successor itself to `cancelled` **(a)** through move 9) and, in the SAME tick, `TR`'s `processGraceLapseForTerm` calls `recordDecision('cancel')` on the PARENT, recording the decided lapse. Reuses the SAME writer an operator's manual "cancel" click uses (move 8). | `TR` `processGraceLapseForTerm` (calls `recordDecision('cancel')`) | `where({ id: termId }) AND status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
 
@@ -87,6 +89,22 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   holds only while the prepay invoice reads paid).
 - `cancelled` + `renewal_decision = 'cancel'` — treated like
   `DECIDED_COVERED_STATUSES` for coverage (decided lapse keeps its window).
+  The decision carries `cancel_disposition` (ADMIN-BUG-R18), written by
+  `recordDecision` in the same statement: `end_now_refund` for Cancel plan's
+  "end now + refund" (it pulled every visit and owes the unused value back),
+  `end_at_term` for "End of paid coverage" and a renewal-time lapse. An
+  end-at-term lapse later ended now is upgraded in place by
+  `recordCancelDisposition` (never back — Cancel plan refuses end-now →
+  end-at-term). The WRITE side keeps an `end_at_term` lapse's paid visits
+  owed through `term_end` (`isEndAtTermLapseInWindow`,
+  `keepEndAtTermLapseCoverage`), only while `coveredTermsAsOf` still reports
+  it as paid coverage (re-checked with the prepay invoice locked, so a
+  dispute's cleared stamps are not handed back): a per-edit refresh
+  attaches and stamps visits that exist, and the nightly
+  `reconcileCoveredTermsSweep` also replaces a skipped one, under Cancel
+  plan's commit key (`tryHoldCancelCommitLockForTransaction`; a busy key
+  waits for the next night). An `end_now_refund` lapse is never reseeded or
+  stamped.
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
   card-expiry exemptions, `getPaymentPendingCustomerIds`.
 - Termite-renewal grace coverage (owner ruling 2026-09-26, P2-4): a
@@ -116,10 +134,10 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   non-zero, normalize them (`canceled`→`cancelled`, `refunded`→`cancelled` with
   `renewal_decision IS NULL` semantics) in the same migration — separate PR,
   owner call.
-- Move 13 is the one unguarded transition, and after it a decided term is
-  stranded `cancelled` with its decision intact. Whether the DELETE should
-  refuse decided terms (or clear the decision) is an owner ruling; documented,
-  not changed.
+- ~~Move 13 is the one unguarded transition...~~ FIXED (ADMIN-BUG-R16):
+  `DELETE /:id/annual-prepay` now runs the same `renewal_decision IS NULL`
+  guard as move 9 (via the shared `cancelTermWithRestorations`) and refuses
+  a decided term, a paid prepay and a charge-replacing prepay with 409.
 - Move 5's release is not ownership-checked: it clears `notice_N_claimed_at`
   without comparing the claim timestamp, so a worker that stalls past the
   15-minute TTL can clear a successor's fresh claim and overwrite its status

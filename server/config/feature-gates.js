@@ -2163,6 +2163,19 @@ const gates = {
   // Kill switch: unset GATE_ROUTE_REORDER_COMPLETE_ORDER.
   routeReorderCompleteOrder: gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER'),
 
+  // Stale-order canonicalization (nightly pass + the route-order-cleanup
+  // script): on an unfrozen tech-day whose stored route_order is stale (a
+  // null/duplicate position, a numeric gap, or a later promise numbered
+  // ahead of an earlier one — staleOrderReasons in route-reorder-window-fit.js),
+  // the comparison baseline becomes the promised-window order instead of the
+  // stale stored order, and a day Google can't even run (coordless, too few
+  // geocoded stops) still gets that baseline written. Non-stale days and
+  // gate-off are byte-for-byte the pre-existing behavior. Nested inside
+  // GATE_ROUTE_REORDER for the nightly pass; the cleanup script also honors
+  // opts.canonicalizeStale directly. Read at call time. No customer messages.
+  // Kill switch: unset GATE_ROUTE_REORDER_STALE_ORDER.
+  routeReorderStaleOrder: gateEnvValue('GATE_ROUTE_REORDER_STALE_ORDER'),
+
   // Planned route measurements and candidate-specific gap checks in the
   // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
   scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
@@ -2171,6 +2184,15 @@ const gates = {
   // modeled lateness, closures and unallocated work. Requires measurements;
   // separate opt-in so collection can stay observational.
   scheduleQualityAlerts: gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS'),
+
+  // Admin-only per-day drive-vs-stops scorecard (day-scorecard.js): read-only
+  // composition over the existing planned quality + saved-snapshot/recorded-
+  // work readers, plus a Bouncie mileage_log rollup for the actual side of a
+  // past day. No writes, no customer surface, no emails. Read at call time
+  // by the route (server/routes/admin-route-scorecard.js) — off answers 404
+  // {enabled:false} and the admin tab hides. Kill switch: unset
+  // GATE_ROUTE_SCORECARD.
+  routeScorecard: gateEnvValue('GATE_ROUTE_SCORECARD'),
 
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
@@ -2844,6 +2866,13 @@ const gates = {
   // it would insert, inside a transaction it rolls back, and logs the count
   // only — no writes). This entry is for logGateStatus only.
   recurringSeriesTopUp: process.env.GATE_RECURRING_SERIES_TOPUP === 'true',
+  // Commercial suite sizing (PR #4840): a commercial tenant in a
+  // multi-tenant building is sized by the SUITE (state food-license seats,
+  // else a type default) instead of the whole building, in the admin
+  // estimate lookup and the estimator engine. **Ships DARK: off unless
+  // exactly `true`**; canonical CALL-TIME reader commercialSuiteSizingLive().
+  // Off = byte-identical to before (the building size flows through).
+  commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
   // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
   // single-visit cancel inside a counted plan adds one visit back at the
   // END of the series (services/recurring-series-cancel-reseed.js →
@@ -2861,12 +2890,6 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
-  // Commercial suite sizing: a commercial tenant in a multi-tenant building
-  // is sized by the SUITE (state food-license seats, else a type default)
-  // instead of the whole building, in the estimator engine's call drafts.
-  // **Ships DARK: off unless exactly `true`**; canonical CALL-TIME reader
-  // commercialSuiteSizingLive(). Off = byte-identical to before.
-  commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
   // Amazon "Delivered" email → auto-restock (server/services/purchase-receipts).
   // Ships DARK: off unless set (gateEnvValue), read at call time by both the
   // post-email-sync hook and the ~15-minute scheduler sweep — a flip needs no

@@ -349,6 +349,31 @@ describe('setup frame — bound to the authenticated CallSid', () => {
     expect(ws.terminate).toHaveBeenCalled();
   });
 
+  // Codex r1 P1 on #4947 (Flux Multilingual, sandbox cell 10): the TwiML's
+  // own language="multi" only tells Twilio's STT/TTS to auto-detect — a
+  // setup frame that echoes it back as msg.lang must never become
+  // RelayConversation.language (isSpanish() would never match "multi",
+  // silently running the whole session in English).
+  describe('a setup frame reporting lang="multi" (Flux Multilingual)', () => {
+    test('never becomes RelayConversation.language — falls back to the customParameters marker', () => {
+      const { setup } = connect('CA-multi-1');
+      setup({ callSid: 'CA-multi-1', from: '+19415550142', lang: 'multi', customParameters: { lang: 'es' } });
+      expect(RelayConversation.mock.calls[0][0].language).toBe('es');
+    });
+
+    test('with no customParameters marker at all, falls back to null (never the literal "multi")', () => {
+      const { setup } = connect('CA-multi-2');
+      setup({ callSid: 'CA-multi-2', from: '+19415550142', lang: 'multi' });
+      expect(RelayConversation.mock.calls[0][0].language).toBeNull();
+    });
+
+    test('a REAL detected language on the setup frame (not the "multi" placeholder) still wins, unchanged', () => {
+      const { setup } = connect('CA-multi-3');
+      setup({ callSid: 'CA-multi-3', from: '+19415550142', lang: 'fr', customParameters: { lang: 'es' } });
+      expect(RelayConversation.mock.calls[0][0].language).toBe('fr');
+    });
+  });
+
   // gh prb-r11: the session_mode label is frame input in BOTH directions —
   // the routing truth is the call_log source, resolved at UPGRADE time
   // (before any frame exists, so there is no window where prompt frames can
