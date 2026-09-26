@@ -1155,9 +1155,10 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(ctx.options.callerAni).not.toBe(OUR_LINE);
 
     // Item A: composed with canAutoRoute, an outbound CONFIRMED booking held
-    // only on recoverable flags (ANI present but caller_phone_missing,
-    // garbled name_email_mismatch) now books — identical to the inbound
-    // contract in call-fail-open-booking.test.js.
+    // only on recoverable flags (ANI present but caller_phone_missing) now
+    // books — identical to the inbound contract in
+    // call-fail-open-booking.test.js. name_email_mismatch is advisory outright
+    // since #4901, so it never needed fail-open in either direction.
     const extraction = {
       triage_flags: ['caller_phone_missing', 'name_email_mismatch'],
       confidence: { overall: 0.9 },
@@ -1169,7 +1170,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(blockedPreFix.allowed).toBe(false);
     const allowedPostFix = canAutoRoute(extraction, { ...ctx.options, contactPhone, addressValidation: av });
     expect(allowedPostFix.allowed).toBe(true);
-    expect(allowedPostFix.failedOpenFlags).toEqual(expect.arrayContaining(['caller_phone_missing', 'name_email_mismatch']));
+    expect(allowedPostFix.failedOpenFlags).toEqual(expect.arrayContaining(['caller_phone_missing']));
 
     // Item C (unchanged, both before and after this lane): an UNCONFIRMED
     // call is never fail-opened into a booking, outbound or inbound — the
