@@ -16,6 +16,7 @@ const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { currency } = require('./email-template');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 function firstToken(value) {
@@ -70,19 +71,19 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
       suppressionGroupKey: 'transactional_required',
       categories: ['bank_verification', 'payment_setup'],
       ...(enforceBillingPreference ? {
-        withProviderHandoff: async (dispatch) => {
-          const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
+        withProviderHandoff: async (dispatch) => withCustomerCommsLock(db, customer.id, async (trx) => {
+          const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
           if (ownership.ok !== true) return ownership;
-          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
           if (freshPrefs?.email_enabled === false) {
             emailDisabledAtHandoff = true;
             return { ok: false };
           }
           if (billingChannelAllowed(freshPrefs || {}, 'payment_issue', 'email') === false) return { ok: false };
           providerHandoffStarted = true;
-          await dispatch();
+          await dispatch(trx);
           return { ok: true };
-        },
+        }),
       } : {}),
     });
     if (emailDisabledAtHandoff && !result.sent) {

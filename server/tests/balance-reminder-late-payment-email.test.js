@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.fn() }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -37,6 +38,7 @@ jest.mock('../services/collections/contact-policy', () => ({
 }));
 
 const db = require('../models/db');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const EmailTemplates = require('../services/email-template-library');
@@ -121,8 +123,18 @@ function customer(overrides = {}) {
 }
 
 describe('late-payment email sidecar', () => {
+  let lockHeld;
+  const trx = jest.fn((table) => {
+    expect(lockHeld).toBe(true);
+    return db(table);
+  });
   beforeEach(() => {
     jest.clearAllMocks();
+    lockHeld = false;
+    withCustomerCommsLock.mockImplementation(async (_db, _customerId, fn) => {
+      lockHeld = true;
+      try { return await fn(trx); } finally { lockHeld = false; }
+    });
   });
 
   test('latePaymentCheck keeps SMS send behavior and sends the matching 7-day email template', async () => {
@@ -332,11 +344,26 @@ describe('late-payment email sidecar', () => {
     ['failed initial preference read', undefined, new Error('preferences unavailable')],
   ])('late-payment email proceeds with %s', async (_label, prefs, error) => {
     const prefRead = chain({ first: prefs });
+    const freshPrefs = chain({ first: prefs });
+    const freshCustomer = chain({ first: customer() });
+    const ownershipRead = chain({ first: { payer_id: null, scheduled_send_error: null } });
     if (error) prefRead.first.mockRejectedValueOnce(error);
     setDbQueues({
-      invoices: [chain({ first: invoice() })],
-      notification_prefs: [prefRead],
+      invoices: [chain({ first: invoice() }), ownershipRead],
+      notification_prefs: [prefRead, freshPrefs],
+      customers: [freshCustomer],
       customer_interactions: [chain()],
+    });
+    const dispatch = jest.fn(async (database) => {
+      expect(lockHeld).toBe(true);
+      expect(database).toBe(trx);
+      await Promise.resolve();
+      expect(lockHeld).toBe(true);
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      expect(verdict).toEqual({ ok: true });
+      return { sent: verdict.ok };
     });
 
     const result = await BalanceReminder.sendLatePaymentEmail({
@@ -351,6 +378,17 @@ describe('late-payment email sidecar', () => {
 
     expect(result).toMatchObject({ ok: true });
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs'], ['customers']]);
+    expect(ownershipRead.where).toHaveBeenCalledWith({ id: 'inv-1' });
+    expect(freshPrefs.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(freshPrefs.first).toHaveBeenCalledTimes(1);
+    expect(freshCustomer.where).toHaveBeenCalledWith({ id: 'cust-1' });
+    expect(require('../services/customer-contact').getInvoiceEmailRecipients)
+      .toHaveBeenLastCalledWith(customer(), prefs || {});
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(lockHeld).toBe(false);
   });
 
   test('a fresh email opt-out before provider handoff prevents dispatch', async () => {
@@ -382,6 +420,9 @@ describe('late-payment email sidecar', () => {
     });
 
     expect(handoffResult).toEqual({ ok: false });
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs']]);
+    expect(lockHeld).toBe(false);
     expect(dispatch).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
   });

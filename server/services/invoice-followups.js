@@ -40,6 +40,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const EmailTemplateLibrary = require('./email-template-library');
 const { isDefiniteRejection } = require('./sendgrid-mail');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
@@ -267,16 +268,25 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       // awaited after the read above. Fail-closed — an unreadable invoice
       // aborts before dispatch, like every other ownership guard here.
       withProviderHandoff: async (dispatch) => {
+        if (enforceBillingPreference) {
+          // Order the final check after any in-flight preference save and
+          // hold the same customer-comms lock through provider dispatch.
+          return withCustomerCommsLock(db, customer.id, async (trx) => {
+            const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, trx)();
+            if (verdict.ok !== true) return verdict;
+            const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
+            if (freshPrefs?.email_enabled === false) {
+              emailDisabledAtHandoff = true;
+              return { ok: false };
+            }
+            if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
+            providerHandoffStarted = true;
+            await dispatch(trx);
+            return { ok: true };
+          });
+        }
         const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
         if (verdict.ok !== true) return verdict;
-        if (enforceBillingPreference) {
-          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-          if (freshPrefs?.email_enabled === false) {
-            emailDisabledAtHandoff = true;
-            return { ok: false };
-          }
-          if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
-        }
         providerHandoffStarted = true;
         await dispatch();
         return { ok: true };

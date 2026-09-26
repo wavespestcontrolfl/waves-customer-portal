@@ -10,6 +10,10 @@ jest.mock('../services/customer-contact', () => ({
 }));
 jest.mock('../services/email-template', () => ({ currency: (v) => `$${Number(v).toFixed(2)}` }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.wavespestcontrol.com' }));
+const mockWithCustomerCommsLock = jest.fn();
+jest.mock('../utils/customer-comms-lock', () => ({
+  withCustomerCommsLock: (...args) => mockWithCustomerCommsLock(...args),
+}));
 
 const db = require('../models/db');
 const EmailTemplateLibrary = require('../services/email-template-library');
@@ -34,6 +38,7 @@ const customer = { id: 'cust-1', first_name: 'Taylor' };
 describe('sendMicrodepositVerificationEmail', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockWithCustomerCommsLock.mockImplementation(async (_database, _customerId, fn) => fn(db));
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') return prefsChain({});
       throw new Error(`Unexpected db table ${table}`);
@@ -111,14 +116,20 @@ describe('sendMicrodepositVerificationEmail', () => {
 
     expect(result.ok).toBe(true);
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockWithCustomerCommsLock).not.toHaveBeenCalled();
   });
 
   test('fresh Email Messages opt-out refuses provider dispatch', async () => {
-    const prefs = [{ email_enabled: true }, { email_enabled: false }];
     db.mockImplementation((table) => {
-      if (table === 'notification_prefs') return prefsChain(prefs.shift());
+      if (table === 'notification_prefs') return prefsChain({ email_enabled: true });
       throw new Error(`Unexpected db table ${table}`);
     });
+    const lockedPrefsQuery = prefsChain({ email_enabled: false });
+    const lockedTrx = jest.fn((table) => {
+      if (table === 'notification_prefs') return lockedPrefsQuery;
+      throw new Error(`Unexpected locked table ${table}`);
+    });
+    mockWithCustomerCommsLock.mockImplementationOnce(async (_database, _customerId, fn) => fn(lockedTrx));
     jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
     const dispatch = jest.fn();
     let handoffResult;
@@ -132,8 +143,58 @@ describe('sendMicrodepositVerificationEmail', () => {
     });
 
     expect(handoffResult).toEqual({ ok: false });
+    expect(mockWithCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(invoiceHelpers.selfPayAtDispatch).toHaveBeenCalledWith('inv-1', lockedTrx);
+    expect(lockedTrx).toHaveBeenCalledWith('notification_prefs');
+    expect(lockedPrefsQuery.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
     expect(dispatch).not.toHaveBeenCalled();
     expect(result).toMatchObject({ ok: false, skipped: true, reason: 'email_disabled' });
+  });
+
+  test('preference-enforced provider handoff rechecks and dispatches under the customer lock', async () => {
+    let lockActive = false;
+    const lockedPrefsQuery = prefsChain({ email_enabled: true });
+    lockedPrefsQuery.where.mockImplementation((criteria) => {
+      expect(lockActive).toBe(true);
+      expect(criteria).toEqual({ customer_id: 'cust-1' });
+      return lockedPrefsQuery;
+    });
+    const lockedTrx = jest.fn((table) => {
+      if (table === 'notification_prefs') return lockedPrefsQuery;
+      throw new Error(`Unexpected locked table ${table}`);
+    });
+    mockWithCustomerCommsLock.mockImplementationOnce(async (_database, _customerId, fn) => {
+      lockActive = true;
+      try {
+        return await fn(lockedTrx);
+      } finally {
+        lockActive = false;
+      }
+    });
+    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+    const dispatch = jest.fn(async (database) => {
+      expect(database).toBe(lockedTrx);
+      expect(lockActive).toBe(true);
+      await Promise.resolve();
+      expect(lockActive).toBe(true);
+    });
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const handoffResult = await withProviderHandoff(dispatch);
+      return { sent: handoffResult.ok };
+    });
+
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(mockWithCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(invoiceHelpers.selfPayAtDispatch).toHaveBeenCalledWith('inv-1', lockedTrx);
+    expect(lockedTrx).toHaveBeenCalledWith('notification_prefs');
+    expect(lockedPrefsQuery.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(lockedPrefsQuery.first).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(lockedTrx);
+    expect(lockActive).toBe(false);
   });
 
   test('returns ok:false (never throws) when the email send errors', async () => {

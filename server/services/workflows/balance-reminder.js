@@ -16,6 +16,7 @@ const ContactLedger = require("../collections/contact-ledger");
 const { billingChannelAllowed, explicitBillingChannels } = require('../billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
 const { isDefiniteRejection } = require('../sendgrid-mail');
+const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -562,23 +563,24 @@ class BalanceReminder {
         // …and again at the provider boundary, inside the library's handoff:
         // the recipient resolution and payload render are awaited after the
         // read above. Fail-closed, like the follow-up engine's email leg.
-        withProviderHandoff: async (dispatch) => {
-          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, db)();
+        // Same customer-comms lock as the follow-up engine and preference saves.
+        withProviderHandoff: async (dispatch) => withCustomerCommsLock(db, customer.id, async (trx) => {
+          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, trx)();
           if (verdict.ok !== true) return verdict;
-          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
           if (freshPrefs?.email_enabled === false) {
             emailDisabledAtHandoff = true;
             return { ok: false };
           }
           if (billingChannelAllowed(freshPrefs || {}, 'billing', 'email') === false) return { ok: false };
-          const freshCustomer = await db('customers').where({ id: customer.id }).first();
+          const freshCustomer = await trx('customers').where({ id: customer.id }).first();
           const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
             .filter((entry) => isEmailLike(entry.email));
           if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
           providerHandoffStarted = true;
-          await dispatch();
+          await dispatch(trx);
           return { ok: true };
-        },
+        }),
       });
 
       if (emailDisabledAtHandoff && !result.sent) {

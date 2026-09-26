@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.fn() }));
 // Collections contact ledger (record-then-send, codex 2026-08-14): the rails
 // now insert a ledger row BEFORE each delivery attempt and SKIP the send if
 // the insert fails. Mock it as always-succeeding so this suite keeps testing
@@ -35,6 +36,7 @@ jest.mock('../services/customer-contact', () => ({
 }));
 
 const db = require('../models/db');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const smsTemplates = require('../routes/admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplates = require('../services/email-template-library');
@@ -136,6 +138,7 @@ describe('invoice follow-up email sidecar', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
+    withCustomerCommsLock.mockReset();
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
@@ -243,7 +246,6 @@ describe('invoice follow-up email sidecar', () => {
       notification_prefs: [
         ...(!options.operator ? [chain({ first: prefs })] : []),
         emailPrefs,
-        ...(options.handoffOptOut ? [chain({ first: { ...prefs, email_enabled: false } })] : []),
       ],
       customer_interactions: emailSent ? [chain(), interaction] : [interaction],
       invoice_followup_sequences: [
@@ -251,10 +253,26 @@ describe('invoice follow-up email sidecar', () => {
         chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
       ],
     });
-    const dispatch = jest.fn();
+    let lockHeld = false;
+    const freshPrefs = chain({ first: options.handoffOptOut ? { ...prefs, email_enabled: false } : prefs });
+    const trx = jest.fn((table) => {
+      expect(lockHeld).toBe(true);
+      expect(table).toBe('notification_prefs');
+      return freshPrefs;
+    });
+    withCustomerCommsLock.mockImplementationOnce(async (_db, _customerId, fn) => {
+      lockHeld = true;
+      try { return await fn(trx); } finally { lockHeld = false; }
+    });
+    const dispatch = jest.fn(async (database) => {
+      expect(lockHeld).toBe(!options.operator);
+      expect(database).toBe(options.operator ? undefined : trx);
+      await Promise.resolve();
+      expect(lockHeld).toBe(!options.operator);
+    });
     const invoiceHelpers = require('../services/invoice-helpers');
     const ownership = jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
-    if (options.handoffOptOut || options.operator) {
+    if (options.handoffOptOut || emailSent) {
       EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
         const verdict = await withProviderHandoff(dispatch);
         return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
@@ -263,6 +281,15 @@ describe('invoice follow-up email sidecar', () => {
     try {
       if (options.operator) await InvoiceFollowUps.sendNextTouchNow('inv-1', { operatorInitiated: true });
       else await InvoiceFollowUps.runPending();
+      if (!options.operator && (emailSent || options.handoffOptOut)) {
+        expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+        expect(ownership).toHaveBeenCalledWith('inv-1', trx);
+        expect(trx).toHaveBeenCalledWith('notification_prefs');
+        expect(freshPrefs.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+        expect(freshPrefs.first).toHaveBeenCalledTimes(1);
+      } else {
+        expect(withCustomerCommsLock).not.toHaveBeenCalled();
+      }
     } finally {
       ownership.mockRestore();
     }
@@ -270,7 +297,12 @@ describe('invoice follow-up email sidecar', () => {
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(emailSent || options.handoffOptOut ? 1 : 0);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(options.noSms ? 0 : 1);
     if (options.handoffOptOut) expect(dispatch).not.toHaveBeenCalled();
-    if (options.operator) expect(dispatch).toHaveBeenCalledTimes(1);
+    if (emailSent) {
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      if (options.operator) expect(dispatch).toHaveBeenCalledWith();
+      else expect(dispatch).toHaveBeenCalledWith(trx);
+    }
+    expect(lockHeld).toBe(false);
     if (options.noSms) {
       expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paused' }));
       expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
