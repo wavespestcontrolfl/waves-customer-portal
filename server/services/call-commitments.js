@@ -40,6 +40,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 // A due time typed by the office arrives either as an ISO instant (the
 // panel converts its datetime-local value with the ET helper) or, from any
@@ -701,12 +702,12 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   // No sampling controls on the request (current Anthropic models 400 on
   // them). maxRetries 0 because the pipeline has its own retry lanes — a
   // claim-holding pass must not sit through the SDK's per-attempt timeouts.
-  const response = await anthropic.messages.create({
+  const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
     model: MODELS.FLAGSHIP,
     ...anthropicEffortConfig(MODELS.FLAGSHIP),
     max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
     messages: [{ role: 'user', content: buildCommitmentsPrompt({ transcript, callStartedAt }) }],
-  }, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 });
+  }, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 }), { laneId: 'call_commitments' });
   const text = (response?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
   let parsed;
   try {

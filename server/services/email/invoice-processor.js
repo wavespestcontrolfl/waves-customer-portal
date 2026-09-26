@@ -9,6 +9,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { taxPeriodFor } = require('../../utils/tax-period');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 const anthropic = new Anthropic();
 
@@ -55,7 +56,7 @@ async function processVendorInvoice(email, classification) {
         is_invoice: true,
       });
 
-      const parseResponse = await anthropic.messages.create({
+      const parseResponse = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1024),
@@ -85,7 +86,7 @@ async function processVendorInvoice(email, classification) {
             },
           ],
         }],
-      });
+      }), { laneId: 'invoice_pdf' });
 
       parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
 

@@ -145,6 +145,7 @@ try {
 
 const MODELS = require('../config/models');
 const { stripThinkingBlocks } = require('./llm/deep');
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 const HTTP_TIMEOUT_MS = 15000;
 const MAX_ITEMS_PER_FEED = 200;
@@ -575,7 +576,7 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
   const systemPrompt = buildExtractionSystemPrompt(source, maxEvents, mode, todayIso);
   const wrapped = mode === 'articles' ? `<articles>\n${content}\n</articles>` : `<html>\n${content}\n</html>`;
 
-  const response = await anthropic.messages.create({
+  const response = await ledgerCall('anthropic', MODELS.WORKHORSE, () => anthropic.messages.create({
     model: MODELS.WORKHORSE,
     // Headroom for the full maxEvents (≤30) list. The old 2000-token cap
     // truncated event-dense feeds mid-array (~4KB of JSON), which then
@@ -584,7 +585,7 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     max_tokens: 8000,
     system: systemPrompt,
     messages: [{ role: 'user', content: wrapped }],
-  });
+  }), { laneId: 'events' });
   // WORKHORSE resolves to a model that can lead with a thinking block on
   // real feed-sized inputs (#2814 moved it opus-4-8 → sonnet-5 on 2026-07-18).
   // A thinking block has no .text, so reading content[0] blind yielded '' and

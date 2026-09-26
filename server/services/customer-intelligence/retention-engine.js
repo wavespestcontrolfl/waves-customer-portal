@@ -89,6 +89,7 @@ class RetentionEngine {
     // templates were retired 2026-07-06; without a draft there is no outreach
     // copy to propose, so a two-leg miss skips drafting below.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      laneId: 'retention_drafts',
       maxTokens: 500,
       jsonMode: true,
       jsonSchema: OUTREACH_SCHEMA,

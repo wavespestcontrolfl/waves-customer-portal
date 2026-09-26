@@ -73,6 +73,7 @@ const labelExtractLimiter = require('express-rate-limit')({
   keyGenerator: (req) => String(req.technicianId),
   message: { error: 'Too many label reads. Try again in ten minutes.' },
 });
+const { ledgerCall } = require('../services/llm-dispatch-metrics');
 router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE') }));
 router.use('/:id/label-review', (req, res, next) => {
   if (!gateEnvValue('GATE_LABEL_PIPELINE')) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
@@ -1804,13 +1805,13 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
 
   const tools = [{ type: 'web_search_20250305', name: 'web_search' }];
   let responseText = '';
-  let msg = await anthropic.messages.create({
+  let msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
     model: MODELS.FLAGSHIP,
     ...anthropicEffortConfig(MODELS.FLAGSHIP),
     max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 4000),
     tools,
     messages: [{ role: 'user', content: prompt }],
-  });
+  }), { laneId: 'inventory_research' });
   for (const block of msg.content) if (block.type === 'text') responseText += block.text;
 
   let loops = 0;
@@ -1822,7 +1823,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       tool_use_id: tb.id,
       content: 'Search completed. Continue analyzing results and provide your final JSON response.',
     }));
-    msg = await anthropic.messages.create({
+    msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 4000),
@@ -1832,7 +1833,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
         { role: 'assistant', content: msg.content },
         { role: 'user', content: toolResults },
       ],
-    });
+    }), { laneId: 'inventory_research' });
     for (const block of msg.content) if (block.type === 'text') responseText += block.text;
   }
 
@@ -3580,13 +3581,13 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
   "summary": "Brief summary of findings"
 }`;
 
-    const msg = await anthropic.messages.create({
+    const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }],
-    });
+    }), { laneId: 'inventory_research' });
 
     // Extract text from response (may have multiple content blocks from tool use)
     let responseText = '';
@@ -3606,7 +3607,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
         content: 'Search completed. Continue analyzing results and provide your final JSON response.',
       }));
 
-      currentMsg = await anthropic.messages.create({
+      currentMsg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
@@ -3616,7 +3617,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
           { role: 'assistant', content: currentMsg.content },
           { role: 'user', content: toolResults },
         ],
-      });
+      }), { laneId: 'inventory_research' });
 
       for (const block of currentMsg.content) {
         if (block.type === 'text') responseText += block.text;

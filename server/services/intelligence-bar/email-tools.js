@@ -15,6 +15,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -413,7 +414,7 @@ Address: ${customer.address_line1 || ''}, ${customer.city || ''}`;
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const msg = await anthropic.messages.create({
+    const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 800),
@@ -439,7 +440,7 @@ RULES:
 
 Return ONLY the email body text, no subject line, no metadata.`
       }],
-    });
+    }), { laneId: 'ib_tools' });
 
     const draft = anthropicText(msg);
 

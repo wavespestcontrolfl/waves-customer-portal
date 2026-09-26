@@ -123,6 +123,7 @@ class SEOAdvisor {
       const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
         // 8000: the weekly schema has 8 array sections and a verbose week can
         // exceed 4000, truncating the JSON mid-structure (the "Grade: ?" alerts).
+        laneId: 'seo_advisor',
         maxTokens: 8000,
         jsonMode: true,
         timeoutMs: ADVISOR_TIMEOUT_MS,

@@ -85,6 +85,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
+const { ledgerCall } = require('../services/llm-dispatch-metrics');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -2352,7 +2353,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
     // Tool-use loop
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const response = await anthropic.messages.create({
+      const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
         max_tokens: anthropicMaxTokens(model, context === 'tech' ? 1024 : 4096),
@@ -2365,7 +2366,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
         messages: withCacheBreakpoint(currentMessages),
-      });
+      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a

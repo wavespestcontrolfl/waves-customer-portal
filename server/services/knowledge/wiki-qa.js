@@ -53,6 +53,7 @@ class WikiQA {
     let paths = [];
     try {
       const routing = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+        laneId: 'wiki_qa',
         text: `Given this question about Waves Pest Control, which wiki articles should I read? List the file paths (max 8).
 
 Question: ${question}
@@ -95,6 +96,7 @@ ${liveIndex}`,
     // Step 3: Answer with full context (FLAGSHIP first, Sol on a miss; a
     // two-leg miss throws like the SDK path did)
     const answered = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'wiki_qa',
       system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.`,
       text: `Question: ${question}
 

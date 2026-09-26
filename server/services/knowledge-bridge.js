@@ -29,6 +29,7 @@ const MODEL = require('../config/models').FLAGSHIP;
 const { ROUTES } = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { dispatch, anthropicText } = require('./llm/call');
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -45,20 +46,20 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
   // Invalid/preamble OpenAI output → { ok:false } → fall through to the Claude
   // fallback below rather than returning text the caller can't parse.
   {
-    const r = await dispatch(ROUTES.knowledgeAnswer, { system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
+    const r = await dispatch(ROUTES.knowledgeAnswer, { laneId: 'knowledge_qa', system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
     if (r.ok && r.json) return JSON.stringify(r.json);
   }
   // Fallback — Claude (FLAGSHIP).
   if (!Anthropic) return null;
   try {
     const client = new Anthropic();
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODEL, () => client.messages.create({
       model: MODEL,
       ...anthropicEffortConfig(MODEL),
       max_tokens: anthropicMaxTokens(MODEL, maxTokens),
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
-    });
+    }), { laneId: 'knowledge_qa' });
     // First TEXT block — a thinking block leads the content on Opus 5.5.
     return anthropicText(response) || null;
   } catch (err) {

@@ -34,6 +34,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 // so a busy query set (≈queries × platforms rows/day) can't truncate history.
 const TREND_DAYS = 30;
 const { isEnabled } = require('../../config/feature-gates');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some envs */ }
@@ -395,14 +396,14 @@ class LLMMentionProber {
     if (!context || !process.env.ANTHROPIC_API_KEY || !Anthropic) return 'neutral';
     try {
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-      const resp = await client.messages.create({
+      const resp = await ledgerCall('anthropic', MODELS.FAST, () => client.messages.create({
         model: MODELS.FAST,
         max_tokens: 8,
         messages: [{
           role: 'user',
           content: `An AI answer mentioned "Waves Pest Control" like this:\n"""${context}"""\nReply with ONE word — positive, neutral, or negative — for how it portrays Waves.`,
         }],
-      });
+      }), { laneId: 'mentions_sentiment' });
   // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
   // with a thinking block (no .text) on larger inputs, which made a blind
   // content[0] read return '' — see event-ingestion.js for the incident.

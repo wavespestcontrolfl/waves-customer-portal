@@ -2,6 +2,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatch } = require('./llm/call');
 const { stripThinkingBlocks } = require('./llm/deep');
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 // Structured-output contract for the live (dispatcher) leg. The direct-SDK
 // Claude fallback below has no schema path, so the prompt keeps its field
@@ -68,7 +69,7 @@ Return ONLY valid JSON, no markdown.`;
 
   // Live model — GPT-5.5. On any miss, fall through to Claude below (never a gap).
   {
-    const r = await dispatch(MODELS.ROUTES.leadClassify, { text: prompt, jsonMode: true, jsonSchema: TRIAGE_SCHEMA, maxTokens: 300 });
+    const r = await dispatch(MODELS.ROUTES.leadClassify, { laneId: 'lead_triage', text: prompt, jsonMode: true, jsonSchema: TRIAGE_SCHEMA, maxTokens: 300 });
     if (r.ok && r.json) return mapTriage(r.json);
   }
 
@@ -78,11 +79,11 @@ Return ONLY valid JSON, no markdown.`;
   try {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey });
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.FAST, () => client.messages.create({
       model: MODELS.FAST,
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
-    });
+    }), { laneId: 'lead_triage' });
     // Thinking-block guard: FAST resolves to a model that can lead with a
     // thinking block (no .text). A blind content[0] read returned '', and
     // JSON.parse('') threw straight into the catch below — AI lead triage

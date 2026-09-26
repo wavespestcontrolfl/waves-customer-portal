@@ -18,6 +18,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { etDateString } = require('../utils/datetime-et');
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -59,7 +60,7 @@ class TaxAdvisor {
     try {
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-      const response = await anthropic.messages.create({
+      const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 6000),
@@ -158,7 +159,7 @@ ${JSON.stringify(analysisData, null, 2)}
 Please search for current FL and federal tax changes, then provide your analysis as JSON.`,
           },
         ],
-      });
+      }), { laneId: 'tax_advisor' });
 
       // Process response — handle tool use (web search may produce multiple content blocks)
       let rawText = '';

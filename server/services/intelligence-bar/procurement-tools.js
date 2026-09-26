@@ -17,6 +17,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -543,13 +544,13 @@ VENDORS: ${vendorList}
 Search vendor websites for exact prices. Return JSON only:
 {"product":"${product.name}","results":[{"vendor":"Name","price":99.99,"quantity":"32 oz","url":"https://...","pricePerOz":3.12}],"cheapest":"Vendor","summary":"Brief findings"}`;
 
-    const msg = await anthropic.messages.create({
+    const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }],
-    });
+    }), { laneId: 'ib_tools' });
 
     // Handle tool use loop
     let currentMsg = msg;
@@ -566,7 +567,7 @@ Search vendor websites for exact prices. Return JSON only:
         type: 'tool_result', tool_use_id: tb.id,
         content: 'Search completed. Provide final JSON response.',
       }));
-      currentMsg = await anthropic.messages.create({
+      currentMsg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
@@ -576,7 +577,7 @@ Search vendor websites for exact prices. Return JSON only:
           { role: 'assistant', content: currentMsg.content },
           { role: 'user', content: toolResults },
         ],
-      });
+      }), { laneId: 'ib_tools' });
     }
 
     // Parse JSON

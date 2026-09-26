@@ -83,6 +83,7 @@ async function assessPhotoQuality(base64Image, mimeType) {
     // VISION first, OpenAI Terra on a miss. A two-leg miss fails open below,
     // exactly as an SDK error did.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+      laneId: 'lawn_quality_gate',
       text: 'Evaluate this lawn photo for quality: sharpness (0-100), what percent of the image is lawn (0-100), lighting (0-100), any issues from the allowed list, and whether the photo is usable.',
       images: [{ data: base64Image, mimeType }],
       jsonMode: true,

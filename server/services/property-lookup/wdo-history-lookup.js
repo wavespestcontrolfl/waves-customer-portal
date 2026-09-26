@@ -14,6 +14,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_MAX_SEARCHES = 8;
@@ -142,12 +143,12 @@ async function lookupWdoHistory(address, options = {}) {
     // so the default of 2 could fan one lookup out to 3x the searches + wall-clock
     // on a transient 429/5xx. The single attempt already degrades to null on error.
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
-    const resp = await client.messages.create({
+    const resp = await ledgerCall('anthropic', MODELS.WORKHORSE, () => client.messages.create({
       model: MODELS.WORKHORSE,
       max_tokens: 1500,
       tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: maxSearches }],
       messages: [{ role: 'user', content: buildHistoryPrompt(address) }],
-    }, { timeout: timeoutMs });
+    }, { timeout: timeoutMs }), { laneId: 'wdo_history' });
 
     const textBlock = (resp.content || []).filter((b) => b.type === 'text').pop();
     if (!textBlock?.text) {

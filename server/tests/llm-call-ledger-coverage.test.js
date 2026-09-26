@@ -127,3 +127,55 @@ describe('llm call-ledger coverage', () => {
     });
   });
 });
+
+// Every direct Anthropic SDK call (a file that loads @anthropic-ai/sdk and
+// calls `.messages.create(` / `.messages.stream(`) runs inside ledgerCall, or
+// is listed here with the count and the reason its lane stays `unrecordable`.
+// Two-sided like UNLABELLED_LANES: a file whose unwrapped count drops below
+// its entry fails (shrink the entry), and a new unwrapped call fails (wrap it:
+// `await ledgerCall('anthropic', model, () => client.messages.create({...}),
+// { laneId: '<lane>' })`, then set the lane's policy to ledger: 'call').
+const KNOWN_UNWRAPPED = {
+  'services/llm/call.js': [2, 'the adapter itself — records each leg through recordCall'],
+  'services/voice-agent/relay-conversation.js': [1, 'voice_relay streams; ledgerCall takes a resolved Message'],
+  'services/collections/outbound-voice/collections-conversation.js': [1, 'voice_relay_collections streams'],
+  'services/lawn-assessment.js': [1, 'lawn_assess: its Gemini primary is a raw fetch, unrecorded'],
+  'services/pest-identification.js': [1, 'pest_id: Gemini primary is a raw fetch'],
+  'services/tree-shrub-assessment.js': [1, 'tree_shrub: Gemini primary is a raw fetch'],
+  'services/treatment-zone-suggest.js': [1, 'treatment_zone: Gemini primary is a raw fetch'],
+  'services/turf-height-ocr.js': [1, 'turf_ocr: Gemini primary is a raw fetch'],
+  'services/lawn-diagnostic-prompt.js': [2, 'lawn_diag_vision / lawn_diag_writer: Gemini and OpenAI legs are raw fetches'],
+  'services/property-lookup/ai-property-lookup.js': [2, 'property_trio: OpenAI and Gemini legs are raw fetches'],
+  'services/seo/llm-mention-prober.js': [1, 'mentions_prober: a measurement probe (search), recorded by design as unrecordable'],
+};
+
+function jsFiles(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === 'tests' || entry.name === 'node_modules' ? [] : jsFiles(full);
+    return entry.name.endsWith('.js') ? [full] : [];
+  });
+}
+
+describe('direct Anthropic SDK calls are on the call ledger', () => {
+  const counts = {};
+  for (const file of jsFiles(SERVER_DIR)) {
+    const src = read(file);
+    if (!src.includes('@anthropic-ai/sdk')) continue;
+    const unwrapped = src.split('\n').filter((line) => /\.messages\.(create|stream)\(/.test(line)
+      && !/ledgerCall\(/.test(line) && !/^\s*(\/\/|\*)/.test(line)).length;
+    if (unwrapped) counts[path.relative(SERVER_DIR, file)] = unwrapped;
+  }
+
+  test('no unlisted file makes an unwrapped call', () => {
+    const unlisted = Object.keys(counts).filter((file) => !KNOWN_UNWRAPPED[file]);
+    expect(unlisted).toEqual([]);
+  });
+
+  test('each listed file has exactly its recorded number of unwrapped calls', () => {
+    const drift = Object.entries(KNOWN_UNWRAPPED)
+      .filter(([file, [expected]]) => (counts[file] || 0) !== expected)
+      .map(([file, [expected]]) => `${file}: expected ${expected}, found ${counts[file] || 0}`);
+    expect(drift).toEqual([]);
+  });
+});

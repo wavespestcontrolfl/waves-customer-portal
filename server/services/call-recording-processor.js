@@ -7059,7 +7059,7 @@ async function generateLeadSynopsis(transcription) {
     // that could steal live work. With every call bounded, a stuck pass
     // FAILS, releases and stops beating, and the heartbeat rule alone is
     // enough.
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => client.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1200),
@@ -7108,7 +7108,7 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
       // intervals and trip the stall watchdog on a healthy pass (codex P2).
       // The pipeline has its own retry lanes; a claim-holding pass does not
       // need a second one inside it.
-    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 });
+    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 }), { laneId: 'lead_synopsis' });
 
     // First TEXT block — a thinking block leads the content on Opus 5.5.
     return anthropicText(response).trim() || null;
@@ -19778,6 +19778,7 @@ const CallRecordingProcessor = {
     };
   },
 };
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 // Named production export for the first-touch resume lane (2026-07-30): the
 // held newsletter subscribe is re-driven from lead-first-touch-resume once

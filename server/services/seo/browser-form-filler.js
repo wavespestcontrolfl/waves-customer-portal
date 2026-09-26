@@ -33,6 +33,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const logger = require('../logger');
 const sharp = require('sharp');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname + isPrivateIp
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 function hostOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
@@ -183,13 +184,13 @@ async function boundedShot(page) {
 }
 
 async function callVision(anthropic, screenshotB64, text) {
-  const resp = await anthropic.messages.create({
+  const resp = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
     model: MODEL, ...anthropicEffortConfig(MODEL), max_tokens: anthropicMaxTokens(MODEL, 2048),
     messages: [{ role: 'user', content: [
       { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshotB64 } },
       { type: 'text', text },
     ] }],
-  });
+  }), { laneId: 'form_filler' });
   return parseJson((resp.content || []).map((b) => b.text || '').join(''));
 }
 

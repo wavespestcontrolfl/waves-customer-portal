@@ -172,6 +172,7 @@ class CSRCoach {
     // wall-clock ceiling across BOTH legs (llm/call.js), so the bound
     // reasoned about below covers the whole scoring pass, not one provider.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'csr_coach',
       maxTokens: 3000,
       jsonMode: true,
       timeoutMs: CSR_SCORE_TIMEOUT_MS,

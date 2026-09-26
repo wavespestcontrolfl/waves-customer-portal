@@ -14,6 +14,7 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const db = require('../../models/db');
 const { fetchPageText } = require('./contact-finder');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -95,7 +96,7 @@ Return ONLY JSON with ALL fields:
 - detected_price_usd = null if no price is shown.`;
   let o;
   try {
-    const resp = await anthropic.messages.create({ model: MODEL, max_tokens: 400, messages: [{ role: 'user', content: prompt }] });
+    const resp = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({ model: MODEL, max_tokens: 400, messages: [{ role: 'user', content: prompt }] }), { laneId: 'signup_classifier' });
     o = parseJson((resp.content || []).map((b) => b.text || '').join(''));
   } catch (err) {
     logger.warn(`[signup-classifier] LLM failed for ${host}: ${err.message}`);

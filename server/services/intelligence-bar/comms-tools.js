@@ -20,6 +20,7 @@ const {
   manualSmsDeliveryState,
 } = require('../messaging/send-manual-customer-sms');
 const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -901,7 +902,7 @@ async function draftSmsReply(input) {
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-  const msg = await client.messages.create({
+  const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => client.messages.create({
     model: MODELS.FLAGSHIP,
     ...anthropicEffortConfig(MODELS.FLAGSHIP),
     max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 200),
@@ -919,7 +920,7 @@ Keep it friendly, concise, and action-oriented. Sign as "- Waves Pest Control" o
 Plain keyboard punctuation only: straight quotes and hyphens, never curly quotes, em dashes, or the ellipsis character (they force UCS-2 encoding and multiply SMS segments).
 Return ONLY the SMS text, nothing else.`
     }],
-  });
+  }), { laneId: 'ib_tools' });
 
   const draft = anthropicText(msg);
 

@@ -19,6 +19,7 @@ const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
 const { callAnthropic } = require('../llm/call');
 const { etDateString, etParts } = require('../../utils/datetime-et');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -89,7 +90,7 @@ function buildFollowUpPrompt(prospect, profile, loc, now = new Date()) {
 // error normalization — the injected client keeps the drafter's per-site config and the test seam
 async function draftFollowUp(prospect, { profile, anthropic }) {
   const loc = pickLocation(prospect, profile);
-  const r = await callAnthropic({ model: DRAFT_MODEL, maxTokens: 800, system: FOLLOW_UP_SYSTEM_PROMPT, text: buildFollowUpPrompt(prospect, profile, loc), jsonMode: false, anthropicClient: anthropic });
+  const r = await callAnthropic({ laneId: 'outreach_drafter', model: DRAFT_MODEL, maxTokens: 800, system: FOLLOW_UP_SYSTEM_PROMPT, text: buildFollowUpPrompt(prospect, profile, loc), jsonMode: false, anthropicClient: anthropic });
   return r.ok ? parseDraft(r.text) : null;
 }
 
@@ -170,12 +171,12 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
   let page = null;
   try { page = await fetchPageFn(prospect.target_url || `https://${prospect.target_domain}/`); } catch { page = null; }
   const loc = pickLocation(prospect, profile);
-  const resp = await anthropic.messages.create({
+  const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({
     model: DRAFT_MODEL,
     max_tokens: 1200,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserPrompt(prospect, profile, loc, page) }],
-  });
+  }), { laneId: 'outreach_drafter' });
   const text = (resp && resp.content ? resp.content : []).map((b) => b.text || '').join('');
   return parseDraft(text);
 }

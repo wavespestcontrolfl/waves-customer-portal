@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { stripThinkingBlocks } = require('../llm/deep');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -272,11 +273,11 @@ async function classifyQueryIntent({ queries = [] } = {}) {
 
   try {
     const anthropic = new Anthropic();
-    const msg = await anthropic.messages.create({
+    const msg = await ledgerCall('anthropic', MODELS.FAST, () => anthropic.messages.create({
       model: MODELS.FAST,
       max_tokens: Math.min(2048, batch.length * 20),
       messages: [{ role: 'user', content: prompt }],
-    });
+    }), { laneId: 'seo_intent' });
   // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
   // with a thinking block (no .text) on larger inputs, which made a blind
   // content[0] read return '' — see event-ingestion.js for the incident.

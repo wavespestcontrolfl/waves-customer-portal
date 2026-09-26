@@ -125,6 +125,7 @@ For each signal give its type, a confidence, and a brief quote as evidence. Only
     // FLAGSHIP first, Sol on a miss. A two-leg miss throws into the catch
     // below, which returns the deterministic signals exactly as before.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'signal_detector',
       text: prompt,
       jsonMode: true,
       jsonSchema: SIGNALS_SCHEMA,

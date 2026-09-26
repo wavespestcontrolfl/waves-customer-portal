@@ -267,6 +267,7 @@ class SeoActionGenerator {
         // FLAGSHIP first, Sol on a miss; a two-leg miss throws into the
         // per-action catch below and the action keeps no draft.
         const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+          laneId: 'seo_advisor',
           maxTokens: 1000,
           jsonMode: true,
           jsonSchema: DRAFT_SCHEMA,

@@ -31,6 +31,7 @@ const { anthropicText, geminiText } = require('./llm/call');
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
 const { safeConditionLabel, scrubCustomerText, NO_VISIBLE_STRESS_FINDING } = require('./lawn-diagnostic-report');
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -583,7 +584,7 @@ async function runChallenge(perception = {}, context = {}) {
       overall_notes: perception.overall_notes || null,
       ...diagnosisContextObject(context),
     }, null, 2);
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', LAWN_CHALLENGE_MODEL, () => client.messages.create({
       model: LAWN_CHALLENGE_MODEL,
       ...anthropicEffortConfig(LAWN_CHALLENGE_MODEL),
       max_tokens: anthropicMaxTokens(LAWN_CHALLENGE_MODEL, 1800),
@@ -592,7 +593,7 @@ async function runChallenge(perception = {}, context = {}) {
         role: 'user',
         content: `Photo observations + context (JSON):\n${payload}\n\nChallenge each implied cause, then return the findings JSON now.`,
       }],
-    });
+    }), { laneId: 'lawn_challenge' });
     let parsed;
     try { parsed = parseJsonResponse(response); } catch { parsed = null; }
     if (!parsed) {

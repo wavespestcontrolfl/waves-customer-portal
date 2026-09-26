@@ -22,6 +22,7 @@
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { findContact } = require('./contact-finder');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -170,11 +171,11 @@ Scoring guidance:
 Candidates:
 ${JSON.stringify(list)}`;
 
-  const resp = await anthropic.messages.create({
+  const resp = await ledgerCall('anthropic', MODELS.FAST, () => anthropic.messages.create({
     model: MODELS.FAST,
     max_tokens: 4096,
     messages: [{ role: 'user', content: prompt }],
-  });
+  }), { laneId: 'prospect_score' });
   const text = resp?.content?.map((b) => b.text || '').join('') || '';
   const arr = parseJsonArray(text);
   if (!Array.isArray(arr)) throw new Error('classifier returned non-array');

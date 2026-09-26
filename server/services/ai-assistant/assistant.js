@@ -19,6 +19,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MODEL = require('../../config/models').FLAGSHIP;
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 // Prompt-cache breakpoint (same pattern as admin-intelligence-bar.js). Applied
 // to a shallow copy of the messages array at call time — never to the array we
@@ -190,14 +191,14 @@ class WavesAssistant {
 
       // Tool-use loop — Claude may call multiple tools before responding
       for (let turn = 0; turn < 5; turn++) {
-        const response = await anthropic.messages.create({
+        const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
           model: MODEL,
           ...anthropicEffortConfig(MODEL),
           max_tokens: anthropicMaxTokens(MODEL, 800),
           system,
           tools: TOOLS,
           messages: withCacheBreakpoint(messages),
-        });
+        }), { laneId: 'portal_assistant' });
 
         // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
         // customer turns is the prod verification signal.

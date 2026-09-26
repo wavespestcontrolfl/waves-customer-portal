@@ -151,6 +151,7 @@ class CampaignAdvisor {
       // ceiling as the shared budget across both legs — a verbose day's
       // report needs more than the dispatcher's 2-minute-per-leg default.
       const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+        laneId: 'ads_advisor',
         maxTokens: 4000,
         jsonMode: true,
         timeoutMs: ADVISOR_TIMEOUT_MS,

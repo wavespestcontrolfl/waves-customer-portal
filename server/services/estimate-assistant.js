@@ -6,6 +6,7 @@ const { serviceCountsTowardWaveGuardTier } = require('./pricing-engine/discount-
 const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
 const { dispatch } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -1418,6 +1419,7 @@ function buildAssistantUserContent(question, context) {
 // on any miss returns null so answerEstimateQuestion falls back to Claude.
 async function answerWithOpenAI(question, context) {
   const r = await dispatch(MODELS.ROUTES.estimateAssistant, {
+    laneId: 'estimate_assistant',
     system: SYSTEM_PROMPT,
     text: buildAssistantUserContent(question, context),
     jsonMode: false,
@@ -1430,7 +1432,7 @@ async function answerWithOpenAI(question, context) {
 async function answerWithAnthropic(question, context) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
+  const response = await ledgerCall('anthropic', process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE, () => client.messages.create({
     model: process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE,
     max_tokens: 420,
     system: SYSTEM_PROMPT,
@@ -1438,7 +1440,7 @@ async function answerWithAnthropic(question, context) {
       role: 'user',
       content: buildAssistantUserContent(question, context),
     }],
-  });
+  }), { laneId: 'estimate_assistant' });
   return extractAnthropicText(response);
 }
 
