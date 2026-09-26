@@ -14,7 +14,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "ghost-ant",
@@ -131,7 +131,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "bigheaded-ant",
@@ -245,7 +245,7 @@
     "safety_line": "Stings burn immediately and can trigger allergic reactions. Keep kids and pets away from mounds, and do not kick or disturb one. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "fire-ant",
@@ -357,7 +357,7 @@
     "safety_line": "Not considered medically dangerous, but it can pinch/bite if handled. Leave it undisturbed and let a technician check the wood it came from.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural."
     },
     "slug": "carpenter-ant",
@@ -471,7 +471,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "tawny-crazy-ant",
@@ -583,7 +583,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "white-footed-ant",

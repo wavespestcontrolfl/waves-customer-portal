@@ -11,8 +11,8 @@
     "safety_line": "Skin secretions can irritate eyes, nose, and airways, especially for people with asthma, and can bother pets that mouth one. Wash hands after contact; see a doctor if irritation doesn’t clear up.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": "This EDIS article page returned a 403 to direct fetch during this pass; facts here are corroborated across multiple UF/IFAS and USFWS sources found via search rather than a single directly-loaded page. Worth a follow-up direct verification."
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: EDIS UW259 (\"The Cuban Treefrog in Florida\") and UW394 (\"Managing Conflicts with Wildlife: Living with Frogs\") both loaded directly and confirm skin-secretion eye/nose/mucous-membrane irritation, pet mouth irritation, asthmatic/allergic reactions, and predation on native treefrogs (esp. squirrel treefrogs). safety_line and copy left as written; both URLs added to sources."
     },
     "slug": "cuban-treefrog",
     "common_name": "Cuban Treefrog",
@@ -37,6 +37,12 @@
         "slug": "green-treefrog",
         "difference": "Cuban treefrogs are much larger with warty skin and oversized toe pads; green treefrogs are smaller, smooth-skinned, and usually have a white side stripe.",
         "next_photo": "A close-up of the toe pads and overall size next to a coin.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "squirrel-treefrog",
+        "difference": "Cuban treefrog is much larger (to 5.5 in) with bumpy skin and huge bulging eyes; squirrel treefrog stays under 1.5 in with smooth skin and small eyes.",
+        "next_photo": "A close-up of the eyes (bulging vs. normal) and skin texture (bumpy vs. smooth), next to something for size.",
         "photo_can_confirm": true
       }
     ],
@@ -98,7 +104,9 @@
     },
     "tech_notes": "Confirm size + toe pad size vs. native treefrogs. Humane removal/exclusion; avoid bare-hand contact due to skin secretions.",
     "sources": [
-      "https://journals.flvc.org/edis/article/view/132662"
+      "https://journals.flvc.org/edis/article/view/132662",
+      "https://ask.ifas.ufl.edu/publication/UW259",
+      "https://ask.ifas.ufl.edu/publication/UW394"
     ],
     "links": {
       "site_page": "/pest-identifier/cuban-treefrog/",
@@ -108,11 +116,6 @@
     "risk": "irritant",
     "action": "fix_conditions",
     "season_basis": "year_round",
-    "verification": [
-      {
-        "claim": "Skin-secretion irritation details and native-treefrog predation facts",
-        "note": "The primary EDIS article returned a 403 on direct fetch this pass; facts are corroborated across multiple UF/IFAS and USFWS sources found via search rather than one directly-loaded page. Worth a follow-up direct verification."
-      }
-    ]
+    "verification": []
   }
 ]

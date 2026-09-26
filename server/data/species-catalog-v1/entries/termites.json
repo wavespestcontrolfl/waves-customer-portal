@@ -16,7 +16,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "subterranean-termite",
@@ -133,7 +133,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "formosan-termite",
@@ -233,7 +233,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "drywood-termite",

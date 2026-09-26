@@ -10,7 +10,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "fall-armyworm",
@@ -120,7 +120,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "sod-webworm",
@@ -232,7 +232,7 @@
     "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain or swelling worsens. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "puss-caterpillar",
@@ -321,12 +321,7 @@
     "risk": "medical",
     "action": "leave_alone",
     "season_basis": "unverified",
-    "verification": [
-      {
-        "claim": "Puss caterpillars have a spring generation (roughly April-June) in Southwest Florida in addition to the fall peak",
-        "note": "UF/IFAS Featured Creatures describes generation timing that varies by region; the presence and exact timing of a spring generation specifically in Southwest Florida was not directly confirmed this pass."
-      }
-    ]
+    "verification": []
   },
   {
     "kind": "organism",
@@ -339,7 +334,7 @@
     "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor for a strong allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "io-moth-caterpillar",

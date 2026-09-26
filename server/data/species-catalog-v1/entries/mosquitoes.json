@@ -17,7 +17,7 @@
     "safety_line": "Can spread dengue, Zika, and chikungunya locally. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "aedes-mosquito",
@@ -127,7 +127,7 @@
     "safety_line": "Capable of spreading dengue, chikungunya, and other viruses. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "asian-tiger-mosquito",

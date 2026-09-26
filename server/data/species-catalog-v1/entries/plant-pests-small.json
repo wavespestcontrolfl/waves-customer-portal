@@ -10,7 +10,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "aphid",
@@ -119,7 +119,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "mealybug",
@@ -223,7 +223,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "spiraling-whitefly",
@@ -335,7 +335,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "tea-scale",

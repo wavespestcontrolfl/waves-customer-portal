@@ -105,7 +105,7 @@
     "verification": [
       {
         "claim": "Range in Southwest Florida specifically (vs. common statewide/nationally)",
-        "note": "House centipedes are well documented as common indoor arthropods across Florida generally; density specific to Southwest Florida was not separately verified this pass."
+        "note": "Still open as of 2026-09-26. Re-fetched ask.ifas.ufl.edu/publication/IG093 (UF/IFAS \"Centipedes\" fact sheet, already in sources): it covers centipedes generically (10-100 legs, active predators of insects/spiders, venom not lethal to humans) and does not name Scutigera coleoptrata or break down Florida sub-regions. Searched for a dedicated UF/IFAS Featured Creatures page for the house centipede specifically; none found (only general pest-control blogs turned up, which aren't authoritative sources per the sourcing rules). Extension literature on this species is written at the statewide/national level, not broken out by Florida region, so a Southwest-Florida-specific density figure may not exist to be sourced. Leaving range: \"common\" as a statewide/nationwide characterization rather than asserting SW-FL-specific density."
       }
     ]
   },
@@ -199,9 +199,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "A composting machine that recycles dead leaves into soil — heavy rain floods the leaf litter and evicts them onto the lanai. It can release a mild defensive secretion if handled roughly, so sweeping it out beats picking it up bare-handed; otherwise it dries out and moves on after a day or so indoors.",
+      "what_it_means": "A composting machine that recycles dead leaves into soil. Heavy rain floods the leaf litter and pushes them onto the lanai. It can release a mild defensive secretion, so sweep it out rather than pick it up; indoors it usually dries out, and repeat visitors point to a damp spot near the door.",
       "fact": "A composting machine — it recycles dead leaves into soil. Rain floods the leaf litter and evicts them onto your lanai.",
-      "blurb": "They can't survive indoors for long — sweep them out (rather than handling) and they're gone after a day."
+      "blurb": "They rarely survive long indoors. Sweep them out rather than handling them, and if they keep coming in, look for damp spots near doors."
     },
     "tech_notes": "Rain-driven seasonal migration from mulch/leaf litter. Defensive secretion can mildly irritate skin/eyes on contact; advise sweeping rather than handling. Exterior perimeter treatment + reducing mulch-to-foundation contact handles recurring waves.",
     "sources": [
@@ -230,7 +230,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "pillbug",

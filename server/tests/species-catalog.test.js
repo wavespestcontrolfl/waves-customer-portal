@@ -66,7 +66,7 @@ function flatClaim(text, pattern) {
     && !/\b(males?|females?|adults?|larvae|larva|workers?)\b/i.test(sentence) && !/\b(almost|rarely|seldom|usually)\b/i.test(sentence));
 }
 // A fixed-time outcome is a promise too ("they're gone in days").
-const TIMED_OUTCOME = /\b(gone|cleared|fixed|solved|over) (in|within) (a few |\d+ )?(days?|weeks?)\b/i;
+const TIMED_OUTCOME = /\b(gone|cleared|fixed|solved|over) (in|within|after) (a |a few |\d+ )?(days?|weeks?)\b/i;
 const COMMERCIAL_PROMISE = /\bfree (inspection|estimate|quote)s?\b|\bwithin (a|one|two|\d+) (day|days|hour|hours)\b|\busually within\b|\bno[- ]charge\b/i;
 const WILDLIFE_GROUPS = new Set(['wild-mammals', 'lizards', 'snakes', 'turtles', 'frogs-toads', 'birds']);
 
@@ -362,6 +362,9 @@ describe('resolveName regressions', () => {
     // A singular generic inside a sentence stays generic too (Codex #4873 pre-push P1).
     expect(catalog.resolveName('I found a termite').node).toMatchObject({ level: 'group', id: 'termites' });
     expect(catalog.resolveName('saw a fire ant by the pool').node).toMatchObject({ level: 'subgroup', id: 'fire-ants' });
+    // A species name plus its type stays the species (Codex #4873 r3).
+    expect(catalog.resolveName('Brown Widow spider').node.slug).toBe('brown-widow');
+    expect(catalog.resolveName('a widow spider').node).toMatchObject({ level: 'subgroup', id: 'widow-spiders' });
     expect(catalog.resolveName('insect').node).toMatchObject({ level: 'category', id: 'insect' });
   });
 

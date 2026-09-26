@@ -10,7 +10,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "brown-anole",
@@ -120,8 +120,8 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": "A dedicated Featured Creatures page for Hemidactylus house geckos could not be reached during this pass (404/410 on the pages found); facts here reflect widely corroborated general knowledge and should be spot-checked against a live UF/IFAS gecko publication."
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: the old source (ask.ifas.ufl.edu/publication/UW486) was misidentified -- that publication is actually about the brown anole (Anolis sagrei), not Hemidactylus house geckos, so it was removed. No dedicated UF/IFAS Featured Creatures page for Hemidactylus exists. Confirmed traits instead against two directly-loaded sources: Powell 2004, \"Asian House Gecko (Hemidactylus frenatus),\" IGUANA 11(1):20 (nocturnal, gathers at lights to feed on insects, forages on walls/ceilings), and Hoskin 2020, \"Calling behaviour in the invasive Asian house gecko (Hemidactylus frenatus)...,\" Wildlife Research, BioOne/CSIRO (multiple-chirp \"chik, chik, chik\" call, territorial/sexual function, peaks at dusk and pre-dawn). Toe-pad wall-climbing is a defining, undisputed Gekkonidae trait and wasn't separately sourced."
     },
     "slug": "gecko",
     "common_name": "House Gecko",
@@ -201,7 +201,8 @@
     },
     "tech_notes": "Beneficial insectivore; no treatment. Non-native Hemidactylus species are common and harmless around structures.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/UW486"
+      "https://journals.ku.edu/iguana/article/download/17068/15346/41420",
+      "https://bioone.org/journalArticle/Download?urlid=10.1071%2FWR20003"
     ],
     "links": {
       "site_page": "/pest-identifier/gecko/",
@@ -211,11 +212,6 @@
     "risk": "low",
     "action": "leave_alone",
     "season_basis": "year_round",
-    "verification": [
-      {
-        "claim": "General house gecko (Hemidactylus spp.) behavior facts (chirping, wall-climbing)",
-        "note": "A dedicated UF/IFAS Featured Creatures page for Hemidactylus house geckos could not be reached this pass (404/410); facts reflect widely corroborated general knowledge and should be spot-checked against a live UF/IFAS gecko publication."
-      }
-    ]
+    "verification": []
   }
 ]

@@ -15,7 +15,7 @@
     "safety_line": "Bites are rare and defensive but medically significant — alpha-latrotoxin can cause serious symptoms. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "black-widow",
@@ -127,7 +127,7 @@
     "safety_line": "Venom is potent but this species injects less of it and bites less readily than the black widow. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "brown-widow",
@@ -239,7 +239,7 @@
     "safety_line": "Bites only if held or pinched, and feel about like a bee sting. No medical concern for most people.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "golden-silk-orbweaver",
@@ -345,7 +345,7 @@
     "safety_line": "Not dangerous to people, though a bite from handling one can be locally painful. No medical concern for most people.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "huntsman-spider",
@@ -450,7 +450,7 @@
     "safety_line": "Venom is not dangerous to people; a bite from handling one can be locally painful, like a bee sting.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "wolf-spider",

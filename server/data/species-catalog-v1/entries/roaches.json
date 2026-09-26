@@ -17,7 +17,7 @@
     "safety_line": "Roaches can carry bacteria picked up outdoors. Wash hands after cleanup and keep food covered.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "american-cockroach",
@@ -131,7 +131,7 @@
     "safety_line": "Roaches can carry bacteria picked up outdoors. Wash hands after cleanup and keep food covered.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": "Sourced from a UF entomology project gallery page rather than a Featured Creatures EDIS number; the dedicated EDIS page for this species could not be located during this pass."
     },
     "slug": "smokybrown-cockroach",
@@ -241,7 +241,7 @@
     "safety_line": "German roach infestations can trigger allergies and asthma and can adulterate food with feces and shed skins. Keep food sealed and surfaces clean while treatment is underway.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "german-cockroach",
