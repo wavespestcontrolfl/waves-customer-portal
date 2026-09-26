@@ -283,6 +283,16 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(recorded()).toMatchObject({ failure: null });
   });
 
+  it('a final agent.message carrying end_turn collects its text AND ends the run', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', stop_reason: { type: 'end_turn' }, content: [{ type: 'text', text: 'Done.' }] } },
+      text('never read'),
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(result.report).toBe('Done.');
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
   it('two agent.custom_tool_use events + one requires_action idle naming both → exactly ONE POST with both results', async () => {
     mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
     global.fetch = fetchFor([

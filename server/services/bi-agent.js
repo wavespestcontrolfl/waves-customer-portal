@@ -156,21 +156,25 @@ async function openSessionStream(sessionId, deadline) {
   return { res, timer, controller };
 }
 
-// One classification per frame, carrying everything the run loop acts on.
-// The JSON `type` is authoritative: the SSE `event:` line may be absent, and
+// One classification per frame, carrying everything the run loop acts on;
+// `end` marks the frame that ends the session — including a final
+// agent.message that carries stop_reason end_turn alongside its text. The
+// JSON `type` is authoritative: the SSE `event:` line may be absent, and
 // readSessionFrames then reports 'message'.
 function classifyFrame(event, data) {
   const type = data?.type || event;
-  if (type === 'agent.message' || event === 'assistant' || event === 'text') return { kind: 'text' };
+  if (type === 'agent.message' || event === 'assistant' || event === 'text') {
+    return { kind: 'text', end: isSessionTerminal(event, data) };
+  }
   if (type === 'agent.custom_tool_use') return { kind: 'tool_use' };
   if (type === 'session.status_idle') {
     const stop = stopReasonFromEvent(data);
     if (stop?.type === 'requires_action') return { kind: 'requires_action', eventIds: stop.event_ids || [] };
-    if (stop?.type === 'end_turn') return { kind: 'end' };
+    if (stop?.type === 'end_turn') return { kind: 'other', end: true };
     // retries_exhausted, budget_reached, or an unknown stop reason
     return { kind: 'failed', failure: `session_idle_${stop?.type || 'unknown'}` };
   }
-  if (isSessionTerminal(event, data)) return { kind: 'end' };
+  if (isSessionTerminal(event, data)) return { kind: 'other', end: true };
   if (isSessionError(event) || type === 'session.error' || type === 'error') {
     return { kind: 'failed', failure: 'session_error_event', detail: JSON.stringify(data) };
   }
@@ -324,12 +328,12 @@ const BIAgent = {
         if (frame.kind === 'text') report += frameText(data);
         else if (frame.kind === 'tool_use') registerToolUse(event, data);
         else if (frame.kind === 'requires_action') await runRequiresActionBatch(sessionId, deadline, frame.eventIds, pendingCustomToolUses, executeToolUse);
-        else if (frame.kind === 'end') { sessionEnded = true; break; }
         else if (frame.kind === 'failed') {
           logger.error(`[bi-agent] Session ${sessionId} failed: ${frame.failure} ${frame.detail || ''}`);
           failure = frame.failure;
           break;
         }
+        if (frame.end) { sessionEnded = true; break; }
       }
       // The stream closed (or was left) before the session said it ended:
       // not a success, whatever the session GET reports later.
