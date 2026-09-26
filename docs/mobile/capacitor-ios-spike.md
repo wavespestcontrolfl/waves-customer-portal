@@ -76,8 +76,9 @@ change an entitlement in an installed iOS binary. See Apple's
 
 ## Known follow-ups before submission
 
-1. **Backend APNs** — see `apns-backend-pr-plan.md` (the `/api/push/native-subscribe`
-   endpoint that `nativePush.js` posts to does not exist yet).
+1. **Backend APNs** — **Shipped.** See `apns-backend-pr-plan.md`; the
+   `/api/push/native-subscribe` endpoint (`server/routes/push.js`) exists and
+   `nativePush.js` already posts to it.
 2. **App Store Guideline 4.2 ("minimum functionality").** A thin web wrapper can
    be rejected. Lean on native capabilities to justify the app: APNs push (this
    spike), Face ID unlock, camera upload for service photos, native share. MODE B

@@ -247,7 +247,7 @@ describe('case + card creation', () => {
     expect(`${title}\n${body}`).not.toMatch(/collection|delinquen/i);
     expect(`${title}\n${body}`).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
     expect(opts).toMatchObject({
-      link: '/admin/customers/cust-1',
+      link: '/admin/customers?customerId=cust-1',
       metadata: expect.objectContaining({ dedupeKey: 'collections:cust-1:1:14', customerId: 'cust-1' }),
     });
   });

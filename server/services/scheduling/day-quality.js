@@ -1,6 +1,7 @@
 /** Planned route measurements. No writes, geocoding, traffic calls or invented
  * stop capacity. Gross calendar gaps are not automatically bookable time. */
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair,
+  startCoVisitChain, advanceCoVisit } = require('../route-reorder-window-fit');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 const { isHoldStop } = require('./travel-gap');
 
@@ -64,6 +65,153 @@ function doubleBookedPairs(stops) {
 function durationBasis(stops) {
   return stops.some(stop => plannedWorkMinutes(stop) != null)
     ? 'owner_planning_minutes_or_stored_window_or_estimate' : 'stored_window_or_estimate';
+}
+
+/**
+ * Opt-in extras for a callers that need physical-stop counting or a
+ * co-visit-aware on-site-minutes total (today: day-scorecard.js's
+ * per-day scorecard) without a second raw-stops read of their own.
+ *
+ * Same-property co-visit rows collapse into one physical stop; a
+ * service-visit group (visit_id) is also one physical stop no matter how
+ * many member rows it has (arrival-route's SUM-of-durations contract —
+ * doubleBookedPairs above collapses co-visits the same way for its own
+ * purpose), and so is a version-2 combined booking's allocation
+ * (allocationKey: one shared arrival anchor even with no visit_id — Codex
+ * P2), keyed on its own id rather than the coordinate-dependent co-visit
+ * rule, which fails closed when a member lacks usable coordinates. Walks the
+ * board order so a 3+ member co-visit chain (not just a pair) still
+ * collapses to one.
+ */
+function physicalStopCount(stops) {
+  const ordered = currentOrder(stops);
+  const seenGroups = new Set();
+  let count = 0;
+  let chainTail = null;
+  for (const stop of ordered) {
+    const group = stop.visit_id ? `visit:${stop.visit_id}` : allocationKey(stop);
+    if (group) {
+      if (!seenGroups.has(group)) { seenGroups.add(group); count += 1; }
+      chainTail = null;
+      continue;
+    }
+    if (chainTail && isCoVisitPair(effectiveWindowRange, chainTail, stop)) { chainTail = stop; continue; }
+    count += 1;
+    chainTail = stop;
+  }
+  return count;
+}
+
+/**
+ * On-site minutes, but a co-visit chain counts once instead of once per
+ * member — plain serviceMinutes (a flat sum of workDuration) double-counts
+ * a co-visited pair sharing a single fallback-duration promise (the same
+ * "phantom hour" isCoVisitPair's own comment describes), which
+ * simulateArrivalRoute never does. Reuses the SAME chain arithmetic the
+ * simulation itself calls (startCoVisitChain/advanceCoVisit in
+ * route-reorder-window-fit.js) rather than a second, driftable formula —
+ * only the duration bookkeeping, no clock/travel state, so it needs no
+ * RouteOptimizer or blocked-interval input.
+ *
+ * A version-2 allocation (allocationKey, no visit_id) is settled FIRST
+ * (Codex P2, round 8): it occupies the SUM of its members — visit-capacity's
+ * own occupiedRows contract, read from that helper rather than re-derived —
+ * so it counts once at that total and never enters a co-visit chain, which
+ * would keep only one member's fallback span (two 60-minute fallback
+ * members are 120, not 60).
+ */
+function allocationTotals(stops) {
+  const members = stops.filter(stop => !stop.visit_id && allocationKey(stop));
+  const totals = new Map();
+  occupiedRows(members).forEach((row, index) => {
+    const key = allocationKey(members[index]);
+    if (!totals.has(key)) totals.set(key, row.endMin - (row.startMin ?? 0));
+  });
+  return totals;
+}
+
+//
+// `sumAllocations: false` is the simulation's OWN duration model (it chains
+// allocation members like any co-visit) — used only to detect when the two
+// disagree (allocationModelMismatch below).
+function coVisitOnSiteMinutes(stops, { sumAllocations = true } = {}) {
+  const ordered = currentOrder(stops);
+  const allocations = sumAllocations ? allocationTotals(ordered) : new Map();
+  let total = [...allocations.values()].reduce((sum, minutes) => sum + minutes, 0);
+  let chain = null;
+  let chainTail = null;
+  for (const stop of ordered) {
+    if (sumAllocations && !stop.visit_id && allocationKey(stop)) {
+      if (chain) total += chain.coMerged;
+      chain = null;
+      chainTail = null;
+      continue;
+    }
+    if (chainTail && isCoVisitPair(effectiveWindowRange, chainTail, stop)) {
+      chain = advanceCoVisit(chain, stop);
+    } else {
+      if (chain) total += chain.coMerged;
+      chain = startCoVisitChain(stop);
+    }
+    chainTail = stop;
+  }
+  if (chain) total += chain.coMerged;
+  return total;
+}
+
+/**
+ * True when a version-2 allocation's summed-member duration contract
+ * (coVisitOnSiteMinutes) disagrees with the duration simulateArrivalRoute
+ * charged it (the plain co-visit chain) — Codex P2, round 9. The modeled
+ * return/lateness/waiting then rest on a different duration model than the
+ * on-site total, so a caller should report them as unknown rather than mix
+ * the two.
+ */
+function allocationModelMismatch(stops) {
+  return coVisitOnSiteMinutes(stops) !== coVisitOnSiteMinutes(stops, { sumAllocations: false });
+}
+
+/**
+ * Unallocated work (Codex P2, round 3): a flat per-stop sum double-counts a
+ * co-visited pair the SAME way plain serviceMinutes does — except unallocated
+ * stops can span several DIFFERENT technician_ids (an offboarding tech's
+ * stops, an unrelated unassigned stop, …), and a co-visit is only ever
+ * within one technician's own route. Group first — a null technician_id
+ * (genuinely unassigned) is its own group, never merged with a named one —
+ * then collapse each group before totaling, so two different technicians'
+ * stops can never chain into one "co-visit" just for sharing a clock slot.
+ */
+function groupedUnallocatedTotals(stops) {
+  const groups = new Map();
+  for (const stop of stops) {
+    const key = stop.technician_id || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(stop);
+  }
+  // Per-technician breakdown too (null = genuinely unassigned) so a caller
+  // that renders one of these technicians elsewhere can leave that group
+  // out of its footer instead of counting it twice (day-scorecard's today
+  // saved-plan rows — Codex P2, round 11). The raw stops ride along too
+  // (Codex P2, round 12) so that caller can partition a group against
+  // another stop-id set (a saved plan's own plannedStopIds) instead of
+  // excluding it wholesale — never itself part of the public response.
+  const byTechnician = [...groups].map(([key, groupStops]) => ({ technicianId: key || null,
+    visits: physicalStopCount(groupStops), serviceMinutes: coVisitOnSiteMinutes(groupStops), stops: groupStops }));
+  return { visits: byTechnician.reduce((sum, group) => sum + group.visits, 0),
+    minutes: byTechnician.reduce((sum, group) => sum + group.serviceMinutes, 0), byTechnician };
+}
+
+// One branch point, not three, at the getScheduleQualityMeasurements call
+// site: flag off is the original flat sum, byte for byte; flag on is the
+// per-technician-group collapse above.
+function unallocatedSummary(unallocated, includeStopExtras) {
+  if (!includeStopExtras) {
+    return { unallocatedVisits: unallocated.length,
+      unallocatedServiceMinutes: unallocated.reduce((sum, stop) => sum + workDuration(stop), 0) };
+  }
+  const totals = groupedUnallocatedTotals(unallocated);
+  return { unallocatedVisits: totals.visits, unallocatedServiceMinutes: totals.minutes,
+    unallocatedByTechnician: totals.byTechnician };
 }
 
 function measureDayQuality(RouteOptimizer, stops, {
@@ -136,10 +284,39 @@ function measureDayQuality(RouteOptimizer, stops, {
   };
 }
 
+// The one stop-select list this measurement reads. Exported so a read-only
+// consumer that needs the SAME columns for its own raw query (day-scorecard's
+// physical-stop collapsing, which needs premise + coords + visit_id +
+// customer_id for isCoVisitPair) can share it instead of drifting from it.
+function dayStopSelect(conn) {
+  const { guardedCoordSelects } = require('./day-stops');
+  return ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
+    'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.reservation_service_mix',
+    'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+    'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+    {
+      customer_address_line1: 'customers.address_line1',
+      customer_address_line2: 'customers.address_line2',
+      customer_city: 'customers.city',
+      customer_state: 'customers.state',
+      customer_zip: 'customers.zip',
+    },
+    'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
+    'scheduled_services.status', 'scheduled_services.reservation_expires_at',
+    'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',
+    // Planning-minute inputs (scheduling/planning-minutes.js) — without
+    // them workDuration's plannedWorkMinutes always reads an unnamed
+    // service and falls back to the legacy window/estimate rule, so
+    // these quality totals silently disagreed with the picker's real
+    // planned minutes under GATE_SCHEDULING_CAPACITY (Codex r1 P2).
+    'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
+    ...guardedCoordSelects(conn)];
+}
+
 async function getScheduleQualityMeasurements(input = {}, conn = require('../../models/db'), now = new Date()) {
   const { etDateString, parseETDateTime, addETDays, validCalendarDate } = require('../../utils/datetime-et');
   const { etDateDiffDays } = require('../recurring-appointment-seeder');
-  const { dayStopsQuery, guardedCoordSelects } = require('./day-stops');
+  const { dayStopsQuery } = require('./day-stops');
   const { applyAssignable } = require('../technician-eligibility');
   const { getBlackoutLayers } = require('./blackout-dates');
   const RouteOptimizer = require('../route-optimizer');
@@ -170,32 +347,13 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   for (let index = 0; index <= etDateDiffDays(from, to); index++) {
     const date = etDateString(addETDays(parseETDateTime(`${from}T12:00`), index));
     const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
-      select: ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
-        'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.reservation_service_mix',
-        'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
-        'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
-        {
-          customer_address_line1: 'customers.address_line1',
-          customer_address_line2: 'customers.address_line2',
-          customer_city: 'customers.city',
-          customer_state: 'customers.state',
-          customer_zip: 'customers.zip',
-        },
-        'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
-        'scheduled_services.status', 'scheduled_services.reservation_expires_at',
-        'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',
-        // Planning-minute inputs (scheduling/planning-minutes.js) — without
-        // them workDuration's plannedWorkMinutes always reads an unnamed
-        // service and falls back to the legacy window/estimate rule, so
-        // these quality totals silently disagreed with the picker's real
-        // planned minutes under GATE_SCHEDULING_CAPACITY (Codex r1 P2).
-        'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
-        ...guardedCoordSelects(conn)],
+      select: dayStopSelect(conn),
     }).whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())');
     const unallocated = stops.filter(stop => !techs.some(tech => tech.id === stop.technician_id));
     const closed = blackouts.dates.has(date);
     const byTech = techs.map(tech => {
-      const quality = measureDayQuality(RouteOptimizer, stops.filter(stop => stop.technician_id === tech.id), {
+      const techStops = stops.filter(stop => stop.technician_id === tech.id);
+      const quality = measureDayQuality(RouteOptimizer, techStops, {
         departureMinutes, targetReturnMinutes, breakMinutes, future: date > today,
       });
       if (unallocated.length || closed) {
@@ -213,10 +371,14 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
         quality.insertionStatus = candidateAnalysis.reason;
       }
       return { technicianId: tech.id, technician: tech.name, ...quality,
-        ...(candidateAnalysis ? { candidateAnalysis } : {}) };
+        ...(candidateAnalysis ? { candidateAnalysis } : {}),
+        // Opt-in only (day-scorecard.js) — every other caller's byTech shape
+        // is unchanged. Reuses techStops instead of re-filtering `stops`.
+        ...(input.includeStopExtras ? { physicalStops: physicalStopCount(techStops),
+          coVisitOnSiteMinutes: coVisitOnSiteMinutes(techStops),
+          allocationModelMismatch: allocationModelMismatch(techStops) } : {}) };
     });
-    days.push({ date, closed, unallocatedVisits: unallocated.length,
-      unallocatedServiceMinutes: unallocated.reduce((sum, stop) => sum + workDuration(stop), 0), byTech });
+    days.push({ date, closed, ...unallocatedSummary(unallocated, input.includeStopExtras), byTech });
   }
   const result = { range: { from, to }, units: 'minutes', days,
     basis: 'planned_schedule_not_actual_field_time',
@@ -226,4 +388,5 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
 }
 
 module.exports = {
-  QUALITY_EXCLUDED_STATUSES, measureDayQuality, getScheduleQualityMeasurements };
+  QUALITY_EXCLUDED_STATUSES, measureDayQuality, getScheduleQualityMeasurements, dayStopSelect,
+  physicalStopCount, coVisitOnSiteMinutes };

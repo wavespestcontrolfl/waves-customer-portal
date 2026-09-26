@@ -385,7 +385,7 @@ async function attachCardHoldPaymentMethod({ customerId, paymentMethodId, mode =
             'Card-hold payment method needs review — not on file at Stripe',
             'A saved-card hold could not be charged: its payment method is not attached to the customer at Stripe (either the original save never completed, or the customer removed the card). Nothing was charged and nothing was re-attached — review the hold and re-collect or release it.',
             {
-              link: `/admin/customers/${customerId}`,
+              link: `/admin/customers?customerId=${customerId}`,
               metadata: { customerId, source: 'card_hold_customerless_pm' },
               dedupeKey: `hold_pm_review:${customerId}:${paymentMethodId}`,
             },
@@ -720,7 +720,7 @@ async function alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invo
       'Stranded card hold matches this completion — review',
       `A completed one-time visit has no card hold of its own, but the same estimate holds a saved-card consent stranded on a cancelled/rescheduled visit (the cancel+recreate reschedule pattern). ${outcomeLine} To collect on the hold, verify the successor and run ops/agents/repoint-orphaned-card-hold.js (dry-run first).`,
       {
-        link: orphan.customerId ? `/admin/customers/${orphan.customerId}` : '/admin/dispatch',
+        link: orphan.customerId ? `/admin/customers?customerId=${orphan.customerId}` : '/admin/dispatch',
         metadata: { scheduledServiceId, invoiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId, source: 'reschedule_orphan_detection' },
         // One bell per hold/target pair (PR #3496 review P1): recap edits
         // and other replays re-run this detection; the admin dedupe (same
@@ -778,7 +778,7 @@ async function alertCompletionChargeNeedsReview({ hold, scheduledServiceId, invo
         ? `A completed one-time visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the amount accepted at booking ($${acceptedAmount.toFixed(2)}). The saved card was NOT charged — review and bill manually or adjust the invoice.`
         : 'A completed one-time visit has an invoice but no booking-time accepted amount frozen on its card hold to cap the saved-card charge against. The saved card was NOT charged — review and bill manually.',
       {
-        link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+        link: hold.customer_id ? `/admin/customers?customerId=${hold.customer_id}` : '/admin/dispatch',
         metadata: { scheduledServiceId, invoiceId, invoiceSubtotal: netInvoiceSubtotal, acceptedAmount },
       },
     );
@@ -990,7 +990,7 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
           'Two card consents on one visit — review before billing',
           'A completed one-time visit carries BOTH an estimate card hold and a /secure appointment-card consent. Neither rail auto-charged (fail closed) and the pay-link flow proceeded. Decide which consent owns the visit, then charge manually or via the ops repair script.',
           {
-            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            link: hold.customer_id ? `/admin/customers?customerId=${hold.customer_id}` : '/admin/dispatch',
             metadata: { scheduledServiceId, invoiceId, holdId: hold.id, source: 'competing_card_consent' },
             dedupeKey: `competing_consent:${hold.id}:${scheduledServiceId}`,
           },
@@ -1014,7 +1014,7 @@ async function alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId, r
       'billing',
       'One-time card-hold needs billing review',
       `A held card-hold visit completed via recap couldn't auto-charge (${reason}) — review + bill/release manually.`,
-      { link: customerId ? `/admin/customers/${customerId}` : '/admin/dispatch', metadata: { scheduledServiceId, reason } },
+      { link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/dispatch', metadata: { scheduledServiceId, reason } },
     );
   } catch (e) { logger.warn('[estimate-card-holds] recap card-hold review alert failed', { error: e.message }); }
 }
@@ -1213,7 +1213,7 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
           'Two card consents on one visit — review before billing',
           'A no-show/late-cancel fee was due, but the visit carries BOTH an estimate card hold and a /secure appointment-card row. Neither card was charged (fail closed). Decide which consent owns the visit, then bill the fee manually if it applies.',
           {
-            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            link: hold.customer_id ? `/admin/customers?customerId=${hold.customer_id}` : '/admin/dispatch',
             metadata: { scheduledServiceId, holdId: hold.id, source: 'competing_card_consent_fee' },
             dedupeKey: `competing_consent_fee:${hold.id}:${scheduledServiceId}`,
           },
@@ -1258,7 +1258,7 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
           ? 'A visit was marked no-show but its scheduled time could not be resolved — the saved-card fee was NOT charged and the hold was released. Bill manually if the fee applies.'
           : `A visit was marked no-show more than ${Math.round(NO_SHOW_FEE_MAX_AGE_MS / 3600000)} hours after its scheduled time — the saved-card fee was NOT charged and the hold was released. Bill manually if the fee applies.`,
         {
-          link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+          link: hold.customer_id ? `/admin/customers?customerId=${hold.customer_id}` : '/admin/dispatch',
           metadata: { scheduledServiceId, reason: staleReason },
         },
       );
@@ -1768,7 +1768,7 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
           'Late reschedule request on a card-hold visit — fee judgment kept for review',
           'A customer requested a reschedule INSIDE the disclosed late-cancel fee window on a visit with a saved-card hold. The hold was parked for the rebooked visit and no fee was charged; if the customer later cancels instead of rebooking, judge the late-cancel fee manually — the legacy request flow records no reschedule log for the sticky rule to read.',
           {
-            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            link: hold.customer_id ? `/admin/customers?customerId=${hold.customer_id}` : '/admin/dispatch',
             metadata: { scheduledServiceId, holdId: hold.id, source: 'reschedule_request_in_window' },
             dedupeKey: `resched_in_window:${hold.id}:${scheduledServiceId}`,
           },
@@ -1852,7 +1852,7 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
             'Late-cancel fee not charged — card removed',
             'A cancellation after an inside-window reschedule would have drawn the late-cancel fee, but the customer removed the saved card — treated as revocation; the hold was released. Bill manually if the fee applies.',
             {
-              link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+              link: hold.customer_id ? `/admin/customers?customerId=${hold.customer_id}` : '/admin/dispatch',
               metadata: { scheduledServiceId, reason: 'sticky_payment_method_revoked' },
             },
           );
@@ -2446,7 +2446,7 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
       `${first} — ${feeText} ${feeLabel.toLowerCase()} on a missed/late-cancelled appointment.`,
       // bell: false — a SUCCESSFUL fee charge is a billing FYI, not a money
       // failure; silenced under GATE_ADMIN_BELL_POLICY.
-      { link: `/admin/customers/${customerId}`, bell: false, metadata: { invoiceId: invoice.id, reason } },
+      { link: `/admin/invoices?invoice=${invoice.id}`, bell: false, metadata: { invoiceId: invoice.id, reason } },
     );
   } catch (e) { logger.warn('[estimate-card-holds] no-show fee admin notify failed', { error: e.message }); }
 }

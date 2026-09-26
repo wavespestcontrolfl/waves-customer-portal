@@ -88,6 +88,20 @@ describe('llmClassify — unknown directories', () => {
     const c = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: 49 }));
     expect(c.detected_price_usd).toBe(49);
   });
+  test('P3: a price that overflows numeric(8,2) (>= 1e6) fails safe (Codex on #4884: would abort the whole run at the DB write)', async () => {
+    const c = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: 1000000 }));
+    expect(c._source).toBe('fallback');
+    expect(decide(c).automation_policy).toBe('needs_account');
+  });
+  test('P3: a negative detected price fails safe', async () => {
+    const c = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: -5 }));
+    expect(c._source).toBe('fallback');
+  });
+  test('P3: a price just under the numeric(8,2) ceiling is kept as-is', async () => {
+    const c = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: 999999.99 }));
+    expect(c.detected_price_usd).toBe(999999.99);
+    expect(c._source).toBe('llm');
+  });
   test('P2: a non-numeric price ("" or string) → fails safe (no fake $0)', async () => {
     const empty = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: '' }));
     expect(empty._source).toBe('fallback');

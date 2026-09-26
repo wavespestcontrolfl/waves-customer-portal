@@ -169,6 +169,24 @@ describe('schedule-send atomic claim', () => {
     });
   });
 
+  test('409s scheduling a stored price built on a guessed home size — the cron would replay it (legacy autofill hold)', async () => {
+    const builder = makeBuilder(estimateRow({ estimate_data: {
+      inputs: { svcPest: true, homeSqFt: '', lotSqFt: '9000' },
+      engineRequest: { profile: {} },
+      result: { recurring: { services: [{ service: 'pest_control', mo: 50, footprintWasDefaulted: true }] }, oneTime: { items: [] } },
+    } }));
+    db.mockImplementation(() => builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sendMethod: 'both', scheduledAt: FUTURE }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/saved before a pricing fix/);
+      expect(builder.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('schedules through the claim filters when the row is claimable', async () => {
     const builder = makeBuilder(estimateRow(), { updateResult: 1 });
     db.mockImplementation(() => builder);

@@ -115,11 +115,11 @@ describe('service report failure alerts', () => {
 
     const builtDelivery = delivery.build({
       customerName: 'Van Lee', serviceLabel: 'Lawn Care · 2026-05-16', attempts: 5,
-      errorMessage: 'SendGrid 550', link: '/admin/customers/cust-1',
+      errorMessage: 'SendGrid 550', link: '/admin/customers?customerId=cust-1',
     });
     expect(builtDelivery.title).toBeTruthy();
     expect(builtDelivery.body).toContain('Van Lee');
-    expect(builtDelivery.link).toBe('/admin/customers/cust-1');
+    expect(builtDelivery.link).toBe('/admin/customers?customerId=cust-1');
 
     const builtPdf = pdf.build({ customerName: 'Ana Diaz', attempts: 3 });
     expect(builtPdf.title).toBeTruthy();
@@ -223,11 +223,11 @@ describe('service report failure alerts', () => {
     expect(['urgent', 'high', 'normal', 'low']).toContain(mint.priority);
     expect(['urgent', 'high', 'normal', 'low']).toContain(sms.priority);
 
-    const builtMint = mint.build({ customerName: 'Rae Kim', serviceLabel: 'Lawn Care · 2026-09-01', errorMessage: 'deadlock', link: '/admin/customers/cust-3' });
+    const builtMint = mint.build({ customerName: 'Rae Kim', serviceLabel: 'Lawn Care · 2026-09-01', errorMessage: 'deadlock', link: '/admin/customers?customerId=cust-3' });
     expect(builtMint.title).toBeTruthy();
     expect(builtMint.body).toContain('Rae Kim');
     expect(builtMint.body).toContain('deadlock');
-    expect(builtMint.link).toBe('/admin/customers/cust-3');
+    expect(builtMint.link).toBe('/admin/customers?customerId=cust-3');
 
     const builtSms = sms.build({ customerName: 'Ben Ortiz', smsType: 'service_report_v1', errorClass: 'TWILIO_30007', errorMessage: 'Carrier violation' });
     expect(builtSms.title).toBeTruthy();

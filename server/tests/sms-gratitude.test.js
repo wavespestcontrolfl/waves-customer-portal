@@ -3,6 +3,14 @@ const {
   gratitudeTimingReason, QUIET_WINDOW_MS, MAX_REPLY_AGE_MS,
 } = require('../services/sms-gratitude');
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+const { _SWAPS: SMS_COPY_AUDIT_R0 } = require('../models/migrations/20260926120000_customer_copy_audit_sms');
+const { _SWAPS: SMS_COPY_AUDIT_R3 } = require('../models/migrations/20260926120400_customer_copy_audit_codex_r3');
+// Original body -> the body customers finally get, after later rounds'
+// superseding swaps.
+const SMS_COPY_AUDIT_SWAPS = SMS_COPY_AUDIT_R0.map(([key, before, after]) => {
+  const later = SMS_COPY_AUDIT_R3.find(([k, from]) => k === key && from === after);
+  return [key, before, later ? later[2] : after];
+});
 
 const received = '2030-01-10T15:00:00.000Z';
 const inbound = { id: 'in-1', direction: 'inbound', body: 'Thank you Adam', createdAt: received, mediaCount: 0 };
@@ -399,4 +407,62 @@ describe('future-only activation and bounded delay', () => {
   test.each([null, '', 'not-a-date'])('invalid activation cannot become epoch: %s', activatedAt => {
     expect(gratitudeTimingReason({ ...base, activatedAt })).toBe('invalid_timing');
   });
+});
+
+describe('customer copy audit SMS drift (2026-09-26, migration 20260926120000)', () => {
+  // One sample value per placeholder used across the whole swap set, shared
+  // between the before/after render of each entry so only the copy itself
+  // differs.
+  const LINK = 'https://portal.wavespestcontrol.com/l/abcdefghjk';
+  const SAMPLE = {
+    amount: '86.40', amount_text: ' for $86.40',
+    appointment_line: 'Reply here with any questions.',
+    billing_url: LINK, booking_url: LINK,
+    card_hold_policy_line: ' Your card on file will be charged after the visit.',
+    card_line: ' on your card ending 4242', category: 'general',
+    charge_note: ' on your card ending 4242',
+    coverage_summary: 'your quarterly pest control visits',
+    date: 'Oct 3', day: 'Friday', deposit_amount: '150', effective_date: 'Nov 1',
+    estimate_url: LINK, eta_line: 'Your tech is about 20 minutes away.',
+    first_name: 'Casey', first_visit_clause: ' Your first visit is Oct 10.',
+    first_visit_date: 'Oct 10', invoice_number: 'INV-1001',
+    invoice_title: 'Quarterly Pest Control', new_expiry: 'Oct 20',
+    pay_link: LINK, pay_url: LINK, portal_url: LINK, price_change_url: LINK,
+    project_type: 'Termite', receipt_line: ` Receipt: ${LINK}`, receipt_url: LINK,
+    reference: 'REF-100', remaining: 'Your lawn care visits',
+    renewal_label: 'termite bond', report_url: LINK,
+    reschedule_line: 'Need to reschedule? Reply here.',
+    response_time: '1 business day', resume_date: 'Oct 15',
+    scope: 'all upcoming visits', service: 'Pest Control', service_date: 'Oct 3',
+    service_date_clause: ' for your Oct 3 visit', service_label: 'Quarterly Pest Control',
+    service_timing: 'tomorrow', service_type: 'Quarterly Pest Control',
+    start_date: 'Oct 10', summary: 'We fixed the ant issue.', tech_name: 'Adam',
+    time: '9 AM', track_clause: ` Track: ${LINK}`, urgency: 'is due soon',
+    visit_date: 'Oct 3', when: 'this morning', window: '8-10 AM',
+    window_text: ' between 8 and 10 AM',
+  };
+  const render = (tpl) => tpl.replace(/\{(\w+)\}/g, (_, key) => {
+    if (!(key in SAMPLE)) throw new Error(`sms-gratitude drift test: no sample value for {${key}}`);
+    return SAMPLE[key];
+  });
+  // A neutral messageType that is NOT in AUTOMATED_CLOSURE_TYPES, and not
+  // hand-typed, so the verdict comes only from the rendered body text —
+  // never from a template-key or manual-reply carve-out.
+  const asPreviousOutbound = (body) => ({
+    id: 'out-1', direction: 'outbound', createdAt: '2030-01-10T14:59:00.000Z',
+    mediaCount: 0, messageType: 'copy_audit_probe', humanAuthored: false, body,
+  });
+  const thanksInbound = {
+    id: 'in-1', direction: 'inbound', body: 'Thanks!', createdAt: '2030-01-10T15:00:00.000Z', mediaCount: 0,
+  };
+  const reasonFor = (body) => evaluateGratitudeContext({
+    inbound: thanksInbound, history: [asPreviousOutbound(body)], firstName: 'Casey', contextComplete: true,
+  }).reason;
+
+  test.each(SMS_COPY_AUDIT_SWAPS.map(([key, before, after]) => [key, before, after]))(
+    '%s: the rewritten body classifies identically to the pre-audit body',
+    (_key, before, after) => {
+      expect(reasonFor(render(after))).toBe(reasonFor(render(before)));
+    },
+  );
 });

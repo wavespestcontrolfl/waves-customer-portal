@@ -233,11 +233,14 @@ describe('billing channel email adapter', () => {
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
-  test('reports a context preparation failure as retryable', async () => {
+  test('reports a context preparation failure as a schedulable hold', async () => {
     mockLoadBillingEmailContext.mockRejectedValue(new Error('connection reset'));
-    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, blocked: true, code: 'BILLING_EMAIL_PREPARATION_FAILED', retryable: true,
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'BILLING_EMAIL_PREPARATION_FAILED',
     });
+    expect(Date.parse(outcome.nextAllowedAt)).toBeGreaterThan(Date.now());
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
@@ -278,8 +281,13 @@ describe('billing channel email adapter', () => {
   ])('classifies %s from the template library as not sent', async (_label, result, code, retryable) => {
     mockSendTemplate.mockResolvedValue(result);
     const outcome = await sendBillingChannelEmail(input());
-    expect(outcome).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code, reason: result.reason });
+    expect(outcome).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: result.reason });
     expect(outcome.retryable === true).toBe(retryable);
+    // A retryable pre-handoff refusal is a schedulable hold that keeps its cause.
+    expect(outcome).toMatchObject(retryable
+      ? { code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: code, deferred: true }
+      : { code });
+    expect(outcome.deferred === true).toBe(retryable);
   });
 
   test('redacts email addresses out of a provider failure reason', async () => {
@@ -291,6 +299,62 @@ describe('billing channel email adapter', () => {
       sent: false, deliveryOutcome: 'uncertain', reason: 'contact [redacted] failed',
     });
     expect(mockRedactEmailAddresses).toHaveBeenCalledWith('delivery to casey@example.com failed');
+  });
+
+  test('preserves a canonical held provider outcome without exposing its stored row', async () => {
+    mockRedactEmailAddresses.mockReturnValue('provider retry held for [redacted]');
+    const err = Object.assign(new Error('provider retry held for casey@example.com'), {
+      code: 'EMAIL_PROVIDER_RETRY_HELD',
+      providerOutcome: {
+        sent: false,
+        held: true,
+        retryable: true,
+        providerAttempted: false,
+        deliveryOutcome: 'uncertain',
+        reason: 'provider retry held for casey@example.com',
+        emailMessageId: 'message-private',
+        message: { id: 'message-private', recipient_email_snapshot: 'casey@example.com' },
+      },
+    });
+    mockSendTemplate.mockRejectedValue(err);
+
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({
+      sent: false,
+      provider: 'email',
+      providerMessageId: null,
+      deliveryOutcome: 'uncertain',
+      code: 'EMAIL_PROVIDER_RETRY_HELD',
+      reason: 'provider retry held for [redacted]',
+      retryable: true,
+      held: true,
+      providerAttempted: false,
+    });
+    expect(outcome).not.toHaveProperty('message');
+    expect(outcome).not.toHaveProperty('emailMessageId');
+  });
+
+  test('preserves canonical acceptance evidence carried by a throw', async () => {
+    mockSendTemplate.mockRejectedValue(Object.assign(new Error('audit write failed'), {
+      providerOutcome: {
+        sent: true,
+        deliveryOutcome: 'accepted',
+        providerMessageId: 'sg-accepted',
+        deduped: true,
+        message: { id: 'message-private' },
+      },
+    }));
+
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({
+      sent: true,
+      provider: 'email',
+      providerMessageId: 'sg-accepted',
+      deliveryOutcome: 'accepted',
+      blocked: false,
+      deduped: true,
+    });
+    expect(outcome).not.toHaveProperty('message');
   });
 
   test.each([false, true])('reports uncertainty only after provider handoff started: %s', async (afterHandoff) => {
@@ -309,6 +373,24 @@ describe('billing channel email adapter', () => {
     });
   });
 
+  test('never turns a held outcome into a producer replay hold', async () => {
+    mockSendTemplate.mockRejectedValue(Object.assign(new Error('provider retry owns this key'), {
+      code: 'EMAIL_PROVIDER_RETRY_OWNED',
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent', blocked: true, retryable: true, held: true },
+    }));
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({ sent: false, blocked: true, held: true, code: 'EMAIL_PROVIDER_RETRY_OWNED' });
+    expect(outcome.deferred).toBeUndefined();
+  });
+
+  test('holds a template-library throw before any delivery row for replay', async () => {
+    mockSendTemplate.mockRejectedValue(new Error('template lookup failed'));
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PREPARATION_ERROR',
+    });
+  });
+
   test('classifies a pre-handoff provider failure as not sent', async () => {
     mockDispatchUnderBillingEmailAuthority.mockRejectedValue(new Error('pre-handoff failure'));
     mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {}));
@@ -317,12 +399,24 @@ describe('billing channel email adapter', () => {
     });
   });
 
-  test('classifies EMAIL_SEND_IN_PROGRESS as not sent even after handoff started', async () => {
-    mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {
-      throw Object.assign(new Error('a send is already in progress for this key'), { code: 'EMAIL_SEND_IN_PROGRESS' });
-    }));
+  test.each([false, true])('holds EMAIL_SEND_IN_PROGRESS as uncertain (handoff started=%s)', async (afterHandoff) => {
+    const collision = Object.assign(new Error('a send is already in progress for this key'), {
+      code: 'EMAIL_SEND_IN_PROGRESS',
+      retryable: true,
+    });
+    if (afterHandoff) {
+      mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => { throw collision; }));
+    } else {
+      // Real sendTemplate collision shape: thrown before withProviderHandoff.
+      mockSendTemplate.mockRejectedValue(collision);
+    }
     await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_SEND_IN_PROGRESS',
+      sent: false,
+      deliveryOutcome: 'uncertain',
+      retryable: true,
+      held: true,
+      providerAttempted: false,
+      code: 'EMAIL_SEND_IN_PROGRESS',
     });
   });
 
