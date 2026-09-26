@@ -2207,7 +2207,9 @@ async function replayDepositReceiptAppOnly(meta) {
     const built = await buildDepositReceiptSmsSend({
       estimate,
       customer,
-      phone: null,
+      // The customer may have added a phone while this receipt was held; a
+      // selected Text leg sends to it, and App/Email never read it.
+      phone: String(customer.phone || '').trim() || null,
       amountDollars: Number(ledgerRow.amount || 0),
       cardSurcharge: Number(ledgerRow.card_surcharge || 0),
       paymentIntentId: ledgerRow.stripe_payment_intent_id,

@@ -415,6 +415,27 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
+  it('the App-only receipt replay sends a selected Text leg to a phone added while held', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const { replayDepositReceiptAppOnly } = require('../services/estimate-deposits');
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockClear();
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', customer_id: 'cust-1', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam' },
+      initialDepositRow: { status: 'received', amount: 100, card_surcharge: 0, stripe_payment_intent_id: 'pi_1' },
+    });
+    mockDbHandler = handler;
+
+    await replayDepositReceiptAppOnly({ estimate_id: 'est-1', customer_id: 'cust-1', payment_intent_id: 'pi_1' });
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(String(sendCustomerMessage.mock.calls[0][0].to).replace(/\D/g, '')).toMatch(/9415550100$/);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
   it('requeues a quiet-held deposit receipt onto the scheduled-SMS rail', async () => {
     forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
