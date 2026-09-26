@@ -425,7 +425,7 @@ const ALLOWLIST = [
   },
   {
     file: 'services/sms-operational-actions.js',
-    snippet: 'const source = await scheduledSourceMessage(trx, await trx(\'sms_log\').where({ id: message.id }).forUpdate().first());',
+    snippet: 'const source = customer && await scheduledSourceMessage(trx, await trx(\'sms_log\').where({ id: message.id }).forUpdate().first());',
     reason: 'single-row lookup by id — not a list read.',
   },
   {

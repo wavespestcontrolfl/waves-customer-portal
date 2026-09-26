@@ -414,7 +414,8 @@ describe('SMS operational evidence and ownership', () => {
     });
 
   test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate'],
-    ['Please call me at one of these numbers', 'callback']])(
+    ['Please call me at one of these numbers', 'callback'], ['Please call me at 3 different numbers', 'callback'],
+    ['Please send the estimate to me at 2 addresses', 'send_estimate']])(
     'a number that is not a clock hour stays undated without review: %s', (body, kind) => {
       const message = source(body);
       const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
