@@ -167,6 +167,14 @@ const TREATMENT_SYMPTOM_RE = new RegExp(`\\b(?:vomit\\w*|throw\\w*\\s+up|dizz\\w
 const NEGATED_EXPOSURE_RE = /\b(?:did\s+not|didn'?t|never|has\s+not|hasn'?t|have\s+not|haven'?t|wasn'?t|was\s+not|weren'?t|not)\s+(?:\w+\s+)?(?:swallow\w*|ingest\w*|eat|ate|eaten|drink|drank|drunk|lick\w*|chew\w*|touch\w*|inhal\w*|consum\w*|tast\w*|get\s+into|got\s+into|exposed)\b|\bno\s+(?:se\s+|le\s+|lo\s+)?(?:trag[a-zñáéíóú]*|comi[oó]|ingiri[oó]|bebi[oó]|toc[oó]|lami[oó]|inhal[oó]|prob[oó])(?![a-zñáéíóú])/gi;
 
 // Denied symptoms ("is not vomiting", "has no rash") are removed first.
+// "My dog didn't eat the bait, but he licked it" — after the denial is
+// stripped, an affirmed exposure on a pronoun still counts when the turn
+// names a product.
+const AFFIRMED_PRONOUN_EXPOSURE_RE = /\b(?:but|and|though|although|yet)\s+(?:he|she|they|it|i|we|my\s+\w+|the\s+\w+)\s+(?:\w+\s+){0,2}?(?:ate|eaten|drank|licked|chewed|swallowed|ingested|inhaled|touched|tasted|consumed|sniffed|got\s+into)\s+(?:it|them|some|a\s+little|a\s+bit|part\s+of\s+it)\b|\bpero\s+(?:s[ií]\s+)?(?:lo|la|los|las)\s+(?:lami[oó]|prob[oó]|toc[oó]|mordi[oó]|mastic[oó]|trag[oó]|comi[oó]|inhal[oó])(?![a-zñáéíóú])/i;
+function affirmedAfterDenial(turn) {
+  return AFFIRMED_PRONOUN_EXPOSURE_RE.test(turn) && new RegExp(`\\b${PRODUCT_NOUN}(?![a-zñáéíóú])`, 'i').test(turn);
+}
+
 function treatmentSymptom(turn) {
   const u = turn.replace(NEGATED_REACTION_RE, ' ');
   return TREATMENT_SYMPTOM_RE.test(u) || TREATMENT_FIRST_SYMPTOM_RE.test(u) || CAUSED_SYMPTOM_RE.test(u);
@@ -176,7 +184,7 @@ function looksLikeEmergency(text) {
   const t = String(text || '').replace(NEGATED_ALLERGY_RE, ' ').replace(NEGATED_NEED_RE, ' ').replace(NEGATED_EXPOSURE_RE, ' ');
   // Exposure shapes are judged one turn (line) at a time — "I ate lunch" in
   // history must not pair with "Which bug spray do you use?" now.
-  const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn) || treatmentSymptom(turn));
+  const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn) || treatmentSymptom(turn) || affirmedAfterDenial(turn));
   return EMERGENCY_RE.test(t) || exposure
     || (BITE_STING_RE.test(t) && REACTION_RE.test(t.replace(NEGATED_REACTION_RE, ' ')));
 }
@@ -359,7 +367,7 @@ const NO_WORRY_RE = new RegExp(`\\b(?:(?:nothing|no\\s+need|no\\s+reason)\\s+to\
 const DO_HARM_RE = /\b(?:won'?t|will\s+not|wouldn'?t|doesn'?t|does\s+not|don'?t|do\s+not|can'?t|cannot|never)\s+do\s+(?:\w+\s+){0,3}?(?:any\s+|no\s+)?(?:harm|damage)\b/i;
 // Indefinite negatives: "nothing harmful about this", "in no way harmful",
 // "nada peligroso".
-const INDEFINITE_NO_HARM_RE = /\bnothing\s+(?:\w+\s+){0,4}?(?:harmful|dangerous|toxic|unsafe|risky|hazardous|poses?\s+(?:a\s+|any\s+)?(?:risk|danger|threat|hazard))\b|\bin\s+no\s+way\s+(?:\w+\s+)?(?:harmful|dangerous|toxic|unsafe|a\s+(?:risk|danger|threat))\b|\bnot\s+(?:at\s+all|in\s+any\s+way)\s+(?:harmful|dangerous|toxic|unsafe)\b|\bnada\s+(?:\S+\s+){0,3}?(?:peligros\w*|dañin\w*|t[oó]xic\w*|nociv\w*)|\bde\s+ninguna\s+(?:manera|forma)\s+(?:es\s+)?(?:peligros|dañin|t[oó]xic|nociv)\w*/i;
+const INDEFINITE_NO_HARM_RE = /\bno\s+(?:chance|possibility|way|risk|danger)\s+(?:at\s+all\s+)?(?:that\s+)?(?:\w+\s+){0,5}?(?:will|would|could|can|might|to)\s+(?:ever\s+)?(?:harm|hurt|injure|affect|sicken|poison|bother|damage|kill|irritate)\b|\bno\s+hay\s+(?:ninguna\s+)?(?:posibilidad|forma|manera|riesgo)\s+de\s+que\s+(?:\S+\s+){0,5}?(?:dañe|lastime|afecte|enferme|envenene|haga\s+daño)(?![a-zñáéíóú])|\bnothing\s+(?:\w+\s+){0,4}?(?:harmful|dangerous|toxic|unsafe|risky|hazardous|poses?\s+(?:a\s+|any\s+)?(?:risk|danger|threat|hazard))\b|\bin\s+no\s+way\s+(?:\w+\s+)?(?:harmful|dangerous|toxic|unsafe|a\s+(?:risk|danger|threat))\b|\bnot\s+(?:at\s+all|in\s+any\s+way)\s+(?:harmful|dangerous|toxic|unsafe)\b|\bnada\s+(?:\S+\s+){0,3}?(?:peligros\w*|dañin\w*|t[oó]xic\w*|nociv\w*)|\bde\s+ninguna\s+(?:manera|forma)\s+(?:es\s+)?(?:peligros|dañin|t[oó]xic|nociv)\w*/i;
 function safetyClaimIn(text) {
   return POSITIVE_SAFETY_RE.test(text) || NEGATED_ACTION_ON_SUBJECT_RE.test(text) || NOMINAL_NO_IMPACT_RE.test(text) || FINE_AROUND_SUBJECT_RE.test(text) || SUBJECT_FIRST_NO_HARM_RE.test(text) || NO_WORRY_RE.test(text) || DO_HARM_RE.test(text) || INDEFINITE_NO_HARM_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
 }
@@ -584,7 +592,13 @@ function emergencyContextOf(contextText, activeMessage) {
   return FOLLOW_UP_RE.test(foldTypography(activeMessage)) ? contextText : activeMessage;
 }
 
-function emergencyGuidance(result, contextText = '') {
+// `trustIntent` false (the claim scrub): the model's "emergency" label alone
+// is not evidence — a routine safety answer it mislabels gets label copy.
+function productExposureIn(context) {
+  return INGESTION_RE.test(context) || EAT_EXPOSURE_RE.test(context) || CONTACT_EXPOSURE_RE.test(context);
+}
+
+function emergencyGuidance(result, contextText = '', { trustIntent = true } = {}) {
   // A denied need for care ("does not require medical care") is not a direction.
   const folded = foldTypography(result.reply).replace(NEGATED_CARE_RE, ' ');
   const context = foldTypography(contextText);
@@ -603,10 +617,11 @@ function emergencyGuidance(result, contextText = '') {
   const petClause = (clauses.length ? clauses : (visitorEmergency ? [context] : [])).some((c) => PET_PATIENT_RE.test(c));
   const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || (CLINICIAN_RE.test(folded) && URGENCY_RE.test(folded)) || visitorEmergency;
   const vet = VET_DIRECTION_RE.test(folded) || petClause;
-  if (!(result.intent === 'emergency' || human || vet)) return null;
-  const ingestion = POISON_MENTION_RE.test(folded) || INGESTION_RE.test(context) || EAT_EXPOSURE_RE.test(context) || CONTACT_EXPOSURE_RE.test(context);
+  const intentEmergency = trustIntent && result.intent === 'emergency';
+  if (!(intentEmergency || human || vet)) return null;
+  const ingestion = POISON_MENTION_RE.test(folded) || productExposureIn(context);
   const parts = [];
-  if (human || (result.intent === 'emergency' && !vet)) {
+  if (human || (intentEmergency && !vet)) {
     parts.push(EMERGENCY_FALLBACK_RESULT.reply + (ingestion ? POISON_CONTROL_LINE : ''));
   }
   if (vet) {
@@ -631,7 +646,7 @@ function scrubUnsafeClaims(result, contextText = '', activeMessage = contextText
   // redirect is not a re-entry time.
   if (REVIEWED_REPLIES.has(result.reply)) return result;
   if (!intakeSafetyClaimSupplement(result.reply, contextText, activeMessage)) return result;
-  const emergency = emergencyGuidance(result, emergencyContextOf(contextText, activeMessage));
+  const emergency = emergencyGuidance(result, emergencyContextOf(contextText, activeMessage), { trustIntent: false });
   if (emergency) return emergency;
   // The reply's own language, falling back to the visitor's ACTIVE message for
   // short replies ("Sí, es seguro.") — never an earlier turn, so a visitor

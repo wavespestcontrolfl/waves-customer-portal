@@ -241,6 +241,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['There is nothing harmful about this pesticide.', ''],
     ['Nothing about this spray poses a risk to pets.', ''],
     ['The product is in no way harmful to children.', ''],
+    ['There is no chance this treatment will hurt your kids.', ''],
+    ['There is no possibility that this pesticide could harm pets.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -452,6 +454,12 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['No.', 'Can the spray injure children?'],
   ])('a terse denial of a kill/damage/injure question is replaced: %s', (reply, active) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply).toMatch(/label directions/);
+  });
+
+  test('an "emergency" label alone does not turn a routine safety answer into the 911 script', () => {
+    const out = scrubUnsafeClaims({ reply: 'This treatment is completely safe for your pets.', intent: 'emergency', service_keys: [], ready_for_quote: false }, 'Is it safe for my pets?');
+    expect(out.reply).toMatch(/label directions/);
+    expect(out.reply).not.toContain('911');
   });
 
   test('a treatment-linked pet symptom gets the veterinary script', () => {
@@ -1740,6 +1748,8 @@ describe('looksLikeEmergency', () => {
     'The pesticide made my child vomit',
     'The spray made my son dizzy',
     'The treatment caused my child to cough',
+    "My dog didn't eat the bait, but he licked it",
+    "My dog didn't eat the bait, but he inhaled it",
     'my dog licked the roach spray',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
