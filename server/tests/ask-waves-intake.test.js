@@ -264,6 +264,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Your pets will be okay.', ''],
     ['Your children should be all right.', ''],
     ['Your dog is going to be fine.', ''],
+    ['This treatment is friendly to pets and children.', ''],
     ['Sus mascotas van a estar bien.', ''],
     ['Tu perro va a estar bien.', ''],
     ['This treatment is benign for pets.', ''],
@@ -317,6 +318,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['At 4 PM.', 'When can my baby crawl on the floor again?'],
     ['Two hours.', 'When can we touch the countertops again?'],
     ['Two hours.', 'How long until it is safe?'],
+    ['30 minutes.', 'When can I let my toddler crawl?'],
     ['The technician recommends no entry for 30 minutes.', 'What precautions after the treatment?'],
     ['The visit has a 30-minute no-entry window.', 'What precautions after the treatment?'],
     ['The visit requires a 30-minute exclusion period.', 'What precautions after the treatment?'],
@@ -604,6 +606,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
 
   test.each(['My gecko ate pesticide', 'My snake swallowed pesticide', 'My fish were exposed to pesticide'])('a reptile/fish exposure gets the veterinary script: %s', (context) => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test('a pronoun-led emergency takes its pet antecedent from an earlier turn', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My dog got into the treated yard\nHe ate pesticide');
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
   });
 
@@ -1971,6 +1978,11 @@ describe('looksLikeEmergency', () => {
     'My baby sucked on rat poison',
     'The ambulance took my husband to the hospital',
     'Paramedics took him to the hospital',
+    'My child drank from a bottle of pesticide',
+    'My son inhaled fumes from pesticide',
+    'My dog licked residue from the pesticide',
+    'Mi hijo tiene convulsiones después del pesticida',
+    'Mi hijo está convulsionando después del tratamiento',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2054,6 +2066,7 @@ describe('looksLikeEmergency', () => {
     'Are the rats poisoned by the bait yet?',
     'My child ate dinner after the lawn treatment',
     'My dog ate dinner next to the bait station',
+    "Pesticide didn't get in my eyes",
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
