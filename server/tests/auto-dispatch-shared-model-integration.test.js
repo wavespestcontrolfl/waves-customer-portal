@@ -7,6 +7,15 @@
 // drive/cluster numbers.
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The SLOT_TAKEN occupancy pre-filter now calls this canonical reader
+// directly (Codex pre-push P1) rather than going through ctx.db — mocked
+// to report no occupancy conflicts so these tests exercise the SCORE
+// comparison, not occupancy; windowsOverlap stays real (pure, harmless
+// against an empty occupancy list either way).
+jest.mock('../services/scheduling/occupancy', () => ({
+  listOccupiedWindows: jest.fn().mockResolvedValue([]),
+  windowsOverlap: jest.requireActual('../services/scheduling/occupancy').windowsOverlap,
+}));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { _internals: { evaluatePlacement } } = require('../services/auto-dispatch');
@@ -44,7 +53,7 @@ function sequencedDb(candidateStops, currentStops) {
     call += 1;
     const n = call;
     const c = {};
-    ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+    ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
       .forEach((m) => { c[m] = () => c; });
     c.select = async () => {
       if (n === 1) return [];

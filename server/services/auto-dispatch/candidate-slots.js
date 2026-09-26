@@ -27,18 +27,28 @@
  * with the ONE shared model (route-model.js) instead of the current
  * placement's own two-neighbor haversine calc and find-time's independent
  * simulation, and (b) drops any candidate the rebooker's writer would refuse
- * with SLOT_TAKEN — the SAME window-overlap predicate the writer's hard
- * occupancy probe applies (overlap-predicate.js), so the finder only ever
- * offers a slot the move writer will actually accept. Gate off: byte-for-byte
- * today's behavior (find-time's own numbers, no overlap pre-filter).
+ * with SLOT_TAKEN — by calling the SAME canonical, tech-blind occupancy
+ * reader the writer's probe uses (scheduling/occupancy.js listOccupiedWindows,
+ * batched one read per date), not a re-derivation of its WHERE — so the
+ * finder only ever offers a slot the move writer will actually accept. Gate
+ * off: byte-for-byte today's behavior (find-time's own numbers, no overlap
+ * pre-filter).
  */
 const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
-const { candidateHasOverlap, isActiveRouteStop } = require('./overlap-predicate');
+const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare, stopPlanningMinutes } = require('./route-model');
+const { listOccupiedWindows, windowsOverlap } = require('../scheduling/occupancy');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+
+// The SAME excludeStatuses SmartRebooker.reschedule's own tech-blind
+// occupancy probe passes to findConflictingVisits (rebooker.js
+// probeMoveConflicts) — a finished morning visit must not block an
+// afternoon move, on top of the non-route-stop statuses every gate shares.
+const OCCUPANCY_EXCLUDE_STATUSES = [...NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -104,36 +114,31 @@ function rowToDayStop(r) {
   };
 }
 
-// One technician-day's OTHER stops (never one of `excludeIds`), shaped for
-// the shared model and filtered to ACTIVE stops only (overlap-predicate.js's
+// One technician's OWN day's OTHER stops (never one of `excludeIds`) — the
+// ROUTE-SCORING input (routeCost/clusterShare), kept tech-scoped
+// deliberately (Codex pre-push P1): the SLOT_TAKEN occupancy pre-filter is a
+// SEPARATE, tech-blind concern now answered by the canonical reader
+// (loadOccupancyForDate below), never re-derived here. Shaped for the
+// shared model and filtered to ACTIVE stops only (overlap-predicate.js's
 // isActiveRouteStop — the SAME status/expiry rule the writer's occupancy
 // probe applies): cancelled/completed/skipped/rescheduled are excluded at
-// the query level, and a no_show row or an expired estimate-slot hold
-// (fetched here, since the query alone can't see reservation_expires_at
-// expiring) is filtered out in memory. Without this, a day whose only
-// "stops" are expired holds or no-shows was invisible to the overlap check
-// but still counted as real stops for route-cost/cluster scoring — near-zero
-// detour and full cluster credit for a day that is actually empty (Codex
-// pre-push P1).
-//
-// technician_id = `technicianId` OR NULL (Codex pre-push P1): the writer's
-// own move-conflict probe (rebooker.js probeMoveConflicts -> scheduling/
-// occupancy.js findConflictingVisits) is occupancy-blind to which row an
-// unassigned committed visit carries — "Waves runs exactly ONE active field
-// technician, so any time overlap ... is a real-world clash whether the
-// rows carry a technician_id, carry different ones, or carry none"
-// (occupancy.js header; AGENTS.md's "tech-scoped conflict WHEREs are blind
-// to technician-NULL rows" mirror rule). A tech-scoped-only query here
-// missed a real double-booking the writer would refuse.
+// the query level, a no_show row or an expired estimate-slot hold (fetched
+// here, since the query alone can't see reservation_expires_at expiring) is
+// filtered out in memory, and a windowless placeholder row (window_start
+// NULL — a due-date recurring child not yet placed) is excluded outright,
+// matching the canonical occupancy reader's own convention ("windowless
+// rows ... deliberately kept inert," scheduling/occupancy.js) — without
+// this a placeholder was fetched and defaulted to a FICTIONAL 08:00 start
+// (Codex pre-push P1), inflating detour/cluster scoring for a day that has
+// no real stop there yet.
 async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
   if (!technicianId) return [];
   const ids = [...(excludeIds || [])].map(String);
   const query = db('scheduled_services')
     .where('scheduled_services.scheduled_date', dateStr)
-    .where((q) => {
-      q.where('scheduled_services.technician_id', technicianId).orWhereNull('scheduled_services.technician_id');
-    })
+    .where('scheduled_services.technician_id', technicianId)
     .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
+    .whereNotNull('scheduled_services.window_start')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id');
   if (ids.length) query.whereNotIn('scheduled_services.id', ids);
   const rows = await query.select(...DAY_STOP_COLUMNS);
@@ -184,39 +189,70 @@ function unitPlanningMinutes(service, siblings) {
   return stopPlanningMinutes(service) + (siblings || []).reduce((sum, m) => sum + stopPlanningMinutes(m), 0);
 }
 
+// One DATE's occupancy, tech-blind — the CANONICAL reader
+// (scheduling/occupancy.js listOccupiedWindows, the underlying loader
+// findConflictingVisits itself queries) used AS-IS for the SLOT_TAKEN
+// pre-filter (Codex pre-push P1: "call the canonical reader ... do not
+// re-derive its WHERE"). Same excludeStatuses the writer's own
+// probeMoveConflicts passes; windowless placeholders are already excluded
+// by the reader itself. `excludeIds` is the moving unit's own ids (self +
+// group siblings — never a conflict for each other). Rows carry their own
+// pre-computed startMin/endMin; overlap is decided with the reader's own
+// exported pure predicate (windowsOverlap), never a re-derived one.
+async function loadOccupancyForDate(db, { dateStr, excludeIds }) {
+  return listOccupiedWindows({
+    db,
+    dateFrom: dateStr,
+    dateTo: dateStr,
+    excludeServiceIds: [...(excludeIds || [])],
+    excludeStatuses: OCCUPANCY_EXCLUDE_STATUSES,
+  });
+}
+
 /**
  * GATE_AUTO_DISPATCH_SHARED_MODEL applied to a HARD-filtered candidate list:
- * drops any candidate the rebooker's writer would refuse with SLOT_TAKEN,
- * and re-scores every survivor's drive/cluster numbers with route-model.js —
- * the SAME function computeCurrentPlacement uses below, so the current
- * placement and every candidate are finally comparable on one scale (root
- * cause b of the 2026-09-26 incident). One DB round trip per distinct
- * (technician, date) pair among the candidates (cached).
+ * drops any candidate the rebooker's writer would refuse with SLOT_TAKEN —
+ * via the canonical, tech-blind occupancy reader, ONE read per distinct
+ * DATE among the candidates (never per candidate) — and re-scores every
+ * survivor's drive/cluster numbers with route-model.js on the technician's
+ * OWN day (loadDayStops, tech-scoped, a separate concern), the SAME
+ * function computeCurrentPlacement uses below, so the current placement and
+ * every candidate are finally comparable on one scale (root cause b of the
+ * 2026-09-26 incident).
  */
 async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops) {
   const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
   const minUnitMinutes = unitPlanningMinutes(service, siblings);
-  const cache = new Map();
+  const occupancyCache = new Map();
+  const occupancyFor = async (dateStr) => {
+    if (!occupancyCache.has(dateStr)) {
+      occupancyCache.set(dateStr, loadOccupancyForDate(ctx.db, { dateStr, excludeIds }));
+    }
+    return occupancyCache.get(dateStr);
+  };
+  const dayStopsCache = new Map();
   const dayStopsFor = async (technicianId, dateStr) => {
     const key = `${technicianId}|${dateStr}`;
-    if (!cache.has(key)) {
-      cache.set(key, await loadDayStops(ctx.db, { technicianId, dateStr, excludeIds }));
+    if (!dayStopsCache.has(key)) {
+      dayStopsCache.set(key, loadDayStops(ctx.db, { technicianId, dateStr, excludeIds }));
     }
-    return cache.get(key);
+    return dayStopsCache.get(key);
   };
   const kept = [];
   for (const cand of candidates) {
-    const stops = await dayStopsFor(cand.technician_id, cand.date);
     const startMin = hhmmToMin(cand.start_time);
     // Never SHRINK the candidate's own reported window — only widen it to
     // at least the moving unit's true combined footprint (Codex pre-push
     // P1), so a standalone visit (minUnitMinutes <= its own duration in the
     // common case) is unaffected.
     const endMin = Math.max(hhmmToMin(cand.end_time), startMin + minUnitMinutes);
-    if (candidateHasOverlap(stops, { startMin, endMin, excludeIds })) {
+    const occupancy = await occupancyFor(cand.date);
+    const conflict = occupancy.some((row) => windowsOverlap(startMin, endMin, row.startMin, row.endMin));
+    if (conflict) {
       if (drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
       continue;
     }
+    const stops = await dayStopsFor(cand.technician_id, cand.date);
     const { detourMinutes, driveWithMinutes } = routeCost(stops, { geo, startMin });
     kept.push({
       ...cand,
@@ -548,6 +584,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadGroupContext, unitPlanningMinutes, filterAndScoreSharedModelCandidates,
+    hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadGroupContext, unitPlanningMinutes,
+    loadOccupancyForDate, filterAndScoreSharedModelCandidates,
   },
 };
