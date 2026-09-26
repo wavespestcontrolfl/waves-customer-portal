@@ -63,7 +63,7 @@ const CUSTOMER_SAFE_REPO_FILES = [MISTING_PROTOCOL_FILE];
 // edit to an allowlisted file/category (or an allowlist mistake) can't leak
 // that material into the model prompt silently. Applied to every DB-backed
 // support source below, not just the repo-file list.
-const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cost\s*targets?|COGS|mark\s*-?ups?|labor\s*(?:cost|rate)s?|material\s*costs?|dispatch(?:ing)?|route\s*density)\b/i;
+const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cost\s*targets?|COGS|mark\s*-?ups?|labor\s*(?:cost|rate)s?|material\s*costs?|dispatch(?:ing)?|route\s*density|best\s*price|wholesale|job\s*scor(?:e|ing))\b|\$\s?\d/i;
 
 // AW-04 fix (2026-09-25): searchKnowledgeBase below used to accept ANY active,
 // non-blocked knowledge_base row that matched a search term — and this
@@ -75,16 +75,20 @@ const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cos
 // knowledge_base.category column is admin free text — Claudeopedia's
 // create()/normalizeCategory() (knowledge-base.js) slugifies whatever string
 // an admin passes, there is no audience/visibility column on this table — so
-// this is a closed ALLOWLIST, not a denylist: only these categories (the
-// customer content categories the original migration comment documented —
-// services, products, protocols, compliance, pests, turf — plus the
-// technician-neutral 'equipment' and the normalizeCategory() default
-// 'general') may answer a public estimate question. A new or misspelled
-// category (or 'business-strategy', 'operations', 'pricing', 'customers',
-// 'competitive' — the internal categories seen in this table today) is
-// invisible by default, same posture as CUSTOMER_SAFE_REPO_FILES above.
+// this is a closed ALLOWLIST, not a denylist. It was checked against the
+// production categories on 2026-09-25 (read-only): 'chemicals' rows carry
+// wholesale supplier prices ("Best Price: $… (SiteOne)"), 'protocols'
+// includes staff routing rules and the job-scoring formula, 'product' and
+// 'seasonal' are internal outcome analytics, 'pricing', 'business-strategy',
+// 'operations', 'credentials' and 'integrations' are internal. Only
+// 'agronomics' (FAWN weather, the county nitrogen blackout) is customer
+// content today; 'services', 'pests', 'turf' and 'compliance' are the
+// customer categories the original migration documented. 'general' (the
+// normalizeCategory() default) is NOT allowed — an uncategorized admin entry
+// could be anything. A new or misspelled category is invisible by default,
+// same posture as CUSTOMER_SAFE_REPO_FILES above.
 const KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES = [
-  'services', 'products', 'protocols', 'compliance', 'pests', 'turf', 'equipment', 'general',
+  'agronomics', 'services', 'pests', 'turf', 'compliance',
 ];
 
 const EXTERNAL_REFERENCES = {

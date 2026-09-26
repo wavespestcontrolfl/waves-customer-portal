@@ -1129,6 +1129,32 @@ describe('estimate AI support context', () => {
     expect(serialized).not.toContain('grand slam offer');
   });
 
+  // Production categories checked 2026-09-25: 'chemicals' rows carry
+  // wholesale supplier prices, 'protocols' holds staff routing / job-scoring
+  // notes, and 'general' is the uncategorized default.
+  test.each([
+    ['chemicals', 'Dimension 2EW', 'Pre-emergent herbicide. Container: 64 fl oz Best Price: $139.50 (SiteOne)'],
+    ['protocols', 'Routing Rules — Waves Pest Control', 'Lawn service ordering rules for technicians.'],
+    ['general', 'Lawn notes', 'Lawn care notes.'],
+    ['product', 'Outcome Data: Product: Celsius WG', 'Lawn performance outcome data.'],
+  ])('AW-04 rd2: a %s-category knowledge_base row is excluded', async (category, title, summary) => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_base: [{ path: `kb/${category}.md`, title, category, summary, content: summary }] }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Pre-emergent, fertilizer, weed control' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd2: a dollar figure in an allowlisted row is dropped by the backstop', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_base: [{ path: 'kb/agro.md', title: 'Lawn fertilizer timing', category: 'agronomics', summary: 'Lawn fertilizer runs about $3.20 per 1000 sq ft.', content: 'x' }] }),
+      question: 'When do you fertilize the lawn?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
   test('AW-04 rd2: a knowledge_base row with no category is excluded (allowlist fails closed)', async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({
