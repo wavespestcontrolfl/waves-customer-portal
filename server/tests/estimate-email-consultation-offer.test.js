@@ -15,8 +15,10 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const mockEstimateConsultationLead = jest.fn();
+const mockReconfirmConsultationLead = jest.fn();
 jest.mock('../services/estimate-consultation-offer', () => ({
   estimateConsultationLead: (...args) => mockEstimateConsultationLead(...args),
+  reconfirmConsultationLead: (...args) => mockReconfirmConsultationLead(...args),
 }));
 
 const mockConsultationUrlForLead = jest.fn();
@@ -31,7 +33,7 @@ jest.mock('../services/lead-consultation-email-block', () => ({
   recipientIsLead: (...args) => mockRecipientIsLead(...args),
 }));
 
-const { buildGoneQuietConsultationUrl } = require('../services/estimate-email-consultation-offer');
+const { buildGoneQuietConsultationUrl, reconfirmGoneQuietConsultation } = require('../services/estimate-email-consultation-offer');
 
 const LEAD = { id: 'lead-1', email: 'taylor@example.com' };
 const ESTIMATE = { id: 'est-1', address: '123 Palm St' };
@@ -143,5 +145,44 @@ describe('buildGoneQuietConsultationUrl — happy path', () => {
     expect(result).not.toBe(longUrl);
     expect(result).not.toContain('long-token-with-secret-bearer');
     expect(result).not.toContain('/inspection/');
+  });
+});
+
+// Codex #4918 r9 P2: the engine re-runs the probe-free final check after
+// its send claim, right before the send.
+describe('reconfirmGoneQuietConsultation', () => {
+  const CONTEXT = { estimateId: 'est-1', leadId: 'lead-1', probedAddress: { line1: '123 Palm St' } };
+
+  beforeEach(() => {
+    mockEstimateEmailConsultationOfferLive.mockReturnValue(true);
+    mockReconfirmConsultationLead.mockResolvedValue(LEAD);
+    mockRecipientIsLead.mockReturnValue(true);
+  });
+
+  test('still eligible and still the lead\'s own inbox → true', async () => {
+    expect(await reconfirmGoneQuietConsultation(CONTEXT, 'taylor@example.com')).toBe(true);
+    expect(mockReconfirmConsultationLead).toHaveBeenCalledWith(CONTEXT);
+    expect(mockRecipientIsLead).toHaveBeenCalledWith('taylor@example.com', LEAD);
+  });
+
+  test('no longer eligible (hold, linkage change, lead edit) → false', async () => {
+    mockReconfirmConsultationLead.mockResolvedValue(null);
+    expect(await reconfirmGoneQuietConsultation(CONTEXT, 'taylor@example.com')).toBe(false);
+  });
+
+  test('the fresh lead\'s email is no longer the recipient → false', async () => {
+    mockRecipientIsLead.mockReturnValue(false);
+    expect(await reconfirmGoneQuietConsultation(CONTEXT, 'taylor@example.com')).toBe(false);
+  });
+
+  test('gate turned off since the build → false, nothing re-read', async () => {
+    mockEstimateEmailConsultationOfferLive.mockReturnValue(false);
+    expect(await reconfirmGoneQuietConsultation(CONTEXT, 'taylor@example.com')).toBe(false);
+    expect(mockReconfirmConsultationLead).not.toHaveBeenCalled();
+  });
+
+  test('a throw fails closed → false', async () => {
+    mockReconfirmConsultationLead.mockRejectedValue(new Error('db down'));
+    expect(await reconfirmGoneQuietConsultation(CONTEXT, 'taylor@example.com')).toBe(false);
   });
 });

@@ -422,3 +422,35 @@ describe('estimateConsultationLead — bounded in-flight slot probes', () => {
     }
   });
 });
+
+// Codex #4918 r9 P2: estimateConsultationLead records what the post-claim
+// reconfirm needs; reconfirmConsultationLead re-runs finalEligibility only.
+describe('estimateConsultationLead context + reconfirmConsultationLead', () => {
+  const { estimateConsultationLead, reconfirmConsultationLead } = require('../services/estimate-consultation-offer');
+
+  test('an eligible result records estimateId, leadId and the probed address; the reconfirm re-runs without a new probe', async () => {
+    const context = {};
+    const args = baseArgs();
+    const lead = await estimateConsultationLead({ ...args, context });
+    expect(lead).toBeTruthy();
+    expect(context).toEqual({ estimateId: ESTIMATE_ID, leadId: LEAD_ID, probedAddress: PAGE_ADDRESS });
+    const probes = mockComputeConsultationSlotsForLead.mock.calls.length;
+    expect(await reconfirmConsultationLead(context)).toBeTruthy();
+    expect(mockComputeConsultationSlotsForLead.mock.calls.length).toBe(probes);
+  });
+
+  test('an ineligible result leaves the context empty, and an empty context never reconfirms', async () => {
+    const context = {};
+    mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: false });
+    expect(await estimateConsultationLead({ ...baseArgs(), context })).toBeNull();
+    expect(context).toEqual({});
+    expect(await reconfirmConsultationLead(context)).toBeNull();
+  });
+
+  test('the estimate goes off-surface after the build → the reconfirm returns null', async () => {
+    const context = {};
+    await estimateConsultationLead({ ...baseArgs(), context });
+    mockIsEstimateAcceptActive.mockReturnValue(false);
+    expect(await reconfirmConsultationLead(context)).toBeNull();
+  });
+});

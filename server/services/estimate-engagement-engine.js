@@ -47,7 +47,7 @@ const { followupEmailVars } = require('./estimate-followup-copy');
 // gone_quiet's own "Rather have us come look first?" link (owner ruling
 // 2026-09-26) — the ONLY rule whose payload calls this; every other rule's
 // payload never references it.
-const { buildGoneQuietConsultationUrl } = require('./estimate-email-consultation-offer');
+const { buildGoneQuietConsultationUrl, reconfirmGoneQuietConsultation } = require('./estimate-email-consultation-offer');
 // Shared lane mechanics from the stage engine (see module doc above).
 const followupShared = require('./estimate-follow-up')._private;
 
@@ -734,12 +734,14 @@ async function processDueBatch(now = new Date()) {
       // take up to 3 s, and the claim's terminal-status check below must see
       // an accept/decline that lands during it — the window between claim and
       // send stays the milliseconds it was before this offer existed.
+      const consultationContext = {};
       let consultationUrl = isGoneQuiet
         ? await buildGoneQuietConsultationUrl({
           estimate: est,
           estimateData: parseEstimateData(est.estimate_data),
           acceptActive: !require('../utils/estimate-claim-sql').estimateOffCustomerSurface(est),
           recipientEmail: est.customer_email,
+          context: consultationContext,
         })
         : '';
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
@@ -797,6 +799,13 @@ async function processDueBatch(now = new Date()) {
       const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
+      // Last check before the send (Codex #4918 r9 P2): the short-link mints
+      // and the claim above all awaited after the builder's own final check.
+      // Probe-free re-run of the shared eligibility against the recipient
+      // this email goes to; anything changed drops the link, never the email.
+      if (consultationUrl && !(await reconfirmGoneQuietConsultation(consultationContext, est.customer_email))) {
+        consultationUrl = '';
+      }
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,

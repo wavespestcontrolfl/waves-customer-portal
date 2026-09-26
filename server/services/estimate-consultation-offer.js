@@ -118,7 +118,7 @@ async function linkedLeadIdFor(estimateId, estimateData) {
 //     Codex #4918 r5 P2) — the caller's acceptActive and every row read
 //     above can go stale during the probe.
 // Throws on unexpected errors — callers fail soft.
-async function estimateConsultationLead({ estimate, estimateData, acceptActive } = {}) {
+async function estimateConsultationLead({ estimate, estimateData, acceptActive, context } = {}) {
   if (!leadInspectionLinkLive() || !acceptActive || !estimate) return null;
   if (estimateData?.scheduled_service_id || estimate.estimate_group_id) return null;
   const leadId = await linkedLeadIdFor(estimate.id, estimateData);
@@ -161,9 +161,12 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
   // above, single-sourced in finalEligibility, before returning anything a
   // caller will mint a bearer token for (the page) or email one (the
   // gone-quiet follow-up) — both consultation surfaces share this helper
-  // and never re-derive eligibility themselves. No further await runs
-  // between this check and the mint/send that follows in either caller.
-  return finalEligibility(estimate.id, leadId, result.address);
+  // and never re-derive eligibility themselves. The page mints right after
+  // this; the email's mint and send claim follow, so it records `context`
+  // and re-runs finalEligibility after the claim (reconfirmConsultationLead).
+  const fresh = await finalEligibility(estimate.id, leadId, result.address);
+  if (fresh && context) Object.assign(context, { estimateId: estimate.id, leadId, probedAddress: result.address });
+  return fresh;
 }
 
 // The final, post-probe eligibility re-check — a fresh read of the
@@ -221,8 +224,17 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
 // estimate.engage_gone_quiet follow-up email's own consultation-offer
 // link, owner ruling 2026-09-26) — the same shared eligibility this
 // module's own page offer above already uses, never re-derived.
+// The probe-free final check, re-run by a caller that awaits more work
+// (a short-link mint, a send claim) between eligibility and the send
+// (Codex #4918 r9 P2). `context` is what estimateConsultationLead recorded.
+async function reconfirmConsultationLead(context) {
+  if (!context?.leadId || !leadInspectionLinkLive()) return null;
+  return finalEligibility(context.estimateId, context.leadId, context.probedAddress);
+}
+
 module.exports = {
   buildEstimateConsultationOffer,
   estimateConsultationLead,
+  reconfirmConsultationLead,
   _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS, MAX_PROBES_IN_FLIGHT, probesInFlight: () => probesInFlight },
 };

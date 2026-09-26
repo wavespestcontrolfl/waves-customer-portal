@@ -23,7 +23,7 @@
 
 const logger = require('./logger');
 const { estimateEmailConsultationOfferLive } = require('../config/feature-gates');
-const { estimateConsultationLead } = require('./estimate-consultation-offer');
+const { estimateConsultationLead, reconfirmConsultationLead } = require('./estimate-consultation-offer');
 const { consultationUrlForLead } = require('./lead-consultation-link');
 // shortWrap (the same createShortCode-or-throw helper the new_lead
 // consultation email block uses) and recipientIsLead (the lead's-own-inbox
@@ -31,7 +31,7 @@ const { consultationUrlForLead } = require('./lead-consultation-link');
 const { shortWrap, recipientIsLead } = require('./lead-consultation-email-block');
 const { TTL_SECONDS } = require('../utils/lead-consultation-token');
 
-async function buildGoneQuietConsultationUrl({ estimate, estimateData, acceptActive, recipientEmail } = {}) {
+async function buildGoneQuietConsultationUrl({ estimate, estimateData, acceptActive, recipientEmail, context } = {}) {
   try {
     if (!estimateEmailConsultationOfferLive()) return '';
     // Everything else (inspection gate, quote-first/not-grouped, unambiguous
@@ -39,7 +39,7 @@ async function buildGoneQuietConsultationUrl({ estimate, estimateData, acceptAct
     // recurring intent, an open slot at the estimate's own property) is the
     // ONE eligibility set every consultation surface shares — never
     // re-derived here.
-    const lead = await estimateConsultationLead({ estimate, estimateData, acceptActive });
+    const lead = await estimateConsultationLead({ estimate, estimateData, acceptActive, context });
     if (!lead) return '';
     // The bearer link goes ONLY to the lead's own inbox (same rule the
     // new_lead consultation email enforces): the estimate's recipient can
@@ -64,4 +64,21 @@ async function buildGoneQuietConsultationUrl({ estimate, estimateData, acceptAct
   }
 }
 
-module.exports = { buildGoneQuietConsultationUrl };
+// Re-run after the send claim (Codex #4918 r9 P2): the short-link mint and
+// the claim both await after buildGoneQuietConsultationUrl's own final
+// check, so an off-surface hold, a linkage change or a lead edit landing
+// there would still ride the email. Probe-free (finalEligibility only) plus
+// the same lead's-own-inbox rule against the recipient about to be mailed.
+// Fail-closed: false drops the link, never the email.
+async function reconfirmGoneQuietConsultation(context, recipientEmail) {
+  try {
+    if (!estimateEmailConsultationOfferLive()) return false;
+    const lead = await reconfirmConsultationLead(context);
+    return Boolean(lead) && recipientIsLead(recipientEmail, lead);
+  } catch (err) {
+    logger.warn(`[estimate-email-consultation-offer] reconfirm failed for estimate ${context?.estimateId}: ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = { buildGoneQuietConsultationUrl, reconfirmGoneQuietConsultation };

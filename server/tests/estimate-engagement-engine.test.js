@@ -75,6 +75,7 @@ jest.mock('../services/estimate-follow-up', () => ({
 // with the RIGHT arguments and threads the result into the payload.
 jest.mock('../services/estimate-email-consultation-offer', () => ({
   buildGoneQuietConsultationUrl: jest.fn(async () => ''),
+  reconfirmGoneQuietConsultation: jest.fn(async () => true),
 }));
 
 const db = require('../models/db');
@@ -86,7 +87,7 @@ const { sessionsForEstimate } = require('../services/estimate-engagement-session
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { leadConvertedSince, phoneConvertedSince } = require('../services/click-followup-gate');
 const followupShared = require('../services/estimate-follow-up')._private;
-const { buildGoneQuietConsultationUrl } = require('../services/estimate-email-consultation-offer');
+const { buildGoneQuietConsultationUrl, reconfirmGoneQuietConsultation } = require('../services/estimate-email-consultation-offer');
 const Engine = require('../services/estimate-engagement-engine');
 
 // Builder stub — chain methods return the builder; awaiting resolves by
@@ -221,6 +222,7 @@ beforeEach(() => {
   followupShared.bumpFollowupCounters.mockResolvedValue(undefined);
   followupShared.repairFollowupCounters.mockResolvedValue(null);
   buildGoneQuietConsultationUrl.mockResolvedValue('');
+  reconfirmGoneQuietConsultation.mockResolvedValue(true);
 });
 
 describe('onEstimateViewed (view-event rules)', () => {
@@ -471,6 +473,7 @@ describe('processDueJobs', () => {
         estimateData: null, // baseEstimate() carries no estimate_data
         acceptActive: true,
         recipientEmail: 'taylor@example.com',
+        context: expect.any(Object),
       });
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
         expect.objectContaining({ consultation_url: 'https://portal.wavespestcontrol.com/l/abc123' }),
@@ -594,6 +597,34 @@ describe('processDueJobs', () => {
       await Engine.processDueJobs(NOW);
 
       expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('taylor@example.com');
+    });
+
+    test('eligibility lost between the builder and the send (hold / linkage / lead edit) → the email still goes, WITHOUT the link (Codex #4918 r9 P2)', async () => {
+      const order = [];
+      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
+      followupShared.claimFollowupSend.mockImplementation(async () => { order.push('claim'); return true; });
+      reconfirmGoneQuietConsultation.mockImplementation(async () => { order.push('reconfirm'); return false; });
+      enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(1);
+      expect(order).toEqual(['claim', 'reconfirm']);
+      expect(reconfirmGoneQuietConsultation).toHaveBeenCalledWith(expect.any(Object), 'taylor@example.com');
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
+        expect.objectContaining({ consultation_url: '' }),
+      );
+    });
+
+    test('no link built → the reconfirm never runs', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
+
+      await Engine.processDueJobs(NOW);
+
+      expect(reconfirmGoneQuietConsultation).not.toHaveBeenCalled();
     });
 
     test('every other rule\'s payload never gets consultation_url — the builder is never even called for them', async () => {
