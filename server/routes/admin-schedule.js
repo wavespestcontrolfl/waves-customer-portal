@@ -16722,6 +16722,12 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // broader is_recurring population, and the reseed enforces it on the plan
   // rows (callbacks / included follow-ups excluded) before calling.
   extendByOne = false,
+  // Post-cancel reseed only: the cancelled row, as a cadence FLOOR for the
+  // extend anchor. latestLiveSeriesVisit skips cancelled rows, so cancelling
+  // a plan's LAST visit would anchor on the one before it and re-book the
+  // very date just cancelled; anchoring on whichever of the two sits later
+  // in cadence appends past the cancelled tail instead.
+  cadenceFloorRow = null,
 }) {
   const live = await liveUpcomingSeriesVisits(trx, parentId);
   const target = extendByOne
@@ -16819,7 +16825,9 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     ? !!prefNoWeekends
     : await customerPrefersNoWeekends(trx, parent.customer_id));
   const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
-  const latest = await latestLiveSeriesVisit(trx, parentId);
+  const latestLive = await latestLiveSeriesVisit(trx, parentId);
+  const cadencePos = (row) => dateOnly((row?.date_exception && row?.date_exception_cadence_date) ? row.date_exception_cadence_date : row?.scheduled_date) || '';
+  const latest = cadenceFloorRow && cadencePos(cadenceFloorRow) > cadencePos(latestLive) ? cadenceFloorRow : latestLive;
   const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
   const seen = await loadActiveSeriesDates(trx, parentId);
   seen.add(baseDateStr);
@@ -18416,7 +18424,7 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // population (Codex r8 P1): 24 live rows of which some are callbacks /
 // included follow-ups would clamp live + 1 back to 24 and add nothing. The
 // cap is enforced here, on the plan-row population, instead.
-async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount }) {
+async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, cancelled }) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
   const reconcileParent = normalizedWindow
@@ -18429,6 +18437,8 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
     const result = await reconcileRecurringSeriesVisitCount(trx, {
       parentId, parent: reconcileParent, cols,
       extendByOne: true,
+      // Append past a cancelled TAIL, never onto the date just cancelled.
+      cadenceFloorRow: cancelled,
       actorId: null,
       // Extend-only by construction (target = live + 1): the trim branch,
       // the only consumer of the claim token, is unreachable.
@@ -18481,7 +18491,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount });
+  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, cancelled });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {

@@ -515,6 +515,37 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     for (const row of inserted) expect(occupied.has(row.scheduled_date)).toBe(false);
   });
 
+  test('extendByOne (post-cancel reseed): adds exactly one visit past its own live read, never clamped to the cap', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 3 });
+    const result = await reconcile(conn, parent, undefined, { extendByOne: true, claimToken: null, actorId: null });
+    expect(result.target).toBe(4);
+    expect(inserted).toHaveLength(1);
+    const full = scenario({ upcoming: MAX_SERIES_VISIT_COUNT });
+    const capped = await reconcile(full.conn, full.parent, undefined, { extendByOne: true, claimToken: null, actorId: null });
+    expect(capped.target).toBe(MAX_SERIES_VISIT_COUNT + 1);
+  });
+
+  test('cadenceFloorRow: a cancelled TAIL visit later than the latest live one moves the anchor past it — never re-books the cancelled date', async () => {
+    // Without a floor the extend lands on some date D; a cancelled row sitting on D must push it one cadence further.
+    const plain = scenario({ upcoming: 2 });
+    await reconcile(plain.conn, plain.parent, undefined, { extendByOne: true, claimToken: null, actorId: null });
+    const D = plain.inserted[0].scheduled_date;
+    const floored = scenario({ upcoming: 2 });
+    await reconcile(floored.conn, floored.parent, undefined, {
+      extendByOne: true, claimToken: null, actorId: null,
+      cadenceFloorRow: { id: 555, status: 'cancelled', scheduled_date: D },
+    });
+    expect(floored.inserted).toHaveLength(1);
+    expect(floored.inserted[0].scheduled_date > D).toBe(true);
+    // an earlier floor than the latest live visit changes nothing
+    const early = scenario({ upcoming: 2 });
+    await reconcile(early.conn, early.parent, undefined, {
+      extendByOne: true, claimToken: null, actorId: null,
+      cadenceFloorRow: { id: 556, status: 'cancelled', scheduled_date: daysOut(-60) },
+    });
+    expect(early.inserted[0].scheduled_date).toBe(D);
+  });
+
   test('an unchanged count writes nothing at all', async () => {
     const { conn, parent, inserted } = scenario({ upcoming: 3 });
     const result = await reconcile(conn, parent, 3);
