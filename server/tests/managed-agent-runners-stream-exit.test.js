@@ -410,6 +410,30 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(recorded()).toMatchObject({ failure: null });
   });
 
+  it('a lead text still in flight at the deadline is awaited, not abandoned — the run returns only after it lands', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    let sendLanded = false;
+    mockExecuteLeadTool.mockImplementation((name) => (name === 'send_lead_response'
+      ? new Promise((resolve) => setTimeout(() => { sendLanded = true; resolve({ sent: true }); }, 120))
+      : Promise.resolve({ ok: true })));
+    let landedWhenRecorded = null;
+    mockRecordSessionUsage.mockImplementation(async () => { landedWhenRecorded = sendLanded; return null; });
+    global.fetch = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      const enc = new TextEncoder();
+      const chunks = [enc.encode(`event: agent.custom_tool_use\ndata: ${JSON.stringify({ id: 'tool-1', name: 'send_lead_response', input: { message: 'Hi' } })}\n\n`)];
+      // Like a real fetch body, the open stream rejects once its signal aborts.
+      const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
+      const aborted = () => (opts.signal.aborted
+        ? Promise.reject(abortError())
+        : new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(abortError()))));
+      return Promise.resolve({ ok: true, status: 200, body: { getReader: () => ({ read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : aborted()), cancel: async () => {}, releaseLock() {} }) } });
+    });
+    await run(load(path));
+    expect(landedWhenRecorded).toBe(true);
+  });
+
   it('a session that asks for more than 20 tool calls is stopped (max_tool_calls)', async () => {
     mockExecuteLeadTool.mockResolvedValue({ ok: true });
     global.fetch = fetchFor([

@@ -132,6 +132,10 @@ function frameText(data) {
 async function runLeadToolCall({ toolName, toolInput, toolContext, deadline, criticalFailures, alreadyDone }) {
   const { sessionId } = toolContext;
   remainingMs(sessionId, deadline); // no tool starts after the deadline
+  // A read may be abandoned at the deadline; a side effect already in flight
+  // (the lead text, the owner draft, the estimate flag, the saved report) is
+  // awaited to completion so the run never returns while it may still land.
+  const bounded = (promise) => (SIDE_EFFECTS[toolName] ? promise : withinDeadline(promise, sessionId, deadline));
   logger.info(`[lead-agent] Tool: ${toolName}`);
 
   let toolResult;
@@ -149,12 +153,12 @@ async function runLeadToolCall({ toolName, toolInput, toolContext, deadline, cri
     // without sending a generic customer acknowledgment.
     logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Queueing draft for human review.`);
     try {
-      const queued = await withinDeadline(executeLeadTool('queue_for_adam', {
+      const queued = await executeLeadTool('queue_for_adam', {
         lead_id: toolContext.leadId,
         customer_id: toolContext.customerId,
         reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Please review and follow up.`,
         draft_response: toolInput.message || '',
-      }, toolContext), sessionId, deadline);
+      }, toolContext);
       if (queued?.queued !== true) throw new Error(queued?.error || 'Draft was not saved');
       toolResult = {
         ...queued,
@@ -184,7 +188,7 @@ async function runLeadToolCall({ toolName, toolInput, toolContext, deadline, cri
     if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
   } else {
     try {
-      toolResult = await withinDeadline(executeLeadTool(toolName, toolInput, toolContext), sessionId, deadline);
+      toolResult = await bounded(executeLeadTool(toolName, toolInput, toolContext));
       if (isToolFailure(toolResult)) {
         failed = true;
         toolError = toolResult.error || 'tool returned error';
