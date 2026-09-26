@@ -672,20 +672,21 @@ function turnHasUnresolvedConditional(normalizedTurn) {
 // The negation/conditional screens above stay as defense in depth.
 // Codex round 10, P1 (:655): "yeah" and "but" were added here (codex round
 // 9) only because the real PINNED grounding sentence started with "But
-// yeah, …" — but this Set is also the closed vocabulary every OTHER
-// sentence's stripped text is checked against (turnVocabularyTokenOk /
-// otherSentenceIsClean), so a free "but" here let an OTHER sentence go
-// contrastive-clean too: "We'll see you Sunday at noon. Yeah, but no."
-// named no scheduling predicate and no declarative-poison term, and every
-// token (yeah/but/no) happened to be vocabulary, so the rejection the
-// caller actually spoke ("no") read as a benign aside. "but"/"yeah" are
+// yeah, …" — but this Set was also the closed vocabulary an OTHER
+// sentence's stripped text was checked against under the (now-removed,
+// owner ruling 2026-09-25) other-sentence whitelist, so a free "but" here
+// let an OTHER sentence go contrastive-clean too: "We'll see you Sunday at
+// noon. Yeah, but no." named no scheduling predicate and no declarative-
+// poison term, and every token (yeah/but/no) happened to be vocabulary, so
+// the rejection the caller actually spoke ("no") read as a benign aside.
+// Moot under the single-sentence rule (any OTHER sentence besides a bare
+// acknowledgement now fails closed regardless), but "but"/"yeah" are
 // discourse OPENERS, not ordinary content words that belong anywhere in a
 // sentence — they already live in COMMITMENT_OPENER_TOKENS for exactly that
 // reason. Pulled out of the shared/base vocabulary; commitmentTurnVocabularyOk
 // (the PINNED-sentence-only check, below) now admits them via
 // COMMITMENT_OPENER_TOKENS as an explicit extra set instead, so "But yeah,
-// we'll see you Sunday at noon." still grounds as the pinned sentence, but
-// no OTHER sentence can borrow either word to launder a rejection.
+// we'll see you Sunday at noon." still grounds as the pinned sentence.
 const COMMITMENT_TURN_VOCAB = new Set([
   'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
   'good', 'yep', 'yes', 'and', 'then', 'all', 'set', 'right',
@@ -707,58 +708,16 @@ const COMMITMENT_TURN_VOCAB = new Set([
   'just', 'let', 'us', 'know', 'anything', 'changes', 'if', 'comes', 'up',
   'need', 'needs', 'questions', 'thanks', 'thank', 'much', 'bye', 'talk',
   'soon', 'welcome', 'care', 'no', 'problem',
-  // Ordinary, clearly non-contingent filler (codex round-3 whitelist
-  // inversion — otherSentenceIsClean, below, requires every OTHER sentence
-  // in the turn to be built from this same closed vocabulary, so a handful
-  // of plain declarative words a non-conditional benign aside actually uses
-  // had to join it): "go" (ordinary movement verb — "it should go to him");
-  // "made"/"send"/"momentarily" (small-talk / "I'll send you a text
-  // momentarily" filler). "should" is deliberately NOT here, and not in
-  // BENIGN_CONDITIONAL_GLUE_WORDS either (codex round 7, P1): a FREE
-  // "should" token let "We should get your okay." pass — no scheduling
-  // predicate, no declarative-poison term, and the whole sentence was
-  // otherwise vocabulary-safe once "should" was admitted anywhere. "should"
-  // now only reaches a sentence through NOTIFICATION_ROUTING_RE, an
-  // anchored whole-sentence shape, never a free token in any Set.
+  // Ordinary, clearly non-contingent filler: "go" (ordinary movement verb —
+  // "it should go to him"); "made"/"send"/"momentarily" (small-talk / "I'll
+  // send you a text momentarily" filler). Still reachable on the PINNED
+  // commitment sentence and on a later-turn restatement
+  // (commitmentTurnVocabularyOk), so kept even though the OTHER-sentence
+  // whitelist that originally motivated widening this Set is gone (owner
+  // ruling 2026-09-25, single-sentence rule — see
+  // COMMITMENT_TURN_ACKNOWLEDGEMENTS, below).
   'go', 'made', 'send', 'momentarily',
 ]);
-// A tiny closed set of CONNECTOR/filler words for a benign CONDITIONAL
-// sentence's carve-out ONLY (codex round-3 whitelist inversion) — never the
-// base COMMITMENT_TURN_VOCAB, never the pinned commitment sentence. Unlocked
-// only once the sentence has already cleared BOTH gates: it has a
-// conditional trigger, AND every extracted clause is benign (clauseIsBenign).
-// At that point the sentence's remaining tokens are just how the agent
-// phrases resolving a benign routing mixup ("let me know", "goes to the
-// wrong person/number", "I'll make sure that gets figured out") — words too
-// specific/generic to trust unconditionally everywhere else in the turn.
-// Codex round 4, finding 2 (live miss 17ed9362's actual single Agent:
-// turn): "It's autonomously done, so if it goes to you, I'll make sure
-// that's rectified." needs "autonomously"/"done"/"rectified" once its one
-// clause ("it goes to you") clears clauseIsBenign against the PREVIOUS
-// sentence's "notification".
-//
-// "should" was here too, for the non-conditional declarative's OWN
-// vocabulary check in otherSentenceIsClean (round 5) — "Yep, it should go
-// to him, the notification." Codex round 7, P1: a FREE "should" token in
-// ANY set otherSentenceIsClean's vocabulary check consults is available to
-// EVERY sentence, conditional or not, and "We should get your okay."
-// otherwise named no declarative-poison term and no scheduling predicate.
-// "should" is now recognized ONLY via NOTIFICATION_ROUTING_RE, an anchored
-// whole-sentence shape (below) — never as a free token here.
-const BENIGN_CONDITIONAL_GLUE_WORDS = new Set([
-  'me', 'tell', 'goes', 'wrong', 'person', 'number', 'make', 'sure', 'gets', 'figured',
-  'autonomously', 'done', 'rectified',
-]);
-// codex round 7, P1: the ONLY way "should" grounds any sentence now — the
-// specific "a notification/email/text routes to a party" declarative shape
-// ("Yep, it should go to him, the notification."), matched whole-sentence,
-// never as a vocabulary token. Checked as an immediate pass in
-// otherSentenceIsClean, the same way REINFORCING_AFFIRMATION_RE is.
-// Codex round 18, P1 (:746): a bare "it"/"that" subject names no topic —
-// after "who has to approve this?", "It should go to him." routes the
-// DECISION, not a notification. A pronoun subject now grounds only when
-// the sentence itself names the notification/email/text after it.
-const NOTIFICATION_ROUTING_RE = /^(?:ok|okay|yep|yes|yeah|so|and)? ?(?:the (?:notification|email|text|confirmation text) should (?:go|be sent|be going) to (?:him|her|them|you|the (?:client|owner|homeowner|point of contact))(?: the (?:notification|email|text))?|(?:it|that) should (?:go|be sent|be going) to (?:him|her|them|you|the (?:client|owner|homeowner|point of contact)) the (?:notification|email|text))$/;
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
   if (COMMITMENT_TURN_VOCAB.has(tok)) return true;
@@ -870,58 +829,16 @@ function normalizeCommitmentText(s) {
 // closed; if the quote appears in several sentences, EVERY one must pass
 // (ambiguity fails closed).
 //
-// OTHER sentences of the same turn (codex P1, live miss 17ed9362: Adam's
-// turn was "Awesome. Yep, it should go to him, the notification. It's
-// autonomously done, so if it goes to you, I'll make sure that's rectified.
-// But yeah, we'll see him on Monday at 10 o'clock." — the pinned quote was
-// the last sentence, and an earlier round's turn-wide vocabulary/conditional
-// screen poisoned it over a CONDITIONAL ABOUT WHICH INBOX GETS THE EMAIL
-// NOTIFICATION, not about the booking) do not need the closed commitment
-// vocabulary VERBATIM — but codex round 3 converged this from a BLACKLIST
-// ("poison when it contains X/Y/Z") to a WHITELIST (otherSentenceIsClean,
-// below), the same inversion the pinned sentence's commitmentTurnVocabularyOk
-// already used. Three successive blacklist rounds (interrogatives, negation/
-// hedge, authorization/unavailability vocabulary, conditional-clause topic
-// scoping) kept missing shapes nobody had enumerated yet — "cancel",
-// "permitting", "contingent", "space", "actually" were never on any poison
-// list, so "Actually, we have to cancel.", "Weather permitting.", and "If we
-// have space I'll email you." (the consequent verb swallowing the actual
-// condition) all read as clean turns. A whitelist needs no such list: those
-// words simply aren't IN the closed vocabulary either.
-//
-// otherSentenceIsClean (codex round 5 converged this further): OTHER
-// sentences may not talk about scheduling AT ALL — only the pinned
-// commitment sentence is allowed scheduling/booking vocabulary. Rounds 3-4
-// still relied on vocabulary MEMBERSHIP (a growing word list) as the
-// primary gate, and round 5 found that growing the shared vocabulary for
-// one shape ("should", "confirmation") quietly opened new holes for
-// another ("We should confirm the appointment." passed because every word,
-// including "should", happened to be vocab). The real invariant is
-// SCHEDULING CONTENT, not word membership: after the interrogative,
-// negation/hedge, and declarative-poison screens, every benign topic
-// PHRASE (who a notification/email/text/invoice/report goes to) is
-// stripped out of the sentence's text first (stripBenignTopicPhrases —
-// phrase-scoped only; the individual words are never added to any
-// vocabulary Set), and if any SCHEDULING_PREDICATE_TERM remains in what's
-// left, the sentence poisons — zero new words needed for
-// "confirm"/"appointment"/"book" shapes ever again. A conditional sentence
-// gets ONE further requirement on top, never a substitute: every extracted
-// clause must still be benign (clauseIsBenign — unchanged: still runs the
-// authorization/unavailability/scheduling-staffing poison-term checks
-// against the clause's own raw text, still requires a benign topic, still
-// falls back to the previous sentence only for a bare-pronoun clause).
-// Only after both the predicate screen (and, for a conditional, the clause
-// check) pass does the STRIPPED text still have to be built from the base
-// vocabulary plus the small BENIGN_CONDITIONAL_GLUE_WORDS filler set. This
-// is what still lets "Yep, it should go to him, the notification." (no
-// scheduling term once "notification" is phrase-stripped) and "It's
-// autonomously done, so if it goes to you, I'll make sure that's
-// rectified." (a bare-pronoun clause resolving against the previous
-// sentence's benign topic) ground, while "We should confirm the
-// appointment.", "We need your confirmation of the appointment.", and "If
-// you need it, we will book the appointment." all fail on "confirm"/
-// "confirmation"/"book"+"appointment" — present in the SCHEDULING_PREDICATE_TERMS
-// screen regardless of conditional structure or vocabulary membership.
+// OTHER sentences of the same turn (codex P1, live miss 17ed9362, through
+// codex round 27) went through 18+ rounds of an ever-more-precise
+// blacklist-then-whitelist clearance test (otherSentenceIsClean and its
+// conditional-clause/scheduling-predicate/benign-topic machinery), each
+// round finding a new phrasing that slipped past the round before it. Owner
+// ruling 2026-09-25 (SINGLE-SENTENCE RULE) replaced all of that: an OTHER
+// sentence is no longer judged on its content at all — see
+// COMMITMENT_TURN_ACKNOWLEDGEMENTS and agentCommitmentSentenceVerified,
+// below, where any OTHER sentence besides a bare acknowledgement now fails
+// the turn closed to triage, whatever it says.
 // Splits one speaker turn into its sentences. Sentence chunks KEEP their
 // terminator (codex P0, round 7n): splitting on [.!?;]+ discarded the "?"
 // that makes "So we will confirm it for noon on Sunday?" a QUESTION — an
@@ -935,118 +852,62 @@ function splitSentences(turn) {
     .filter((s) => s.ns);
 }
 
-// Codex round 23, P1 (:958): the commitment can be taken back in a LATER
-// agent turn ("Agent: We'll see you Sunday at 10 o'clock." … "Agent:
-// Actually, Sunday won't work."), and only the pinned turn was ever read.
-// Later agent turns get a retraction screen — not the allowlist (they are
-// ordinary call wrap-up: address, email, questions): any negation/hedge,
-// any authorization/unavailability poison, an explicit change marker, or
-// scheduling content that does not itself bind the SAME confirmed slot
-// retracts the commitment and holds the call for a human.
-const RETRACTION_MARKER_TERMS = [
-  ' actually ', ' instead ', ' change ', ' changed ', ' switch ', ' move ', ' moved ',
-  ' cancel ', ' cancelled ', ' canceled ', ' scratch that ', ' never mind ', ' nevermind ',
-  ' correction ',
-  // rescheduling with no slot word ("Let's push it back a day.", "Can we
-  // do the following week?")
-  ' push ', ' bump ', ' postpone ', ' delay ', ' rain check ', ' different ',
-  ' another day ', ' another time ', ' following ', ' later ', ' earlier ', ' sooner ',
-];
-// "sorry"/"wait"/"hold on" are deliberately NOT markers: routine wrap-up
-// ("Sorry, what was your email?", "Please wait for the text.") uses them,
-// and a genuine retraction carries its own signal ("Sorry, we can't do
-// Sunday." — negation and a slot mention).
-// SLOT talk only, not the broad other-sentence scheduling screen: later
-// turns are wrap-up, where an address/phone read-back ("100 Example
-// Street"), "our technician will text you", or a price are routine. Day,
-// date, and time words, "at <hour>", and booking/cancel verbs are what a
-// retraction or a different slot is made of.
-const LATER_TURN_SLOT_TERMS = [
-  ' sunday ', ' monday ', ' tuesday ', ' wednesday ', ' thursday ', ' friday ', ' saturday ',
-  ' january ', ' february ', ' march ', ' april ', ' june ', ' july ',
-  ' august ', ' september ', ' october ', ' november ', ' december ',
-  ' tomorrow ', ' today ', ' tonight ', ' next week ', ' weekend ',
-  ' am ', ' pm ', ' clock ', ' noon ', ' midnight ', ' morning ', ' afternoon ', ' evening ',
-  ' appointment ', ' appointments ', ' book ', ' booked ', ' booking ',
-  ' schedule ', ' scheduled ', ' reschedule ', ' rescheduled ', ' visit ', ' slot ',
-  ' available ', ' availability ', ' unavailable ', ' confirm ', ' confirmed ',
-];
-function laterSentenceNamesSlot(ns) {
-  const padded = ` ${ns} `;
-  return LATER_TURN_SLOT_TERMS.some((t) => padded.includes(t))
-    || MAY_DATE_RE.test(ns)
-    // "at <hour>" only in time position — sentence-final or followed by a
-    // time word — so "It's at 100 Example Street." stays an address.
-    || /\bat \d{1,4}(?:$| (?:o|oclock|clock|am|pm|a|p|thirty|fifteen|forty|\d{2})\b)/.test(ns);
+// LATER-TURN SINGLE-SENTENCE RULE (owner ruling 2026-09-25, round 28
+// extension). Codex rounds 23-27 built the same kind of ever-widening
+// term-list/restatement screen for LATER turns (RETRACTION_MARKER_TERMS,
+// LATER_TURN_SLOT_TERMS, a same-slot-restatement carve-out on the agent
+// side, CALLER_CAVEAT_TERMS/CALLER_REFUSAL_STEM_RE on the caller side) that
+// the committing-turn whitelist had already gone through 18 rounds of before
+// the owner replaced it outright (see COMMITMENT_TURN_ACKNOWLEDGEMENTS,
+// below) -- round 28 found four more open threads on exactly this
+// later-turn screen (a withdrawal that named no retraction-marker term, a
+// non-slot condition read as preserving the commitment, a pronoun-based
+// approval deferral, and a bare calendar date read as a later slot change).
+// The owner ruling now applies the SAME single-sentence rule to every turn
+// AFTER the committing one, whoever is speaking: laterSentenceRetracts,
+// below (defined after COMMITMENT_TURN_ACKNOWLEDGEMENTS, which it shares).
+// SINGLE-SENTENCE RULE (owner ruling 2026-09-25, final). 18 Codex rounds of
+// otherSentenceIsClean each found a new phrasing in an OTHER sentence of the
+// committing turn that slipped past the closed-vocabulary/allowlist screen
+// of the round before it ("We need you confirming it.", "Let us know if
+// anything changes, and then we will put you down.", "Okay will come in the
+// email.", "It should go to him." — round 18 alone). Rather than keep
+// chasing new phrasings, the owner ruled MORE RESTRICTIVE than every prior
+// round: a committing agent turn now grounds ONLY when the pinned
+// commitment sentence stands ALONE in that turn. Any other sentence sends
+// the call to triage for a human look, even one that would have cleared the
+// old whitelist — the owner explicitly accepts that some real bookings will
+// now get a human review instead of auto-booking.
+//
+// The one narrow allowance: a whole OTHER sentence that, after
+// normalization, is EXACTLY one of this tiny acknowledgement list. Matched
+// whole-sentence only (otherSentenceIsBareAcknowledgement, below) — never a
+// prefix, never a combination of list words, never a substring — so "Okay
+// will come in the email." (round 18) does NOT read as "Okay" plus a
+// tolerated remainder: splitSentences only ever splits on [.!?;], so this
+// unpunctuated sentence is one unit and its full normalized text is checked
+// against the whole list, not any prefix of it.
+const COMMITMENT_TURN_ACKNOWLEDGEMENTS = new Set([
+  'yes', 'yeah', 'okay', 'ok', 'alright', 'all right', 'perfect', 'great',
+  'awesome', 'sounds good', 'thank you', 'thanks', 'no problem',
+]);
+function otherSentenceIsBareAcknowledgement(other) {
+  return COMMITMENT_TURN_ACKNOWLEDGEMENTS.has(other.ns);
 }
-function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
-  const ns = sentence.ns;
-  const padded = ` ${ns} `;
-  if (turnHasNegationOrHedge(ns)) return true;
-  if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
-  if (RETRACTION_MARKER_TERMS.some((t) => padded.includes(t))) return true;
-  // Codex round 24, P1 (:958): slot binding alone let "Sunday at noon is
-  // off." through as a same-slot mention. A later sentence with scheduling
-  // content passes only as a full RESTATEMENT — the same checks the pinned
-  // commitment sentence itself must pass.
-  if (laterSentenceNamesSlot(ns)) {
-    return !(!sentence.interrogative
-      && commitmentTurnVocabularyOk(ns)
-      && !turnHasUnresolvedConditional(ns)
-      && turnHasAffirmativeCommitmentForm(ns)
-      && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
-  }
-  return false;
-}
-// The caller-side screen (codex round 25): a rejection, hedge, change
-// marker, or authorization caveat holds the call; a caller sentence that
-// names the slot passes only as a plain acknowledgement of the SAME slot
-// ("Great, see you Sunday at noon.") — closed commitment vocabulary plus
-// slot binding — so "Sunday at noon is off." holds. The routine closers
-// "No, that's all." / "Nope, that's it." are not rejections.
-const CALLER_CLOSER_NEGATION_RE = /(?:^| )(?:no|nope|nah)(?: (?:that s|that is) (?:all|it)(?: (?:thanks|thank you|so much|very much|bye))*)(?= |$)/g;
-// Caller-voiced deferrals and the people a caller defers to — "I need to
-// ask my husband first.", "Let me run it by my landlord." A caller naming
-// one of these after the commitment holds the call (fail closed).
-// Phrase-anchored, never bare party nouns or ambiguous verbs: "I am the
-// owner", "Please stop by the side gate", "You can pass through the gate"
-// are routine caller lines.
-const CALLER_CAVEAT_TERMS = [
-  ' ask my ', ' ask the ', ' check with ', ' talk to my ', ' talk with my ', ' talk to the ',
-  ' run it by ', ' run this by ', ' see what my ', ' see what the ',
-  ' get back to you ', ' think about it ', ' let you know ',
-  // Codex round 26, P1 (:1015): direct refusals ("I decline.", "I have to
-  // pass.") and price/interest walk-aways.
-  ' decline ', ' declining ', ' refuse ', ' forget it ', ' forget about it ',
-  ' i ll pass ', ' i will pass ', ' have to pass ', ' going to pass ', ' gonna pass ', ' pass on ',
-  ' hold off ', ' not interested ', ' no thanks ', ' no thank you ', ' i d rather ', ' rather not ',
-  ' too expensive ', ' too much ', ' afford ', ' pricey ', ' shop around ', ' other quotes ',
-  ' go with someone else ', ' use someone else ', ' hire someone else ',
-  ' changed my mind ', ' change my mind ', ' don t want ', ' do not want ',
-  ' stop the service ', ' skip it ', ' skip this ',
-];
-const CALLER_REFUSAL_STEM_RE = /\b(?:reject|object|refus|declin|disagree|deny|denied|cancel|nix)\w*|\bturn(?:ing|ed)? (?:it|that|this|them) down\b/;
-const CALLER_SLOT_REFERENCE_TERMS = [' time ', ' times ', ' day ', ' days ', ' date ', ' dates '];
-function laterCallerSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
-  const ns = sentence.ns.replace(CALLER_CLOSER_NEGATION_RE, ' ').trim();
-  if (!ns) return false;
-  const padded = ` ${ns} `;
-  if (turnHasNegationOrHedge(ns)) return true;
-  if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
-  if (RETRACTION_MARKER_TERMS.some((t) => padded.includes(t))) return true;
-  if (CALLER_CAVEAT_TERMS.some((t) => padded.includes(t))) return true;
-  if (CALLER_REFUSAL_STEM_RE.test(ns)) return true;
-  // Codex round 27, P1 (:1024): "I reject that time." — a caller sentence
-  // that talks about the time/day/date/appointment AT ALL must be a plain
-  // same-slot acknowledgement, whatever verb it uses, so a new objection
-  // synonym never needs a new word here.
-  if (laterSentenceNamesSlot(ns) || CALLER_SLOT_REFERENCE_TERMS.some((t) => padded.includes(t))) {
-    return !(!sentence.interrogative
-      && commitmentTurnVocabularyOk(ns)
-      && !turnHasUnresolvedConditional(ns)
-      && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
-  }
-  return false;
+// LATER_TURN_CLOSERS extends the acknowledgement list with the call-ending
+// phrases a routine wrap-up actually uses that a mid-call acknowledgement
+// would not (owner ruling 2026-09-25, round 28 extension) — still
+// whole-sentence exact match only, same as COMMITMENT_TURN_ACKNOWLEDGEMENTS.
+const LATER_TURN_CLOSERS = new Set([
+  'bye', 'goodbye', 'have a good day', 'have a great day', 'you too',
+  'thank you so much', 'talk to you then', 'see you then',
+]);
+// True when a sentence in a turn AFTER the committing one is anything other
+// than an exact acknowledgement/closer match — the single rule that
+// replaces every later-turn term list and restatement carve-out rounds
+// 23-27 built, for both speakers alike.
+function laterSentenceRetracts(sentence) {
+  return !COMMITMENT_TURN_ACKNOWLEDGEMENTS.has(sentence.ns) && !LATER_TURN_CLOSERS.has(sentence.ns);
 }
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);
@@ -1066,14 +927,18 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
     for (let i = 0; i < sentences.length; i += 1) {
       const s = sentences[i];
       if (!s.ns.includes(q)) continue;
+      // Single-sentence rule: every OTHER sentence in this turn must be a
+      // bare acknowledgement, or the turn is multi-sentence and fails
+      // closed to triage.
       const otherSentencesClean = sentences.every((other, j) => j === i
-        || otherSentenceIsClean(other, sentences[j - 1]?.ns));
-      // Codex round 25, P1 (:1017): LATER caller turns too — "Caller: No,
-      // Sunday does not work for me." after the commitment was never read.
+        || otherSentenceIsBareAcknowledgement(other));
+      // Later-turn single-sentence rule (owner ruling 2026-09-25, round 28):
+      // every sentence in every turn AFTER the committing one, from either
+      // speaker, must be a bare acknowledgement/closer or the call fails to
+      // triage — "Caller: No, Sunday does not work for me." holds, and so
+      // does anything else that isn't an exact list match.
       const laterTurnsClean = turns.slice(t + 1).every((later) => splitSentences(later.text)
-        .every((ls) => !(later.agent
-          ? laterAgentSentenceRetracts(ls, confirmedStartAt, callStartedAt)
-          : laterCallerSentenceRetracts(ls, confirmedStartAt, callStartedAt))));
+        .every((ls) => !laterSentenceRetracts(ls)));
       containing.push({ ...s, otherSentencesClean: otherSentencesClean && laterTurnsClean });
     }
   }
@@ -1108,52 +973,6 @@ const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', '
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
 
-// Adjacent-sentence poisoning for agentCommitmentSentenceVerified (codex P1,
-// live miss 17ed9362; hardened after a local-fallback-auditor P1 on an
-// earlier allowlist-of-bad-topics draft of this check). DEFAULT IS POISON —
-// a conditional elsewhere in the grounding turn poisons the pinned
-// commitment unless it is IDENTIFIABLY about one of a small, curated set of
-// known-benign, non-booking topics (who a notification/email/text/invoice/
-// report goes to). This is the same "blacklists can't enumerate everything,
-// so fail closed by default" shape as the closed commitment vocabulary
-// above: "if we have space", "if the technician has time", "weather
-// permitting" all still poison with NO term enumerated for any of them —
-// unlike an allowlist of bad topics (homeowner/approval/schedule/…), a
-// denylist of GOOD topics never needs to anticipate every way a booking can
-// still be conditional.
-// codex round 5: also covers "confirmation email"/"confirmation sms"/"text
-// message"/"email notification" — the SAME communication-channel-routing
-// topic, phrased with a different pair of words agents actually use.
-const BENIGN_NON_BOOKING_TOPICS = [
-  ' notification ', ' notifications ', ' notify ', ' email ', ' e mail ',
-  ' text ', ' texts ', ' invoice ', ' invoices ', ' report ', ' reports ',
-  ' inbox ', ' confirmation text ', ' confirmation email ', ' confirmation sms ',
-  ' text message ', ' email notification ',
-];
-// Longest-phrase-first ordering for stripBenignTopicPhrases, below: " text "
-// is itself a listed phrase, so stripping in list order would remove "text"
-// out of "confirmation text" BEFORE the two-word phrase ever gets a chance
-// to match, stranding a bare "confirmation" in the sentence — and
-// "confirmation" is deliberately a SCHEDULING_PREDICATE_TERM (codex round
-// 5, instruction 3: "confirmation" exists ONLY inside this phrase list, so
-// it must always be consumed as part of a whole multi-word phrase, never
-// left as a stray token). Sorting longest-first guarantees a multi-word
-// phrase is always tried before any of its component single words.
-const BENIGN_NON_BOOKING_TOPICS_BY_LENGTH_DESC = [...BENIGN_NON_BOOKING_TOPICS]
-  .sort((a, b) => b.length - a.length);
-// Removes every benign topic PHRASE from a normalized sentence, leaving
-// everything else untouched (codex round 5: reverts round 3's merge of
-// these phrases' individual words into COMMITMENT_TURN_VOCAB — a token
-// like "confirmation" must never sit in ANY vocabulary Set; the topic is
-// handled by deleting it from the TEXT before either the
-// SCHEDULING_PREDICATE_TERMS screen or the vocabulary check ever sees it).
-function stripBenignTopicPhrases(ns) {
-  let stripped = ` ${ns} `;
-  for (const phrase of BENIGN_NON_BOOKING_TOPICS_BY_LENGTH_DESC) {
-    stripped = stripped.split(phrase).join(' ');
-  }
-  return stripped.replace(/\s+/g, ' ').trim();
-}
 // Declarative poison vocabulary (codex P1, rounds 1-2 of this PR's local+
 // Codex audit): a sentence naming who has to sign off, the act of
 // approving/authorizing, an unmet-approval DECLARATIVE ("Homeowner approval
@@ -1347,9 +1166,9 @@ const DELEGATED_DECISION_RE = new RegExp(`\\b(?:(?:(?:it s|it is|its|that s|that
 // "It may go to him." / "You may get a text." alone still leave only the
 // bare subject behind, so they stay benign.
 const MODAL_UNCERTAINTY_RE = /\b(?:we|i|you|it|that|this|he|she|they|and|or|but|then|so|also) (?:may(?= [a-z])(?! the \d)|might|could possibly|should be able to|may be able to|might be able to|could be able to)\b/;
-// Codex round 18, P1 (:746), same rule as NOTIFICATION_ROUTING_RE: a bare
-// "It may go to him." names no topic and can route the decision itself, so
-// the pronoun form is benign only with the notification/email/text named.
+// Codex round 18, P1 (:746): a bare "It may go to him." names no topic and
+// can route the decision itself, so the pronoun form is benign only with
+// the notification/email/text named.
 const BENIGN_MODAL_ROUTING_RE = /\b(?:(you) may (?:get|receive) (?:a|an|the) (?:text message|text|email|notification|confirmation text|confirmation email)|(it|that) may (?:go|be sent|be going) to (?:him|her|them|you) the (?:notification|email|text))\b/g;
 function sentenceHasModalUncertainty(ns) {
   return MODAL_UNCERTAINTY_RE.test(ns.replace(BENIGN_MODAL_ROUTING_RE, (_span, you, itThat) => you || itThat));
@@ -1396,450 +1215,17 @@ function sentenceHasDeclarativePoisonVocabulary(ns) {
     || APPROVAL_VERB_USE_RE.test(ns)
     || sentenceHasModalUncertainty(ns);
 }
-// These two lists (and the regex above) ALSO do their work inside
-// clauseIsBenign, below, where they matter for a different reason: a
-// CONDITIONAL sentence's clause is checked directly against them (clause
-// text is a raw-text substring, not yet vocabulary-tokenized) before the
-// clause is ever allowed to unlock the expanded conditional-carve-out
-// vocabulary in otherSentenceIsClean.
-// Scheduling/availability/staffing vocabulary for CONDITION CLAUSES (codex
-// P1, round 2 of this PR's local+Codex audit): a conditional clause is
-// non-benign the instant it touches scheduling/staffing/availability, no
-// matter what the sentence's CONSEQUENT says — "If the technician is
-// available, I'll email you." must poison on "technician"/"available" in
-// the CLAUSE, not read as benign because "email" sits in the consequent.
-const CONDITION_CLAUSE_POISON_TERMS = [
-  ' technician ', ' tech ', ' available ', ' availability ', ' unavailable ',
-  ' schedule ', ' scheduled ', ' scheduling ', ' reschedule ', ' rescheduled ',
-  ' appointment ', ' appointments ', ' visit ', ' staff ', ' staffing ',
-  ' crew ', ' route ', ' slot ', ' calendar ', ' book ', ' booked ', ' booking ',
-];
-// Every conditional trigger word this PR's local+Codex audit has raised,
-// used BOTH to split a sentence into its individual condition clauses (see
-// extractConditionalClauses) and to decide whether a sentence is a
-// conditional at all (turnHasUnresolvedConditional, above, folds these into
-// CONDITIONAL_TOKENS as whole-token phrases). "if" is deliberately absent
-// from CONDITIONAL_TOKENS (it gets the benign-closer exemption there) but
-// IS a trigger here, so a clause that starts with an "if" nested inside an
-// already-conditional sentence still gets split out and evaluated on its
-// own. Bare "should" is deliberately EXCLUDED — "it should go to him" is
-// ordinary modal usage, not a conditional; only the inverted "should the
-// technician be unavailable…" construction is.
-const CONDITION_TRIGGER_RE = /\b(if|unless|as long as|provided|once|when|assuming|subject to|depending|depends|pending|should the)\b/i;
-// A first-person consequent head ("I'll"/"we'll"/"I will"/"we will") ends a
-// condition clause the same way a comma does (codex P1, round 3: "If we
-// have space I'll email you." has NO comma, so a comma-only boundary swept
-// the benign consequent verb "email" into the SAME clause as the actual
-// condition "we have space", and clauseIsBenign then read the whole thing
-// as benign because "email" appears somewhere in it — the real condition,
-// scheduling capacity, was never isolated). Whichever boundary — comma or
-// consequent head — comes first in the raw text wins.
-const CONSEQUENT_HEAD_RE = /\b(i'?ll|we'?ll|i will|we will)\b/i;
-// Splits a raw sentence into EVERY condition clause it contains — not just
-// the first (codex P1, finding 1: "If the email goes to you, let me know,
-// AND IF the technician is available, I'll call you." has TWO clauses; a
-// single-match extractor read only the benign first one and missed the
-// technician-availability clause entirely). Each clause runs from just
-// after its trigger word to the next comma, the next first-person
-// consequent head, the next trigger word, or the end of the sentence —
-// whichever comes first, so one clause never eats into the next or into
-// its own consequent.
-// Codex round 14, P1 (:1413): a clause also ends where a NEW SUBJECT head
-// begins after its first word — "If the email goes to you then we are all
-// set" / "…goes to you you're all set" has no comma and no I'll/we'll head,
-// so the present-tense consequent rode inside the (benign-topic) antecedent
-// clause and was never inspected as a consequent. Cutting there moves it
-// into the consequent, where splitConditionalSentence's caller judges it.
-// Only ever SHORTENS an antecedent (fail-closed direction).
-const CLAUSE_SUBJECT_BOUNDARY_RE = /\S[\s,]+((?:then|we|i|you['\u2019]?re|you are|you['\u2019]?ll|you will|it['\u2019]?s|it is|that['\u2019]?s|that is|everything)\b)/i;
-function conditionalClauseCut(segment) {
-  const cuts = [segment.length];
-  const commaIdx = segment.indexOf(',');
-  if (commaIdx !== -1) cuts.push(commaIdx);
-  const headMatch = CONSEQUENT_HEAD_RE.exec(segment);
-  if (headMatch) cuts.push(headMatch.index);
-  const subjectMatch = CLAUSE_SUBJECT_BOUNDARY_RE.exec(segment);
-  if (subjectMatch) cuts.push(subjectMatch.index + subjectMatch[0].length - subjectMatch[1].length);
-  return Math.min(...cuts);
-}
-// Splits a raw conditional sentence into its condition CLAUSES and every
-// piece of text that is NOT a condition clause — the CONSEQUENTS (codex
-// round 14: the text before the first trigger, e.g. "We'll put you down"
-// in "We'll put you down if…", and the remainder of each trigger segment
-// after its clause is cut). Both are returned normalized; empty pieces are
-// dropped.
-function splitConditionalSentence(rawSentence) {
-  const s = String(rawSentence || '');
-  const re = new RegExp(CONDITION_TRIGGER_RE.source, 'gi');
-  const triggers = [...s.matchAll(re)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
-  const clauses = [];
-  const leading = triggers.length ? normalizeCommitmentText(s.slice(0, triggers[0].start)) : '';
-  const consequents = triggers.length ? [leading] : [];
-  // Codex round 19, P1 (:1543): every trigger needs its OWN consequent.
-  // Filtering empty pieces let one trigger's benign consequent cover a
-  // second, dangling one ("If the email goes to you, I'll make sure that's
-  // rectified, and if the text goes to him." then "We're all set."). Only
-  // the FIRST trigger may take the text before it ("Let me know if the
-  // email goes to you.") as its consequent.
-  let danglingTrigger = false;
-  triggers.forEach((trigger, i) => {
-    const segEnd = i + 1 < triggers.length ? triggers[i + 1].start : s.length;
-    const segment = s.slice(trigger.end, segEnd);
-    const cut = conditionalClauseCut(segment);
-    const clause = normalizeCommitmentText(segment.slice(0, cut));
-    if (clause) clauses.push(clause);
-    const consequent = normalizeCommitmentText(segment.slice(cut));
-    consequents.push(consequent);
-    const own = trimConsequentFillers(consequent) || (i === 0 ? trimConsequentFillers(leading) : '');
-    if (!own) danglingTrigger = true;
-  });
-  return { clauses, consequents: consequents.filter(Boolean), danglingTrigger };
-}
-function extractConditionalClauses(rawSentence) {
-  return splitConditionalSentence(rawSentence).clauses;
-}
-const CONDITION_CLAUSE_GLUE_WORDS = new Set([
-  'it', 'that', 'this', 'they', 'he', 'she', 'is', 'are', 'was', 'were',
-  'does', 'do', 'did', 'goes', 'go', 'went', 'gone', 'comes', 'come', 'came',
-  'to', 'you', 'us', 'we', 'i', 'me', 'him', 'her', 'them', 'not', 'up',
-  'down', 'out', 'back', 'over', 'there', 'here', 's', 'll', 'd', 'the', 'a',
-]);
-function isBarePronounClause(clauseNs) {
-  const toks = clauseNs.split(' ').filter(Boolean);
-  return toks.length > 0 && toks.every((t) => CONDITION_CLAUSE_GLUE_WORDS.has(t));
-}
-// Decides whether ONE already-extracted, already-normalized condition
-// clause is safe. DEFAULT IS POISON, same shape as the rest of this file:
-// any authorization/unavailability/scheduling-staffing term ANYWHERE in the
-// clause poisons it outright (codex P1, finding 5: the benign/poison call
-// must be about the clause's own subject, never rescued by a benign word
-// living in the sentence's consequent), and a clause is only benign when it
-// is IDENTIFIABLY about one of the small, curated, non-booking topics (who
-// a notification/email/text/invoice/report goes to). A BARE-PRONOUN clause
-// ("if it does", "if it goes to you") names no topic of its own, so ONLY
-// then does the referent resolve against the PREVIOUS sentence's benign
-// nouns; a clause with any actual content word never falls back.
-// Codex round 22, P1 (:1406): "If we are all set and the email goes to
-// you" — one benign topic ("email") anywhere in the clause used to clear
-// the WHOLE compound antecedent, booking-status half included. A clause
-// coordinated with and/or/but is now judged per component: every
-// component must be benign on its own.
-const CLAUSE_COORDINATOR_RE = / (?:and|or|but) /;
-const BENIGN_CLAUSE_SHAPE_RE = /^(?:(?:the|your|a|an|that|this) )?(?:confirmation text|confirmation email|confirmation sms|text message|email notification|notification|notifications|email|e mail|text|texts|invoice|invoices|report|reports) (?:goes|go|went|is going|gets sent|get sent|is sent|was sent|comes|ends up going|ends up) to (?:you|him|her|them|someone else|the wrong (?:person|number|email|address|inbox)|your (?:spam|junk)(?: folder)?|spam|junk)$/;
-function clauseIsBenign(clauseNs, prevNs) {
-  if (!clauseNs) return false;
-  if (CLAUSE_COORDINATOR_RE.test(clauseNs)) {
-    return clauseNs.split(CLAUSE_COORDINATOR_RE).every((part) => clauseComponentIsBenign(part.trim(), prevNs));
-  }
-  return clauseComponentIsBenign(clauseNs, prevNs);
-}
-function clauseComponentIsBenign(clauseNs, prevNs) {
-  if (!clauseNs) return false;
-  const padded = ` ${clauseNs} `;
-  if (AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))) return false;
-  if (UNAVAILABILITY_TERMS.some((t) => padded.includes(t))) return false;
-  if (AUTHORIZATION_NEED_RE.test(clauseNs)) return false;
-  if (APPROVAL_REQUEST_RE.test(clauseNs)) return false;
-  if (NON_POSSESSIVE_APPROVAL_RE.test(clauseNs)) return false;
-  if (THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(clauseNs)) return false;
-  if (SUBJECT_LED_APPROVAL_NEED_RE.test(clauseNs)) return false;
-  if (APPROVAL_VERB_USE_RE.test(clauseNs)) return false;
-  if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
-  // Codex round 23, P1 (:1429): a benign topic ANYWHERE in the clause used
-  // to clear it, so an unpunctuated compound ("If we're all set the email
-  // goes to you") rode through on "email". Same inversion as the owner's
-  // other-sentence allowlist: the WHOLE clause must be the benign routing
-  // shape — a notification/email/text/invoice/report going to a party.
-  if (BENIGN_CLAUSE_SHAPE_RE.test(clauseNs)) return true;
-  if (prevNs && isBarePronounClause(clauseNs)) {
-    const prevPadded = ` ${prevNs} `;
-    if (BENIGN_NON_BOOKING_TOPICS.some((t) => prevPadded.includes(t))) return true;
-  }
-  return false;
-}
-// Codex round 5: the vocabulary-membership approach itself was the
-// recurring hole — growing COMMITMENT_TURN_VOCAB for one shape ("should")
-// silently widened what EVERY other sentence could say, and a merged
-// benign-topic token ("confirmation") turned out to double as an ordinary
-// scheduling word. The converged invariant instead: OTHER sentences may
-// not talk about scheduling AT ALL. SCHEDULING_PREDICATE_TERMS is checked
-// on the sentence's text directly (after benign topic PHRASES are
-// stripped, so a genuine "confirmation text"/"email notification" aside
-// never trips it) — one list, whole-token/phrase matched, that needs no
-// growth for a "confirm"/"appointment"/"book"/"schedule" shape ever again,
-// regardless of what other vocabulary exists.
-// codex round 6, P2 (:1179): bare ' may ' collided with the MODAL verb —
-// "Yep, it may go to him, the notification." poisoned on the month name.
-// "may" is deliberately ABSENT from this list; MAY_DATE_RE below recognizes
-// it only in genuine date-shaped usage (adjacent to a day number), leaving
-// the modal use alone. Every other month name stays a plain phrase entry —
-// none of them collide with an ordinary English word the way "may" does.
-const SCHEDULING_PREDICATE_TERMS = [
-  ' confirm ', ' confirms ', ' confirmed ', ' confirmation ',
-  // Codex round 18, P1 (:1375): COMMITMENT_TURN_VOCAB admits "confirming"
-  // and "inspection", so an OTHER sentence built on them ("We need you
-  // confirming it.") must count as scheduling content too.
-  ' confirming ', ' inspection ', ' inspections ',
-  // Codex round 21, P1 (:1426): booking idioms built from whitelisted words
-  // ("Need to put you down.") — any "<party> down" and "get <party> in".
-  ' you down ', ' him down ', ' her down ', ' them down ', ' us down ',
-  // Codex round 22, P1 (:1439): "put you in" too — any "<party> in"
-  // (get/put/have/squeeze … you in), not one verb at a time.
-  ' you in ', ' him in ', ' her in ', ' them in ', ' us in ',
-  ' coming out ',
-  ' appointment ', ' appointments ',
-  ' book ', ' booked ', ' booking ',
-  ' schedule ', ' scheduled ', ' scheduling ', ' reschedule ', ' rescheduled ',
-  ' visit ', ' visits ',
-  ' see you ', ' see him ', ' see her ', ' see them ',
-  ' be there ', ' be out ', ' come out ',
-  ' sunday ', ' monday ', ' tuesday ', ' wednesday ', ' thursday ', ' friday ', ' saturday ',
-  ' january ', ' february ', ' march ', ' april ', ' june ', ' july ',
-  ' august ', ' september ', ' october ', ' november ', ' december ',
-  ' tomorrow ', ' today ', ' tonight ', ' next week ',
-  ' am ', ' pm ', ' clock ', ' noon ', ' midnight ',
-  // Codex round 16, P1 (:1373): spoken day periods are admitted by
-  // COMMITMENT_TURN_VOCAB, so an OTHER sentence naming one ("We're set for
-  // the morning.") must count as scheduling content, like am/pm.
-  ' morning ', ' afternoon ',
-  ' technician ', ' tech ', ' crew ', ' route ', ' slot ', ' calendar ',
-  ' available ', ' availability ', ' unavailable ',
-  ' quote ', ' estimate ', ' price ',
-];
-// "May" recognized ONLY in date-shaped usage — a day number or ordinal
-// immediately adjacent, either order ("May 3rd" / "3rd of May" / "3 May"),
-// or with "the" between month and day ("May the 3rd" — codex round 9, P1
-// :1263: the original alternation required the day number to sit directly
-// after "may", so "That's set for May the 3rd." bypassed it entirely; an
-// optional "the " between the month and the day covers the same date shape
-// spoken the other common way).
-// Codex round 15, P1 (:1377): "We are set for May." names the month with no
-// day number. A month-context preposition or determiner directly before
-// "may" is the other unambiguous month shape — "for/in/by/until/through/
-// since/next/this/last/early/late/mid/end of/beginning of/middle of May" —
-// and is scheduling content too. Modal "may" never follows these words with
-// the meaning of a verb except "this may <verb>", which MODAL_UNCERTAINTY_RE
-// already poisons, so counting it here only ever fails closed; "it may go to
-// him" / "you may get a text" have no such word before "may" and stay benign.
-const MAY_DATE_RE = /\bmay (?:the )?\d{1,2}(?:st|nd|rd|th)?\b|\b\d{1,2}(?:st|nd|rd|th)? (?:of )?may\b|\b(?:for|in|by|until|till|through|since|next|this|last|early|late|mid|end of|beginning of|middle of) may\b/;
-// codex round 6, P2 (:1234): a purely REINFORCING affirmative in an OTHER
-// sentence ("You're confirmed.") was getting caught by the
-// SCHEDULING_PREDICATE_TERMS screen on "confirmed" — but it adds no new
-// scheduling FACT (no day, no time, no place), it only echoes agreement
-// with whatever the pinned sentence already states. Recognized as a narrow,
-// WHOLE-SENTENCE anchored shape only — never via vocabulary, and never
-// allowed to grow past this exact structure: an optional single opener,
-// then a subject ("you're"/"we're"/"it's"/"that's"), then an optional
-// "all", then one closing affirmative verb, and NOTHING else. Anything
-// longer — a reason clause, a weekday, a condition — falls through to the
-// ordinary screens below and is judged on its own content, same as any
-// other sentence ("You're confirmed once he approves." still poisons via
-// the declarative-poison screen on "approves"; "You're confirmed for
-// Sunday." still poisons via SCHEDULING_PREDICATE_TERMS on "sunday" — a
-// weekday is new scheduling information this narrow shape was never meant
-// to cover).
-// codex round 7, P2: a direct PAST-TENSE reinforcement from the agent's own
-// voice ("We confirmed your appointment.") is the same no-new-fact shape as
-// "You're confirmed." above, just phrased in first person with an explicit
-// object — extended as a second alternative, still whole-sentence anchored,
-// still nothing allowed after the object ("We confirmed your appointment
-// for Sunday." still poisons — a weekday is new information outside this
-// shape) and still requiring a completed verb ("We'll confirm your
-// appointment." uses "confirm", not "confirmed", so it never matches
-// either alternative — and as a PINNED sentence it fails
-// turnHasAffirmativeCommitmentForm regardless, since it states no slot).
-// Codex round 11, P1 (:1331): "booked" is accepted ONLY after a subject
-// that names the caller's slot (you/it/that). After "we re"/"we are" it is
-// a capacity statement ("We are all booked." = no openings), which also
-// poisons via UNAVAILABILITY_TERMS; the we-subject alternative keeps the
-// other completions ("We're all set.").
-const REINFORCING_AFFIRMATION_RE = /^(?:(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:(?:you re|you are|it s|it is|that s|that is) (?:all )?(?:confirmed|set|booked|good to go|on the books|locked in)|(?:we re|we are) (?:all )?(?:confirmed|set|good to go|on the books|locked in))|(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:we|i) (?:have )?(?:confirmed|booked|scheduled|got you (?:down|booked|scheduled)) (?:your|the|that|this) (?:appointment|visit|service|slot)(?: for you)?)$/;
-// True when a normalized sentence (already run through
-// stripBenignTopicPhrases) still talks about scheduling — either a term
-// from the phrase list above, the date-shaped "May" regex, or a bare 1-4
-// digit "time-looking" token (an hour, a bare date number, OR — codex round
-// 9, P1 :1263 — that same date number spelled as an ORDINAL, "3rd"/"31st").
-// turnVocabularyTokenOk (the final whitelist check every OTHER sentence's
-// stripped text still has to pass) already admits a bare `\d{1,2}(st|nd|rd|
-// th)` token as ordinary vocabulary — it has to, so the PINNED sentence can
-// state "the 3rd" — but this predicate screen never recognized that same
-// token as scheduling CONTENT, so "We're set for the 3rd." (an OTHER
-// sentence naming a date with no weekday/month/"confirm" term at all)
-// cleared every check and never poisoned. Deliberately broad on the digit
-// check: fails closed to triage on any short number (an address, a price
-// without cents) rather than risk missing a real time or date mention — the
-// safe direction for an OTHER sentence, which is never the one that needs to
-// state a time.
-// Codex round 10, P1 (:1345): a conditional's CONSEQUENT can itself be a
-// full booking commitment — "If the email goes to you, we'll have you
-// down." has a benign antecedent (clauseIsBenign only ever extracts and
-// checks the antecedent, never the consequent — see extractConditionalClauses,
-// above), and its consequent "we'll have you down" names no
-// SCHEDULING_PREDICATE_TERMS phrase at all ("have you down" was never added
-// to that list). Every word of the consequent (we/ll/have/you/down) is
-// ordinary COMMITMENT_TURN_VOCAB or BENIGN_CONDITIONAL_GLUE_WORDS
-// ("goes" — unlocked once the antecedent clears clauseIsBenign), so the
-// sentence read as clean and a second, un-grounded booking commitment
-// slipped through as "benign" scheduling routing chatter. Rather than fork
-// a growing list of consequent-commitment phrasings, reuse the SAME
-// COMMITMENT_HEADS templates the pinned-sentence binder already recognizes
-// as a booking commitment (turnHasAffirmativeCommitmentForm, above): any
-// one of those exact head phrases appearing anywhere in the (stripped)
-// sentence is, by construction, scheduling content, so it counts toward
-// this predicate screen the same as any SCHEDULING_PREDICATE_TERMS phrase.
-function sentenceContainsCommitmentHead(strippedNs) {
-  const padded = ` ${strippedNs} `;
-  return COMMITMENT_HEADS.some((head) => padded.includes(` ${head.endsWith(' ') ? head : `${head} `}`));
-}
-// Codex round 13, P1 (:1397) / round 14, P1 (:1413): a conditional
-// sentence's CONSEQUENT is judged on its own, and it is GUILTY UNLESS it is
-// one of the known-benign shapes below. Round 13 poisoned only an agent
-// future/ability head (we'll/I can + verb); "If the email goes to you, then
-// we are all set." is a present-tense commitment that named no such head,
-// no scheduling term, and only vocabulary words, so it read as a benign
-// aside. Inverting the rule closes the class: every consequent piece (text
-// before the first trigger, and each trigger segment's remainder after its
-// clause — see splitConditionalSentence) must, after dropping edge
-// discourse fillers, match one ANCHORED whole-piece exemption:
-//   - the notification-remediation promise ("I'll make sure that's
-//     rectified" / "…that gets figured out" — the live 17ed9362 turn),
-//   - "let me/us know" (the benign-routing test's consequent),
-//   - "it's autonomously done" (the live 17ed9362 turn's preface before
-//     "so if it goes to you").
-// Anything riding along after an exemption ("…rectified and we'll have you
-// down") breaks the anchor and poisons.
-const BENIGN_CONDITIONAL_CONSEQUENT_RES = [
-  /^(?:i|we) (?:ll|will) make sure (?:that|it) (?:s|is|gets) (?:rectified|figured out|done)$/,
-  /^let (?:me|us) know$/,
-  /^(?:it s|it is) autonomously done$/,
-];
-const CONSEQUENT_LEADING_FILLERS = new Set(['so', 'then', 'and', 'yep', 'yes', 'yeah', 'ok', 'okay', 'alright']);
-const CONSEQUENT_TRAILING_FILLERS = new Set(['so', 'then', 'and']);
-function trimConsequentFillers(consequentNs) {
-  const toks = consequentNs.split(' ').filter(Boolean);
-  while (toks.length && CONSEQUENT_LEADING_FILLERS.has(toks[0])) toks.shift();
-  while (toks.length && CONSEQUENT_TRAILING_FILLERS.has(toks[toks.length - 1])) toks.pop();
-  return toks.join(' ');
-}
-// Codex round 15, P1 (:1537): a DANGLING antecedent — a conditional sentence
-// with no consequent at all ("If the email goes to you." followed by "We're
-// all set.") — is unexempted too. Sentence punctuation had split the
-// consequent into the next sentence, where the reinforcing-affirmation
-// shape passed it on its own; the dangling half now poisons instead.
-function conditionalConsequentIsUnexempted(rawSentence) {
-  const split = splitConditionalSentence(rawSentence);
-  const consequents = split.consequents
-    .map(trimConsequentFillers)
-    .filter(Boolean);
-  return !consequents.length
-    || split.danglingTrigger
-    || consequents.some((c) => !BENIGN_CONDITIONAL_CONSEQUENT_RES.some((re) => re.test(c)));
-}
-function sentenceHasSchedulingPredicate(strippedNs) {
-  const padded = ` ${strippedNs} `;
-  if (MAY_DATE_RE.test(strippedNs)) return true;
-  if (SCHEDULING_PREDICATE_TERMS.some((t) => padded.includes(t))) return true;
-  if (sentenceContainsCommitmentHead(strippedNs)) return true;
-  // Codex round 15, P1 (:1487): the vocabulary whitelist admits 1-4 digit
-  // tokens, so the screen must reject the same width — "We are set for
-  // 2027." (a year) and "We're set for 1030." (a run-together time) named
-  // scheduling content through a 4-digit token this screen used to skip.
-  return strippedNs.split(' ').some((tok) => /^\d{1,4}(?:st|nd|rd|th)?$/.test(tok));
-}
-// Top-level CLEARANCE test for ONE sentence OTHER than the pinned
-// commitment sentence (agentCommitmentSentenceVerified calls this for every
-// sentence in the turn). Order matters:
-//   1. Not a question (still asking, not committing).
-//   2. No negation/hedge (turnHasNegationOrHedge — defense in depth).
-//   3. No declarative poison vocabulary (sentenceHasDeclarativePoisonVocabulary
-//      — codex round 4: an authorization/unavailability phrase or the
-//      anchored "need <party> to <authorize>" shape poisons UNCONDITIONALLY,
-//      checked before anything below ever runs, because a closed vocabulary
-//      of ordinary words — "him"/"need"/"confirm"/"the"/"appointment" — can
-//      never express that SHAPE on its own).
-//   4. A purely REINFORCING affirmative ("You're confirmed."/"We confirmed
-//      your appointment.") passes immediately, checked as a narrow
-//      whole-sentence ANCHORED shape (REINFORCING_AFFIRMATION_RE, codex
-//      rounds 6-7 — never via vocabulary), before the scheduling-predicate
-//      screen ever sees "confirmed"/"booked"/etc. Anything longer than the
-//      exact shape falls through to the ordinary screens below.
-//   5. The narrow notification-routing declarative ("Yep, it should go to
-//      him, the notification.") also passes immediately, checked the same
-//      way (NOTIFICATION_ROUTING_RE, codex round 7, P1) — the only place
-//      "should" grounds a sentence at all now that it is not a free token
-//      in any vocabulary Set.
-//   6. No SCHEDULING_PREDICATE_TERM in the sentence once benign topic
-//      phrases are stripped out (codex round 5, above) — "We should confirm
-//      the appointment.", "We need your confirmation of the appointment.",
-//      and "If you need it, we will book the appointment." all poison here,
-//      on "confirm"/"confirmation"/"book"+"appointment", regardless of
-//      conditional structure or vocabulary membership.
-//   7. A CONDITIONAL sentence gets ONE further requirement ON TOP of (not
-//      instead of) the STRIPPED-text vocabulary check below: every
-//      extracted clause must be benign (clauseIsBenign — unchanged: still
-//      runs the authorization/unavailability/scheduling-staffing poison-term
-//      checks against each clause's own raw text, still requires a benign
-//      topic, still falls back to the previous sentence only for a
-//      bare-pronoun clause), AND every consequent piece must match an
-//      anchored benign exemption (conditionalConsequentIsUnexempted — codex
-//      rounds 13-14: guilty unless known-benign). A
-//      conditional sentence can only pass through
-//      this carve-out — vocabulary-only clearance is never enough for it,
-//      unlike a non-conditional declarative.
-//   8. Whatever remains of the STRIPPED text must be built from the base
-//      COMMITMENT_TURN_VOCAB plus the small BENIGN_CONDITIONAL_GLUE_WORDS
-//      filler set (never the raw, unstripped text — the benign topic words
-//      are gone by now and never need to sit in any vocabulary Set at all).
-// The allowlist itself (owner ruling 2026-09-26). Every entry is a WHOLE
-// normalized sentence (^…$); a sentence that adds anything to one of these
-// shapes falls off the list and holds the call for a human. The poison
-// screens above still run first, as defense in depth.
-const ACK_ALT = '(?:ok|okay|awesome|perfect|great|alright|all right|sounds good|yep|yes|yeah|no problem|got it|cool|wonderful|excellent|we made it)';
-const COURTESY_ALT = '(?:thanks|thank you(?: so much| very much)?|bye(?: bye)?|talk to you soon|have a (?:good|great|nice) (?:day|one|night|evening|weekend)|take care|you re welcome)';
-const BENIGN_SEND_TOPIC_ALT = '(?:(?:a|an|the|your) )?(?:confirmation text|confirmation email|text message|text|email|invoice|report|receipt|notification)';
-const SEND_TIMING_ALT = '(?: (?:momentarily|shortly|soon|now|right now|right away|today))?';
-const OTHER_SENTENCE_ALLOWED_SHAPES = [
-  // bare acknowledgements: "Awesome." / "Yes." / "No problem." / "Awesome, we made it."
-  new RegExp(`^${ACK_ALT}(?: ${ACK_ALT})*$`),
-  // courtesy closers: "Thank you so much." / "Have a good one." / "Okay, bye."
-  new RegExp(`^(?:${ACK_ALT} )*${COURTESY_ALT}(?: ${COURTESY_ALT})*$`),
-  // the let-us-know closer: "Just let us know if anything changes, thanks."
-  new RegExp(`^(?:${ACK_ALT} )*(?:just )?let (?:us|me) know if (?:anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)(?: ${COURTESY_ALT})*$`),
-  // a benign document/notification send: "I'll email you the invoice." /
-  // "I'll send you a confirmation text momentarily."
-  new RegExp(`^(?:${ACK_ALT} )*(?:i|we) (?:ll|will|am going to|are going to|re going to) (?:send|email|text) (?:you|him|her|them) ${BENIGN_SEND_TOPIC_ALT}${SEND_TIMING_ALT}$`),
-  // a notice the customer will receive: "You may get a text." / "You'll get an email shortly."
-  new RegExp(`^(?:${ACK_ALT} )*you (?:ll|will|may|should|re going to|are going to) (?:get|receive) ${BENIGN_SEND_TOPIC_ALT}${SEND_TIMING_ALT}$`),
-  // modal notification routing with the topic named: "Yep, it may go to him, the notification."
-  new RegExp(`^(?:${ACK_ALT} )*(?:(?:it|that) (?:may|will) (?:go|be sent|be going) to (?:him|her|them|you) the (?:notification|email|text)|the (?:notification|email|text|confirmation text) (?:may|will) (?:go|be sent|be going) to (?:him|her|them|you))$`),
-];
-function otherSentenceIsClean(other, prevNs) {
-  if (other.interrogative) return false;
-  if (turnHasNegationOrHedge(other.ns)) return false;
-  if (sentenceHasDeclarativePoisonVocabulary(other.ns)) return false;
-  if (REINFORCING_AFFIRMATION_RE.test(other.ns)) return true;
-  if (NOTIFICATION_ROUTING_RE.test(other.ns)) return true;
-  const stripped = stripBenignTopicPhrases(other.ns);
-  if (sentenceHasSchedulingPredicate(stripped)) return false;
-  // The glue set unlocks ONLY for a sentence whose conditional clauses all
-  // cleared clauseIsBenign (codex round 9, P1 :713 root cause) — a plain
-  // declarative gets the base vocabulary alone, so "I will tell him to okay
-  // it." can never borrow "tell" from the conditional carve-out.
-  if (turnHasUnresolvedConditional(other.ns)) {
-    const clauses = extractConditionalClauses(other.raw);
-    if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
-    if (conditionalConsequentIsUnexempted(other.raw)) return false;
-    return stripped.split(' ').every((tok) => turnVocabularyTokenOk(tok, [BENIGN_CONDITIONAL_GLUE_WORDS]));
-  }
-  // Owner ruling 2026-09-26 (after codex round 22): a NON-conditional
-  // OTHER sentence grounds only if it IS one of the known-benign shapes —
-  // guilty unless allowlisted, the same inversion that converged the
-  // conditional consequent (rounds 13-14). Rounds 4-22 each found a new
-  // sentence built purely from COMMITMENT_TURN_VOCAB words ("We'll see.",
-  // "Need to put you in.", "We need yes.") that the vocabulary screen read
-  // as a clean aside; vocabulary membership no longer clears anything here.
-  return OTHER_SENTENCE_ALLOWED_SHAPES.some((re) => re.test(other.ns));
-}
+// Codex rounds 1-27 built an ever-more-precise CLEARANCE test for one OTHER
+// sentence in the committing turn (conditional-clause extraction, a
+// scheduling-predicate screen, a curated non-booking-topic allowlist, a
+// closed OTHER_SENTENCE_ALLOWED_SHAPES allowlist) -- otherSentenceIsClean,
+// clauseIsBenign, extractConditionalClauses, stripBenignTopicPhrases,
+// sentenceHasSchedulingPredicate and their supporting term lists/regexes.
+// Owner ruling 2026-09-25 (SINGLE-SENTENCE RULE, see
+// COMMITMENT_TURN_ACKNOWLEDGEMENTS above) replaced all of that machinery: an
+// OTHER sentence no longer gets judged on its content at all -- it is either
+// a bare acknowledgement or the turn fails closed. Removed as dead code
+// rather than left unreachable.
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves
 // the LITERAL wall clock of an ET-offset timestamp even when the seasonal

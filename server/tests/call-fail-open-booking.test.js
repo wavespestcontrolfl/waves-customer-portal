@@ -214,12 +214,18 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // parked in triage on caller_not_authorized. All names/quotes here are
   // synthetic.
   const AGENT_COMMIT_QUOTE = "So we'll confirm it for noon on Sunday, and just let us know if anything changes.";
+  // single-sentence rule (owner ruling 2026-09-25, round 28 extension): the
+  // trailing caller line is a LATER turn, so it must be an EXACT
+  // acknowledgement/closer match, not a combination of two ("Okay, thank
+  // you." combines "okay" and "thank you" into one sentence, matching
+  // neither list entry exactly) — "Thank you." alone is the single fixture
+  // wrap-up line every unrelated test in this file relies on.
   const TRANSCRIPT = [
     'Caller: Hi, I want to confirm the inspection for noon on Sunday.',
     'Agent: Sounds good, let me grab the address.',
     'Caller: 100 Example Street in Venice.',
     `Agent: ${AGENT_COMMIT_QUOTE}`,
-    'Caller: Okay, thank you.',
+    'Caller: Thank you.',
   ].join('\n');
 
   function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = AGENT_COMMIT_QUOTE } = {}) {
@@ -806,13 +812,16 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // sentence when it references authorization/approval or the scheduling
   // itself — a conditional about something unrelated (here, which inbox a
   // notification lands in) does not.
-  test('a conditional about NOTIFICATION ROUTING elsewhere in the turn does not poison the pinned commitment', () => {
+  // single-sentence rule (owner ruling 2026-09-25): the committing turn has
+  // two OTHER sentences besides the pinned commitment, neither a bare
+  // acknowledgement, so it now fails closed regardless of their content.
+  test('a conditional about NOTIFICATION ROUTING elsewhere in the turn no longer grounds (single-sentence rule)', () => {
     const turn = "Yep, it should go to him, the notification. If it goes to you, I'll make sure that gets figured out. "
       + "But yeah, we'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "But yeah, we'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('a conditional about HOMEOWNER APPROVAL elsewhere in the turn still poisons the pinned commitment', () => {
@@ -894,23 +903,28 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // plain declarative that merely MENTIONS a weekday or unrelated topic in
   // passing, built entirely from the closed vocabulary, must not poison
   // just for naming one.
-  test('an adjacent sentence merely mentioning an unrelated topic (invoice email) does not poison the pinned commitment', () => {
+  // single-sentence rule (owner ruling 2026-09-25): "I'll email you the
+  // invoice." is an OTHER sentence, not a bare acknowledgement, so the turn
+  // now fails closed even though it names no scheduling or poison content.
+  test('an adjacent sentence merely mentioning an unrelated topic (invoice email) no longer grounds (single-sentence rule)', () => {
     const turn = "I'll email you the invoice. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // A genuinely benign CONDITIONAL clause — "if the confirmation text goes
   // to the wrong number" is about text-delivery routing, not scheduling,
   // staffing, availability, or authorization — must still ground.
-  test('a benign conditional clause about confirmation-text delivery does not poison the pinned commitment', () => {
+  // single-sentence rule (owner ruling 2026-09-25): the benign conditional
+  // aside is still an OTHER sentence, not a bare acknowledgement.
+  test('a benign conditional clause about confirmation-text delivery no longer grounds (single-sentence rule)', () => {
     const turn = "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Codex round 3, finding 1: a comma-less consequent ("I'll email you") sat
@@ -1061,14 +1075,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // round 5 introduced. The split preserves the exact intent (does small
   // talk plus a benign topic aside poison the turn?) without touching what
   // round 5 actually fixed.
-  test('Codex round-5 positive control: small talk + a benign confirmation-text aside does not poison the pinned commitment', () => {
+  // single-sentence rule (owner ruling 2026-09-25): three OTHER sentences
+  // ("Awesome, we made it.", "Yep.", "I'll send you a confirmation text
+  // momentarily.") — none a bare acknowledgement whole-sentence match
+  // ("Yep." alone would be, but it isn't alone here) — now fail the turn
+  // closed.
+  test('Codex round-5 positive control: small talk + a benign confirmation-text aside no longer grounds (single-sentence rule)', () => {
     const turn = "Awesome, we made it. Yep. I'll send you a confirmation text momentarily. So we'll see you Sunday at 4.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const ex = agentCommitted(['caller_not_authorized'], { quote: "So we'll see you Sunday at 4." });
     ex.scheduling.confirmed_start_at = '2026-08-02T16:00:00-04:00'; // Sunday 4 PM
     const r = canAutoRoute(ex, opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Codex round 6, P1 (:1029): AUTHORIZATION_NEED_RE only covered the
@@ -1100,12 +1119,15 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // as a narrow, whole-sentence-anchored shape, checked before the
   // scheduling-predicate screen; anything longer than the exact shape still
   // falls through to the ordinary screens.
-  test('Codex round-6 regression: "You\'re confirmed." (reinforcing affirmative) does not poison the pinned commitment', () => {
+  // single-sentence rule (owner ruling 2026-09-25): "You're confirmed." is
+  // not on the tiny acknowledgement list (whole-sentence exact match only),
+  // so it is now an OTHER sentence like any other and fails the turn closed.
+  test('Codex round-6 regression: "You\'re confirmed." (reinforcing affirmative) no longer grounds (single-sentence rule)', () => {
     const turn = "You're confirmed. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('Codex round-6: "You\'re confirmed once he approves." still poisons — a reason clause is not the reinforcing shape', () => {
@@ -1134,13 +1156,16 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // collided with the MODAL verb — "it may go to him" poisoned on the month
   // name. "may" is now recognized only in genuine date-shaped usage
   // (MAY_DATE_RE, a day number/ordinal immediately adjacent).
-  test('Codex round-6 regression: modal "may" no longer collides with the month name — the notification-routing turn still grounds', () => {
+  // single-sentence rule (owner ruling 2026-09-25): two OTHER sentences,
+  // neither a bare acknowledgement, now fail the turn closed regardless of
+  // the modal/month disambiguation this test originally pinned.
+  test('Codex round-6 regression: modal "may" no longer collides with the month name, but the turn still fails closed (single-sentence rule)', () => {
     const turn = "Yep, it may go to him, the notification. If it goes to you, I'll make sure that gets figured out. "
       + "But yeah, we'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "But yeah, we'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('Codex round-6: a genuine date-shaped "May" mention in an OTHER sentence still poisons', () => {
@@ -1174,11 +1199,11 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  // The live 17ed9362 single-turn fixture (added round 4, re-verified round
-  // 5) must still ground after "should" was pulled out of the free glue set
-  // — "Yep, it should go to him, the notification." now grounds ONLY
-  // through NOTIFICATION_ROUTING_RE's anchored shape, not vocabulary.
-  test('Codex round-7: the live 17ed9362 single-turn fixture still grounds after "should" left the free glue set', () => {
+  // single-sentence rule (owner ruling 2026-09-25): the live 17ed9362
+  // fixture's committing turn has THREE other sentences ahead of the pinned
+  // commitment, none a bare acknowledgement, so it no longer grounds — this
+  // exact call now gets a human triage look instead of auto-booking.
+  test('Codex round-7: the live 17ed9362 single-turn fixture no longer grounds (single-sentence rule)', () => {
     const transcript = [
       'Agent: Waves Pest Control, this is Adam.',
       'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
@@ -1197,19 +1222,22 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
       }],
       scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
     };
-    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(false);
   });
 
   // Codex round 7, P2: a direct past-tense reinforcement from the agent's
   // own voice states no new scheduling fact any more than "You're
   // confirmed." does — extended REINFORCING_AFFIRMATION_RE with this second
   // anchored alternative.
-  test('Codex round-7 regression: "We confirmed your appointment." (direct past-tense reinforcement) does not poison the pinned commitment', () => {
+  // single-sentence rule (owner ruling 2026-09-25): "We confirmed your
+  // appointment." is not on the acknowledgement list, so it is an OTHER
+  // sentence and the turn now fails closed.
+  test('Codex round-7 regression: "We confirmed your appointment." (direct past-tense reinforcement) no longer grounds (single-sentence rule)', () => {
     const turn = "We confirmed your appointment. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Accepted strictness, same as the round-6 weekday case: a trailing
@@ -1274,7 +1302,10 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // controls must still pass after widening AUTHORIZATION_NEED_RE's party
   // and verb-object groups — none of those turns use "need <caller> to
   // <verb> (it)", so the widened regex should not newly catch them.
-  test('Codex round-8: the live 17ed9362 single-turn fixture still grounds after widening AUTHORIZATION_NEED_RE', () => {
+  // single-sentence rule (owner ruling 2026-09-25): see the round-7 version
+  // of this fixture, above — three OTHER sentences, none a bare
+  // acknowledgement, so it no longer grounds.
+  test('Codex round-8: the live 17ed9362 single-turn fixture no longer grounds (single-sentence rule)', () => {
     const transcript = [
       'Agent: Waves Pest Control, this is Adam.',
       'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
@@ -1293,15 +1324,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
       }],
       scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
     };
-    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(false);
   });
 
-  test('Codex round-8: round-6/round-7 positive controls ("You\'re confirmed.", "We confirmed your appointment.") still pass', () => {
+  // single-sentence rule (owner ruling 2026-09-25): neither "You're
+  // confirmed." nor "We confirmed your appointment." is on the tiny
+  // acknowledgement list, so both are now OTHER sentences that fail the
+  // turn closed.
+  test('Codex round-8: round-6/round-7 positive controls ("You\'re confirmed.", "We confirmed your appointment.") no longer pass (single-sentence rule)', () => {
     for (const turn of ["You're confirmed. We'll see you Sunday at noon.", "We confirmed your appointment. We'll see you Sunday at noon."]) {
       const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
       const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-      expect(r.allowed).toBe(true);
-      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
     }
   });
 
@@ -1382,7 +1417,9 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // and widening the ordinal-date checks — none of those turns use a
   // "tell/ask/have/get <party> <verb>" directive or an ordinal date token,
   // so neither change should newly catch them.
-  test('Codex round-9: the live 17ed9362 single-turn fixture still grounds after the round-9 fixes', () => {
+  // single-sentence rule (owner ruling 2026-09-25): see the round-7/round-8
+  // versions of this fixture, above.
+  test('Codex round-9: the live 17ed9362 single-turn fixture no longer grounds (single-sentence rule)', () => {
     const transcript = [
       'Agent: Waves Pest Control, this is Adam.',
       'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
@@ -1401,15 +1438,17 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
       }],
       scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
     };
-    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(false);
   });
 
-  test('Codex round-9: round-6/round-7 positive controls ("You\'re confirmed.", "We confirmed your appointment.") still pass', () => {
+  // single-sentence rule (owner ruling 2026-09-25): see the round-8 version
+  // of this positive control, above.
+  test('Codex round-9: round-6/round-7 positive controls ("You\'re confirmed.", "We confirmed your appointment.") no longer pass (single-sentence rule)', () => {
     for (const turn of ["You're confirmed. We'll see you Sunday at noon.", "We confirmed your appointment. We'll see you Sunday at noon."]) {
       const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
       const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-      expect(r.allowed).toBe(true);
-      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
     }
   });
 
@@ -1513,18 +1552,30 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  test.each([
-    "We'll see you Sunday at noon. Just let us know if anything changes.",
-    "We'll see you Sunday at noon. Let us know if anything changes, thank you so much.",
-    "Okay, we'll see you Sunday at noon.",
-    "The notification should go to him. We'll see you Sunday at noon.",
-    "Yep, it should go to him, the notification. We'll see you Sunday at noon.",
-    "Yep, it may go to him, the notification. We'll see you Sunday at noon.",
-  ])('Codex round-19: benign closers, openers, and topic-named routing still ground — %s', (turn) => {
+  // single-sentence rule (owner ruling 2026-09-25): "Okay, we'll see you
+  // Sunday at noon." is ONE sentence (comma, not a sentence break) — the
+  // pinned sentence itself, with "Okay" as a recognized opener — so it still
+  // grounds unchanged. Every other turn here has a genuine SECOND sentence,
+  // none a bare acknowledgement, so those five now fail closed instead.
+  test('Codex round-19: an opener fused into the pinned sentence still grounds — Okay, we\'ll see you Sunday at noon.', () => {
+    const turn = "Okay, we'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test.each([
+    "We'll see you Sunday at noon. Just let us know if anything changes.",
+    "We'll see you Sunday at noon. Let us know if anything changes, thank you so much.",
+    "The notification should go to him. We'll see you Sunday at noon.",
+    "Yep, it should go to him, the notification. We'll see you Sunday at noon.",
+    "Yep, it may go to him, the notification. We'll see you Sunday at noon.",
+  ])('Codex round-19: benign closers, openers, and topic-named routing no longer ground — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Codex round 19 (review of 4de001a2fc): three P1s.
@@ -1545,15 +1596,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25): each turn here has a
+  // genuine second sentence, none a bare acknowledgement, so all three now
+  // fail closed instead of grounding through the (removed) benign-routing/
+  // conditional-consequent carve-outs.
   test.each([
     "You may get a text. We'll see you Sunday at noon.",
     "If the email goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
     "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.",
-  ])('Codex round-20: benign routing and single-trigger conditionals with a consequent still ground — %s', (turn) => {
+  ])('Codex round-20: benign routing and single-trigger conditionals no longer ground — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Codex round 20 (review of c65ffa5423): P1 (:1138) — an approval
@@ -1610,14 +1665,18 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25): "Thank you so much." is
+  // not an exact whole-sentence match of the acknowledgement list ("thank
+  // you" without the trailing "so much"), so both turns here are now
+  // multi-sentence and fail closed.
   test.each([
     "If the email goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
     "We'll see you Sunday at noon. Thank you so much.",
-  ])('Codex round-23: single-topic antecedents and courtesy closers still ground — %s', (turn) => {
+  ])('Codex round-23: single-topic antecedents and courtesy closers no longer ground — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Owner ruling 2026-09-26 (after codex round 22): a non-conditional OTHER
@@ -1640,19 +1699,35 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25): "Perfect." is a WHOLE
+  // OTHER sentence that exactly matches the tiny acknowledgement list, so it
+  // still grounds unchanged.
+  test('owner allowlist: a bare acknowledgement still grounds — Perfect. We\'ll see you Sunday at noon.', () => {
+    const turn = "Perfect. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  // single-sentence rule (owner ruling 2026-09-25): none of these OTHER
+  // sentences is an EXACT whole-sentence acknowledgement-list match —
+  // "Okay, sounds good." combines two list entries into one sentence, which
+  // the rule does not allow, and the rest are ordinary content sentences —
+  // so all six now fail closed instead of grounding through the (removed)
+  // owner allowlist.
   test.each([
-    "Perfect. We'll see you Sunday at noon.",
     "Okay, sounds good. We'll see you Sunday at noon.",
     "We'll see you Sunday at noon. Have a good one.",
     "We'll see you Sunday at noon. Okay, bye.",
     "I'll send you the invoice. We'll see you Sunday at noon.",
     "You'll get a text shortly. We'll see you Sunday at noon.",
     "We're all set. We'll see you Sunday at noon.",
-  ])('owner allowlist: listed shapes still ground — %s', (turn) => {
+  ])('owner allowlist: listed shapes no longer ground — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Codex round 23 (reviews of 223c088e84 and 1be805e080): four P1s.
@@ -1692,6 +1767,11 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25, round 28 extension):
+  // ordinary wrap-up ("Can I get your email address?", "Our technician will
+  // text you...") and a same-slot restatement are no longer exempted —
+  // EVERY later-turn sentence must be an exact acknowledgement/closer match,
+  // no term lists, no restatement carve-out. All nine now hold the call.
   test.each([
     "Agent: Can I get your email address?",
     "Agent: Perfect, you'll get a text shortly. Have a good one.",
@@ -1702,8 +1782,18 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     "Agent: Is 100 Example Street correct?",
     "Agent: Our technician will text you when he's on the way.",
     "Agent: And the house is at 100 Example Street.",
-  ])('Codex round-24: ordinary wrap-up or a same-slot restatement in a later turn still grounds — %s', (later) => {
+  ])('Codex round-24: ordinary wrap-up or a same-slot restatement in a later turn no longer grounds — single-sentence rule (owner ruling 2026-09-25) — %s', (later) => {
     const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}\nCaller: Okay.`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The surviving positive case: a later agent turn that is ITSELF nothing
+  // but a bare acknowledgement/closer (no wrap-up content at all) still
+  // grounds, same as the committing turn's own bare-acknowledgement rule.
+  test('a later agent turn that is a bare acknowledgement still grounds — Agent: Perfect.', () => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\nAgent: Perfect.\nCaller: Okay.`;
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
@@ -1735,6 +1825,12 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25, round 28 extension): none
+  // of these is an EXACT whole-sentence acknowledgement/closer match — each
+  // either combines two list words into one sentence ("No, that's all,
+  // thank you." / "Okay, talk to you then."), restates the slot ("Great,
+  // see you Sunday at noon."), or is ordinary routine content ("Please stop
+  // by the side gate.") — so all seven now hold the call.
   test.each([
     "Caller: Great, see you Sunday at noon.",
     "Caller: No, that's all, thank you.",
@@ -1743,7 +1839,22 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     "Caller: Please stop by the side gate.",
     "Caller: You can pass through the gate.",
     "Caller: Okay, talk to you then.",
-  ])('Codex round-26: a later caller acknowledgement or closer still grounds — %s', (later) => {
+  ])('Codex round-26: a later caller acknowledgement or closer no longer grounds — single-sentence rule (owner ruling 2026-09-25) — %s', (later) => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The surviving positive case: a later caller turn that is ITSELF nothing
+  // but a bare acknowledgement, or one of the round-28 closers, still
+  // grounds.
+  test.each([
+    'Caller: Perfect.',
+    'Caller: Bye.',
+    'Caller: You too.',
+    'Caller: Talk to you then.',
+  ])('Codex round-28: a later caller turn that is a bare acknowledgement or closer still grounds — %s', (later) => {
     const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
     expect(r.allowed).toBe(true);
@@ -1772,16 +1883,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25): none of these reinforcing
+  // affirmatives is on the tiny acknowledgement list, so all four are now
+  // OTHER sentences that fail the turn closed.
   test.each([
     "You're all booked. We'll see you Sunday at noon.",
     "We're all set. We'll see you Sunday at noon.",
     "You're confirmed. We'll see you Sunday at noon.",
     "We confirmed your appointment. We'll see you Sunday at noon.",
-  ])('Codex round-12: reinforcing affirmations still ground — %s', (turn) => {
+  ])('Codex round-12: reinforcing affirmations no longer ground — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('Codex round-12 regression: a cardinal date equal to the hour ("Sunday the 10 at 10 o\'clock") must match the slot day', () => {
@@ -1844,14 +1958,17 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25): two OTHER sentences,
+  // neither a bare acknowledgement, so both turns now fail closed instead of
+  // grounding through the (removed) benign-consequent carve-out.
   test.each([
     "Yep, it should go to him, the notification. If it goes to you, I'll make sure that gets figured out. We'll see you Sunday at noon.",
     "Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
-  ])('Codex round-14: a benign notification-remediation consequent still grounds — %s', (turn) => {
+  ])('Codex round-14: a benign notification-remediation consequent no longer grounds — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // P1 (:1084) — "yes" (and "green light") are authorization nouns.
@@ -1922,15 +2039,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25): each turn has OTHER
+  // sentences beyond the pinned commitment, none a bare acknowledgement, so
+  // all three now fail closed instead of grounding through the (removed)
+  // anchored-consequent carve-out.
   test.each([
     "Yep, it should go to him, the notification. If it goes to you, I'll make sure that gets figured out. We'll see you Sunday at noon.",
     "Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
     "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.",
-  ])('Codex round-15: the anchored benign consequents still ground — %s', (turn) => {
+  ])('Codex round-15: the anchored benign consequents no longer ground — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // P1 (:1037) — a delegated decision poisons.
@@ -1963,14 +2084,16 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // single-sentence rule (owner ruling 2026-09-25): neither OTHER sentence
+  // is a bare acknowledgement, so both turns now fail closed.
   test.each([
     "Yep, it may go to him, the notification. We'll see you Sunday at noon.",
     "You may get a text. We'll see you Sunday at noon.",
-  ])('Codex round-15: benign notification-routing "may" still grounds — %s', (turn) => {
+  ])('Codex round-15: benign notification-routing "may" no longer grounds — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Codex round 15 (review of 64941712eb): four P1s.
@@ -2001,14 +2124,16 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // ("It should go to him." after "who has to okay it?"), so both routing
   // forms now require the notification/email/text to be named; the bare
   // form moved to the round-19 poison list above.
+  // single-sentence rule (owner ruling 2026-09-25): both OTHER sentences
+  // fail closed now, whatever benign routing content they name.
   test.each([
     "You may get a text. We'll see you Sunday at noon.",
     "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.",
-  ])('Codex round-16: benign modal routing and a conditional with its consequent still ground — %s', (turn) => {
+  ])('Codex round-16: benign modal routing and a conditional with its consequent no longer ground — single-sentence rule (owner ruling 2026-09-25) — %s', (turn) => {
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
@@ -2035,26 +2160,21 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   // Live miss 2026-09-24, call 17ed9362: a lender arranging a WDO inspection
-  // for the homeowner (the point of contact) on behalf of the caller. The
-  // model pinned the closing agent sentence — a third-party "see him", a
-  // bare "o'clock", and an adjacent conditional about which inbox gets the
-  // notification email — and the OLD grounding rejected all three;
-  // hasAgentCommittedEvidence must now ground it. Shape only: every name,
-  // address, phone and email in the live call is replaced with the same
-  // kind of clearly-fictitious placeholder this file already uses elsewhere
-  // (AGENTS.md "Customer PII in the repo" — no realistic identifying detail
-  // in tests, even synthetic).
+  // for the homeowner (the point of contact) on behalf of the caller. Rounds
+  // 4-27 progressively widened the whitelist so this exact shape — a
+  // third-party "see him", a bare "o'clock", and an adjacent conditional
+  // about which inbox gets the notification email — could still ground.
   //
-  // Codex round 4, finding 2: an earlier draft of this test SPLIT the live
-  // agent turn across two separate "Agent:" lines and reworded "It's
-  // autonomously done ... I'll make sure that's rectified" down to "I'll
-  // make sure that gets figured out" — both changes moved the notification-
-  // routing sentence out of the SAME turn as the pinned commitment (so
-  // otherSentenceIsClean never even ran on it) and swapped in easier
-  // vocabulary, masking the actual gap this PR exists to fix. The live call
-  // is genuinely ONE agent turn with several sentences; this test now uses
-  // that exact turn, unsplit, with the real wording.
-  test('hasAgentCommittedEvidence grounds a third-party "see him ... 10 o\'clock" commitment past a notification-routing conditional (live miss 17ed9362 shape, single unsplit turn)', () => {
+  // single-sentence rule (owner ruling 2026-09-25) supersedes all of that:
+  // the committing turn has THREE other sentences ahead of the pinned
+  // commitment, none a bare acknowledgement, so this exact call no longer
+  // auto-books — it now gets a human triage look instead, which the owner
+  // explicitly accepted as the cost of closing the 18-round whack-a-mole.
+  // Shape only: every name, address, phone and email in the live call is
+  // replaced with the same kind of clearly-fictitious placeholder this file
+  // already uses elsewhere (AGENTS.md "Customer PII in the repo" — no
+  // realistic identifying detail in tests, even synthetic).
+  test('hasAgentCommittedEvidence no longer grounds the live 17ed9362 shape — single-sentence rule (owner ruling 2026-09-25)', () => {
     const transcript = [
       'Agent: Waves Pest Control, this is Adam.',
       'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
@@ -2073,7 +2193,7 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
       }],
       scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
     };
-    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(false);
   });
 
   // P1 coverage gap (local fallback auditor): AT_WEEKDAY_RE (the bare
@@ -2143,6 +2263,84 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     // it must not add a conflicting second time mention alongside "noon".
     const ns = normalizeCommitmentText('We will see you Sunday at noon, and we open at 12 sharp.');
     expect(quoteBindsConfirmedSlot(ns, '2026-08-02T12:00:00-04:00', '2026-07-30T15:50:00-04:00')).toBe(true);
+  });
+
+  // SINGLE-SENTENCE RULE (owner ruling 2026-09-25, final). After 18 Codex
+  // rounds, each finding a new phrasing in the OTHER sentences of the
+  // committing turn that slipped past a closed-vocabulary whitelist, the
+  // owner ruled: only a committing agent turn that consists of the
+  // commitment sentence ALONE can ground. Any other sentence in that turn
+  // holds the call for a human, with one narrow allowance for a whole OTHER
+  // sentence that exactly matches the tiny acknowledgement list.
+  describe('single-sentence rule (owner ruling 2026-09-25)', () => {
+    test('a single-sentence commitment (no other sentences in the turn) still grounds', () => {
+      const r = canAutoRoute(agentCommitted(), opts());
+      expect(r.allowed).toBe(true);
+      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    });
+
+    test('a leading bare "Okay." acknowledgement still grounds — Okay. We\'ll see you Sunday at noon.', () => {
+      const turn = "Okay. We'll see you Sunday at noon.";
+      const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+      const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+      expect(r.allowed).toBe(true);
+      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    });
+
+    test('a trailing bare "Thank you." acknowledgement still grounds — We\'ll see you Sunday at noon. Thank you.', () => {
+      const turn = "We'll see you Sunday at noon. Thank you.";
+      const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+      const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+      expect(r.allowed).toBe(true);
+      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    });
+
+    // An acknowledgement fused into the SAME sentence as the commitment
+    // (comma, not a sentence break) is not a second sentence at all — the
+    // pinned-sentence rules (commitmentTurnVocabularyOk / COMMITMENT_OPENER_TOKENS)
+    // decide it, unchanged. See the "Codex round-19: an opener fused into
+    // the pinned sentence still grounds" test, above, for the canAutoRoute
+    // coverage of this exact shape; this is quoteBindsConfirmedSlot/form-level
+    // confirmation that the acknowledgement-list check never even runs on a
+    // fused opener, because splitSentences never splits it into two units.
+    test('"Okay, we\'ll see you Sunday at noon." is ONE sentence, not an other-sentence + acknowledgement pair', () => {
+      const turn = "Okay, we'll see you Sunday at noon.";
+      const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+      const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+      expect(r.allowed).toBe(true);
+      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    });
+
+    // Codex round 18's four open threads (0f5ba00c50) — each is an OTHER
+    // sentence that is not on the acknowledgement list, so the single-
+    // sentence rule resolves all four the same way: the turn is multi-
+    // sentence and now fails closed, whatever the sentence says.
+    test.each([
+      ['We need you confirming it.', 'PRRT_kwDOR3YQi86mBTjY'],
+      ['Let us know if anything changes, and then we will put you down.', 'PRRT_kwDOR3YQi86mBTjh'],
+      ['Okay will come in the email.', 'PRRT_kwDOR3YQi86mBTjp'],
+      ['It should go to him.', 'PRRT_kwDOR3YQi86mBTju'],
+    ])('Codex round-18 thread %#: "%s" no longer grounds (single-sentence rule, %s)', (sentence) => {
+      const turn = `${sentence} We'll see you Sunday at noon.`;
+      const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+      const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    });
+
+    // "Okay will come in the email." must be judged as ONE sentence, not
+    // split so a leading "Okay" alone matches the acknowledgement list —
+    // splitSentences only breaks on [.!?;], and this sentence has no
+    // internal punctuation, so its whole normalized text ("okay will come in
+    // the email") is checked against the list and correctly fails (round-18
+    // thread PRRT_kwDOR3YQi86mBTjp).
+    test('"Okay will come in the email." is judged as ONE sentence, not "Okay" + a tolerated remainder', () => {
+      const turn = "Okay will come in the email. We'll see you Sunday at noon.";
+      const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+      const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    });
   });
 });
 

@@ -294,8 +294,31 @@ function checkTcpaConsent(extraction, opts = {}) {
 // v2-1.36.0 (codex round 27): a later caller sentence referring to the
 // time/day/date must be a plain same-slot acknowledgement, and refusal verb
 // stems (reject/object/refuse/decline/cancel…) hold — MORE RESTRICTIVE.
-const V2_DECISION_VERSION = 'v2-1.36.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0'];
+// v2-1.37.0 (owner ruling 2026-09-25, SINGLE-SENTENCE RULE, final): after 18
+// Codex rounds each finding a new OTHER-sentence phrasing that slipped past
+// the closed-vocabulary/allowlist screen of the round before it, a
+// committing agent turn now grounds ONLY when the pinned commitment
+// sentence stands ALONE in that turn — any other sentence holds the call
+// for a human, with one narrow allowance for a whole OTHER sentence that
+// exactly matches a tiny acknowledgement list (yes/yeah/okay/ok/alright/all
+// right/perfect/great/awesome/sounds good/thank you/thanks/no problem).
+// Replaces the round 3-27 other-sentence whitelist entirely — MORE
+// RESTRICTIVE (a real booking with any other non-acknowledgement sentence
+// in the committing turn — e.g. "Yep, it should go to him, the
+// notification. We'll see you Sunday at noon." — no longer auto-books; the
+// owner explicitly accepts that cost).
+// v2-1.38.0 (owner ruling 2026-09-25, round 28 extension): the SAME
+// single-sentence rule now applies to every turn AFTER the committing one,
+// from either speaker — every later sentence must be an exact
+// acknowledgement/closer match (the committing-turn list plus bye/goodbye/
+// have a good day/have a great day/you too/thank you so much/talk to you
+// then/see you then) or the call holds for a human. Replaces the round
+// 23-27 later-turn term lists and same-slot-restatement carve-out entirely
+// — MORE RESTRICTIVE (ordinary wrap-up like "Can I get your email address?"
+// or "Our technician will text you when he's on the way." in a later turn
+// no longer grounds; only a bare acknowledgement/closer does).
+const V2_DECISION_VERSION = 'v2-1.38.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0'];
 
 function buildRouteDecision({
   callLogId,
