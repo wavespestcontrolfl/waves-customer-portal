@@ -880,6 +880,27 @@ const AUTO_TIER_ELIGIBLE = ['Silver', 'Gold', 'Platinum'];
 // sits elsewhere in the same submit group, that catalog row is simply
 // absent from `offeredDiscounts` and this returns null exactly like the
 // picker would show nothing to click.
+// Line-level conditions under which an auto-picked tier discount may stay
+// on a line (the customer-tier condition is handled by the customer-change
+// reset). Shared with autoTierDiscountForLine so adding and removing agree.
+export function autoTierLineStillEligible({ cadence, linkedEstimate, linePrepaid } = {}) {
+  if (!cadence || cadence === 'one_time') return false;
+  return !linkedEstimate && !linePrepaid;
+}
+
+// Would the tier auto-fill still have work to do on this booking, i.e. a
+// Silver+ customer with a qualifying recurring line that carries no
+// discount and was not opted out by staff? Used to hold Save while the
+// discount catalog the auto-fill reads is loading or failed.
+export function autoTierPendingLines({ customerTier, services, linkedEstimate, linePrepaid, dismissed } = {}) {
+  if (!AUTO_TIER_ELIGIBLE.includes(customerTier)) return false;
+  return (Array.isArray(services) ? services : []).some((svc, idx) => (
+    !svc?.lineDiscount
+    && !(dismissed || {})[svc?.lineId || idx]
+    && autoTierLineStillEligible({ cadence: svc?.cadence, linkedEstimate, linePrepaid })
+  ));
+}
+
 export function autoTierDiscountForLine({
   customerTier,
   cadence,
@@ -894,11 +915,10 @@ export function autoTierDiscountForLine({
   // of never gets it back — only a customer change resets that.
   if (hasLineDiscount || autoTierRemoved) return null;
   // Recurring lines only — a one-time (or blank-cadence) line is untouched.
-  if (!cadence || cadence === 'one_time') return null;
   // An estimate-loaded booking may already have the tier % baked into its
   // quoted line price; a prepaid/pay-in-full line bills the flat prepay
   // total, not this line's own discounted rate. Neither gets an auto pick.
-  if (linkedEstimate || linePrepaid) return null;
+  if (!autoTierLineStillEligible({ cadence, linkedEstimate, linePrepaid })) return null;
   if (!AUTO_TIER_ELIGIBLE.includes(customerTier)) return null;
   const rows = Array.isArray(offeredDiscounts) ? offeredDiscounts : [];
   return rows.find((d) => d?.is_waveguard_tier_discount && d?.requires_waveguard_tier === customerTier) || null;
@@ -1887,6 +1907,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => { cancelled = true; };
   }, []);
   const [discountPresets, setDiscountPresets] = useState([]);
+  // Catalog readiness, tracked apart from an authoritative empty list
+  // (Codex #4944 r1 P1): the WaveGuard tier auto-fill reads this catalog,
+  // so a Silver+ recurring booking must not save at full price while it is
+  // still loading or after its fetch failed. Retried via discountCatalogAttempt.
+  const [discountCatalogStatus, setDiscountCatalogStatus] = useState('loading');
+  const [discountCatalogAttempt, setDiscountCatalogAttempt] = useState(0);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
   // Appointment-level discount slot, on top of each line's own slot — always
@@ -2619,17 +2645,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         else if (Array.isArray(r)) setTechs(r);
       } catch { /* techs not critical */ }
     })();
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setDiscountCatalogStatus('loading');
     (async () => {
       try {
         const r = await adminFetch('/admin/discounts');
+        if (cancelled) return;
         const list = Array.isArray(r) ? r : [];
         const filtered = list
           .filter(d => d.is_active)
           .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
         setDiscountPresets(filtered);
-      } catch { /* discounts optional */ }
+        setDiscountCatalogStatus('ready');
+      } catch {
+        if (!cancelled) setDiscountCatalogStatus('failed');
+      }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [discountCatalogAttempt]);
 
   // Which catalog keys never take a PERCENTAGE discount (termite bond, palm
   // injection, ...). Same source the Edit appointment modal uses; the
@@ -3353,6 +3388,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const prepaid = !!(collectPrepay || billAsAnnualPrepay || billAsManualPrepay);
     services.forEach((svc, idx) => {
       const key = svc.lineId || idx;
+      // Codex #4944 r1 P1: an auto pick is only ever added by this effect,
+      // so it must also come OFF here when the line stops qualifying (a
+      // cadence switched to one-time, a prepay option turned on, an
+      // estimate linked). Not an operator dismissal — the line gets it
+      // back if it qualifies again.
+      if (svc.lineDiscount?.autoApplied) {
+        if (!autoTierLineStillEligible({ cadence: svc.cadence, linkedEstimate: !!linkedEstimate, linePrepaid: prepaid })) {
+          setServices((arr) => arr.map((s, i) => (i === idx && s.lineDiscount?.autoApplied ? { ...s, lineDiscount: null } : s)));
+        }
+        return;
+      }
       const discount = autoTierDiscountForLine({
         customerTier: tier,
         cadence: svc.cadence,
@@ -4335,6 +4381,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // the guard itself — not just this DOM path to it — is directly
     // testable.
     if (handleSubmitBlockedByDiscountOrPreviewState({ discountSaveBlockedReason, previewConfirming })) return;
+    if (tierCatalogBlocksSave) return;
     if (!canSubmitAppointments({
       selectedCustomer,
       services,
@@ -4615,6 +4662,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // ever read ''. This chain's first branch is now stackingUnconfirmedBlocksSave
   // / appointmentDiscountGateDrifted alone (the background-poll-level
   // findings), never a second, unreachable recovery path alongside them.
+  // Codex #4944 r1 P1: hold Save while the discount catalog the WaveGuard
+  // tier auto-fill reads is loading or failed and a line is still waiting
+  // for that auto pick. Kept out of discountSaveBlockedReason, whose banner
+  // and Retry routing belong to the appointment-discount flow.
+  const tierCatalogBlocksSave = discountCatalogStatus !== 'ready' && !partialCommitLocked
+    && autoTierPendingLines({
+      customerTier: selectedCustomer?.tier,
+      services,
+      linkedEstimate: !!linkedEstimate,
+      linePrepaid: !!(collectPrepay || billAsAnnualPrepay || billAsManualPrepay),
+      dismissed: autoTierDismissed,
+    });
   const discountSaveBlockedReason = stackingUnconfirmedBlocksSave
     // Codex pre-push audit P1 (round 3): a background gate flip since this
     // discount was picked shares the SAME banner/copy as the probe-unknown
@@ -4667,7 +4726,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     bookingPropertyState,
     alreadySubmitting: saving,
     addressAskPending,
-  }) && !discountSaveBlockedReason && !previewConfirming && !previewGroupError;
+  }) && !discountSaveBlockedReason && !previewConfirming && !previewGroupError && !tierCatalogBlocksSave;
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -5723,6 +5782,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   These cadences book as separate appointments — this discount
                   applies to {appointmentDiscountGroup.lines.map((svc) => svc.name).join(' + ')} only.
                 </div>
+              )}
+            </div>
+          )}
+
+          {tierCatalogBlocksSave && (
+            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginTop: 12, fontSize: 14, color: D.red, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span>
+                {discountCatalogStatus === 'failed'
+                  ? `Couldn't load the discount list, so the WaveGuard ${selectedCustomer?.tier} discount can't be filled in — retry before saving.`
+                  : `Loading the discount list for the WaveGuard ${selectedCustomer?.tier} discount…`}
+              </span>
+              {discountCatalogStatus === 'failed' && (
+                <button
+                  type="button"
+                  onClick={() => setDiscountCatalogAttempt((n) => n + 1)}
+                  style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
+                >Retry</button>
               )}
             </div>
           )}

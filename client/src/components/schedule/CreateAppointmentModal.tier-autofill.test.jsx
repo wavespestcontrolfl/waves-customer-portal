@@ -15,7 +15,7 @@
  * no need to mount the 200-property modal.
  */
 import { describe, it, expect } from 'vitest';
-import { autoTierDiscountForLine } from './CreateAppointmentModal';
+import { autoTierDiscountForLine, autoTierLineStillEligible, autoTierPendingLines } from './CreateAppointmentModal';
 
 const SILVER = {
   id: 'd-silver', name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10,
@@ -110,5 +110,34 @@ describe('autoTierDiscountForLine (owner ruling 2026-09-26)', () => {
     // still legitimately be absent from offeredDiscounts (scope filter,
     // an in-flight stacking-gate check, etc.) — absence alone is enough.
     expect(autoTierDiscountForLine(base({ offeredDiscounts: [] }))).toBeNull();
+  });
+});
+
+describe('autoTierLineStillEligible (Codex #4944 r1: auto pick comes off an ineligible line)', () => {
+  it('keeps a recurring, non-prepaid, non-estimate line', () => {
+    expect(autoTierLineStillEligible({ cadence: 'quarterly', linkedEstimate: false, linePrepaid: false })).toBe(true);
+  });
+  it('drops a line switched to one-time or blank cadence', () => {
+    expect(autoTierLineStillEligible({ cadence: 'one_time' })).toBe(false);
+    expect(autoTierLineStillEligible({ cadence: '' })).toBe(false);
+  });
+  it('drops a line once prepay is on or an estimate is linked', () => {
+    expect(autoTierLineStillEligible({ cadence: 'quarterly', linePrepaid: true })).toBe(false);
+    expect(autoTierLineStillEligible({ cadence: 'quarterly', linkedEstimate: true })).toBe(false);
+  });
+});
+
+describe('autoTierPendingLines (Codex #4944 r1: hold Save until the catalog loads)', () => {
+  const line = (o = {}) => ({ lineId: 'l1', cadence: 'quarterly', lineDiscount: null, ...o });
+  it('is pending for a Silver customer with an undiscounted recurring line', () => {
+    expect(autoTierPendingLines({ customerTier: 'Silver', services: [line()] })).toBe(true);
+  });
+  it('is not pending for Bronze, one-time, prepay, estimate, discounted or dismissed lines', () => {
+    expect(autoTierPendingLines({ customerTier: 'Bronze', services: [line()] })).toBe(false);
+    expect(autoTierPendingLines({ customerTier: 'Silver', services: [line({ cadence: 'one_time' })] })).toBe(false);
+    expect(autoTierPendingLines({ customerTier: 'Silver', services: [line()], linePrepaid: true })).toBe(false);
+    expect(autoTierPendingLines({ customerTier: 'Silver', services: [line()], linkedEstimate: true })).toBe(false);
+    expect(autoTierPendingLines({ customerTier: 'Silver', services: [line({ lineDiscount: { id: 'x' } })] })).toBe(false);
+    expect(autoTierPendingLines({ customerTier: 'Silver', services: [line()], dismissed: { l1: true } })).toBe(false);
   });
 });
