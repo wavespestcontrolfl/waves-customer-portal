@@ -31,6 +31,7 @@ jest.mock('../models/db', () => {
       whereIn: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
+      update: jest.fn(async () => 1),
       first: jest.fn(() => firstFn()),
     };
     return chain;
@@ -50,7 +51,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim, claimLeadFirstTouch } = require('../services/lead-auto-reply');
+const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim, claimLeadFirstTouch, clearServiceMenuIntakeState } = require('../services/lead-auto-reply');
 
 const PHONE = '+19415551234';
 const PHONE_HASH = crypto.createHash('sha256').update(PHONE, 'utf8').digest('hex');
@@ -210,5 +211,25 @@ describe('claimLeadFirstTouch — normalizes the phone like the messaging layer'
     db.__state.audit = async () => ({ id: 'a1' });
     await expect(claimLeadFirstTouch('(941) 555-1234', 'cust-1')).resolves.toMatchObject({ claimed: false });
     expect(db.__chains['messaging_audit_log'].where).toHaveBeenCalledWith({ to_hash: PHONE_HASH });
+  });
+});
+
+describe('clearServiceMenuIntakeState', () => {
+  test('clears only the untouched awaiting_service seed', async () => {
+    await clearServiceMenuIntakeState('cust-1');
+    const c = db.__chains['customers'];
+    expect(c.where).toHaveBeenCalledWith({ id: 'cust-1', lead_intake_status: 'awaiting_service' });
+    expect(c.update).toHaveBeenCalledWith({ lead_intake_status: null });
+  });
+
+  test('a db error is swallowed (non-fatal)', async () => {
+    const trx = jest.fn(() => ({ where() { return this; }, update: async () => { throw new Error('pg down'); } }));
+    await expect(clearServiceMenuIntakeState('cust-1', trx)).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  test('no customer id → no query', async () => {
+    await clearServiceMenuIntakeState(null);
+    expect(db).not.toHaveBeenCalled();
   });
 });

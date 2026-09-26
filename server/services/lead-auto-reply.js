@@ -258,7 +258,29 @@ async function claimLeadFirstTouch(phone, customerId, dbc = db) {
   }
 }
 
+/**
+ * The webhook seeds lead_intake_status='awaiting_service', which expects an
+ * answer to the standard reply. Once the Lead Response agent's personal text
+ * is accepted by Twilio, that state no longer matches what the customer was
+ * asked, so the next reply takes the normal AI draft path instead. Called at
+ * the confirmed send itself, so later agent work (a session error, a queue
+ * for review) cannot skip it. Guarded: only the untouched seed is cleared; a
+ * state the form data already advanced (awaiting_address) or a reply already
+ * moved on is left alone. Non-fatal.
+ */
+async function clearServiceMenuIntakeState(customerId, dbc = db) {
+  if (!customerId) return;
+  try {
+    await dbc('customers')
+      .where({ id: customerId, lead_intake_status: 'awaiting_service' })
+      .update({ lead_intake_status: null });
+  } catch (stateErr) {
+    logger.warn(`[lead-auto-reply] intake state clear after agent send failed: ${stateErr.message}`);
+  }
+}
+
 module.exports = {
+  clearServiceMenuIntakeState,
   LEAD_AUTO_REPLY_AUDIT_CUTOVER,
   hasPriorLeadAutoReply,
   resolveLeadAutoReplyClaim,

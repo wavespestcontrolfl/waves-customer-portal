@@ -773,7 +773,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // Seeded now, whichever text ends up going out, so the address-only
       // clarification below can still advance it from the form data. If the
       // agent's personal text is the one that goes out, the service-menu
-      // state is cleared again (clearServiceMenuIntakeState).
+      // state is cleared again at that send (clearServiceMenuIntakeState in
+      // services/lead-auto-reply.js, called by send_lead_response).
       try {
         await db('customers').where({ id: customer.id }).update({
           lead_intake_status: 'awaiting_service',
@@ -1183,7 +1184,6 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         agentConfigured: leadAgentConfigured,
         processLead,
         sendFallback: sendFallbackAutoReply,
-        onAgentSent: () => clearServiceMenuIntakeState(customer.id),
         onError: err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`),
       }).catch(err => logger.error(`[lead-agent] Fallback chain error: ${err.message}`));
     } catch (e) {
@@ -1813,23 +1813,8 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
 // first, and the agent's send_lead_response is then refused.
 const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
 
-// After the agent's personal text went out, awaiting_service no longer
-// matches what the customer was asked (it expects an answer to the standard
-// reply), so the next reply takes the normal AI draft path instead. Guarded:
-// only the untouched seed is cleared. A state the form data already advanced
-// (awaiting_address from the address-only clarification) or that a reply
-// already moved on is left alone. Non-fatal.
-async function clearServiceMenuIntakeState(customerId) {
-  try {
-    await db('customers')
-      .where({ id: customerId, lead_intake_status: 'awaiting_service' })
-      .update({ lead_intake_status: null });
-  } catch (stateErr) {
-    logger.warn(`[lead-webhook] intake state clear after agent send failed: ${stateErr.message}`);
-  }
-}
 
-async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, onAgentSent = async () => {}, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
+async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
   if (!agentConfigured) {
     return processLead().catch(err => onError(err));
   }
@@ -1841,19 +1826,8 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
   const run = Promise.resolve().then(processLead).then(outcome => ({ outcome }), err => ({ err }));
   const settled = await Promise.race([run, timedOut]);
   clearTimeout(timer);
-  if (settled.timedOut) {
-    // The agent may have won the claim just before the deadline and finish
-    // sending after it (the fallback then finds the claim and skips). Its
-    // send still counts once it lands.
-    void run.then(({ outcome, err }) => {
-      if (err) return onError(err);
-      if (outcome?.actionTaken === 'auto_sent') return onAgentSent();
-      return undefined;
-    }).catch(lateErr => onError(lateErr));
-  }
   if (settled.err) onError(settled.err);
-  if (settled.outcome?.actionTaken === 'auto_sent') return onAgentSent();
-  return sendFallback();
+  if (settled.outcome?.actionTaken !== 'auto_sent') return sendFallback();
 }
 
 // The lead auto-reply dedup predicate, once-ever claim, and the send itself
@@ -1906,7 +1880,6 @@ module.exports._test = {
   shouldRunLeadAcquisition,
   settleLeadResponseAgentRun,
   LEAD_AGENT_FALLBACK_AFTER_MS,
-  clearServiceMenuIntakeState,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
   isHoneypotTripped,

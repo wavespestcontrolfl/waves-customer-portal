@@ -280,7 +280,7 @@ async function executeLeadTool(toolName, input, context) {
       // (an earlier automated reply, a concurrent run, a repeated call, or a
       // dedup lookup that could not be read — fail closed) means NO send:
       // the lead goes to the owner instead.
-      const { claimLeadFirstTouch, resolveLeadAutoReplyClaim, isDeliveredSms } = require('./lead-auto-reply');
+      const { claimLeadFirstTouch, resolveLeadAutoReplyClaim, isDeliveredSms, clearServiceMenuIntakeState } = require('./lead-auto-reply');
       const firstTouch = await claimLeadFirstTouch(customer.phone, customer.id);
       if (!firstTouch.claimed) {
         return {
@@ -343,6 +343,7 @@ async function executeLeadTool(toolName, input, context) {
       const result = sendResult.sent && !isDeliveredSms(sendResult)
         ? { ...sendResult, sent: false, blocked: true, code: sendResult.code || 'NOT_DELIVERED' }
         : sendResult;
+      if (result.sent) await clearServiceMenuIntakeState(customer.id);
 
       // No quiet-hours requeue: lead_response_auto_reply is a
       // customer-action entry point (owner ruling 2026-08-29) — the agent

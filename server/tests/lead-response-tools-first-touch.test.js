@@ -18,6 +18,7 @@
 const mockMessage = jest.fn();
 const mockClaim = jest.fn();
 const mockResolveClaim = jest.fn();
+const mockClearIntake = jest.fn();
 const mockPipeline = jest.fn();
 const mockBridge = jest.fn();
 
@@ -25,6 +26,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/lead-auto-reply', () => ({
   claimLeadFirstTouch: (...args) => mockClaim(...args),
   resolveLeadAutoReplyClaim: (...args) => mockResolveClaim(...args),
+  clearServiceMenuIntakeState: (...args) => mockClearIntake(...args),
   isDeliveredSms: (result) => result?.sent === true && /^(SM|MM)/.test(String(result.providerMessageId || '')),
 }));
 jest.mock('../services/pipeline-manager', () => ({ onEvent: (...args) => mockPipeline(...args) }));
@@ -96,6 +98,10 @@ test('first touch: claims the phone, appends the STOP line, and stamps the claim
   }));
   expect(mockResolveClaim).toHaveBeenCalledWith('9415550100', { sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
   expect(result).toMatchObject({ sent: true });
+  // The personal text is what the customer answers now, not the standard
+  // reply's service question — cleared at the send itself, so a later
+  // session error or queue-for-review cannot leave the menu state behind.
+  expect(mockClearIntake).toHaveBeenCalledWith(context.customerId);
 });
 
 test('a phone that already had its one automated text (claim not won) gets NO second text', async () => {
@@ -106,6 +112,7 @@ test('a phone that already had its one automated text (claim not won) gets NO se
   expect(mockMessage).not.toHaveBeenCalled();
   expect(mockResolveClaim).not.toHaveBeenCalled();
   expect(result).toMatchObject({ sent: false, blocked: true, code: 'FIRST_TOUCH_ALREADY_SENT' });
+  expect(mockClearIntake).not.toHaveBeenCalled();
 });
 
 test('a success-shaped sentinel (template disabled) is NOT a delivered text — not auto_sent, claim settled on the raw result', async () => {
@@ -117,6 +124,7 @@ test('a success-shaped sentinel (template disabled) is NOT a delivered text — 
 
   expect(mockResolveClaim).toHaveBeenCalledWith('9415550100', sentinel);
   expect(result).toMatchObject({ sent: false, blocked: true, code: 'NOT_DELIVERED' });
+  expect(mockClearIntake).not.toHaveBeenCalled();
 });
 
 test('a blocked send still settles (releases) the first-touch claim', async () => {
