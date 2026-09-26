@@ -12,6 +12,7 @@ const {
   buildTreeShrubTechFindings,
   treeShrubReviewSignature,
   treeShrubPhotosHash,
+  validateTreeShrubReviewForReport,
   applyReviewDecisions,
   storeTreeShrubAssessmentFromReview,
   previewTreeShrubAssessment,
@@ -185,6 +186,70 @@ describe('treeShrubReviewSignature — anti-tamper binding', () => {
   it('photo hash is order-sensitive and content-bound', () => {
     expect(treeShrubPhotosHash(['a', 'b'])).not.toBe(treeShrubPhotosHash(['b', 'a']));
     expect(treeShrubPhotosHash(['a', 'b'])).toBe(treeShrubPhotosHash(['a', 'b']));
+  });
+});
+
+describe('validateTreeShrubReviewForReport — Generate grounding contract', () => {
+  const scores = {
+    foliageFullness: 84, leafColorVigor: 76, pestActivity: 58,
+    diseaseLeafSpot: 88, waterHeatStress: 72, overallScore: 76,
+  };
+  const photosHash = treeShrubPhotosHash(['data:a', 'data:b']);
+  const makeReview = (overrides = {}) => {
+    const review = {
+      scores,
+      scoredCount: 2,
+      photoCount: 2,
+      photosHash,
+      observations: 'Visible foliage appears thin with some pale leaves.',
+      decisions: [{ key: 'pest_activity', action: 'monitor' }],
+      confirmed: true,
+      ...overrides,
+    };
+    review.signature = overrides.signature || treeShrubReviewSignature(
+      review.scores, review.scoredCount, 'svc1', review.photosHash, review.observations,
+    );
+    return review;
+  };
+
+  it('accepts the exact service-bound preview while retaining signal-only provenance', () => {
+    const result = validateTreeShrubReviewForReport(makeReview(), { serviceId: 'svc1' });
+    expect(result).toEqual({
+      ok: true,
+      grounding: {
+        source: 'reviewed_photo_signals',
+        scores,
+        scoredCount: 2,
+        photoCount: 2,
+        photosHash,
+        observations: 'Visible foliage appears thin with some pale leaves.',
+        hasHidden: false,
+      },
+    });
+  });
+
+  it('omits a hidden metric, the influenced overall, and aggregate raw observations', () => {
+    const review = makeReview({ decisions: [{ key: 'pest_activity', action: 'hidden' }] });
+    const result = validateTreeShrubReviewForReport(review, { serviceId: 'svc1' });
+    expect(result.ok).toBe(true);
+    expect(result.grounding.scores).not.toHaveProperty('pestActivity');
+    expect(result.grounding.scores).not.toHaveProperty('overallScore');
+    expect(result.grounding.observations).toBe('');
+    expect(result.grounding.hasHidden).toBe(true);
+  });
+
+  it.each([
+    ['unconfirmed review', (review) => ({ ...review, confirmed: false }), 'review_not_confirmed'],
+    ['mismatched counts', (review) => ({ ...review, photoCount: 3 }), 'photo_count_mismatch'],
+    ['out-of-range count', (review) => ({ ...review, scoredCount: 6, photoCount: 6 }), 'photo_count_mismatch'],
+    ['string counts', (review) => ({ ...review, scoredCount: '2', photoCount: '2' }), 'photo_count_mismatch'],
+    ['malformed hash', (review) => ({ ...review, photosHash: 'not-a-hash' }), 'photos_hash_invalid'],
+    ['extra unsigned score key', (review) => ({ ...review, scores: { ...review.scores, diagnosis: 100 } }), 'score_keys_invalid'],
+    ['wrong service signature', (review) => ({ ...review, signature: treeShrubReviewSignature(review.scores, 2, 'other-service', review.photosHash, review.observations) }), 'signature_mismatch'],
+    ['unknown decision', (review) => ({ ...review, decisions: [{ key: 'diagnosis', action: 'confirmed' }] }), 'decisions_invalid'],
+  ])('rejects %s with a retry-safe reason', (_label, mutate, reason) => {
+    const result = validateTreeShrubReviewForReport(mutate(makeReview()), { serviceId: 'svc1' });
+    expect(result).toEqual({ ok: false, reason });
   });
 });
 

@@ -47,6 +47,98 @@ function treeShrubReviewSignature(scores = {}, scoredCount, serviceId, photosHas
   return crypto.createHmac('sha256', process.env.JWT_SECRET || 'tree-shrub-review-key').update(canon).digest('hex');
 }
 
+const TREE_SHRUB_REVIEW_SCORE_KEYS = [
+  'foliageFullness',
+  'leafColorVigor',
+  'pestActivity',
+  'diseaseLeafSpot',
+  'waterHeatStress',
+  'overallScore',
+];
+const TREE_SHRUB_REVIEW_SCORE_KEYSET = [...TREE_SHRUB_REVIEW_SCORE_KEYS].sort().join('|');
+
+const TREE_SHRUB_REVIEW_DECISION_KEYS = {
+  foliage_fullness: 'foliageFullness',
+  leaf_color_vigor: 'leafColorVigor',
+  pest_activity: 'pestActivity',
+  disease_leaf_spot: 'diseaseLeafSpot',
+  water_heat_mechanical_stress: 'waterHeatStress',
+};
+
+// Validate the signed preview contract used by Generate. The HMAC proves only
+// that these photo-model scores and observations came from this server's
+// preview for this service and photo-set hash. It never converts a visual
+// signal into a technician-confirmed pest, disease, deficiency, or diagnosis.
+function validateTreeShrubReviewForReport(review, { serviceId } = {}) {
+  const invalid = (reason) => ({ ok: false, reason });
+  if (!review || typeof review !== 'object' || Array.isArray(review)) return invalid('review_shape');
+  if (review.confirmed !== true) return invalid('review_not_confirmed');
+  if (!serviceId) return invalid('service_id_missing');
+
+  const scoredCount = review.scoredCount;
+  const photoCount = review.photoCount;
+  if (scoredCount !== photoCount || !Number.isInteger(photoCount)
+    || photoCount < 1 || photoCount > 5) return invalid('photo_count_mismatch');
+  if (!/^[a-f0-9]{64}$/.test(String(review.photosHash || ''))) return invalid('photos_hash_invalid');
+  if (!/^[a-f0-9]{64}$/.test(String(review.signature || ''))) return invalid('signature_invalid');
+  if (typeof review.observations !== 'string') return invalid('observations_invalid');
+
+  const scores = review.scores;
+  if (!scores || typeof scores !== 'object' || Array.isArray(scores)) return invalid('scores_invalid');
+  if (Object.keys(scores).sort().join('|') !== TREE_SHRUB_REVIEW_SCORE_KEYSET) return invalid('score_keys_invalid');
+  if (!TREE_SHRUB_REVIEW_SCORE_KEYS.every((key) => (
+    Number.isFinite(scores[key]) && scores[key] >= 0 && scores[key] <= 100
+  ))) return invalid('score_values_invalid');
+
+  const decisions = review.decisions;
+  const allowedActions = new Set(['monitor', 'confirmed', 'hidden', 'edit']);
+  if (!Array.isArray(decisions) || decisions.length > 5
+    || decisions.some((decision) => (
+      !decision || typeof decision !== 'object' || Array.isArray(decision)
+        || !Object.prototype.hasOwnProperty.call(TREE_SHRUB_REVIEW_DECISION_KEYS, decision.key)
+        || !allowedActions.has(decision.action)
+    ))
+    || new Set(decisions.map((decision) => decision.key)).size !== decisions.length) {
+    return invalid('decisions_invalid');
+  }
+
+  const expected = treeShrubReviewSignature(
+    scores,
+    scoredCount,
+    serviceId,
+    review.photosHash,
+    review.observations,
+  );
+  if (review.signature !== expected) return invalid('signature_mismatch');
+
+  const hiddenScoreKeys = new Set(decisions
+    .filter((decision) => decision.action === 'hidden')
+    .map((decision) => TREE_SHRUB_REVIEW_DECISION_KEYS[decision.key]));
+  const includedScores = {};
+  // The original overall includes every category, including a hidden false
+  // read. Omit that aggregate whenever anything was hidden rather than
+  // presenting a score still influenced by the rejected signal.
+  const includedKeys = hiddenScoreKeys.size
+    ? TREE_SHRUB_REVIEW_SCORE_KEYS.filter((key) => key !== 'overallScore' && !hiddenScoreKeys.has(key))
+    : TREE_SHRUB_REVIEW_SCORE_KEYS;
+  for (const key of includedKeys) includedScores[key] = scores[key];
+
+  return {
+    ok: true,
+    grounding: {
+      source: 'reviewed_photo_signals',
+      scores: includedScores,
+      scoredCount,
+      photoCount,
+      photosHash: review.photosHash,
+      // Any hidden signal can make the aggregate prose contradict the
+      // technician's review, so drop it whole.
+      observations: hiddenScoreKeys.size ? '' : review.observations.trim(),
+      hasHidden: hiddenScoreKeys.size > 0,
+    },
+  };
+}
+
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
@@ -908,6 +1000,7 @@ module.exports = {
   analyzePhoto,
   treeShrubReviewSignature,
   treeShrubPhotosHash,
+  validateTreeShrubReviewForReport,
   buildTreeShrubTechFindings,
   mergePhotoComposites,
   buildCustomerTreeShrubReport,
