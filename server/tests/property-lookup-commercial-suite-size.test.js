@@ -400,6 +400,29 @@ describe('a tech-verified sqft outranks the suite resolver', () => {
     expect(profile.fieldVerifyFlags.find((f) => f.field === 'squareFootage')).toBeUndefined();
   });
 
+  test('a legacy whole-building override is caught even when an AI unit-size figure precedes the county building figure', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 46031, // lookup-prefilled building total saved as "verified" under the unit address
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: {
+          value: 46031, confidence: 'high', sourceType: 'verified',
+          evidence: [
+            { sourceType: 'verified', value: 46031 },
+            { sourceType: 'ai', value: 1400 }, // an AI leg's unit-level figure, listed first
+            { sourceType: 'county', value: 46031 },
+          ],
+        },
+      },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    // The building total is the LARGEST prior figure, so the whole-building
+    // override is not trusted as a suite measurement.
+    expect(profile.suiteSize?.source).not.toBe('verified');
+    expect(profile.homeSqFt).not.toBe(46031);
+  });
+
   test('a non-aggregated commercial condo keeps its own county folio measurement', () => {
     const record = plazaSuiteRecord({
       squareFootage: 1850,

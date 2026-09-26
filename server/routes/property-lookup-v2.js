@@ -1690,10 +1690,13 @@ function verifiedSqftLooksSuiteScoped(rc) {
   const verifiedValue = Number(rc?.squareFootage);
   if (!(verifiedValue > 0)) return false;
   const evidence = rc?._fieldEvidence?.squareFootage?.evidence;
-  const priorCountyEntry = Array.isArray(evidence)
-    ? evidence.find((e) => e && e.sourceType && e.sourceType !== 'verified' && Number(e.value) > 0)
-    : null;
-  const buildingSqft = priorCountyEntry ? Number(priorCountyEntry.value) : null;
+  // The building total is the LARGEST pre-verification figure (county
+  // record, GIS, AI): an AI leg may report the unit's own area too, and the
+  // building is always the biggest number on the chain.
+  const priorValues = Array.isArray(evidence)
+    ? evidence.filter((e) => e && e.sourceType && e.sourceType !== 'verified').map((e) => Number(e.value)).filter((v) => v > 0)
+    : [];
+  const buildingSqft = priorValues.length ? Math.max(...priorValues) : null;
   if (!(buildingSqft > 0)) return true;
   return verifiedValue <= buildingSqft * 0.5;
 }
