@@ -151,6 +151,32 @@ postgres('end-at-term annual-prepay lapses keep their paid visits through term_e
     expect(await upcoming(t)).toHaveLength(kept.length);
   });
 
+  test('the nightly sweep never books a replacement in the past — the office is asked to book it (pre-push P1)', async () => {
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    const t = await seededTerm();
+    await decideCancel(t);
+    // The first paid visit is skipped on its day, and the next night's sweep
+    // finds its cadence slot already behind it.
+    const [first] = await coverage(t);
+    await skip(first);
+    const before = (await coverage(t)).length;
+    const nextNight = etDateString(addETDays(new Date(`${String(first.scheduled_date instanceof Date ? first.scheduled_date.toISOString() : first.scheduled_date).slice(0, 10)}T12:00:00Z`), 1));
+    const nightlySweep = () => AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: nextNight, conn: trx });
+    const pastLive = () => trx('scheduled_services').where({ customer_id: t.customerId })
+      .whereNotIn('status', ['skipped', 'cancelled']).where('scheduled_date', '<', nextNight);
+    const notices = () => trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual-prepay-first-visit:${t.termId}:lapse_replacement_unscheduled`]);
+    await nightlySweep();
+    expect(await pastLive()).toHaveLength(0);
+    expect(await coverage(t)).toHaveLength(before);
+    const [notice] = await notices();
+    expect(notice?.title).toMatch(/replacement booked/);
+    // A second night neither seeds it nor stacks a second notice.
+    await nightlySweep();
+    expect(await pastLive()).toHaveLength(0);
+    expect(await notices()).toHaveLength(1);
+  });
+
   test('an end-now-refund lapse is never reseeded or stamped, by the refresh or the sweep', async () => {
     const t = await seededTerm();
     const pulled = await pullAll(t);

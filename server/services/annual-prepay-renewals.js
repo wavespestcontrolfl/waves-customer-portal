@@ -699,7 +699,7 @@ function fileCoverageExceptionAfterCommit(scope, term, reason, body) {
   return fileCoverageException(term, reason, body);
 }
 
-async function fileCoverageException(term, reason, body) {
+async function fileCoverageException(term, reason, body, { title = 'Annual prepay: promised first visit needs attention' } = {}) {
   try {
     // notifyAdmin does not interpret dedupeKey — enforce it here (same
     // pattern as appointment-reminders): one open alert per term+reason per
@@ -715,7 +715,7 @@ async function fileCoverageException(term, reason, body) {
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin(
       'alert',
-      'Annual prepay: promised first visit needs attention',
+      title,
       body,
       {
         link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
@@ -732,7 +732,11 @@ async function fileCoverageException(term, reason, body) {
   }
 }
 
-async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString(), nowHHMM = etNowHHMM() } = {}) {
+// seedNotBefore (opt-in, ADMIN-BUG-R18): a gap-fill never seeds a visit
+// dated before it; such slots come back in unseededPastDates for the caller
+// to hand to the office. Unset (every activation / refresh caller), the
+// behavior is unchanged.
+async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
@@ -874,8 +878,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // windowless or sitting at a different hour than the operator quoted).
   let adoptedPromisedRow = null;
   const datesToSeed = [];
+  const unseededPastDates = [];
   for (const scheduledDate of targetDates) {
-    if (datesToSeed.length >= remainingToSeed) break;
+    if (datesToSeed.length + unseededPastDates.length >= remainingToSeed) break;
     const exactOnly = scheduledDate === promisedTarget;
     const matchIndex = availableExisting.findIndex((row) => {
       const existingDate = dateOnly(row.scheduled_date);
@@ -886,6 +891,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     if (matchIndex !== -1) {
       const [matched] = availableExisting.splice(matchIndex, 1);
       if (exactOnly) adoptedPromisedRow = matched;
+      continue;
+    }
+    if (seedNotBefore && scheduledDate < seedNotBefore) {
+      unseededPastDates.push(scheduledDate);
       continue;
     }
     datesToSeed.push(scheduledDate);
@@ -1604,6 +1613,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         existingCount: existingRows.length,
         createdRows,
         effectiveTermEnd,
+        unseededPastDates,
         reason: 'palm_concurrent_backfill_failed',
       };
     }
@@ -1615,6 +1625,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     existingCount: existingRows.length,
     createdRows,
     effectiveTermEnd,
+    unseededPastDates,
   };
 }
 
@@ -2832,15 +2843,26 @@ async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false,
     const termEnd = dateOnly(term.term_end);
     let windowEnd = termEnd;
     let createdCount = 0;
+    let unseededPastDates = [];
     if (reseed) {
-      const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: inferCoverageCadence(term) }, t);
+      // Never a replacement dated in the past (a visit skipped on its day
+      // regenerates that day): it could not be serviced, and it would fill
+      // the slot on every later sweep. The office books those with the
+      // customer — a hand-booked visit is stamped by the next refresh.
+      const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: inferCoverageCadence(term) }, t, { seedNotBefore: today });
       if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
       createdCount = ensured?.createdCount || 0;
+      unseededPastDates = ensured?.unseededPastDates || [];
     }
     await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, t);
     await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, t);
     if (windowEnd !== termEnd) await syncCustomerRenewalDate(term.customer_id, windowEnd, t);
-    return { kept: true, createdCount, windowEnd };
+    if (unseededPastDates.length) {
+      await fileCoverageException(term, 'lapse_replacement_unscheduled',
+        `A paid visit${unseededPastDates.length > 1 ? 's' : ''} on this end-of-coverage plan (${unseededPastDates.join(', ')}) was skipped and its date has passed. Book ${unseededPastDates.length > 1 ? 'replacements' : 'a replacement'} with the customer before coverage ends ${windowEnd} — the plan is paid through then.`,
+        { title: 'Annual prepay: a paid visit needs a replacement booked' });
+    }
+    return { kept: true, createdCount, windowEnd, unseededPastDates };
   };
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
