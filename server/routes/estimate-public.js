@@ -4993,8 +4993,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              // #2969 parity (owner 2026-07-23): the standalone risk-free /
-              // 90-day line was removed from the React page as a duplicate —
+              // #2969 parity (owner 2026-07-23): the standalone risk-free
+              // guarantee line was removed from the React page as a duplicate —
               // the plan-terms strip below already carries the money-back
               // guarantee. Factual assurance copy, matching the other
               // categories' recurringAssurance lines.
@@ -5589,7 +5589,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Cancel / refund / guarantee terms — surfaced on the SSR estimate so a
   // high-consideration buyer sees exactly where they stand before approving.
   // Policy (owner-confirmed): setup fully refundable, annual prepay prorated
-  // on unused visits, cancel anytime with no contract, 90-day money-back +
+  // on unused visits, cancel anytime with no contract, money-back guarantee +
   // free re-service. Gated to recurring plans (same condition as the billing
   // card) and mode-aware so it hides in one-time mode.
   const planTermsCardHtml = showBillingCard ? `
@@ -5610,8 +5610,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="plan-terms-detail">On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.</span>
       </li>` : ''}
       <li class="plan-terms-item">
-        <span class="plan-terms-term">90-day money-back guarantee</span>
-        <span class="plan-terms-detail">Not satisfied? We re-treat between visits free &mdash; and you&rsquo;re backed by a 90-day money-back guarantee.</span>
+        <span class="plan-terms-term">Money-back guarantee</span>
+        <span class="plan-terms-detail">If a covered problem comes back between visits, we re-treat free. If we can&rsquo;t solve it, we refund your most recent service payment.</span>
       </li>
     </ul>
   </section>` : '';

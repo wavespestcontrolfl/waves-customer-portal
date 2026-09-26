@@ -118,6 +118,12 @@ describe('billing channel email authority', () => {
     });
   });
 
+  test('passes the authority transaction to provider preparation', async () => {
+    const { outcome, dispatch } = await runAuthority();
+    expect(outcome.ok).toBe(true);
+    expect(dispatch).toHaveBeenCalledWith(mockDb);
+  });
+
   test('does not allow dispatch when the global email preference is disabled', async () => {
     rows.notification_prefs = { customer_id: 'cust-1', email_enabled: false, billing_channels: ['email'] };
     const { context } = await runAuthority();
@@ -310,7 +316,7 @@ describe('billing channel email authority', () => {
     const preSendCheck = jest.fn(async () => ({ ok: true }));
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email' });
+    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: mockDb });
   });
 
   test('blocks dispatch when the pre-send check fails', async () => {

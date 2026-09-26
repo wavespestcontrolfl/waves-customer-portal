@@ -62,7 +62,8 @@ it('fills and explicitly saves a property, preserving a manually entered unit', 
 });
 
 it('replaces the primary address without carrying the old unit to another property', async () => {
-  render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} />);
+  const onCustomerMutation = vi.fn();
+  render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} onCustomerMutation={onCustomerMutation} />);
   fireEvent.click((await screen.findAllByRole('button', { name: /^edit$/i }))[0]);
   selectPlace(place());
   expect(screen.getByLabelText('Address')).toHaveValue('100 Example Street');
@@ -73,6 +74,33 @@ it('replaces the primary address without carrying the old unit to another proper
   fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
   await waitFor(() => expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
   expect(JSON.parse(fetchMock.mock.calls.find(([, o]) => o?.method === 'PUT')[1].body)).toMatchObject({ addressLine1: '100 Example Street', addressLine2: '', city: 'Sarasota', state: 'FL', zip: '34236' });
+  await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'fixture', action: 'update' }));
+});
+
+it('notifies the overlay parent when the first service address becomes primary', async () => {
+  const onCustomerMutation = vi.fn();
+  const addresslessDetail = {
+    ...detail,
+    customer: { ...detail.customer, address: { line1: '', line2: '', city: '', state: '', zip: '' } },
+  };
+  fetchMock.mockImplementation(async (url, options = {}) => new Response(JSON.stringify(
+    options.method === 'POST' && String(url).endsWith('/properties')
+      ? { properties: [{ id: 'primary-1', address_line1: '100 Example Street', city: 'Sarasota', state: 'FL', zip: '34236', is_primary: true }] }
+      : String(url).endsWith('/properties')
+        ? { properties: [] }
+        : String(url).endsWith('/fixture') ? addresslessDetail : {}
+  ), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+  render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} onCustomerMutation={onCustomerMutation} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Property', exact: true }));
+  await screen.findByText('No service address on file.');
+  expect(onCustomerMutation).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));
+  selectPlace(place());
+  fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
+
+  await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'fixture', action: 'update' }));
+  expect(onCustomerMutation).toHaveBeenCalledTimes(1);
 });
 
 it.each(['gate', 'key'])('keeps manual entry available when the %s is absent', async (missing) => {

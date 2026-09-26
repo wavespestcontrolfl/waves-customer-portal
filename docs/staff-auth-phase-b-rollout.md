@@ -1,5 +1,10 @@
 # Staff authentication Phase B rollout
 
+**Completed.** Phase B shipped via PR #2726 and #2727
+(`server/models/migrations/20260714000000_staff_auth_hardening.js`,
+`server/middleware/staff-maintenance.js`). This doc is kept as the rollout
+record.
+
 Phase B advances active Staff timer writers from generation 1 to generation 2,
 revokes every pre-Phase-B Staff session, and adds password change/reset support.
 It follows the Phase A schema rollout from PR #2603 and must use a controlled
