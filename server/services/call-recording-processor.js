@@ -14223,12 +14223,11 @@ const CallRecordingProcessor = {
         // 2026-09-03 after a tenant's roach-treatment lead at a 358-unit
         // complex sat on a bare street address). Never sends: the draft
         // row is the terminal artifact; the send runs through the full
-        // consent pipeline at approval. Direction-independent (owner
-        // directive 2026-09-26): not spam/voicemail, no do-not-contact,
-        // either direction now — the target number is the customer's own
-        // number either way (the inbound ANI, or the dialed `to_phone` on
-        // an outbound call — never a dictated callback number, which is
-        // never personal enough to receive an unconfirmed clarifying ask).
+        // consent pipeline at approval. Eligibility: inbound (see below),
+        // not spam/voicemail, no do-not-contact; the target is the
+        // customer's own number (clarifyAskTargetPhone — never a dictated
+        // callback number, which is never personal enough to receive an
+        // unconfirmed clarifying ask).
         // A DROPPED call stays on its own one-shot text above — parking a
         // second address question for the same run would let the owner
         // send the same ask twice (codex r1 P1). The street judgment reads
@@ -14239,7 +14238,13 @@ const CallRecordingProcessor = {
         // Both DNC shapes gate it — the V2 consent object AND the legacy
         // flat extractor field (V2 off / unavailable / schema-failed still
         // sets the flat one) (codex r5 P1).
-        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail
+        // Still INBOUND-only: an approved draft is sent under the voice
+        // channel's transactional consent (admin-drafts.js), and whether a
+        // call WE placed can carry that consent is the owner's pending
+        // outbound-SMS-consent decision (2026-09-26), not a routing rule —
+        // pre-push audit P1. clarifyAskTargetPhone already resolves the
+        // customer leg for both directions for when that decision lands.
+        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
           && v2Result?.extraction?.consent?.do_not_contact_request !== true
           && extracted.do_not_contact_request !== true) {
           try {
