@@ -1768,6 +1768,14 @@ function buildAutoMapRow({ product, proposal, vendorId, vendorName, connectionId
 function isUsableAutoMapProposal(m, requestedIds) {
   if (!m || typeof m !== 'object' || Array.isArray(m)) return false;
   if (!requestedIds.has(String(m.productId))) return false;
+  // Every other field the route writes must be on-contract when present:
+  // `confidence: "high"` was stored as the 0.50 default and `-1` failed
+  // applyMappingRow after the leg was accepted; an object name/unit/notes
+  // was stored as "[object Object]" (review on #4884).
+  const textOrAbsent = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+  if (!['notes', 'vendorProductName', 'packageSizeUnit', 'purchaseUom', 'packageSizeValue'].every((k) => textOrAbsent(m[k]))) return false;
+  if (m.confidence != null && !(typeof m.confidence === 'number' && m.confidence >= 0 && m.confidence <= 1)) return false;
+  if (m.price != null && priceResultNumber(m.price) === null) return false;
   if (m.found === false) return true;
   if (m.found !== true) return false;
   // A real SKU (string or number, not the word "null") or an http(s) URL —
@@ -3597,11 +3605,26 @@ function parsePriceResult(r, vendors) {
     : (typeof r.quantity === 'string' && r.quantity.trim() ? r.quantity.trim() : null);
   const url = typeof r.url === 'string' && /^https?:\/\/\S+$/i.test(r.url.trim()) ? r.url.trim() : null;
   const notes = typeof r.notes === 'string' ? r.notes.trim() : '';
-  return { vendor, price, quantity, url, notes };
+  return { vendor, price, quantity, url, notes, pricePerOz: priceResultNumber(r.pricePerOz) };
 }
 
-function isUsablePriceResult(r, vendors) {
-  return parsePriceResult(r, vendors) !== null;
+// One read of a whole price-lookup reply, shared by both endpoints: only
+// parsed, usable results are queued, returned to the caller, or named as the
+// cheapest vendor — a mixed batch used to hand its invented or malformed
+// members back unfiltered (Codex r15 on #4884). `complete` is false when
+// `results` is missing or any member is unusable, so a partial answer fails
+// the row; an explicit [] ("nothing found") is complete.
+function readPriceLookupReply(parsed, vendors) {
+  const raw = parsed && typeof parsed === 'object' && Array.isArray(parsed.results) ? parsed.results : null;
+  const usable = (raw || []).map((r) => parsePriceResult(r, vendors)).filter(Boolean);
+  const cheapest = findPriceVendor(usable.map((u) => u.vendor), parsed?.cheapest);
+  return {
+    complete: raw !== null && usable.length === raw.length,
+    usable,
+    results: usable.map((u) => ({ vendor: u.vendor.name, price: u.price, quantity: u.quantity, url: u.url, pricePerOz: u.pricePerOz, notes: u.notes || null })),
+    cheapest: cheapest ? cheapest.name : null,
+    summary: typeof parsed?.summary === 'string' ? parsed.summary.trim() : '',
+  };
 }
 
 // =========================================================================
@@ -3697,6 +3720,10 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       }
     }
 
+    // Still asking for tools at the cap: the model never gave its answer.
+    const exhausted = currentMsg.stop_reason === 'tool_use';
+    if (exhausted) ledgerCallRejected(currentMsg, 'tool_loop_exhausted');
+
     // Parse the JSON response
     let parsed;
     try {
@@ -3705,26 +3732,20 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       const jsonMatch = clean.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : clean);
     } catch (parseErr) {
-      ledgerCallRejected(currentMsg, 'invalid_json');
+      if (!exhausted) ledgerCallRejected(currentMsg, 'invalid_json');
       logger.warn(`[AI Price Lookup] Failed to parse JSON: ${parseErr.message}`);
       return res.json({ success: true, raw: responseText, results: [], summary: 'AI returned non-JSON response. See raw field.' });
     }
 
-    // A nonempty results array with no usable entry (e.g. [{}]) is a schema
-    // shape that answered nothing — the loop below would skip every one of
-    // them, so it must not read as a successful call (Codex r8 on #4884).
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)
-      || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))
-      || (parsed.results.length > 0 && !parsed.results.some((r) => isUsablePriceResult(r, vendors)))) {
-      ledgerCallRejected(currentMsg, 'schema_invalid');
-    }
+    // Only usable results are queued or returned; a missing, empty-shaped or
+    // partially unusable `results` fails the row (Codex r8, r14, r15 on #4884).
+    const reply = readPriceLookupReply(parsed, vendors);
+    if (!exhausted && !reply.complete) ledgerCallRejected(currentMsg, 'schema_invalid');
 
     // If we have a productId, create approval queue entries for found prices
     let approvalsCreated = 0;
-    if (productId && parsed.results && parsed.results.length > 0) {
-      for (const raw of parsed.results) {
-        const result = parsePriceResult(raw, vendors);
-        if (!result) continue;
+    if (productId) {
+      for (const result of reply.usable) {
         const { vendor } = result;
 
         // Check existing price
@@ -3757,9 +3778,9 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
     res.json({
       success: true,
       product: productName,
-      results: parsed.results || [],
-      cheapest: parsed.cheapest || null,
-      summary: parsed.summary || '',
+      results: reply.results,
+      cheapest: reply.cheapest,
+      summary: reply.summary,
       approvalsCreated,
     });
   } catch (err) {
@@ -3823,7 +3844,6 @@ router.storedUnitCostPerOz = storedUnitCostPerOz;
 router.quantityToOz = quantityToOz;
 // Shared web-search-result usability check (Codex r8 on #4884) —
 // procurement-tools.js's own price lookup applies the same validation.
-router.isUsablePriceResult = isUsablePriceResult;
-router.parsePriceResult = parsePriceResult;
+router.readPriceLookupReply = readPriceLookupReply;
 
 module.exports = router;

@@ -97,3 +97,22 @@ test('a tool loop that runs out before a final answer fails the row', async () =
   expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
   expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'tool_loop_exhausted');
 });
+
+// Review on #4884: fields the route writes must be on-contract when present.
+test.each([
+  ['a word confidence (stored as the 0.50 default)', { confidence: 'high' }],
+  ['an out-of-range confidence (fails applyMappingRow after acceptance)', { confidence: -1 }],
+  ['an object price (notes "~$[object Object]")', { price: { usd: 99 } }],
+  ['an object product name', { vendorProductName: {} }],
+  ['an object package unit', { packageSizeUnit: {} }],
+  ['object notes', { notes: { why: 'x' } }],
+])('%s makes the decision unusable: dropped, and the row fails', async (_label, extra) => {
+  expect(await propose([P1_FOUND, { ...P2_NONE, ...extra }])).toEqual([P1_FOUND]);
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+});
+
+test('in-contract optional fields are accepted', async () => {
+  const full = { productId: 'p2', found: true, vendorSku: 'TS-78', productUrl: 'https://acme.example/taurus', vendorProductName: 'Taurus SC 78oz', packageSizeValue: 78, packageSizeUnit: 'oz', purchaseUom: 'each', price: '129.99', confidence: 0.9, notes: 'exact match' };
+  expect(await propose([P1_FOUND, full])).toEqual([P1_FOUND, full]);
+  expect(ledgerCallRejected).not.toHaveBeenCalled();
+});

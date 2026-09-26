@@ -457,6 +457,12 @@ function ledgerCallRejected(value, errorCode) {
 async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, laneId = null, policyLabel: label = null, trace = null } = {}) {
   // Monotonic clock: callers' own budget math uses Date.now (and tests pin it).
   const t0 = performance.now();
+  // Inside runAsReplay a direct call is filed under `<policy>:replay`, the
+  // way dispatch chains are (recordedPolicyLabel) — a fixed-fixture replay of
+  // a live code path (e.g. the lawn naming gate running runChallenge) must
+  // not dilute the live lane's failure rate or keep a silent live lane
+  // looking active (Codex r15 on #4884).
+  const policy = applyReplayLane(label || laneId || agentContext.current().laneId || `${provider}/${requestedModel}`);
   let value;
   try {
     value = await fn();
@@ -465,7 +471,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     // llm/call.js requires this module, so its require is lazy.
     let errorCode = 'error';
     try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
-    const failedId = recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: label });
+    const failedId = recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: policy });
     // The calls most worth debugging are the ones that failed: an opted-in
     // lane keeps the request bodies of a rejected call too (no response).
     if (trace) recordTrace(failedId, { system: trace.system, prompt: trace.prompt, laneId });
@@ -494,7 +500,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     providerRef: value?.id,
     promptVersion,
     laneId,
-    policyLabel: label,
+    policyLabel: policy,
   });
   if (trace) recordTrace(callId, { system: trace.system, prompt: trace.prompt, response: messageText(value), laneId });
   if (value && typeof value === 'object' && !errorCode) ledgerCallIdOf.set(value, callId);

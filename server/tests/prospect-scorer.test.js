@@ -204,6 +204,11 @@ describe('classifyBatch — every consumed field is parsed, not coerced (Codex r
     expect((await run({ suggested_anchor: 'null' })).suggested_anchor).toBeNull();
     expect(ledgerCallRejected).not.toHaveBeenCalled();
   });
+
+  test('an anchor longer than anchor_planned (varchar 255) is dropped and fails the row', async () => {
+    expect((await run({ suggested_anchor: 'x'.repeat(256) })).suggested_anchor).toBeNull();
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
 });
 
 describe('classifyBatch LLM path', () => {

@@ -209,10 +209,13 @@ function parseClassifiedEntry(o, c) {
   const topicKey = typeof o.target_topic === 'string' ? o.target_topic.trim().toLowerCase() : '';
   if (o.target_topic !== undefined && o.target_topic !== null && !VALID_TOPICS.has(topicKey)) degraded = true;
 
+  // "<short anchor or null>" — it lands in anchor_planned varchar(255), where
+  // a longer string would fail the insert after this row read success.
   let anchor = null;
   if (typeof o.suggested_anchor === 'string') {
     const a = o.suggested_anchor.trim();
-    anchor = a && a.toLowerCase() !== 'null' ? a : null;
+    if (a.length > 255) degraded = true;
+    else anchor = a && a.toLowerCase() !== 'null' ? a : null;
   } else if (o.suggested_anchor !== undefined && o.suggested_anchor !== null) {
     degraded = true;
   }

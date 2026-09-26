@@ -50,6 +50,7 @@ class WikiQA {
     }
 
     // Step 1: Route to relevant articles (FLAGSHIP first, Sol on a miss)
+    const knownPaths = new Set(indexRows.map((r) => r.path));
     let paths = [];
     try {
       const routing = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
@@ -63,9 +64,19 @@ ${liveIndex}`,
         jsonMode: true,
         jsonSchema: ROUTING_SCHEMA,
         maxTokens: 500,
-      }, { validate: (result) => (Array.isArray(result.json?.paths) ? null : 'invalid_output') });
+      }, {
+        // Every routed path must be an article from the index the model was
+        // shown: an invented one used to be cited back as a source and stored
+        // as referenced while nothing loaded (Codex-class gap on #4884). An
+        // empty list stays a valid "nothing relevant".
+        validate: (result) => {
+          const listed = result.json?.paths;
+          if (!Array.isArray(listed)) return 'invalid_output';
+          return listed.every((p) => typeof p === 'string' && knownPaths.has(p)) ? null : 'invalid_output';
+        },
+      });
       if (!routing.ok || !Array.isArray(routing.json?.paths)) throw new Error(routing.reason || 'no_paths');
-      paths = routing.json.paths;
+      paths = routing.json.paths.slice(0, 8);
     } catch {
       // Fallback: search by keywords
       const keywords = question.toLowerCase().split(/\s+/).filter(w => w.length > 3);
@@ -90,7 +101,7 @@ ${liveIndex}`,
 
     // Step 2: Load articles
     const articles = await db('knowledge_base')
-      .whereIn('path', paths.slice(0, 8))
+      .whereIn('path', paths)
       .select('path', 'title', 'content');
 
     // Step 3: Answer with full context (FLAGSHIP first, Sol on a miss; a

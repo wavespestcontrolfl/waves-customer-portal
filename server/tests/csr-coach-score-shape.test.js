@@ -10,11 +10,18 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { isUsableCsrScore, normalizeCsrScore } = require('../services/csr/csr-coach');
 
+const CORE = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
+const RESCUE = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
+// point_details whose 0/1 points add up to the given core / rescue scores.
+const pointsFor = (core, rescue) => ({
+  ...Object.fromEntries(CORE.map((k, i) => [k, i < core ? 1 : 0])),
+  ...Object.fromEntries(RESCUE.map((k, i) => [k, i < rescue ? 1 : 0])),
+});
 const GOOD = {
   total_score: 12, core_score: 8, rescue_score: 4,
   control_score: 4, warmth_score: 4, clarity_score: 4, objection_handling_score: 3, closing_strength_score: 4,
   call_outcome: 'booked',
-  point_details: { greeting: 1, empathy: 1 },
+  point_details: pointsFor(8, 4),
   lead_quality_score: 8,
 };
 
@@ -55,7 +62,7 @@ describe('isUsableCsrScore', () => {
 
   // Codex r13 on #4884: values outside the rubric's documented ranges used to
   // be accepted and persisted into CSR averages.
-  const triple = (core, rescue, total = core + rescue) => ({ ...GOOD, core_score: core, rescue_score: rescue, total_score: total });
+  const triple = (core, rescue, total = core + rescue) => ({ ...GOOD, core_score: core, rescue_score: rescue, total_score: total, point_details: pointsFor(Math.max(0, Math.min(core, 10)), Math.max(0, Math.min(rescue, 5))) });
   test('enforces the documented ranges of core (0-10), rescue (0-5) and total (0-15)', () => {
     expect(isUsableCsrScore(triple(0, 0))).toBe(true);
     expect(isUsableCsrScore(triple(10, 5))).toBe(true);
@@ -130,13 +137,46 @@ describe('isUsableCsrScore', () => {
     expect(normalizeCsrScore({ ...GOOD, estimated_job_value: -5 }).estimated_job_value).toBeNull();
   });
 
-  test('follow_up_task: needs a recommended_action; type and deadline fall back to safe defaults', () => {
-    expect(normalizeCsrScore({ ...GOOD, follow_up_task: 'call them' }).follow_up_task).toBeNull();
-    expect(normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'call_back', recommended_action: '  ' } }).follow_up_task).toBeNull();
-    const t = normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'Send SMS', recommended_action: 'Text the quote', deadline_hours: '4/24/48' } }).follow_up_task;
-    expect(t).toMatchObject({ type: 'send_sms', recommended_action: 'Text the quote', deadline_hours: 24 });
-    const u = normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'carrier pigeon', recommended_action: 'Call back', deadline_hours: 48 } }).follow_up_task;
-    expect(u).toMatchObject({ type: 'call_back', deadline_hours: 48 });
+  // Codex r15 on #4884: an unknown type used to be rewritten to call_back.
+  test('follow_up_task: absent/null is no task; a present task must be on-contract or the answer is rejected', () => {
+    expect(normalizeCsrScore({ ...GOOD, follow_up_task: null }).follow_up_task).toBeNull();
+    expect(normalizeCsrScore({ ...GOOD }).follow_up_task).toBeNull();
+    for (const bad of [
+      'call them',
+      { type: 'call_back', recommended_action: '  ' },
+      { type: 'send_email', recommended_action: 'Email the quote' },
+      { recommended_action: 'Call back' },
+      { type: 'send_sms', recommended_action: 'Text the quote', deadline_hours: '4/24/48' },
+      { type: 'send_sms', recommended_action: 'Text the quote', deadline_hours: -1 },
+    ]) {
+      expect(normalizeCsrScore({ ...GOOD, follow_up_task: bad })).toBeNull();
+    }
+    expect(normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'Send SMS', recommended_action: 'Text the quote' } }).follow_up_task)
+      .toMatchObject({ type: 'send_sms', recommended_action: 'Text the quote', deadline_hours: 24 });
+    expect(normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'call_back', recommended_action: 'Call back', deadline_hours: '48' } }).follow_up_task)
+      .toMatchObject({ type: 'call_back', deadline_hours: 48 });
+  });
+
+  // Codex r15 on #4884: point_details {} beside core_score 10 was stored,
+  // and the weekly insight reads a missing core point as missed.
+  test('point_details: every core point present as 0/1, adding up to core_score and rescue_score', () => {
+    expect(isUsableCsrScore({ ...GOOD, point_details: {} })).toBe(false);
+    const { greeting, ...missingCore } = GOOD.point_details;
+    expect(isUsableCsrScore({ ...GOOD, point_details: missingCore })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, point_details: { ...GOOD.point_details, greeting: 2 } })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, point_details: { ...GOOD.point_details, greeting: 0 } })).toBe(false); // sums to 7, not 8
+    expect(isUsableCsrScore({ ...GOOD, point_details: { ...GOOD.point_details, objection_save: 0 } })).toBe(false); // rescue 3, not 4
+  });
+
+  test('point_details: absent rescue points count as 0; keys and values are canonicalized', () => {
+    const coreOnly = Object.fromEntries(CORE.map((k, i) => [k, i < 8 ? 1 : 0]));
+    const n = normalizeCsrScore({ ...GOOD, rescue_score: 0, total_score: 8, point_details: coreOnly });
+    expect(n.point_details).toMatchObject({ greeting: 1, strong_close: 0, objection_save: 0, follow_up_offer: 0 });
+    const loose = { ...Object.fromEntries(CORE.map((k, i) => [k.replace(/_/g, ' ').toUpperCase(), i < 8 ? '1' : false])), Objection_Save: true, 'upsell-attempt': 1, urgency_creation: '1', referral_mention: 1, extra_key: 1 };
+    const m = normalizeCsrScore({ ...GOOD, point_details: loose });
+    expect(m).not.toBeNull();
+    expect(m.point_details.problem_capture).toBe(1);
+    expect(m.point_details.extra_key).toBeUndefined();
   });
 
   test('rejects a missing, null, or array point_details — JSON.stringify(undefined) is undefined, not a string', () => {

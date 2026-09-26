@@ -57,4 +57,68 @@ describe('lawn-diagnostic prompt v0.5 naming gate', () => {
     expect(out.customer_summary).toBe('');
     expect(normalizeDiagnosisJson({}).findings).toEqual([]);
   });
+
+  // Finding-level contract gate (Codex reviewer finding on #4884): a finding
+  // missing `name`, or carrying a present-but-off-contract confidence /
+  // severity / urgency, must be dropped rather than defaulted downstream
+  // into "Unspecified lawn finding" / unknown / moderate.
+  describe('normalizeDiagnosisJson finding-level contract gate', () => {
+    test('drops a finding with no name', () => {
+      const out = normalizeDiagnosisJson({ findings: [{}] });
+      expect(out.findings).toEqual([]);
+      expect(out.droppedFindings).toBe(1);
+    });
+
+    test('drops a finding whose name is not a string (e.g. an object)', () => {
+      const out = normalizeDiagnosisJson({ findings: [{ name: { x: 1 }, confidence: 'certain', severity: 'critical' }] });
+      expect(out.findings).toEqual([]);
+      expect(out.droppedFindings).toBe(1);
+    });
+
+    test('drops a finding with an off-contract confidence, severity, or urgency', () => {
+      expect(normalizeDiagnosisJson({ findings: [{ name: 'Browning', confidence: 'certain' }] }).findings).toEqual([]);
+      expect(normalizeDiagnosisJson({ findings: [{ name: 'Browning', severity: 'critical' }] }).findings).toEqual([]);
+      expect(normalizeDiagnosisJson({ findings: [{ name: 'Browning', urgency: 'asap' }] }).findings).toEqual([]);
+    });
+
+    test('keeps a finding whose optional confidence/severity/urgency are simply absent', () => {
+      const out = normalizeDiagnosisJson({ findings: [{ name: 'Browning along the edge' }] });
+      expect(out.findings).toEqual([{ name: 'Browning along the edge' }]);
+      expect(out.droppedFindings).toBe(0);
+    });
+
+    test('keeps on-contract findings and reports the drop count when mixed with malformed ones', () => {
+      const out = normalizeDiagnosisJson({
+        findings: [
+          { name: 'Browning along the edge', confidence: 'low', severity: 'mild', urgency: 'monitor' },
+          { name: '   ' }, // blank name
+          { confidence: 'high' }, // no name at all
+        ],
+      });
+      expect(out.findings).toEqual([{ name: 'Browning along the edge', confidence: 'low', severity: 'mild', urgency: 'monitor' }]);
+      expect(out.droppedFindings).toBe(2);
+    });
+  });
+});
+
+// The finding-level gate accepts exactly what lawn-diagnostic-report.js's
+// normalizers read correctly — synonyms and case included — and only drops
+// values they would rewrite to a default (review on #4884).
+describe('normalizeDiagnosisJson keeps findings the report normalizers read correctly', () => {
+  const { normalizeDiagnosisJson } = require('../services/lawn-diagnostic-prompt');
+  test.each([
+    ['confidence "Medium" / severity "High"', { name: 'Chinch bugs', confidence: 'Medium', severity: 'High' }],
+    ['severity "minor"', { name: 'Dollar spot', severity: 'minor' }],
+    ['urgency "Follow up" and a null confidence', { name: 'Brown patch', urgency: 'Follow up', confidence: null }],
+  ])('%s is kept', (_label, finding) => {
+    const out = normalizeDiagnosisJson({ findings: [finding] });
+    expect(out.findings).toHaveLength(1);
+    expect(out.droppedFindings).toBe(0);
+  });
+
+  test('severity "critical" (the report would silently rewrite it to moderate) is dropped', () => {
+    const out = normalizeDiagnosisJson({ findings: [{ name: 'Grubs', severity: 'critical' }, { name: 'Chinch bugs' }] });
+    expect(out.findings.map((f) => f.name)).toEqual(['Chinch bugs']);
+    expect(out.droppedFindings).toBe(1);
+  });
 });

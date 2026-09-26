@@ -504,6 +504,78 @@ describe('fillCitationForm', () => {
   test('only fill/select/check/submit are allowed actions (no click/upload)', () => {
     expect([..._internals.ALLOWED_ACTIONS].sort()).toEqual(['check', 'fill', 'select', 'submit']);
   });
+
+  // Review on #4884: an object/array/boolean `value` on a fill/select action would
+  // type "[object Object]" / "true" into a live directory form (the consumer does
+  // page.fill(sel, String(act.value ?? '')) / selectOption(...)) — fail closed before
+  // touching the page.
+  test.each([
+    ['fill', { foo: 'bar' }],
+    ['fill', ['a']],
+    ['fill', true],
+    ['select', { foo: 'bar' }],
+    ['select', ['a']],
+  ])('P3 (#4884): a %s action with a non-text value (%p) → field_action_failed, never dispatched to the page', async (action, value) => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action, selector: '#f', value }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('field_action_failed');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined(); // never submitted
+    expect(log.find((a) => a[0] === action)).toBeUndefined(); // never dispatched to the page
+  });
+
+  // "NEVER invent values": an empty or absent value is the model leaving a field it
+  // has no data for — it types nothing, as it always did; a number types its digits.
+  test.each([
+    ['an empty string', ''],
+    ['an absent value', undefined],
+    ['a numeric ZIP', 34202],
+  ])('P3 (#4884): a fill with %s is still dispatched and the form is submitted', async (_label, value) => {
+    const log = [];
+    const act = value === undefined ? { action: 'fill', selector: '#f' } : { action: 'fill', selector: '#f', value };
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [act, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(r.errorCode).not.toBe('field_action_failed');
+    expect(log.find((a) => a[0] === 'fill')).toEqual(['fill', '#f', value === undefined ? '' : String(value)]);
+  });
+
+  test('P3 (#4884): a check action needs no value (unaffected by the fill/select guard)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'check', selector: '#agree' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(log).toContainEqual(['check', '#agree']);
+    expect(r.outcome).not.toBe('failed');
+  });
+
+  test('P3 (#4884): a non-string plan.notes on a blocked verdict is dropped, never surfaced as "[object Object]"', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: 'captcha', actions: [], notes: { weird: true } }, {}),
+    }));
+    expect(r.outcome).toBe('blocked_captcha');
+    expect(r.notes).toBeUndefined();
+  });
+
+  test('P3 (#4884): a non-string verify.notes on a rejection is dropped, never surfaced as "[object Object]"', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://x.com/submit' } }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: true, live_url: null, notes: { weird: true } },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_rejected');
+    expect(r.notes).toBe('directory rejected the submission');
+  });
 });
 
 describe('requestAllowed (egress lock — EXACTLY the pinned host set)', () => {

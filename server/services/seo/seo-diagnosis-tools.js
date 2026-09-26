@@ -285,7 +285,13 @@ async function classifyQueryIntent({ queries = [] } = {}) {
     const parsedLines = text.split('\n').map((line) => {
       const m = line.trim().match(/^(.+?)\t(transactional|informational|commercial-investigation)\t(\d+(?:\.\d+)?)/);
       if (!m) return null;
-      return { query: m[1].trim(), intent: m[2], confidence: Math.min(1, Number(m[3])) };
+      const confidence = Number(m[3]);
+      // The prompt documents confidence as 0-1; an out-of-range value (e.g. 7)
+      // is off-contract for this line — drop it here so the query falls through
+      // to the same "missing" path (keyword fallback + ledger rejection) as a
+      // dropped/duplicated line, rather than silently clamping to 1.0 (Codex on #4884).
+      if (!(confidence >= 0 && confidence <= 1)) return null;
+      return { query: m[1].trim(), intent: m[2], confidence };
     }).filter(Boolean);
     // Map lines back to the batch by exact query text — defensive against a
     // response that drops, reorders, or duplicates lines. A query with no

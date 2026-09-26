@@ -104,7 +104,14 @@ Return ONLY valid JSON, no markdown.`;
     const text = stripThinkingBlocks(response).content?.[0]?.text || '';
     let triage;
     try { triage = JSON.parse(text); } catch (err) { ledgerCallRejected(response, 'invalid_json'); throw err; }
-    if (!triageMatchesSchema(triage)) ledgerCallRejected(response, 'schema_invalid');
+    // An off-schema answer (e.g. urgency "critical") is a failed triage, not
+    // one to map: its values used to be written onto the lead anyway while
+    // only the ledger row said it failed (review on #4884). Same null the
+    // caller already handles for any AI failure.
+    if (!triageMatchesSchema(triage)) {
+      ledgerCallRejected(response, 'schema_invalid');
+      return null;
+    }
     return mapTriage(triage);
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);

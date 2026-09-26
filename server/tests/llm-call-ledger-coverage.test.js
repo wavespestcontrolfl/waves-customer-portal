@@ -148,7 +148,6 @@ const KNOWN_UNWRAPPED = {
   'services/tree-shrub-assessment.js': [1, 'tree_shrub: Gemini primary is a raw fetch'],
   'services/treatment-zone-suggest.js': [1, 'treatment_zone: Gemini primary is a raw fetch'],
   'services/turf-height-ocr.js': [1, 'turf_ocr: Gemini primary is a raw fetch'],
-  'services/lawn-diagnostic-prompt.js': [2, 'lawn_diag_vision / lawn_diag_writer: Gemini and OpenAI legs are raw fetches'],
   'services/property-lookup/ai-property-lookup.js': [2, 'property_trio: OpenAI and Gemini legs are raw fetches'],
   'services/seo/llm-mention-prober.js': [1, 'mentions_prober: a measurement probe (search), recorded by design as unrecordable'],
   'services/twilio.js': [1, "Twilio's SMS client — its messages.create is Twilio's API, not Anthropic"],

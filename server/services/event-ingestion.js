@@ -624,17 +624,32 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents, requi
     return [];
   }
   const events = parsed.events.slice(0, maxEvents);
-  // A nonempty batch where every entry fails normalizeExtractedEvent answered
-  // nothing usable — {"events":[{}]} would otherwise read as a successful
-  // call even though upsertExtractedEvents silently drops every one of its
-  // entries (~line 705). An intentionally empty array ({"events":[]}, a
-  // genuinely event-less page/feed) stays a success (Codex r8 on #4884).
-  if (events.length) {
-    const nowMs = Date.now();
-    const anyUsable = events.some((ev) => normalizeExtractedEvent(source, ev, nowMs, { requireStart }) !== null);
-    if (!anyUsable) ledgerCallRejected(response, 'schema_invalid');
+  // Malformed members (not an object, no string title, a non-text field, an
+  // unparseable startAt) never reach the caller: a null member used to throw
+  // inside the usability check or mid-upsert after the call was accepted, and
+  // a non-string title/description was stored as "[object Object]"; any such
+  // member fails the row (Codex r8 + review on #4884). A nonempty batch where
+  // every well-formed entry still fails normalizeExtractedEvent (e.g. all out
+  // of the date window) answered nothing usable either. An intentionally
+  // empty array ({"events":[]}) stays a success.
+  const wellFormed = events.filter(isWellFormedExtractedEvent);
+  const nowMs = Date.now();
+  if (wellFormed.length < events.length
+    || (events.length && !wellFormed.some((ev) => normalizeExtractedEvent(source, ev, nowMs, { requireStart }) !== null))) {
+    ledgerCallRejected(response, 'schema_invalid');
   }
-  return events;
+  return wellFormed;
+}
+
+// An extracted event in the prompt's shape: an object with a non-blank
+// string title; every other field a string or null; a startAt, when given,
+// that parses as a date.
+const EXTRACTED_EVENT_TEXT_FIELDS = ['startAt', 'venueName', 'city', 'description', 'eventUrl', 'imageUrl'];
+function isWellFormedExtractedEvent(ev) {
+  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return false;
+  if (typeof ev.title !== 'string' || !ev.title.trim()) return false;
+  if (!EXTRACTED_EVENT_TEXT_FIELDS.every((k) => ev[k] === undefined || ev[k] === null || typeof ev[k] === 'string')) return false;
+  return !(typeof ev.startAt === 'string' && ev.startAt.trim() && !parseDateOrNull(ev.startAt));
 }
 
 /**
@@ -652,7 +667,8 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents, requi
 function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const cutoffMs = nowMs + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
-  const title = (ev.title || '').toString().trim().slice(0, 512);
+  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return null;
+  const title = typeof ev.title === 'string' ? ev.title.trim().slice(0, 512) : '';
   if (!title) return null;
 
   const start = parseDateOrNull(ev.startAt);
@@ -665,8 +681,8 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // drift between runs (different timezone formatting, trailing
   // slashes, etc) — the parsed Date's toISOString() and the
   // safeHttpUrl() canonical form don't.
-  const description = ev.description ? String(ev.description).slice(0, 2000) : null;
-  const venueName = ev.venueName ? String(ev.venueName).slice(0, 256) : null;
+  const description = typeof ev.description === 'string' && ev.description ? ev.description.slice(0, 2000) : null;
+  const venueName = typeof ev.venueName === 'string' && ev.venueName ? ev.venueName.slice(0, 256) : null;
   const eventUrl = safeHttpUrl(ev.eventUrl);
   const imageUrl = safeHttpUrl(ev.imageUrl);
 

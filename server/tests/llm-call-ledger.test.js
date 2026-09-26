@@ -340,6 +340,21 @@ describe('llm call ledger', () => {
   });
 
   describe('ledgerCall', () => {
+    // Codex r15 on #4884: direct calls inside a replay harness were filed
+    // under the live lane label, unlike dispatch chains.
+    it('files calls inside runAsReplay under the :replay policy, live calls under the lane', async () => {
+      const { metrics } = load();
+      await metrics.runAsReplay(() => metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(ANTHROPIC_MESSAGE), { laneId: 'lawn_challenge' }));
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(ANTHROPIC_MESSAGE), { laneId: 'lawn_challenge' });
+      await metrics.runAsReplay(() => metrics.ledgerCall('anthropic', 'm', () => Promise.reject(new Error('boom')), { laneId: 'lawn_challenge' }).catch(() => {}));
+      await flush();
+      expect(callRows().map((r) => [r.lane_id, r.policy])).toEqual([
+        ['lawn_challenge', 'lawn_challenge:replay'],
+        ['lawn_challenge', 'lawn_challenge'],
+        ['lawn_challenge', 'lawn_challenge:replay'],
+      ]);
+    });
+
     it('returns the resolved value unchanged and records from it', async () => {
       const { metrics } = load();
       const value = await metrics.ledgerCall('anthropic', 'req-model', () => Promise.resolve(ANTHROPIC_MESSAGE));

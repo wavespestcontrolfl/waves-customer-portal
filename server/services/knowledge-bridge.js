@@ -195,7 +195,11 @@ function recommendationPayloadShapeValid(raw) {
     if (!Array.isArray(raw.recommendations)) return false;
     for (const rec of raw.recommendations) {
       if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
-      if (!optionalString(rec.action) || !optionalString(rec.reason) || !optionalString(rec.timeframe)) return false;
+      // A recommendation that is present must say what to do: `[{}]` used to
+      // count as grounded and render a blank line (review on #4884). Absent
+      // scalar fields elsewhere stay allowed (r37).
+      if (typeof rec.action !== 'string' || !rec.action.trim()) return false;
+      if (!optionalString(rec.reason) || !optionalString(rec.timeframe)) return false;
       if (rec.priority !== undefined && rec.priority !== null
         && typeof rec.priority !== 'number' && typeof rec.priority !== 'string') return false;
     }

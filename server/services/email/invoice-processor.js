@@ -28,6 +28,52 @@ function isUsableInvoiceTotal(total) {
   return typeof total === 'string' && /^-?\d+(\.\d+)?$/.test(total.trim());
 }
 
+// The one read of the extraction: everything downstream uses these values,
+// never the raw reply. A present field that is off the prompt's contract is
+// dropped to null (so the classifier's own figure is used instead) and marks
+// the answer degraded: an invalid invoice_date used to become today's date
+// (wrong expense_date / tax_year), and an object invoice_number was written
+// into the expense description as "#[object Object]" (Codex-class gap on
+// #4884). A zero or negative total is a real value (e.g. a credit memo) that
+// simply creates no expense. Returns { invoice, degraded }; invoice is null
+// when the reply is not an object.
+function readParsedInvoice(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { invoice: null, degraded: true };
+  let degraded = false;
+  const invoice = { ...raw };
+  const present = (v) => v !== undefined && v !== null;
+
+  invoice.total = null;
+  if (present(raw.total)) {
+    if (isUsableInvoiceTotal(raw.total)) invoice.total = Number(raw.total);
+    else degraded = true;
+  }
+  invoice.invoice_number = null;
+  if (present(raw.invoice_number)) {
+    const n = typeof raw.invoice_number === 'string' || (typeof raw.invoice_number === 'number' && Number.isFinite(raw.invoice_number))
+      ? String(raw.invoice_number).trim() : '';
+    if (n) invoice.invoice_number = n;
+    else degraded = true;
+  }
+  invoice.invoice_date = null;
+  if (present(raw.invoice_date)) {
+    const m = typeof raw.invoice_date === 'string' && raw.invoice_date.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    if (d && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3]) invoice.invoice_date = raw.invoice_date.trim();
+    else degraded = true;
+  }
+  invoice.line_items = [];
+  if (present(raw.line_items)) {
+    if (Array.isArray(raw.line_items)) {
+      invoice.line_items = raw.line_items.filter((l) => l && typeof l === 'object' && !Array.isArray(l));
+      if (invoice.line_items.length !== raw.line_items.length) degraded = true;
+    } else degraded = true;
+  }
+  // Neither a total nor an invoice number: the extraction answered nothing.
+  if (invoice.total === null && !invoice.invoice_number) degraded = true;
+  return { invoice, degraded };
+}
+
 function parseClaudeJson(text) {
   try {
     const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -103,12 +149,13 @@ async function processVendorInvoice(email, classification) {
         }],
       }), { laneId: 'invoice_pdf' });
 
-      parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
-      if (!parsedInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
-      else if (typeof parsedInvoice !== 'object' || Array.isArray(parsedInvoice)
-        || !isUsableInvoiceTotal(parsedInvoice.total)
-        || (parsedInvoice.total == null && !parsedInvoice.invoice_number)
-        || (parsedInvoice.line_items != null && !Array.isArray(parsedInvoice.line_items))) ledgerCallRejected(parseResponse, 'schema_invalid');
+      const rawInvoice = parseClaudeJson(anthropicText(parseResponse));
+      if (!rawInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
+      else {
+        const read = readParsedInvoice(rawInvoice);
+        if (read.degraded) ledgerCallRejected(parseResponse, 'schema_invalid');
+        parsedInvoice = read.invoice;
+      }
 
       if (parsedInvoice) {
         await db('email_attachments').where({ id: pdfAttachment.id }).update({
@@ -145,7 +192,7 @@ async function processVendorInvoice(email, classification) {
       let aiSuggestionNote = '';
       if (!categoryRow) {
         try {
-          const ai = await autoCategorizeExpense(vendorName, (Array.isArray(parsedInvoice?.line_items) ? parsedInvoice.line_items.map(l => l?.description).filter(Boolean).join('; ') : '') || email.subject, amount);
+          const ai = await autoCategorizeExpense(vendorName, (parsedInvoice ? parsedInvoice.line_items.map(l => (typeof l.description === 'string' ? l.description : '')).filter(Boolean).join('; ') : '') || email.subject, amount);
           if (ai?.categoryName) aiSuggestionNote = ` AI-suggested category: ${ai.categoryName} (unconfirmed).`;
         } catch (err) {
           logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
@@ -196,4 +243,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice, isUsableInvoiceTotal };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice };

@@ -81,6 +81,32 @@ test('a response with no usable lines at all still classifies every query (via f
   expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'invalid_output');
 });
 
+test('P4 (#4884): a confidence outside the documented 0-1 is treated as off-contract, not silently clamped to 1.0', async () => {
+  // One valid line, one line whose confidence (7) is out of range — the model's own
+  // documented contract is 0-1, so this line must be dropped (not clamped) and the
+  // query falls through to the keyword fallback + the batch is flagged as a failure.
+  respondWithLines([
+    'termite cost near me\ttransactional\t0.9',
+    'how to identify a termite\tinformational\t7',
+  ]);
+  const queries = ['termite cost near me', 'how to identify a termite'];
+  const out = await classifyQueryIntent({ queries });
+
+  expect(out.classifications).toHaveLength(2);
+  expect(out.classifications[0]).toMatchObject({ query: 'termite cost near me', intent: 'transactional', confidence: 0.9 });
+  // Falls back to the deterministic keyword classifier at confidence 0.5 — never 1.0.
+  expect(out.classifications[1]).toMatchObject({ query: 'how to identify a termite', confidence: 0.5 });
+  expect(out.classifications[1].confidence).not.toBe(1);
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'invalid_output');
+});
+
+test('a confidence of exactly 1 (in-range boundary) is kept as-is, not treated as off-contract', async () => {
+  respondWithLines(['termite cost near me\ttransactional\t1']);
+  const out = await classifyQueryIntent({ queries: ['termite cost near me'] });
+  expect(out.classifications[0]).toMatchObject({ query: 'termite cost near me', confidence: 1 });
+  expect(ledgerCallRejected).not.toHaveBeenCalled();
+});
+
 test('extra/unmatched lines in the response do not cause false matches or duplicate classifications', async () => {
   respondWithLines([
     'termite cost near me\ttransactional\t0.9',

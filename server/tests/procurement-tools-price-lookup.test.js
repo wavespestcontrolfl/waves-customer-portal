@@ -100,13 +100,13 @@ test('a usable result creates exactly one approval and is not flagged', async ()
   expect(ledgerCallRejected).not.toHaveBeenCalled();
 });
 
-test('a junk entry alongside a usable one is skipped, not flagged, and counts only the real insert', async () => {
+test('a junk entry alongside a usable one is skipped and counts only the real insert; the partial answer fails the row (Codex r15 on #4884)', async () => {
   const inserts = wireDb();
   respondWith([{}, { vendor: 'Acme Supply', price: 55.25 }]);
   const out = await executeProcurementTool('run_price_lookup', { product_name: 'Taurus SC' });
   expect(out.approvals_created).toBe(1);
   expect(inserts).toHaveLength(1);
-  expect(ledgerCallRejected).not.toHaveBeenCalled();
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
 });
 
 test('an intentionally empty results array stays a success', async () => {
@@ -137,4 +137,41 @@ test('a requested vendor named with different case and spacing still matches; op
   expect(out.approvals_created).toBe(1);
   expect(inserts[0]).toMatchObject({ vendor_id: 'v-acme', new_price: 55.25, source_url: null });
   expect(ledgerCallRejected).not.toHaveBeenCalled();
+});
+
+// Codex r15 on #4884: the loop exited right after fetching the 9th turn, so a
+// final answer arriving there was never read and the call failed as
+// invalid_json. Every fetched turn is now read before the cap is checked.
+describe('tool loop', () => {
+  const toolTurn = { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't', name: 'web_search', input: {} }] };
+  const finalTurn = (results) => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ product: 'Taurus SC', results, cheapest: null, summary: 's' }) }] });
+
+  test('a final answer on the 9th turn (after 8 tool rounds) is read and used', async () => {
+    const inserts = wireDb();
+    for (let i = 0; i < 8; i += 1) mockCreate.mockResolvedValueOnce(toolTurn);
+    mockCreate.mockResolvedValueOnce(finalTurn([{ vendor: 'Acme Supply', price: 55.25 }]));
+    const out = await executeProcurementTool('run_price_lookup', { product_name: 'Taurus SC' });
+    expect(mockCreate).toHaveBeenCalledTimes(9);
+    expect(out.approvals_created).toBe(1);
+    expect(inserts).toHaveLength(1);
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('still asking for tools at the cap fails the row as tool_loop_exhausted (once)', async () => {
+    wireDb();
+    mockCreate.mockResolvedValue(toolTurn);
+    await executeProcurementTool('run_price_lookup', { product_name: 'Taurus SC' });
+    expect(mockCreate).toHaveBeenCalledTimes(9);
+    expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'tool_loop_exhausted');
+  });
+
+  test('only usable results are returned to the Intelligence Bar, and cheapest must be one of them', async () => {
+    wireDb();
+    mockCreate.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ results: [{ vendor: 'Acme Supply', price: 55.25, pricePerOz: 2.76 }, { vendor: 'Made Up Co', price: 1 }], cheapest: 'Made Up Co', summary: 's' }) }] });
+    const out = await executeProcurementTool('run_price_lookup', { product_name: 'Taurus SC' });
+    expect(out.results).toEqual([{ vendor: 'Acme Supply', price: 55.25, quantity: null, url: null, pricePerOz: 2.76, notes: null }]);
+    expect(out.cheapest).toBeNull();
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
 });

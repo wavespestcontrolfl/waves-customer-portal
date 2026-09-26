@@ -48,3 +48,41 @@ describe('isUsableInvoiceTotal', () => {
     expect(isUsableInvoiceTotal(true)).toBe(false);
   });
 });
+
+// Everything downstream reads these values, never the raw reply: an invalid
+// invoice_date used to become today's date, and an object invoice_number was
+// written into the expense description as "#[object Object]".
+describe('readParsedInvoice', () => {
+  const { readParsedInvoice } = require('../services/email/invoice-processor');
+
+  test('a clean extraction is used as-is and not degraded', () => {
+    const { invoice, degraded } = readParsedInvoice({ invoice_number: 'INV-12', invoice_date: '2026-09-01', total: '1250.50', line_items: [{ description: 'Termidor' }], vendor_name: 'Acme' });
+    expect(degraded).toBe(false);
+    expect(invoice).toMatchObject({ invoice_number: 'INV-12', invoice_date: '2026-09-01', total: 1250.5, vendor_name: 'Acme' });
+  });
+
+  test.each([
+    ['an impossible invoice_date', { invoice_number: 'A1', invoice_date: '2026-13-45', total: 10 }, 'invoice_date'],
+    ['a numeric invoice_date', { invoice_number: 'A1', invoice_date: 20260101, total: 10 }, 'invoice_date'],
+    ['an object invoice_number', { invoice_number: {}, total: 10 }, 'invoice_number'],
+    ['a word total', { invoice_number: 'A1', total: 'unknown' }, 'total'],
+  ])('%s is dropped to null (the classifier figure is used) and degrades the answer', (_label, raw, field) => {
+    const { invoice, degraded } = readParsedInvoice(raw);
+    expect(invoice[field]).toBeNull();
+    expect(degraded).toBe(true);
+  });
+
+  test('non-object line items are dropped and degrade; a zero or negative total (credit memo) is a real value', () => {
+    const a = readParsedInvoice({ invoice_number: 'A1', total: 5, line_items: [{ description: 'x' }, 'y', null] });
+    expect(a.invoice.line_items).toEqual([{ description: 'x' }]);
+    expect(a.degraded).toBe(true);
+    const b = readParsedInvoice({ invoice_number: 'CM-1', total: -42.1 });
+    expect(b.invoice.total).toBe(-42.1);
+    expect(b.degraded).toBe(false);
+  });
+
+  test('neither a total nor an invoice number answers nothing', () => {
+    expect(readParsedInvoice({ vendor_name: 'Acme' }).degraded).toBe(true);
+    expect(readParsedInvoice([]).invoice).toBeNull();
+  });
+});

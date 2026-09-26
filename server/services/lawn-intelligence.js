@@ -46,6 +46,23 @@ function assessmentAnalytics() {
   return require('./assessment-analytics');
 }
 
+// dispatchWithFallback validate hook: sharpness / lawn_coverage_pct /
+// lighting are documented 0-100 (PHOTO_QUALITY_SCHEMA above) but only typed
+// `integer` — an out-of-range value (negative, or e.g. 900) would otherwise
+// pass straight into the weighted score below and can win/lose
+// is_best_photo on a bogus number. Reject rather than clamp: a present
+// out-of-range value is off-contract, not a value to silently coerce.
+// Any number in range: only the rounded weighted score is stored, so a
+// fractional sub-score (85.5) always scored correctly and is not rejected.
+function isPct0to100(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
+}
+function invalidPhotoQualityJson(json) {
+  if (!json || typeof json !== 'object') return 'schema_invalid';
+  if (!isPct0to100(json.sharpness) || !isPct0to100(json.lawn_coverage_pct) || !isPct0to100(json.lighting)) return 'schema_invalid';
+  return null;
+}
+
 // ══════════════════════════════════════════════════════════════
 // 1. FAWN WEATHER CONTEXT
 // ══════════════════════════════════════════════════════════════
@@ -89,7 +106,7 @@ async function assessPhotoQuality(base64Image, mimeType) {
       jsonMode: true,
       jsonSchema: PHOTO_QUALITY_SCHEMA,
       maxTokens: 300,
-    });
+    }, { validate: (result) => invalidPhotoQualityJson(result.json) });
     if (!res.ok || !res.json) throw new Error(res.reason || 'no_json');
     const result = res.json;
     const score = Math.round((result.sharpness * 0.4 + result.lawn_coverage_pct * 0.35 + result.lighting * 0.25));

@@ -68,7 +68,7 @@ describe('recommendations must be usable', () => {
     ['an object reasoning (would throw as a React child)', { action: 'raise budget', reasoning: { why: 'x' } }],
     ['an array campaign', { action: 'raise budget', campaign: ['Pest'] }],
   ])('%s fails the report', (_label, rec) => {
-    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'high', action: 'ok' }, rec] })).toBe(false);
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'high', action: 'ok' }, { priority: 'high', ...rec }] })).toBe(false);
   });
 
   test('a rec with an action and text fields is usable', () => {
@@ -76,23 +76,36 @@ describe('recommendations must be usable', () => {
   });
 });
 
-describe('normalizeAdsReport', () => {
-  test('canonicalizes rec priority so every rec lands in a rendered group', () => {
-    const out = normalizeAdsReport({ ...GOOD, recommendations: [{ priority: ' High ', action: 'a' }, { action: 'b' }, { priority: 'urgent', action: 'c' }] });
-    expect(out.recommendations.map((r) => r.priority)).toEqual(['high', 'medium', 'medium']);
+// An off-contract member fails the leg (the next provider gets a turn)
+// instead of being rewritten or trimmed after the leg was accepted.
+describe('rendered items must be usable as given', () => {
+  const rec = { priority: 'high', action: 'raise budget' };
+  test.each([
+    ['a rec without a priority', { recommendations: [{ action: 'a' }] }],
+    ['a rec with an off-enum priority (would never be shown)', { recommendations: [{ priority: 'urgent', action: 'a' }] }],
+    ['a waste alert without its search term (a copied template)', { recommendations: [rec], waste_alerts: [{ search_term: '', spend: 0 }] }],
+    ['a waste alert with an object spend', { recommendations: [rec], waste_alerts: [{ search_term: 'bugs', spend: { usd: 3 } }] }],
+    ['a scaling opportunity without its campaign', { scaling_opportunities: [{ current_budget: 20 }] }],
+    ['a capacity warning without its area', { capacity_warnings: [{ utilization: 90 }] }],
+    ['a non-text insight', { insights: ['CPA is down', { text: 'x' }] }],
+    ['a blank insight', { insights: [''] }],
+  ])('%s fails the report', (_label, extra) => {
+    expect(isUsableAdsReport({ ...GOOD, ...extra })).toBe(false);
   });
 
-  test('drops secondary-list items without their label or with a non-text rendered field', () => {
-    const out = normalizeAdsReport({
+  test('a full report with every list well formed is usable; an extra non-rendered field is fine', () => {
+    expect(isUsableAdsReport({
       ...GOOD,
-      waste_alerts: [{ search_term: '', spend: 0 }, { search_term: 'free pest control', spend: 12.5, conversions: 0, action: 'add_negative', extra: [1] }, { search_term: 'bugs', spend: { usd: 3 } }],
-      scaling_opportunities: [{ campaign: 'Pest', current_budget: 20, suggested_budget: 30, headroom_reason: 'IS lost to budget' }, {}],
-      capacity_warnings: [{ area: 'Venice', utilization: 95, recommendation: 'slow spend' }, { utilization: 90 }],
-      insights: ['CPA is down', '', { text: 'x' }],
-    });
-    expect(out.waste_alerts.map((w) => w.search_term)).toEqual(['free pest control']);
-    expect(out.scaling_opportunities).toHaveLength(1);
-    expect(out.capacity_warnings).toHaveLength(1);
-    expect(out.insights).toEqual(['CPA is down']);
+      recommendations: [{ priority: 'High', action: 'raise budget', campaign: 'Pest' }],
+      waste_alerts: [{ search_term: 'free pest control', spend: 12.5, conversions: 0, action: 'add_negative', extra: [1] }],
+      scaling_opportunities: [{ campaign: 'Pest', current_budget: 20, suggested_budget: 30, headroom_reason: 'IS lost to budget' }],
+      capacity_warnings: [{ area: 'Venice', utilization: 95, recommendation: 'slow spend' }],
+      insights: ['CPA is down'],
+    })).toBe(true);
+  });
+
+  test('normalizeAdsReport only lower-cases an accepted priority so the page groups it', () => {
+    const out = normalizeAdsReport({ ...GOOD, recommendations: [{ priority: ' High ', action: 'a' }, { priority: 'low', action: 'b' }] });
+    expect(out.recommendations.map((r) => r.priority)).toEqual(['high', 'low']);
   });
 });

@@ -93,15 +93,18 @@ function callbackNumberCoachingNote(v2Extraction, contactPhone) {
 // past an "object, not array" check; r11 found fractional values for INTEGER
 // columns; r13 found values outside the rubric's documented ranges
 // (total_score: 999, rescue_score: -4, warmth_score: 100) persisted into CSR
-// averages; r14 found totals that are not core + rescue. Required: the nine
-// rubric scores within their ranges (integers where the column is INTEGER),
-// total_score === core_score + rescue_score, a call_outcome from the rubric's list
-// (canonicalized — call_outcome === 'booked' drives the booking rate and the
-// follow-up gate, so "Booked" must not read as a loss), and a point_details
-// object. Optional fields are canonicalized, and an absent or off-contract
-// value becomes null / [] — the score itself is still usable — instead of a
-// varchar overflow or a non-numeric decimal failing the insert after the leg
-// was accepted. Pure/testable; returns the normalized score or null.
+// averages; r14 found totals that are not core + rescue; r15 found point
+// details that disagree with the scores and invented follow-up types.
+// Required: the nine rubric scores within their ranges (integers where the
+// column is INTEGER), total_score === core_score + rescue_score, point_details
+// that add up to them (normalizePointDetails), a call_outcome from the
+// rubric's list (canonicalized — call_outcome === 'booked' drives the booking
+// rate and the follow-up gate, so "Booked" must not read as a loss), and a
+// follow_up_task that is absent or on-contract. The descriptive optional
+// fields are canonicalized, and an absent or off-contract value becomes
+// null / [] — the score itself is still usable — instead of a varchar
+// overflow or a non-numeric decimal failing the insert after the leg was
+// accepted. Pure/testable; returns the normalized score or null.
 const CSR_SCORE_RANGES = {
   total_score: [0, 15, true],
   core_score: [0, 10, true],
@@ -136,17 +139,60 @@ function csrText(v) {
   return typeof v === 'string' && v.trim() ? v.trim() : null;
 }
 
+// null / absent → no task. A task that is present must be on-contract — a
+// known type and an action, with an absent deadline taking the documented 24h
+// — because rewriting an unknown type (e.g. send_email) into call_back gives
+// the task different semantics, and the follow-up watcher could then count
+// an unrelated outbound call as having done it (Codex r15 on #4884). An
+// off-contract task makes the answer unusable (undefined), not a callback.
 function normalizeFollowUpTask(task) {
-  if (!task || typeof task !== 'object' || Array.isArray(task)) return null;
+  if (task === null || task === undefined) return null;
+  if (typeof task !== 'object' || Array.isArray(task)) return undefined;
+  const type = csrEnum(task.type, CSR_TASK_TYPES);
   const action = csrText(task.recommended_action);
-  if (!action) return null;
-  const hours = csrNumber(task.deadline_hours);
-  return {
-    ...task,
-    type: csrEnum(task.type, CSR_TASK_TYPES) || 'call_back',
-    recommended_action: action,
-    deadline_hours: hours !== null && hours > 0 && hours <= 168 ? hours : 24,
-  };
+  if (!type || !action) return undefined;
+  let hours = 24;
+  if (task.deadline_hours !== undefined && task.deadline_hours !== null) {
+    hours = csrNumber(task.deadline_hours);
+    if (hours === null || hours <= 0 || hours > 168) return undefined;
+  }
+  return { ...task, type, recommended_action: action, deadline_hours: hours };
+}
+
+// The rubric's fifteen 0/1 points. All ten core points always apply, so each
+// must be present; rescue points only count "when the situation arose", so
+// an absent one is 0. The points must add up to core_score / rescue_score —
+// `point_details: {}` beside core_score: 10 used to be stored, and the weekly
+// insight reads a missing point as missed (Codex r15 on #4884). Returns the
+// normalized details (0/1 numbers, known keys only) or null.
+const CSR_CORE_POINTS = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
+const CSR_RESCUE_POINTS = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
+function csrPoint(v) {
+  if (v === 1 || v === true || v === '1') return 1;
+  if (v === 0 || v === false || v === '0') return 0;
+  return null;
+}
+function normalizePointDetails(raw, coreScore, rescueScore) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const details = {};
+  for (const [key, value] of Object.entries(raw)) details[key.trim().toLowerCase().replace(/[\s-]+/g, '_')] = value;
+  const out = {};
+  let core = 0;
+  for (const key of CSR_CORE_POINTS) {
+    const p = csrPoint(details[key]);
+    if (p === null) return null;
+    out[key] = p;
+    core += p;
+  }
+  let rescue = 0;
+  for (const key of CSR_RESCUE_POINTS) {
+    if (details[key] === undefined || details[key] === null) { out[key] = 0; continue; }
+    const p = csrPoint(details[key]);
+    if (p === null) return null;
+    out[key] = p;
+    rescue += p;
+  }
+  return core === coreScore && rescue === rescueScore ? out : null;
 }
 
 function normalizeCsrScore(raw) {
@@ -163,8 +209,8 @@ function normalizeCsrScore(raw) {
   if (score.total_score !== score.core_score + score.rescue_score) return null;
   score.call_outcome = csrEnum(raw.call_outcome, CSR_CALL_OUTCOMES);
   if (!score.call_outcome) return null;
-  // JSON.stringify(undefined) IS undefined — never let that reach the insert.
-  if (!raw.point_details || typeof raw.point_details !== 'object' || Array.isArray(raw.point_details)) return null;
+  score.point_details = normalizePointDetails(raw.point_details, score.core_score, score.rescue_score);
+  if (!score.point_details) return null;
   score.call_summary = csrText(raw.call_summary);
   score.coaching_notes = csrText(raw.coaching_notes);
   score.better_phrasings = Array.isArray(raw.better_phrasings)
@@ -176,6 +222,7 @@ function normalizeCsrScore(raw) {
   const value = csrNumber(raw.estimated_job_value);
   score.estimated_job_value = value !== null && value >= 0 && value < 1e8 ? value : null;
   score.follow_up_task = normalizeFollowUpTask(raw.follow_up_task);
+  if (score.follow_up_task === undefined) return null;
   return score;
 }
 
@@ -614,7 +661,7 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
       return { recommendation: 'Not enough data yet — need at least 5 scored calls.', dataPoint: '', estimatedImpact: '' };
     }
 
-    const pointNames = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
+    const pointNames = CSR_CORE_POINTS;
 
     let bestRec = null;
     let bestImpact = 0;

@@ -126,7 +126,7 @@ test('a usable result (matching vendor + real price) creates exactly one approva
   });
 });
 
-test('a junk entry alongside a usable one is skipped, not flagged, and counts only the real insert', async () => {
+test('a junk entry alongside a usable one is skipped and counts only the real insert; the partial answer fails the row (Codex r15 on #4884)', async () => {
   const inserts = wireDb();
   respondWith([{}, { vendor: 'Acme Supply', price: 42.5 }]);
   await withServer(async (baseUrl) => {
@@ -134,7 +134,7 @@ test('a junk entry alongside a usable one is skipped, not flagged, and counts on
     const body = await res.json();
     expect(body.approvalsCreated).toBe(1);
     expect(inserts).toHaveLength(1);
-    expect(ledgerCallRejected).not.toHaveBeenCalled();
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
   });
 });
 

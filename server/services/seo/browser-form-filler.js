@@ -186,18 +186,40 @@ async function boundedShot(page) {
 // The callers' own gates, so the ledger fails exactly what the lane rejects
 // (Codex r5 on #4884): the plan gate before any page interaction, and the
 // verifier's strict booleans.
+// A fill/select action's `value` is written verbatim into a live directory form
+// (page.fill(sel, String(act.value ?? '')) / selectOption(...)) — an object, array
+// or boolean types "[object Object]" / "true" into the field, so it must be text: a
+// string, or a number typed as its digits (a ZIP or phone). An empty or absent value
+// is the prompt's own "NEVER invent values" for a field the business has no data
+// for — it types nothing, as before (review on #4884). check/click/submit take no value.
+function hasUsableValue(a) {
+  return a.value === undefined || a.value === null || typeof a.value === 'string'
+    || (typeof a.value === 'number' && Number.isFinite(a.value));
+}
+// notes is free-text evidence written into the attempt row / outcome object — an
+// off-contract non-string (object/number/array) must never reach that write.
+function asNotes(v) {
+  return typeof v === 'string' ? v : undefined;
+}
 function planShapeInvalid(plan) {
   if (!(plan && typeof plan === 'object' && BLOCKED_VALUES.has(plan.blocked)
     && typeof plan.form_present === 'boolean' && Array.isArray(plan.actions))) return true;
+  // notes is optional evidence text written straight into attempt detail — a present
+  // non-string value (object/number/array) is off-contract.
+  if (plan.notes !== undefined && typeof plan.notes !== 'string') return true;
   // A blocked / no-form verdict is a legitimate answer; the caller stops there.
   if (plan.blocked || !plan.form_present || !plan.actions.length) return false;
   if (!plan.actions.every((a) => a && ALLOWED_ACTIONS.has(a.action))) return true;
+  if (plan.actions.some((a) => (a.action === 'fill' || a.action === 'select') && !hasUsableValue(a))) return true;
   const last = plan.actions[plan.actions.length - 1];
   if (plan.actions.filter((a) => a.action === 'submit').length !== 1 || last.action !== 'submit' || !last.selector) return true;
   // The caller fails closed on a pre-submit fill / select / check with no selector (Codex r7 on #4884).
   return plan.actions.slice(0, -1).some((a) => a.action !== 'submit' && !a.selector);
 }
-const verifyShapeInvalid = (v) => !(v && typeof v === 'object' && ['success', 'pending', 'rejected'].every((k) => typeof v[k] === 'boolean'));
+const verifyShapeInvalid = (v) => !(v && typeof v === 'object' && ['success', 'pending', 'rejected'].every((k) => typeof v[k] === 'boolean'))
+  // notes is optional evidence text written straight into attempt detail — a present
+  // non-string value (object/number/array) is off-contract.
+  || (v.notes !== undefined && typeof v.notes !== 'string');
 
 async function callVision(anthropic, screenshotB64, text, shapeInvalid = null) {
   const resp = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
@@ -346,8 +368,8 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     if (!BLOCKED_VALUES.has(plan.blocked) || typeof plan.form_present !== 'boolean' || !Array.isArray(plan.actions)) {
       return { outcome: 'failed', errorCode: 'plan_invalid', screenshot: shot1, notes: 'malformed plan (blocked/form_present/actions)' };
     }
-    if (plan.blocked) return { outcome: `blocked_${plan.blocked}`.replace('blocked_phone', 'blocked_phone_verification'), errorCode: `blocked_${plan.blocked}`, screenshot: shot1, notes: plan.notes };
-    if (!plan.form_present || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: plan.notes || 'no form' };
+    if (plan.blocked) return { outcome: `blocked_${plan.blocked}`.replace('blocked_phone', 'blocked_phone_verification'), errorCode: `blocked_${plan.blocked}`, screenshot: shot1, notes: asNotes(plan.notes) };
+    if (!plan.form_present || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: asNotes(plan.notes) || 'no form' };
     // Every action must be a known type — an unexpected type (click/upload/etc.) signals
     // a plan we can't faithfully execute, so reject the whole plan rather than submit a
     // form with steps silently dropped.
@@ -398,6 +420,11 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       // fail closed (abort before submit) rather than silently skip and submit a
       // partially-blank listing.
       if (!act.selector) return { outcome: 'failed', errorCode: 'field_action_failed', screenshot: shot1, notes: `${act.action} action missing selector (not submitted)` };
+      // Mirrors the plan-shape gate: an object/array/boolean value on fill/select
+      // would type "[object Object]" / "true" into the live form (review on #4884).
+      if ((act.action === 'fill' || act.action === 'select') && !hasUsableValue(act)) {
+        return { outcome: 'failed', errorCode: 'field_action_failed', screenshot: shot1, notes: `${act.action} action value is not text (not submitted)` };
+      }
       try {
         if (act.action === 'fill') await page.fill(act.selector, String(act.value ?? ''));
         else if (act.action === 'select') await page.selectOption(act.selector, String(act.value ?? ''));
@@ -455,7 +482,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // gate error), a clear rejection must park the row, not record a phantom placement.
     const rejected = !!verify && verify.rejected === true;
     const confirmed = !rejected && !!verify && (verify.success === true || verify.pending === true);
-    const placed = (msg) => ({ outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2 || shot1, notes: [(verify && verify.notes) || msg, onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200) });
+    const placed = (msg) => ({ outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2 || shot1, notes: [asNotes(verify && verify.notes) || msg, onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200) });
 
     // EVIDENCE-based outcome (not "a click happened"), ordered so the SAFE verdict wins on
     // ambiguity: a clear rejection, then a confirmation, then a form that NAVIGATED off-host
@@ -463,7 +490,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // evidence, then on-host dispatch, then a bare off-host abort, then no-evidence. So a row
     // is only marked placed (no-retry → no dup) when confirmed, or a real submit reached the
     // pinned host and the form never navigated its data off-host.
-    if (rejected) return { outcome: 'failed', errorCode: 'submit_rejected', screenshot: shot2 || shot1, notes: (verify && verify.notes) || 'directory rejected the submission' };
+    if (rejected) return { outcome: 'failed', errorCode: 'submit_rejected', screenshot: shot2 || shot1, notes: asNotes(verify && verify.notes) || 'directory rejected the submission' };
     if (confirmed) return placed('submitted');
     // The form NAVIGATED off-host with its data → blocked by the egress lock, directory never
     // got it. Stays submit_blocked even if an on-host request also dispatched, so a genuinely

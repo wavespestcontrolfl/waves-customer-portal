@@ -35,10 +35,12 @@ const { ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 const SOURCE = { id: 'src-1', name: 'Manatee Chamber — Upcoming Events', coverage_geo: ['bradenton'] };
 const OPTS = { mode: 'articles', maxEvents: 15 };
+// In the prompt's own event shape (title / startAt / city) — malformed
+// members are filtered out of the extraction since Codex review on #4884.
 const EVENTS_JSON = JSON.stringify({
   events: [
-    { name: 'Business After Hours', start_date: '2026-08-05', city: 'Bradenton' },
-    { name: 'Chamber Breakfast', start_date: '2026-08-12', city: 'Bradenton' },
+    { title: 'Business After Hours', startAt: '2026-08-05T17:30:00-04:00', city: 'bradenton' },
+    { title: 'Chamber Breakfast', startAt: '2026-08-12T07:30:00-04:00', city: 'bradenton' },
   ],
 });
 
@@ -58,7 +60,7 @@ describe('event extraction: thinking-block tolerance', () => {
 
     const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
     expect(events).toHaveLength(2);
-    expect(events[0].name).toBe('Business After Hours');
+    expect(events[0].title).toBe('Business After Hours');
   });
 
   test('redacted_thinking is tolerated the same way', async () => {
@@ -105,19 +107,40 @@ describe('event extraction: thinking-block tolerance', () => {
       mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{},{}]}' }] });
 
       const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
-      // Behavior for the caller is unchanged — upsertExtractedEvents still
-      // gets the raw (unusable) entries and drops them itself.
-      expect(events).toEqual([{}, {}]);
+      // Malformed members never reach the caller.
+      expect(events).toEqual([]);
       expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
     });
 
-    test('a batch with at least one usable entry is NOT flagged, even if others are junk', async () => {
+    test('junk members are dropped and fail the row; the usable entry is still returned', async () => {
       mockCreate.mockResolvedValue({
         content: [{ type: 'text', text: '{"events":[{},{"title":"Sunset Market"}]}' }],
       });
 
       const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
-      expect(events).toHaveLength(2);
+      expect(events).toEqual([{ title: 'Sunset Market' }]);
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    // A null member used to throw inside the usability check / mid-upsert
+    // after the call was accepted; a non-string title or description was
+    // stored as "[object Object]".
+    test.each([
+      ['a null member', null],
+      ['an object title', { title: { en: 'Boat Parade' } }],
+      ['an object description', { title: 'Boat Parade', description: {} }],
+      ['an unparseable startAt', { title: 'Boat Parade', startAt: 'next-ish Tuesday' }],
+    ])('%s is dropped (no throw) and fails the row', async (_label, member) => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify({ events: [member, { title: 'Sunset Market' }] }) }] });
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      expect(events).toEqual([{ title: 'Sunset Market' }]);
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('a batch of only well-formed entries is not flagged', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{"title":"Sunset Market","venueName":null,"description":"Fresh produce."}]}' }] });
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      expect(events).toHaveLength(1);
       expect(ledgerCallRejected).not.toHaveBeenCalled();
     });
 

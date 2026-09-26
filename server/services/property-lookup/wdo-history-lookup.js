@@ -99,6 +99,13 @@ function normalizeHistory(parsed) {
   const pt = String(parsed.previousTreatment || '').trim().toLowerCase();
   const conf = String(parsed.confidence || '').trim().toLowerCase();
   const fum = parsed.fumigation && typeof parsed.fumigation === 'object' ? parsed.fumigation : null;
+  const sources = Array.isArray(parsed.sources)
+    ? parsed.sources.map((s) => str(s, 300)).filter(isHttpUrl).slice(0, 8)
+    : [];
+  // The prompt allows "yes" ONLY with a concrete source; an uncited "yes"
+  // would be cached and pre-fill a legal FDACS-13645 filing, so it is a
+  // failed lookup (retryable), not a verdict (Codex-class gap on #4884).
+  if (pt === 'yes' && !sources.length) return null;
   return {
     previousTreatment: ['yes', 'no'].includes(pt) ? pt : 'unknown',
     treatmentNotes: str(parsed.treatmentNotes, 1000),
@@ -120,9 +127,7 @@ function normalizeHistory(parsed) {
         description: str(p?.description, 200),
       })).filter((p) => p.type || p.description)
       : [],
-    sources: Array.isArray(parsed.sources)
-      ? parsed.sources.map((s) => str(s, 300)).filter(isHttpUrl).slice(0, 8)
-      : [],
+    sources,
     confidence: ['high', 'medium', 'low'].includes(conf) ? conf : 'low',
   };
 }
@@ -164,10 +169,15 @@ async function lookupWdoHistory(address, options = {}) {
       ledgerCallRejected(resp, 'empty_text');
       throw new Error('no text block in lookup response');
     }
-    const normalized = normalizeHistory(parseJson(textBlock.text));
-    if (!normalized) {
+    const parsed = parseJson(textBlock.text);
+    if (!parsed) {
       ledgerCallRejected(resp, 'invalid_json');
       throw new Error('unparseable lookup response');
+    }
+    const normalized = normalizeHistory(parsed);
+    if (!normalized) {
+      ledgerCallRejected(resp, 'schema_invalid');
+      throw new Error('lookup response broke its contract (missing verdict, or "yes" without a source)');
     }
     logger.info('[wdo-history] resolved', {
       elapsedMs: Date.now() - t0,

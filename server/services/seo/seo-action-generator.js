@@ -283,6 +283,19 @@ Current position: ${detail.gsc_position || 'unknown'}
 
 Top ranking queries:
 ${queryList || 'No query data available'}`,
+        }, {
+          // A blank title/meta_description is schema-valid (any string) but permanently
+          // removes the action from the whereNull('ai_draft') queue and renders an empty
+          // card — reject it so the two-leg miss falls through and no draft is stored
+          // (Codex on #4884). Don't strictly enforce the prompt's 50-60/140-155 length
+          // guidance: a slightly long/short-but-non-empty draft is still usable.
+          validate: (result) => {
+            const title = result.json && result.json.title;
+            const meta = result.json && result.json.meta_description;
+            if (typeof title !== 'string' || !title.trim()) return 'invalid_output';
+            if (typeof meta !== 'string' || !meta.trim()) return 'invalid_output';
+            return null;
+          },
         });
         if (!res.ok || !res.json) throw new Error(`draft dispatch failed: ${res.reason}`);
 

@@ -110,8 +110,12 @@ Return ONLY JSON with ALL fields:
   // detected_price_usd must satisfy the prompt's number|null contract EXACTLY:
   // present, and either null or a finite number. Reject omitted/undefined and any
   // string (Number('') and Number('  ') are a finite 0 that would fake a $0 price
-  // on a paid listing) → fail safe to needs_account.
-  const priceOk = o && (o.detected_price_usd === null || (typeof o.detected_price_usd === 'number' && Number.isFinite(o.detected_price_usd)));
+  // on a paid listing) → fail safe to needs_account. Also bound it to what the
+  // detected_price_usd numeric(8,2) column can hold (max 999999.99) — an
+  // in-range-but-overflowing value would abort the whole classifier run at the
+  // DB write, so treat it as off-contract here instead (Codex on #4884).
+  const priceOk = o && (o.detected_price_usd === null || (typeof o.detected_price_usd === 'number' && Number.isFinite(o.detected_price_usd)
+    && o.detected_price_usd >= 0 && o.detected_price_usd < 1e6));
   const valid = o && CATEGORIES.has(o.directory_category) && RELS.has(o.offered_link_rel)
     && isBool(o.requires_account) && isBool(o.requires_email_verification)
     && isBool(o.requires_captcha) && isBool(o.requires_payment) && isBool(o.recurring) && priceOk;

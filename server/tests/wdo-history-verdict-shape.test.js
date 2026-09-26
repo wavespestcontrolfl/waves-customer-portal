@@ -23,3 +23,19 @@ describe('wdo history — verdict fields are required', () => {
     expect(normalizeHistory({ previousTreatment: ' Yes ', confidence: 'HIGH', sources: ['https://example.com'] })).toMatchObject({ previousTreatment: 'yes', confidence: 'high' });
   });
 });
+
+// The prompt allows "yes" ONLY with a concrete source; an uncited "yes" would
+// pre-fill a legal FDACS-13645 filing.
+describe('wdo history — a "yes" verdict needs a cited source', () => {
+  test('"yes" with no http(s) source is not a usable history', () => {
+    expect(normalizeHistory({ previousTreatment: 'yes', confidence: 'high' })).toBeNull();
+    expect(normalizeHistory({ previousTreatment: 'yes', confidence: 'high', sources: [] })).toBeNull();
+    expect(normalizeHistory({ previousTreatment: 'yes', confidence: 'high', sources: ['county permit #123', 'javascript:alert(1)'] })).toBeNull();
+  });
+
+  test('"yes" with a cited URL, and "no"/"unknown" without one, normalize', () => {
+    expect(normalizeHistory({ previousTreatment: 'yes', confidence: 'medium', sources: ['https://www.manateepao.gov/permit/123'] }))
+      .toMatchObject({ previousTreatment: 'yes', sources: ['https://www.manateepao.gov/permit/123'] });
+    expect(normalizeHistory({ previousTreatment: 'unknown', confidence: 'low', sources: [] })).toMatchObject({ previousTreatment: 'unknown' });
+  });
+});
