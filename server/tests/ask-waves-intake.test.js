@@ -271,6 +271,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Mantenga a los niños dentro hasta el viernes.', ''],
     ['Puede volver a entrar a las once.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
     ['Stay off the treated lawn until May 3.', ''],
+    ['Return after 30 minutes.', 'How should I prepare?'],
+    ['Residents may return after 30 minutes.', 'How should I prepare?'],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
@@ -729,6 +731,7 @@ describe('normalizeIntakeResult', () => {
     ['No hace falta preparar la casa.', ''],
     ['You can re-enter once your technician confirms the product is dry.', ''],
     ['You may re-enter once your technician confirms the product is dry.', ''],
+    ['We will return in two weeks for the follow-up.', ''],
     ["The EPA doesn't approve pesticides; it registers them.", ''],
     ["The EPA didn't approve this product; it is EPA-registered.", ''],
     ['This product is not EPA-approved; it is EPA-registered.', ''],
@@ -803,6 +806,8 @@ describe('normalizeIntakeResult', () => {
     'The product is not safe to swallow; take your child to the hospital now.',
     'El producto no es seguro; vaya al hospital de inmediato.',
     'This product is not safe to ingest; call an ambulance now.',
+    'It is not safe to swallow; do not delay calling 911.',
+    'It is not safe to swallow; never delay medical care.',
   ])('a hospital referral in the reply keeps the emergency script: %s', (reply) => {
     const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Is this product ok?');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
