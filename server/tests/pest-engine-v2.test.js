@@ -353,6 +353,13 @@ describe('buildAnswer — evidence', () => {
     }));
     expect(built.evidence.matches).toEqual(['Reddish-brown mound builders']);
   });
+
+  test('an UNAPPROVED top candidate never has its traits cited as evidence — Codex round-0 P1 (round 8)', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('unreviewed-ant', 0.95, { traitsVisible: [1] })],
+    }));
+    expect(built.evidence).toEqual({ matches: [], still_need: [] });
+  });
 });
 
 describe('buildAnswer — local label', () => {
@@ -567,6 +574,20 @@ describe('identifyPestV2 — escalation triggers', () => {
     // The unverified 0.95 can never read pretty_sure once a trigger fired
     // with no OpenAI answer.
     expect(result.v2.answer.wording).toBe('likely');
+  });
+
+  test('a verify record naming the right slug but missing its trait arrays is not a real verification — Codex round-0 P1 (round 8)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.97 }] } }) // no trait arrays at all
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    // The invalid verify record's 0.97 was never applied — and even if it
+    // had been, the unanswered trigger caps it below pretty_sure either way.
+    expect(result.v2.answer.wording).toBe('likely');
+    expect(result.v2.evidence).toEqual({ matches: [], still_need: [] }); // zero cited evidence
   });
 
   test('an escalation call that answers ok but names NO candidate does not count as OpenAI confirmation — Codex round-0 P1 (round 2)', async () => {

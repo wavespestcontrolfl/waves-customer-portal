@@ -300,28 +300,46 @@ async function callEscalationModel(images, catalogEntries, candidateContext, tim
  * missing that slug) must NOT leave that candidate's original candidates-
  * call confidence standing unverified — that is exactly the "empty or
  * invalid JSON" miss the contract already treats as `gemini_missed`. */
+// Codex round-0 P1 (round 8): a verify record naming the right slug but
+// missing its required fields (no numeric confidence, or no trait arrays
+// at all) is not a real verification — accepting it let a candidate reach
+// `pretty_sure` having cited zero evidence. Both `mergeVerify` and
+// `verifyCoversAllCandidates` require this shape before trusting a record.
+function isValidVerifyRecord(v) {
+  return !!v && typeof v.confidence === 'number' && v.confidence >= 0 && v.confidence <= 1
+    && Array.isArray(v.traits_visible) && Array.isArray(v.traits_not_visible);
+}
+
 function verifyCoversAllCandidates(verifyResult, catalogCandidates) {
   if (!verifyResult?.ok || !Array.isArray(verifyResult.json?.candidates)) return false;
-  const verifiedSlugs = new Set(verifyResult.json.candidates.filter((v) => v?.slug).map((v) => String(v.slug)));
-  return catalogCandidates.every((c) => verifiedSlugs.has(c.slug));
+  const bySlug = new Map();
+  for (const v of verifyResult.json.candidates) {
+    if (v?.slug) bySlug.set(String(v.slug), v);
+  }
+  return catalogCandidates.every((c) => isValidVerifyRecord(bySlug.get(c.slug)));
 }
 
 function mergeVerify(candidates, verifyResult) {
   const bySlug = new Map();
   if (verifyResult?.ok && Array.isArray(verifyResult.json?.candidates)) {
     for (const v of verifyResult.json.candidates) {
-      if (v && v.slug) bySlug.set(String(v.slug), v);
+      if (v?.slug && isValidVerifyRecord(v)) bySlug.set(String(v.slug), v);
     }
   }
   return candidates.map((c) => {
     if (!c.entry) return c;
     const v = bySlug.get(c.slug);
+    // No VALID verify record — the candidate's original candidates-call
+    // confidence stands unverified, and `verifyCoversAllCandidates`
+    // already flags this as `gemini_missed` so escalation runs and
+    // `unansweredTrigger` caps it below pretty_sure if OpenAI doesn't
+    // answer either.
     if (!v) return c;
     return {
       ...c,
       confidence: clamp01(v.confidence),
-      traitsVisible: Array.isArray(v.traits_visible) ? v.traits_visible.filter(Number.isFinite) : [],
-      traitsNotVisible: Array.isArray(v.traits_not_visible) ? v.traits_not_visible.filter(Number.isFinite) : [],
+      traitsVisible: v.traits_visible.filter(Number.isFinite),
+      traitsNotVisible: v.traits_not_visible.filter(Number.isFinite),
     };
   });
 }
@@ -471,8 +489,14 @@ function buildEntryBlock(entry) {
   };
 }
 
+// Codex round-0 P1 (round 8): traits are catalog-authored strings, same
+// naming-risk class as look-alike `difference` prose — an unapproved
+// entry's traits must not be cited as evidence just because it happens to
+// be the top candidate. No fallback to an unapproved entry: if nothing
+// approved is on the list, there is no entry being named, so there is
+// nothing to cite evidence FOR either.
 function evidenceFor(candidates) {
-  const top = candidates.find((c) => c.entry) || null;
+  const top = candidates.find((c) => c.entry && isApproved(c.entry)) || null;
   if (!top) return { matches: [], still_need: [] };
   const traits = top.entry.traits || [];
   const pick = (nums) => [...new Set(nums)]
