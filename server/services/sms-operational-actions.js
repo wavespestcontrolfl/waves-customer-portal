@@ -669,7 +669,10 @@ async function refreshSmsCommitment(conn, row, now, verify) {
           sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
     if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
   });
-  return { outcome: persisted ? 'verified' : 'deferred', verdict, closed };
+  // A provider or schema failure is persisted with retry_after, but no model
+  // judged the event: keep it pending (verify reuses the stored failure until
+  // retry_after, so this costs no extra provider calls).
+  return { outcome: persisted && !verdict.retry_after ? 'verified' : 'deferred', verdict, closed };
 }
 
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {

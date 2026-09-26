@@ -1188,7 +1188,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(verify.mock.calls.map(([row, , opts]) => [row.id, opts.eventOnly])).toEqual([[target, false]]);
   });
 
-  test.each(['revalidation refuses the close', 'the source text changes under the lock'])(
+  test.each(['revalidation refuses the close', 'the source text changes under the lock', 'the provider fails'])(
     'Codex #4816 r18/r19: a verdict the transaction does not persist leaves the event unseen for the next tick (%s)', async (cause) => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
@@ -1207,6 +1207,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     // A stale evidence hash: revalidation refuses the close, as it does for a
     // witness that changed or is locked by another writer.
     const verify = jest.fn(async () => {
+      if (cause === 'the provider fails') {
+        return { verdict: 'uncertain', reason: 'provider_failed', evidence_hash: 'x', retry_after: new Date(now.getTime() + 3600000).toISOString() };
+      }
       if (cause === 'the source text changes under the lock') {
         await mockPg('sms_log').where({ id: message.id }).update({ message_body: `${message.message_body} (edited)` });
         return { verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null };
