@@ -1,18 +1,31 @@
-// withParentDecisionLock against REAL PostgreSQL (Codex round-7 P1, hardened
-// round-7 P2 self-review). Proves, against real advisory-lock/pg_locks
-// behavior no mock can fake:
-//   (a) the pooled connection it borrows is ALWAYS returned — on success,
-//       on a throwing fn(), and on a genuine failure to acquire the lock;
+// The parent-decision lock against REAL PostgreSQL (Codex round-7 P1,
+// redesigned per the pre-push audit's P1: recordDecision no longer wraps
+// EVERY program's decision in a dedicated-connection session lock — only a
+// TERMITE annual term takes a lock at all, and it's a connection-free
+// pg_advisory_xact_lock on the SAME conn/transaction the decision UPDATE
+// itself runs on. withParentDecisionLock — the dedicated-connection
+// SESSION lock — is now charge-side only (termite-annual-renewal-
+// charge.js's decideAndCharge, held across its own live Stripe call).
+// Proves, against real advisory-lock/pg_locks behavior no mock can fake:
+//   (a) the pooled connection withParentDecisionLock borrows is ALWAYS
+//       returned — on success, on a throwing fn(), and on a genuine
+//       failure to acquire the lock;
 //   (b) the pg_advisory_unlock actually runs on the SAME session that took
 //       the lock (a cross-session unlock silently no-ops in Postgres, so
 //       this is checked by watching the lock disappear from pg_locks, not
 //       by trusting the call was made);
 //   (c) a second caller contending for the SAME term WAITS (bounded by
 //       lock_timeout), then either wins once the first releases or gets one
-//       clear timeout error — never an instant spurious failure;
+//       clear timeout error — never an instant spurious failure. This now
+//       covers BOTH lock kinds on the same key: a charge (session lock)
+//       and a decision (xact lock) genuinely exclude each other;
 //   (d) the pool is never exhausted — sequential locks and two genuinely
 //       concurrent holders (one per connection) both run clean against a
-///      pool capped at 2.
+//       pool capped at 2, and recordDecision's OWN xact-lock path never
+//       needs a SECOND connection at all (a pool of 1 is enough for it
+//       alone);
+//   (e) a non-termite recordDecision takes no lock and runs unaffected by
+//       a held session lock on the same key — byte-identical to main.
 //
 // Bridges REPAIR_TEST_DATABASE_URL (this lane's own convention) onto
 // DATABASE_URL and a small DB_POOL_MAX/MIN so `../models/db` — the SAME
@@ -20,7 +33,11 @@
 // cannot take as a parameter — connects to the disposable test database
 // with a deliberately small pool, mirroring cron-lock-postgres.test.js's
 // own real-db-module pattern (a separate small-pool `holder` knex instance
-// models a genuinely different session/backend).
+// models a genuinely different session/backend). recordDecision's OWN
+// reads/writes are exercised against the REAL, already-migrated
+// annual_prepay_terms table (customer_id/term_start/term_end are its only
+// NOT NULL, no-default columns) — real rows, deleted via the customer's
+// ON DELETE CASCADE in afterEach.
 const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
@@ -32,10 +49,12 @@ const ORIGINAL_ENV = {
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
-postgres('withParentDecisionLock — real Postgres advisory-lock mechanics', () => {
+postgres('parent-decision lock — real Postgres advisory-lock mechanics', () => {
   let db;
   let holder; // a genuinely separate session/connection — models the "other side" of a race
   let withParentDecisionLock;
+  let recordDecision;
+  const customerIds = [];
 
   beforeAll(() => {
     const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
@@ -46,8 +65,17 @@ postgres('withParentDecisionLock — real Postgres advisory-lock mechanics', () 
     process.env.DB_POOL_MAX = '2';
     process.env.DB_POOL_MIN = '2';
     db = require('../models/db');
-    ({ withParentDecisionLock } = require('../services/annual-prepay-renewals'));
+    ({ withParentDecisionLock, recordDecision } = require('../services/annual-prepay-renewals'));
     holder = require('knex')({ client: 'pg', connection: process.env.REPAIR_TEST_DATABASE_URL, pool: { min: 1, max: 1 } });
+  });
+
+  afterEach(async () => {
+    // ON DELETE CASCADE on annual_prepay_terms.customer_id — deleting the
+    // customer takes the term(s) with it.
+    if (customerIds.length) {
+      await db('customers').whereIn('id', customerIds).del();
+      customerIds.length = 0;
+    }
   });
 
   afterAll(async () => {
@@ -57,6 +85,28 @@ postgres('withParentDecisionLock — real Postgres advisory-lock mechanics', () 
     process.env.DB_POOL_MAX = ORIGINAL_ENV.DB_POOL_MAX;
     process.env.DB_POOL_MIN = ORIGINAL_ENV.DB_POOL_MIN;
   });
+
+  // Minimal valid rows on the REAL, already-migrated schema — annualPlanVersion
+  // null/undefined models an ordinary (non-termite) program's term.
+  const insertTerm = async ({ annualPlanVersion = null, status = 'active', renewalDecision = null } = {}) => {
+    const { randomUUID } = require('crypto');
+    const customerId = randomUUID();
+    customerIds.push(customerId);
+    await db('customers').insert({
+      id: customerId,
+      first_name: 'Lock Test',
+      phone: `+1555${String(Date.now()).slice(-7)}${Math.floor(Math.random() * 10)}`,
+    });
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: customerId,
+      term_start: '2026-01-01',
+      term_end: '2026-12-31',
+      status,
+      renewal_decision: renewalDecision,
+      annual_plan_version: annualPlanVersion,
+    }).returning('*');
+    return term.id;
+  };
 
   // The two-int4-arg form (pg_advisory_lock(key1, key2), what
   // withParentDecisionLock actually calls) stores classid=key1, objid=key2
@@ -197,5 +247,106 @@ postgres('withParentDecisionLock — real Postgres advisory-lock mechanics', () 
     const after = (await db.raw('SHOW lock_timeout')).rows[0].lock_timeout;
     expect(after).toBe(baseline);
     expect(after).not.toMatch(/ms$/); // sanity: the internal bound (e.g. "5000ms") always carries a unit suffix
+  });
+
+  test('(e) recordDecision on a NON-termite term takes no lock — runs unaffected by a held session lock on the same key', async () => {
+    const termId = await insertTerm({ annualPlanVersion: null, status: 'active' });
+    // Hold the SESSION lock a termite charge would hold, on this exact key —
+    // a non-termite decision must never even ask for it.
+    await holder.raw('SELECT pg_advisory_lock(hashtext(?), hashtext(?::text))', ['annual-prepay-parent-decision', termId]);
+    try {
+      const startedAt = Date.now();
+      const result = await recordDecision({ termId, action: 'renew', conn: db });
+      const elapsed = Date.now() - startedAt;
+      expect(result).toMatchObject({ id: termId, status: 'renewed', renewal_decision: 'renew' });
+      // Byte-identical to main: no wait at all, since no lock is ever taken.
+      expect(elapsed).toBeLessThan(500);
+      expect(db.client.pool.numUsed()).toBe(0);
+    } finally {
+      await holder.raw('SELECT pg_advisory_unlock(hashtext(?), hashtext(?::text))', ['annual-prepay-parent-decision', termId]);
+    }
+  });
+
+  test('(c) a decline (recordDecision, xact lock) racing an in-flight charge (withParentDecisionLock, session lock) on the SAME termite term WAITS, then proceeds', async () => {
+    const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+    const order = [];
+
+    const chargeStartedAt = Date.now();
+    const chargeDone = withParentDecisionLock(termId, async () => {
+      order.push('charge-holds-lock');
+      await sleep(300);
+      order.push('charge-releases');
+      return 'charged';
+    });
+    // Give the charge a moment to actually claim the session lock first —
+    // otherwise this is just a race for who gets there first, not proof
+    // that the LOSER waits.
+    await sleep(40);
+
+    const declineStartedAt = Date.now();
+    const declineDone = recordDecision({ termId, action: 'cancel', conn: db }).then((term) => {
+      order.push('decline-runs');
+      return term;
+    });
+
+    const [chargeResult, declineResult] = await Promise.all([chargeDone, declineDone]);
+
+    expect(chargeResult).toBe('charged');
+    // The decision genuinely proceeded (not refused, not silently skipped)
+    // once the charge released its session lock.
+    expect(declineResult).toMatchObject({ id: termId, status: 'cancelled', renewal_decision: 'cancel' });
+    expect(order).toEqual(['charge-holds-lock', 'charge-releases', 'decline-runs']);
+    expect(Date.now() - declineStartedAt).toBeGreaterThanOrEqual(200);
+    expect(Date.now() - chargeStartedAt).toBeGreaterThanOrEqual(300);
+    expect(db.client.pool.numUsed()).toBe(0);
+  });
+
+  test('(d) recordDecision (termite, xact lock) never needs a SECOND connection — a pool capped at 1 is enough on its own', async () => {
+    const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+    const soloPool = require('knex')({ client: 'pg', connection: process.env.REPAIR_TEST_DATABASE_URL, pool: { min: 0, max: 1 } });
+    try {
+      // If recordDecision's termite path ever tried to hold one connection
+      // (its transaction) while asking the SAME pool for a second one (the
+      // old, redesigned-away session-lock shape), this would hang against
+      // a max:1 pool instead of resolving.
+      const result = await recordDecision({ termId, action: 'renew', conn: soloPool });
+      expect(result).toMatchObject({ id: termId, status: 'renewed', renewal_decision: 'renew' });
+      expect(soloPool.client.pool.numUsed()).toBe(0);
+    } finally {
+      await soloPool.destroy();
+    }
+  });
+
+  // Codex round-7 P1 (2nd audit round) — REENTRANCY: chargeInvoiceWithSavedCard's
+  // own card-on-file success path calls syncTermForInvoicePayment
+  // synchronously, which for a termite renewal successor walks straight
+  // into stampParentRenewedForSuccessor -> recordDecision('renew') on the
+  // SAME parent term withParentDecisionLock is still holding (the session
+  // lock, across the "Stripe submission"). Without the re-entrancy guard,
+  // that inner recordDecision would try its OWN xact lock on the SAME key
+  // from a SECOND connection and self-wait until its lock_timeout — a
+  // multi-second stall on every successful synchronous charge, against a
+  // pool of only 2. Proves it completes immediately instead.
+  test('a successful charge that synchronously re-enters recordDecision for the SAME parent term completes with no timeout, under a pool of max 2', async () => {
+    const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+    const startedAt = Date.now();
+
+    const outcome = await withParentDecisionLock(termId, async () => {
+      // Models decideAndCharge's own eligibility re-check + "Stripe
+      // submission" — then the SAME synchronous call chain that
+      // submission's own success handler makes into recordDecision for
+      // this EXACT parent term, all still inside this callback.
+      await sleep(20); // stands in for the live Stripe round trip
+      const decided = await recordDecision({ termId, action: 'renew', conn: db });
+      return { charged: true, decided };
+    });
+
+    const elapsed = Date.now() - startedAt;
+    expect(outcome.charged).toBe(true);
+    expect(outcome.decided).toMatchObject({ id: termId, status: 'renewed', renewal_decision: 'renew' });
+    // Bounded by the ~20ms stand-in for Stripe, nowhere near the 5s
+    // lock_timeout a self-wait would have hit.
+    expect(elapsed).toBeLessThan(1000);
+    expect(db.client.pool.numUsed()).toBe(0);
   });
 });

@@ -824,6 +824,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         whereNull: jest.fn().mockReturnThis(),
         update: jest.fn().mockReturnThis(),
         returning: jest.fn().mockResolvedValue([{ id: 'term-1' }]),
+        // Codex round-7 P1 (redesigned): the termite-scoping peek — a plain
+        // (non-termite) term reads no annual_plan_version, so every one of
+        // these ordinary moves stays byte-identical to before (no lock, no
+        // transaction wrapper).
+        first: jest.fn().mockResolvedValue({ annual_plan_version: null }),
         // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
         columnInfo: jest.fn().mockResolvedValue({}),
       };

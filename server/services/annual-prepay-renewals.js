@@ -1,3 +1,4 @@
+const { AsyncLocalStorage } = require('async_hooks');
 const { addMonthsSameDay: addMonthsSameDayShared } = require('../utils/date-only');
 const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
@@ -2790,7 +2791,7 @@ function coveredTermsAsOf(conn, coverageDate = null) {
 // reaching them here would be redundant, not wrong, but the narrowing
 // keeps this check legible as "grace, specifically". Fails closed (false)
 // on any lookup error, matching every other non-strict path here.
-async function termiteGraceCoversVisit(scheduledService, conn) {
+async function termiteGraceCoversVisit(scheduledService, conn, { throwOnError = false } = {}) {
   // Scoped to a visit with NO prepay stamp at all — one that already
   // carries SOME prepaid_method (even a malformed/incomplete one) has a
   // stamp from a DIFFERENT coverage decision and must fall through to
@@ -2822,6 +2823,14 @@ async function termiteGraceCoversVisit(scheduledService, conn) {
     }
     return true;
   } catch (err) {
+    // Codex round-7 P1 (2nd audit round): a strict caller (the extended-
+    // completion charging guard, same contract as the stamp-based checks
+    // below) needs an unverifiable grace lookup to REFUSE the charge, not
+    // read as "no grace coverage, fall through to the stamp check" — which
+    // for an unstamped visit resolves uncovered and would charge a visit
+    // that may genuinely be in grace. Only a non-strict (billing-
+    // suppression) caller may treat a lookup failure as "not covered".
+    if (throwOnError) throw err;
     logger.warn(`[annual-prepay] termite grace-coverage check failed for scheduled service ${scheduledService.id}: ${err.message}`);
     return false;
   }
@@ -2874,7 +2883,7 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   // recognition of the SAME window). termiteGraceCoversVisit itself scopes
   // to an unstamped visit (see its own comment) — never waves through a
   // visit that already carries some other, even malformed, prepay stamp.
-  if (await termiteGraceCoversVisit(scheduledService, conn)) return true;
+  if (await termiteGraceCoversVisit(scheduledService, conn, { throwOnError })) return true;
 
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
   // Strict callers (the extended-completion charging guard): a STAMPED
@@ -6131,17 +6140,21 @@ async function hasAnnualPrepayRenewal(customerId, termEnd) {
   return !!row;
 }
 
-// Codex round-7 P1: a per-term SESSION-scoped Postgres advisory lock,
-// shared between recordDecision's own decision write below AND
-// termite-annual-renewal-charge.js's charge path (decideAndCharge, right
-// before its Stripe submission). Deliberately NOT pg_advisory_xact_lock:
-// the charge path holds this lock ACROSS a live Stripe network call, which
-// must never happen inside an open DB transaction (a held xact lock would
-// pin a pooled connection for the whole round trip). Without a SHARED lock
-// here, a cancel (or any other decision) committed in the gap between
-// resolveChargeEligibility's own row lock releasing and the actual Stripe
-// submission starting could still get charged — those are two separate DB
-// transactions with nothing serializing them otherwise.
+// Codex round-7 P1, redesigned per pre-push audit P1: this per-term
+// SESSION-scoped Postgres advisory lock is now used by EXACTLY ONE
+// caller — termite-annual-renewal-charge.js's charge path
+// (decideAndCharge, right before its Stripe submission), where a
+// dedicated pooled connection genuinely needs to hold a lock ACROSS a
+// live Stripe network call, which must never happen inside an open DB
+// transaction (a held xact lock would pin a pooled connection for the
+// whole round trip, and the charge path opens no transaction of its own
+// for exactly this reason). recordDecision's OWN write (below) no longer
+// calls this — it takes a cheaper, connection-free TRANSACTION-scoped
+// pg_advisory_xact_lock on the SAME key namespace instead (see its own
+// comment), which still mutually excludes against this session lock
+// (Postgres advisory locks share one lock table regardless of which
+// acquisition function took them) without ever borrowing a second
+// connection for every program's ordinary decision.
 //
 // Codex round-7 P2 self-review: admin-cancellation.js's own
 // acquireCancelCommitLock (the same session-scoped pg_try_advisory_lock +
@@ -6163,6 +6176,102 @@ async function hasAnnualPrepayRenewal(customerId, termEnd) {
 // its own unrelated locks.
 const PARENT_DECISION_LOCK_NS = 'annual-prepay-parent-decision';
 const PARENT_DECISION_LOCK_TIMEOUT_MS = 5000;
+
+// Codex round-7 P1 (2nd audit round): chargeInvoiceWithSavedCard's OWN
+// card-on-file success path calls syncTermForInvoicePayment SYNCHRONOUSLY,
+// before returning — for a termite renewal successor's invoice, that walks
+// straight into stampParentRenewedForSuccessor -> recordDecision('renew')
+// on the SAME parent term decideAndCharge's withParentDecisionLock is
+// STILL holding (the session lock, on a dedicated connection, exactly
+// across this Stripe call). recordDecision would then try to take its OWN
+// xact lock on the SAME key from a DIFFERENT connection — a genuine
+// self-wait (bounded by its own lock_timeout, so not a permanent hang, but
+// a real multi-second stall on every successful synchronous card-on-file
+// charge, every time, plus the parent's 'renewed' stamp failing on this
+// pass). Threading a "lock already held" flag through
+// chargeInvoiceWithSavedCard -> syncTermForInvoicePayment ->
+// stampParentRenewedForSuccessor would touch a generic, heavily-used
+// Stripe charging function with a termite-only concern. AsyncLocalStorage
+// is this codebase's existing idiom for exactly this shape (see
+// agent-control/context.js's own doc: "threading ids through every shared
+// entry point would touch every call site; a module-level variable would
+// leak between concurrent requests; ALS is scoped to the async tree") —
+// withParentDecisionLock marks the term it holds for the lifetime of its
+// OWN async call tree (including everything synchronously awaited inside
+// it, however many layers down); recordDecision checks this BEFORE ever
+// asking for its own lock and, for a re-entrant call on the SAME term,
+// skips straight to the write — the outer session lock already provides
+// all the serialization anyone needs, so a second lock from the SAME
+// logical flow would only ever contend with itself.
+const heldParentDecisionLockStore = new AsyncLocalStorage();
+
+// Extracted from recordDecision (Codex round-7 P2 self-review, AGENTS.md
+// L412-418): the transaction-scoped lock acquisition is a genuinely
+// self-contained step — bound the wait, acquire, translate a timeout into
+// one clear error. See recordDecision's own comment for why an xact lock
+// here still mutually excludes the charge path's session lock on the SAME
+// key.
+async function acquireParentDecisionXactLock(trx, termId) {
+  try {
+    await trx.raw('SELECT set_config(\'lock_timeout\', ?, true)', [`${PARENT_DECISION_LOCK_TIMEOUT_MS}ms`]);
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [PARENT_DECISION_LOCK_NS, String(termId)]);
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      throw new Error(`could not acquire the parent-decision lock for term ${termId} within ${PARENT_DECISION_LOCK_TIMEOUT_MS}ms — a decision or charge is already in progress for this term`);
+    }
+    throw err;
+  }
+}
+
+// Extracted from recordDecision (Codex round-7 P2 self-review) — the
+// termite-scoping decision (peek, re-entrancy check, lock-and-write vs
+// plain write) is a genuinely self-contained sub-decision. See
+// recordDecision's own call site comment and heldParentDecisionLockStore's
+// doc for the full reasoning; kept together here rather than split further
+// since these three checks are one coherent policy, not separable steps.
+async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
+  // Only a TERMITE annual term (annual_plan_version NOT NULL) can race
+  // against termite-annual-renewal-charge.js's Stripe submission, so only
+  // that term type pays for any serialization at all — every other
+  // program's decision is BYTE-IDENTICAL to before this lane ever existed:
+  // one UPDATE, no transaction wrapper, no lock, no second connection.
+  const peek = await conn('annual_prepay_terms').where({ id: termId }).first('annual_plan_version');
+  if (!peek?.annual_plan_version) return runUpdate(conn);
+
+  // Re-entrancy guard: a synchronous call chain that already holds the
+  // SESSION lock on this EXACT term (decideAndCharge's
+  // withParentDecisionLock, still open around its own Stripe submission)
+  // needs no second lock from a second connection; that would only
+  // contend with itself.
+  if (heldParentDecisionLockStore.getStore() === String(termId)) return runUpdate(conn);
+
+  // TRANSACTION-scoped advisory lock (pg_advisory_xact_lock), on the SAME
+  // conn/transaction the UPDATE itself runs on — conn.transaction() opens a
+  // real transaction when `conn` is the root pool handle, or a SAVEPOINT
+  // (same connection, no new one borrowed) when `conn` is already a
+  // transaction (stampParentRenewedForSuccessor's own savepoint wrapper) —
+  // the SAME auto-detecting call already used elsewhere in this file.
+  // pg_advisory_xact_lock releases automatically at the enclosing
+  // transaction's commit/rollback — no explicit unlock statement, so there
+  // is no separate-connection unlock step that could fail to run. A
+  // SESSION lock (termite-annual-renewal-charge.js's decideAndCharge, held
+  // across its own live Stripe call on a DEDICATED connection) and an XACT
+  // lock on the SAME key still mutually exclude — Postgres advisory locks
+  // share one lock table regardless of which acquisition function took
+  // them, so a decision here genuinely waits behind an in-flight charge,
+  // and a charge genuinely waits behind an in-flight decision, whichever
+  // side gets there first.
+  return conn.transaction(async (trx) => {
+    // SET LOCAL (inside acquireParentDecisionXactLock) — scoped to this
+    // transaction/savepoint only, cleared automatically at its own
+    // commit/rollback; never a session-level setting that could leak onto
+    // some later, unrelated borrower of the same pooled connection (the
+    // risk the OLD session-lock design for this write had to guard
+    // against with an explicit RESET).
+    await acquireParentDecisionXactLock(trx, termId);
+    return runUpdate(trx);
+  });
+}
 async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS } = {}) {
   // Internal, code-controlled only (never request-derived) — still clamp
   // defensively before it ever reaches a query, parameterized or not.
@@ -6186,7 +6295,9 @@ async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_
       // statement, both of which run on the SAME session either way.
       try { await lockConn.query('RESET lock_timeout'); } catch { /* connection likely already broken; the outer catch/finally handles it */ }
     }
-    return await fn();
+    // Mark this term as session-lock-held for the lifetime of fn()'s own
+    // async tree — see heldParentDecisionLockStore's doc above.
+    return await heldParentDecisionLockStore.run(String(termId), () => fn());
   } finally {
     if (lockConn) {
       if (locked) {
@@ -6249,29 +6360,23 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
   // every pre-existing caller) lets stampParentRenewedForSuccessor below
   // run this SAME write on the successor's own transaction/savepoint,
   // instead of a separate global-db write that could commit out of order
-  // with, or survive a rollback of, the successor's own activation. Codex
-  // round-7 P1: the write itself now runs under withParentDecisionLock —
-  // see its own doc — serializing this decision against the termite
-  // renewal charge path's Stripe submission for the SAME term, whichever
-  // side reaches the lock first. Scope note: the lock releases as soon as
-  // THIS statement resolves, not when an outer transaction (a non-default
-  // `conn`) eventually commits — correct for every caller that matters
-  // for this race (the default conn=db writers: an operator's decline,
-  // and the grace-lapse pass's own recordDecision('cancel'), both
-  // auto-commit on this single statement), since chargeInvoiceWithSavedCard
-  // opens no transaction of its own that could straddle the release either.
-  // stampParentRenewedForSuccessor's OWN savepoint-scoped call writes
-  // 'renew' (never the 'cancel' this race is about) and is not itself
-  // blocked by an in-flight charge.
-  return withParentDecisionLock(termId, async () => {
-    const [term] = await conn('annual_prepay_terms')
+  // with, or survive a rollback of, the successor's own activation.
+  const runUpdate = async (t) => {
+    const [term] = await t('annual_prepay_terms')
       .where({ id: termId })
       .whereIn('status', ACTIVE_STATUSES)
       .whereNull('renewal_decision')
       .update(update)
       .returning('*');
     return term || null;
-  });
+  };
+
+  // Codex round-7 P1 (redesigned per pre-push audit P1 — the original
+  // design wrapped EVERY program's recordDecision in a dedicated-connection
+  // session lock, doubling pool use even when this write already runs
+  // inside an open transaction, e.g. stampParentRenewedForSuccessor's
+  // `conn: t`) — see writeDecisionUnderTermiteLock's own doc.
+  return writeDecisionUnderTermiteLock(conn, termId, runUpdate);
 }
 
 // ADMIN-BUG-R18: Cancel plan re-deciding a term whose cancel decision is

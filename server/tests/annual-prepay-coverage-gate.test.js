@@ -138,6 +138,25 @@ describe('annualPrepayCoversVisit — fail-closed completion coverage gate', () 
     await expect(annualPrepayCoversVisit(stampedVisit({ prepaid_method: 'cash' }))).resolves.toBe(false);
   });
 
+  // Codex round-7 P1 (2nd audit round): a strict caller (visit-completion-
+  // payment.js / visit-completion-invoice.js's throwOnError:true) needs an
+  // unverifiable termite-grace lookup to REFUSE the charge — the SAME
+  // fail-closed contract as the stamp-based checks above — never silently
+  // read as "no grace coverage" and fall through to an ordinary uncovered
+  // result for an unstamped visit that may genuinely still be in grace.
+  test('an unstamped visit whose termite-grace lookup throws, under throwOnError: strict callers get the throw, never a silent false', async () => {
+    coveredQuery({ rejectWith: new Error('db unreachable') });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit, db, { throwOnError: true }))
+      .rejects.toThrow('db unreachable');
+  });
+
+  test('the SAME unstamped visit, non-strict (billing suppression): the lookup failure still degrades to NOT covered', async () => {
+    coveredQuery({ rejectWith: new Error('db unreachable') });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit)).resolves.toBe(false);
+  });
+
   test('no-config / no-stamp visit: NOT covered (short-circuit, no query)', async () => {
     coveredQuery({ forbidQuery: true });
     await expect(annualPrepayCoversVisit(

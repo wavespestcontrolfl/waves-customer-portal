@@ -1329,12 +1329,28 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
 // here.
 async function processGraceLapses({ conn = db, limit = 200, counts }) {
   try {
+    // Codex round-7 P1 (2nd audit round): the deadline test used to run
+    // ONLY in JS, after an over-fetched page (limit*2) ordered by
+    // term_start — a backlog of NOT-YET-DUE rows (early term_start, but
+    // still within their own grace window) fills that page and the
+    // per-row skip trims them back out, but the LIMIT itself never grows:
+    // a genuinely overdue row past the over-fetch cutoff could be starved
+    // indefinitely. The shared deadline SQL predicate
+    // (termiteRenewalGraceDeadlineSql — the SAME formula
+    // termiteRenewalGraceDeadlineFor/graceDeadlineFor computes in JS,
+    // proven to agree exactly) now runs IN the WHERE clause, and the page
+    // orders by the DEADLINE itself (most overdue first) — every row this
+    // query returns is already genuinely due, so LIMIT bounds real work,
+    // never dead weight.
+    const { termiteRenewalGraceDeadlineSql } = require('./annual-prepay-renewals');
+    const deadlineSql = termiteRenewalGraceDeadlineSql('t');
     const candidates = await conn('annual_prepay_terms as t')
       .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
       .whereNotNull('t.annual_plan_version')
       .whereNotNull('t.renewed_from_term_id')
       .where('t.status', PAYMENT_PENDING_STATUS)
       .whereNull('t.renewal_lapse_started_at')
+      .whereRaw(`${deadlineSql} < ?`, [etDateString()])
       .where(function presented() {
         // Codex round-7 P1: renewal_charge_attempted_at IS NOT NULL alone
         // is NOT evidence the customer was ever told anything — the fence
@@ -1363,19 +1379,13 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
               .orWhereNotNull('i.email_sent_at');
           });
       })
-      .orderBy('t.term_start', 'asc')
+      .orderByRaw(`${deadlineSql} asc`) // most overdue first
       .select('t.*')
-      .limit(limit * 2); // over-fetch: the per-row grace-deadline check below trims further
-    counts.graceScanned = 0;
-    let lapsed = 0;
+      .limit(limit);
+    counts.graceScanned = candidates.length;
     for (const term of candidates) {
-      if (lapsed >= limit) break;
-      const deadline = graceDeadlineFor(term);
-      if (!deadline || etDateString() <= deadline) continue;
-      counts.graceScanned += 1;
       try {
         const outcome = await processGraceLapseForTerm(term, conn);
-        lapsed += 1;
         if (outcome === 'deferred') counts.graceReconciliationDeferred += 1;
         else if (outcome === 'retired') counts.graceRetiredSettled += 1;
         else counts.graceLapsed += 1;
@@ -1403,14 +1413,16 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
 // actually running (decideAndCharge succeeding concurrently) is the same
 // class of race, caught here on the successor's own status instead. ONE
 // ALLOW-list, all under the SAME row lock: the successor is still
-// payment_pending, AND (if it has an invoice) that invoice is still
-// collectible (isInvoiceCollectibleStatus, the SAME test every other money
-// seam in this codebase shares, invoice-helpers.js) with no paid_at, AND
-// (Codex round-2 P0, folded in here rather than left as a separate
-// unlocked step) no Stripe charge reconciliation is pending on it
-// (assertNoInvoiceChargeReconciliationPending, run against the SAME trx).
-// A deny-list on "is it exactly 'prepaid'" would miss a SIMILARLY-settled
-// status this file doesn't even know about yet. ALSO re-checks the PARENT
+// payment_pending, AND (if it has an invoice) that invoice reads no
+// DURABLE paid/prepaid evidence (paid_at set, or status paid/prepaid) —
+// Codex round-7 P1 (2nd audit round): NOT the blanket
+// `!isInvoiceCollectibleStatus(...)` this used to read, which wrongly
+// retired a still-clearing ACH ('processing' is itself uncollectible, but
+// is not settled — checked and DEFERRED first, its own comment below) —
+// with no paid_at, AND (Codex round-2 P0, folded in here rather than left
+// as a separate unlocked step) no Stripe charge reconciliation is pending
+// on it (assertNoInvoiceChargeReconciliationPending, run against the SAME
+// trx). ALSO re-checks the PARENT
 // under this SAME lock (Codex round-7 P1) — the parent must be either
 // still undecided or already decided 'cancel' by THIS lapse's own prior
 // partial run, or the lapse defers instead of voiding against a plan an
@@ -1458,7 +1470,6 @@ async function resolveLapseVoidEligibility(term, conn = db) {
     const fresh = await trx('annual_prepay_terms').where({ id: term.id }).forUpdate().first();
     if (!fresh) return { outcome: 'retired', reason: 'the term no longer exists' };
 
-    const { isInvoiceCollectibleStatus } = require('./invoice-helpers');
     let invoice = null;
     if (fresh.prepay_invoice_id) {
       invoice = await trx('invoices').where({ id: fresh.prepay_invoice_id }).first('status', 'paid_at');
@@ -1482,7 +1493,34 @@ async function resolveLapseVoidEligibility(term, conn = db) {
       if (fresh.status !== PAYMENT_PENDING_STATUS) {
         return { outcome: 'retired', reason: `the successor is already ${fresh.status}, not payment_pending` };
       }
-      if (invoice && (!isInvoiceCollectibleStatus(invoice.status) || invoice.paid_at)) {
+      // Codex round-7 P1 (2nd audit round): 'processing' is in
+      // isInvoiceCollectibleStatus's OWN uncollectible list (you can't
+      // ATTEMPT to collect an ACH debit that's already mid-clearing) —
+      // but that is NOT the same thing as durably settled. The old
+      // `!isInvoiceCollectibleStatus(...)` check lumped a still-clearing
+      // ACH payment in with paid/prepaid/void/refunded and RETIRED the
+      // term (no void, coverage kept) before the bank had actually
+      // confirmed anything — an ACH debit that later BOUNCES leaves the
+      // successor permanently retired with no coverage paid for and no
+      // lapse ever recorded. Checked FIRST, ahead of any retire decision:
+      // still processing means DEFER (retry next tick, same bucket as a
+      // pending Stripe charge reconciliation below), never retire.
+      const invoiceStatusKey = invoice ? String(invoice.status || '').toLowerCase() : null;
+      if (invoiceStatusKey === 'processing') {
+        return {
+          outcome: 'deferred',
+          kind: 'reconciliation_pending',
+          reason: `the invoice reads processing — the ACH payment has not durably cleared yet on invoice ${fresh.prepay_invoice_id}`,
+        };
+      }
+      // Retire only on DURABLE paid/prepaid evidence — paid_at set, or the
+      // status itself already reads paid/prepaid. A genuinely
+      // void/refunded/canceled invoice (not this lapse's OWN void — that
+      // shape is voidAlreadyRan, handled above) falls through instead of
+      // retiring here: voidInvoice's own re-entry self-heals as a no-op on
+      // an already-settled invoice, so proceeding is safe either way and
+      // never wrongly skips a genuinely owed void.
+      if (invoice && (invoice.paid_at || invoiceStatusKey === 'paid' || invoiceStatusKey === 'prepaid')) {
         const paidNote = invoice.paid_at ? ' (paid_at set)' : '';
         return { outcome: 'retired', reason: `the invoice already reads ${invoice.status}${paidNote}` };
       }
@@ -1576,6 +1614,33 @@ async function processGraceLapseForTerm(term, conn = db) {
       .update({ renewal_lapse_started_at: new Date() });
   }
 
+  // Codex round-7 P1 (2nd audit round): the eligibility re-check above
+  // used to commit on its OWN, short-lived transaction, releasing its row
+  // lock BEFORE the void and retrieval task ran — a renew/switch_plan
+  // decision landing in that gap was ignored (the void and retrieval task
+  // still fired against a plan an operator had just decided otherwise). A
+  // dedicated-connection SESSION lock, held across the WHOLE sequence
+  // (eligibility re-check through the final recordDecision('cancel')) —
+  // the SAME mechanism and SAME key decideAndCharge's charge submission
+  // uses — closes it: a decision (xact lock) racing in from elsewhere on
+  // this SAME parent genuinely waits behind this whole sequence, or this
+  // sequence's own eligibility re-check already sees it and defers with NO
+  // void. The nested recordDecision('cancel') call below (SAME parent, SAME
+  // async tree) never re-takes the lock — see heldParentDecisionLockStore's
+  // doc in annual-prepay-renewals.js. A term with no parent (should not
+  // occur for a real grace-lapse candidate, but defensive) skips the lock
+  // entirely — nothing to serialize against.
+  if (!term.renewed_from_term_id) {
+    return processGraceLapseSequence(term, conn);
+  }
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  return AnnualPrepayRenewals.withParentDecisionLock(
+    term.renewed_from_term_id,
+    () => processGraceLapseSequence(term, conn),
+  );
+}
+
+async function processGraceLapseSequence(term, conn) {
   const eligibility = await resolveLapseVoidEligibility(term, conn);
   if (eligibility.outcome === 'deferred') {
     if (eligibility.kind === 'parent_decided_elsewhere') {
@@ -1678,6 +1743,32 @@ async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
 // Two narrow, self-healing legs for the accepted crash gaps between minting
 // a successor and finishing its charge decision. Never blocks the other
 // passes; a failure on one successor never blocks the rest.
+// Extracted from reconcileStuckSuccessors' leg 7b (Codex round-7 P1, 2nd
+// audit round self-review — AGENTS.md L412-418, keeps the loop body under
+// the max-depth ceiling). Returns 'delivered' (fresh bell + verified
+// delivery), true (deduped/suppressed bell — staff already know, or this
+// term is exempt — no delivery needed), or false (the bell itself failed,
+// or a fresh bell's delivery failed) — only a truthy return may stamp the
+// leg's own exclusion column; false must stay retryable.
+async function bellAndVerifyDeliveryForNeverReachedStripe(successor) {
+  const result = await ringRenewalBell(
+    successor,
+    'ambiguous',
+    'the renewal charge was claimed but never reached Stripe (a crash between the attempt fence and the Stripe call) — check Stripe and the invoice before collecting any other way',
+  );
+  // A null result (ringRenewalBell swallows its own failures and returns
+  // null) means staff were NEVER actually told — stamping "handled" would
+  // permanently exclude a row nobody has seen.
+  if (!result) return false;
+  if (result.deduped || result.suppressed) return true;
+  // A FRESH bell must also have a VERIFIED delivery before this leg calls
+  // itself done — a failed delivery must stay retryable too, exactly like
+  // deliverInvoiceAndStampSkip's own verified-delivery contract elsewhere
+  // in this file.
+  const delivery = await deliverRenewalInvoice(successor);
+  return delivery?.ok ? 'delivered' : false;
+}
+
 async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
   // 7a. renewal_charge_attempted_at IS NULL and old enough that a normal
   // same-tick decideAndCharge() call would already have run (or already
@@ -1759,21 +1850,13 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
     counts.reconcileNeverReachedStripeScanned = candidates.length;
     for (const successor of candidates) {
       try {
-        const result = await ringRenewalBell(
-          successor,
-          'ambiguous',
-          'the renewal charge was claimed but never reached Stripe (a crash between the attempt fence and the Stripe call) — check Stripe and the invoice before collecting any other way',
-        );
-        if (result && !result.deduped && !result.suppressed) {
-          await deliverRenewalInvoice(successor);
-          counts.reconcileNeverReachedStripeBelled += 1;
+        const handled = await bellAndVerifyDeliveryForNeverReachedStripe(successor);
+        if (handled === 'delivered') counts.reconcileNeverReachedStripeBelled += 1;
+        if (handled) {
+          await conn('annual_prepay_terms').where({ id: successor.id })
+            .whereNull('renewal_charge_never_reached_stripe_belled_at')
+            .update({ renewal_charge_never_reached_stripe_belled_at: new Date() });
         }
-        // Stamped regardless of fresh-vs-deduped (either way staff has
-        // been told, or already was) — matching stampRenewalExceptionBelled's
-        // own convention.
-        await conn('annual_prepay_terms').where({ id: successor.id })
-          .whereNull('renewal_charge_never_reached_stripe_belled_at')
-          .update({ renewal_charge_never_reached_stripe_belled_at: new Date() });
       } catch (err) {
         logger.error(`[termite-annual-renewal] reconcile (never-reached-stripe) failed for successor ${successor.id}: ${err.message}`);
       }
@@ -1840,6 +1923,7 @@ module.exports = {
     checkStillEligibleForRenewalAction,
     processGraceLapseForTerm,
     reconcileMissedLapseEffects,
+    reconcileStuckSuccessors,
     bellNoWitnessTerms,
     bellUnanchoredOriginalTerms,
     bellStaleOverdueTerms,

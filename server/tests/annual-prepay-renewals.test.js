@@ -2093,6 +2093,11 @@ describe('annual prepay renewal helpers', () => {
       whereNull: jest.fn().mockReturnThis(),
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'term-1', status: 'cancelled', renewal_decision: 'cancel' }]),
+      // Codex round-7 P1 (redesigned): the termite-scoping peek — a plain
+      // (non-termite) program's term reads no annual_plan_version, so the
+      // decision below stays byte-identical to before (no lock, no
+      // transaction wrapper).
+      first: jest.fn().mockResolvedValue({ annual_plan_version: null }),
       // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
       columnInfo: jest.fn().mockResolvedValue({}),
     };
@@ -3758,8 +3763,13 @@ describe('stampParentRenewedForSuccessor (move 14) — the parent-renewed hook',
   });
 
   test('a successor with renewed_from_term_id calls recordDecision(\'renew\') on the PARENT — reusing the canonical writer, not a new status-write site', async () => {
+    // Codex round-7 P1 (redesigned): recordDecision now peeks the term's
+    // annual_plan_version first (same conn, no lock for a non-termite
+    // term) before its actual write — same query object serves both calls
+    // here since this fixture isn't testing that termite-scoping itself
+    // (see the dedicated recordDecision termite-lock describe below).
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    setDbQueues({ annual_prepay_terms: [recordDecisionQ] });
+    setDbQueues({ annual_prepay_terms: [recordDecisionQ, recordDecisionQ] });
 
     await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
 
@@ -3778,7 +3788,7 @@ describe('stampParentRenewedForSuccessor (move 14) — the parent-renewed hook',
 
   test('idempotent — a parent already decided (guard miss) is a silent no-op, never throws', async () => {
     const recordDecisionQ = query({ returning: [] }); // guard miss: recordDecision resolves null
-    setDbQueues({ annual_prepay_terms: [recordDecisionQ] });
+    setDbQueues({ annual_prepay_terms: [recordDecisionQ, recordDecisionQ] });
     await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
   });
 
@@ -3793,7 +3803,7 @@ describe('stampParentRenewedForSuccessor (move 14) — the parent-renewed hook',
   // own activation flip.
   test('when the caller passes an existing transaction, the stamp runs as a SAVEPOINT on it (conn.transaction), never the global db', async () => {
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    const trxTableQueues = { annual_prepay_terms: [recordDecisionQ] };
+    const trxTableQueues = { annual_prepay_terms: [recordDecisionQ, recordDecisionQ] };
     const trx = jest.fn((table) => {
       const queue = trxTableQueues[table];
       if (!queue || !queue.length) throw new Error(`Unexpected trx table ${table}`);
@@ -3821,7 +3831,7 @@ describe('stampParentRenewedForSuccessor (move 14) — the parent-renewed hook',
 
   test('a plain (non-db, non-transaction) conn runs the stamp directly, with no extra transaction/savepoint wrapper', async () => {
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    const plainConnQueues = { annual_prepay_terms: [recordDecisionQ] };
+    const plainConnQueues = { annual_prepay_terms: [recordDecisionQ, recordDecisionQ] };
     const plainConn = jest.fn((table) => {
       const queue = plainConnQueues[table];
       if (!queue || !queue.length) throw new Error(`Unexpected conn table ${table}`);
@@ -3847,7 +3857,10 @@ describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
     const scanQ = query({ rows: [{ successor_id: 'succ-1', parent_id: 'parent-1' }, { successor_id: 'succ-2', parent_id: 'parent-2' }] });
     const decision1 = query({ returning: [{ id: 'parent-1', renewal_decision: 'renew' }] });
     const decision2 = query({ returning: [{ id: 'parent-2', renewal_decision: 'renew' }] });
-    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [decision1, decision2] });
+    // Codex round-7 P1 (redesigned): each recordDecision call now peeks
+    // annual_plan_version first (same query object, same conn) before its
+    // actual write — two dequeues per row.
+    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [decision1, decision1, decision2, decision2] });
 
     const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
 
