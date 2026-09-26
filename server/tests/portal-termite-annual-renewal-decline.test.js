@@ -30,6 +30,8 @@ jest.mock('../services/termite-stations', () => ({
 const mockDeclineTermiteAnnualRenewal = jest.fn();
 jest.mock('../services/annual-prepay-renewals', () => ({
   declineTermiteAnnualRenewal: (...args) => mockDeclineTermiteAnnualRenewal(...args),
+  // The REAL shared eligibility rule — GET's canDecline must match the write.
+  termiteDeclineBlockedReason: (...args) => jest.requireActual('../services/annual-prepay-renewals').termiteDeclineBlockedReason(...args),
 }));
 
 const state = { rows: [], fail: false, whereArgs: [] };
@@ -114,6 +116,7 @@ describe('GET /api/property/termite-annual-plan', () => {
   test('a live undecided term reports its renewal date, fee, and canDecline:true', async () => {
     state.rows = [{
       id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'active', renewal_decision: null,
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
     }];
     const { body } = await invoke(getHandler());
     expect(body).toEqual({
@@ -128,6 +131,24 @@ describe('GET /api/property/termite-annual-plan', () => {
     }];
     const { body } = await invoke(getHandler());
     expect(body.term).toEqual(expect.objectContaining({ declined: true, canDecline: false }));
+  });
+
+  test('an unpaid (payment_pending) plan never offers the decline control', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'payment_pending', renewal_decision: null,
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+    }];
+    const { body } = await invoke(getHandler());
+    expect(body.term).toEqual(expect.objectContaining({ declined: false, canDecline: false }));
+  });
+
+  test('an original plan still awaiting installation never offers the decline control', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'active', renewal_decision: null,
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
+    }];
+    const { body } = await invoke(getHandler());
+    expect(body.term).toEqual(expect.objectContaining({ declined: false, canDecline: false }));
   });
 
   test('a term already decided to renew hides the decline control (canDecline:false)', async () => {

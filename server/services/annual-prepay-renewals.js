@@ -5786,6 +5786,23 @@ async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
   }
 }
 
+// Why an undeclined termite annual term can't be declined online right now
+// (null = it can). Shared by the portal GET's canDecline and the decline
+// write so the control is never offered for a POST that will refuse:
+// - a different decision already on file is never overwritten;
+// - only a paid, live term (ACTIVE_STATUSES) — an unpaid payment_pending
+//   plan has nothing to renew yet;
+// - an ORIGINAL term still awaiting installation: a decided term is
+//   excluded from installation anchoring (termite-annual-activation.js), so
+//   declining now would strand the coverage year on its provisional dates.
+//   The customer can still decline by email or in writing (agreement v3).
+function termiteDeclineBlockedReason(term) {
+  if (term.renewal_decision) return 'already_decided';
+  if (!ACTIVE_STATUSES.includes(term.status)) return 'not_active';
+  if (coverageAwaitsInstallation(term)) return 'awaiting_installation';
+  return null;
+}
+
 async function declineTermiteAnnualRenewal({ customerId, termId = null, today = etDateString(), conn = db } = {}) {
   if (!customerId) return { ok: false, reason: 'missing_customer' };
   const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
@@ -5811,12 +5828,10 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
     if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
       return declineResultFromRow(term, { alreadyDeclined: true });
     }
-    if (term.renewal_decision) {
-      return { ok: false, reason: 'already_decided', decision: term.renewal_decision, termId: term.id };
-    }
-    if (!ACTIVE_STATUSES.includes(term.status)) {
-      return { ok: false, reason: 'not_active', status: term.status, termId: term.id };
-    }
+    const blocked = termiteDeclineBlockedReason(term);
+    if (blocked === 'already_decided') return { ok: false, reason: blocked, decision: term.renewal_decision, termId: term.id };
+    if (blocked === 'not_active') return { ok: false, reason: blocked, status: term.status, termId: term.id };
+    if (blocked) return { ok: false, reason: blocked, termId: term.id };
 
     const decided = await recordDecision({
       termId: term.id, action: 'cancel', notes: CUSTOMER_DECLINE_RENEWAL_NOTE, conn: trx,
@@ -5851,6 +5866,7 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
 
 module.exports = {
   createTermForAnnualPrepay,
+  termiteDeclineBlockedReason,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   // Public: the one-step-prepay booking preflight (admin-schedule) matches the

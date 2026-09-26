@@ -641,7 +641,7 @@ router.get('/termite-bond', async (req, res, next) => {
 // resolution (annual_plan_version IS NOT NULL, soonest term_end >= today).
 const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { declineTermiteAnnualRenewal } = require('../services/annual-prepay-renewals');
+const { declineTermiteAnnualRenewal, termiteDeclineBlockedReason } = require('../services/annual-prepay-renewals');
 
 router.get('/termite-annual-plan', async (req, res, next) => {
   res.set('Cache-Control', 'private, no-store');
@@ -655,7 +655,7 @@ router.get('/termite-annual-plan', async (req, res, next) => {
       .whereNotNull('annual_plan_version')
       .where('term_end', '>=', today)
       .orderBy('term_end', 'asc')
-      .first('id', 'term_end', 'prepay_amount', 'status', 'renewal_decision');
+      .first('id', 'term_end', 'prepay_amount', 'status', 'renewal_decision', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
     if (!term) {
       return res.json({ available: false, reason: 'no_term' });
     }
@@ -667,10 +667,9 @@ router.get('/termite-annual-plan', async (req, res, next) => {
         termEnd: dateOnlyString(term.term_end),
         prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
         declined,
-        // A conflicting decision (renew/switch_plan) already on file means
-        // the "Don't renew" control has nothing to do — hide it rather than
-        // offer a decline the service will only refuse.
-        canDecline: !term.renewal_decision,
+        // The write side's own eligibility (decision on file, unpaid, or
+        // awaiting installation) — never offer a decline the POST refuses.
+        canDecline: !declined && !termiteDeclineBlockedReason(term),
       },
     });
   } catch (err) {
@@ -691,6 +690,7 @@ const DECLINE_REFUSAL_MESSAGES = {
   term_ended: 'This plan’s renewal window has already passed.',
   already_decided: 'A renewal decision is already on file for this plan.',
   not_active: 'This plan is not currently eligible to decline renewal.',
+  awaiting_installation: 'Your stations have not been installed yet. To cancel before installation, email or write to us.',
   conflict: 'Something changed while we were saving this. Please refresh and try again.',
 };
 
