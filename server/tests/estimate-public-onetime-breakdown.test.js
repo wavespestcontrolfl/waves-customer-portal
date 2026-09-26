@@ -4541,7 +4541,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Cancel anytime &mdash; no contract');
     expect(html).toContain('setup is refundable');
     expect(html).toContain('Annual prepay is prorated');
-    expect(html).toContain('backed by a 90-day money-back guarantee');
+    expect(html).toContain('we refund your most recent service payment');
   });
 
   test('quote-required estimates do not render the plan terms card', () => {
@@ -6427,11 +6427,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('.q-bar{display:none}');
     expect(html).not.toContain('Wave Goodbye to Pests!');
     // The pest mini-guarantee ("Try us risk-free…") must not leak into lawn copy;
-    // the 90-day money-back guarantee now appears via the dedicated plan-terms
+    // the money-back guarantee now appears via the dedicated plan-terms
     // section (owner-confirmed it applies to lawn too).
     expect(html).not.toContain('Try us risk-free');
     expect(html).toContain('class="card plan-terms-card"');
-    expect(html).toContain('backed by a 90-day money-back guarantee');
+    expect(html).toContain('we refund your most recent service payment');
     expect(html).not.toContain('Free annual termite inspection');
     expect(html).not.toContain('What WaveGuard members get');
   });

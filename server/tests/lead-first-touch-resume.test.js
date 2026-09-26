@@ -293,6 +293,7 @@ const {
   resumeHeldNewsletterPostCommit,
   sweepAbandonedFirstTouchHolds,
   repenHoldsForFreshEmailReview,
+  emailReviewBlocksRelease,
 } = require('../services/lead-first-touch-resume');
 const { FIRST_TOUCH_AUTO_RELEASE_RULE } = require('../services/lead-first-touch-resume');
 const logger = require('../services/logger');
@@ -1354,6 +1355,33 @@ describe('mid-send races (r19)', () => {
     // the claim — no marker written, so a deny stays intact.
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
     expect(mockHoldUpdates.at(-1).last_error).toBeUndefined();
+  });
+
+  test('an open name_email_mismatch card no longer holds the first-touch email (owner ruling 2026-09-26)', async () => {
+    function fakeDbh(storedReasonCode) {
+      return (table) => {
+        const chain = {
+          where: () => chain,
+          whereIn: (col, values) => {
+            if (col === 'reason_code') chain._reasonCodes = values;
+            return chain;
+          },
+          orderByRaw: () => chain,
+          first: async () => {
+            if (table !== 'triage_items') return null;
+            if ((chain._reasonCodes || []).includes(storedReasonCode)) return { id: 'card-1', status: 'open' };
+            return null;
+          },
+        };
+        return chain;
+      };
+    }
+    // A name_email_mismatch card is advisory now — it must not be in the
+    // reason_code list either query filters on, so it never blocks.
+    await expect(emailReviewBlocksRelease('call-1', fakeDbh('name_email_mismatch'))).resolves.toBeNull();
+    // An email_unverified card (EMAIL_REVIEW_REASON_CODES) still blocks —
+    // that hold concerns the address itself and is untouched by the ruling.
+    await expect(emailReviewBlocksRelease('call-1', fakeDbh('email_unverified'))).resolves.toBe('email_review_live');
   });
 
   test('a card landing after the enroll still blocks the DOI, under the gate row lock', async () => {
