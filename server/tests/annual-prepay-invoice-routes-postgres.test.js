@@ -26,6 +26,11 @@ jest.mock('../middleware/admin-auth', () => ({
 // rolled-back test transaction.
 jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => null) }));
+jest.mock('../services/stripe', () => ({
+  ...jest.requireActual('../services/stripe'),
+  retrievePaymentIntent: jest.fn(),
+  cancelPaymentIntent: jest.fn(async () => ({ status: 'canceled' })),
+}));
 jest.mock('../services/invoice-followups', () => ({
   stopOnPayment: jest.fn(async () => null),
   resumeSequence: jest.fn(async () => null),
@@ -137,6 +142,40 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect(res.body.error).toMatch(/refund/);
     expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
+  });
+
+  test('removing the flag is refused while a payment on the open pay-page session is in flight', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId, stripe_payment_intent_id: 'pi_synthetic_inflight' });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+    require('../services/stripe').retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_synthetic_inflight', status: 'processing' });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/in flight/);
+    expect(require('../services/stripe').cancelPaymentIntent).not.toHaveBeenCalled();
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
+  });
+
+  test('an abandoned pay-page session is cancelled before the flag is removed', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId, stripe_payment_intent_id: 'pi_synthetic_open' });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+    require('../services/stripe').retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_synthetic_open', status: 'requires_payment_method' });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(200);
+    expect(require('../services/stripe').cancelPaymentIntent).toHaveBeenCalledWith('pi_synthetic_open', expect.anything());
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('cancelled');
   });
 
   test('removing the flag from an unpaid prepay runs the canonical cancel: prior billing mode back, covered invoice owed again, open visits released', async () => {

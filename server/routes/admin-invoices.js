@@ -2337,8 +2337,17 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await db('invoices')
       .where({ id: req.params.id })
-      .first('id', 'customer_id');
+      .first('id', 'customer_id', 'stripe_payment_intent_id');
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+    // Retire an open pay-page session first, the one mechanism apply-credit
+    // and manual payments use: a customer confirming it after coverage is
+    // removed would pay for coverage that no longer exists. Money already
+    // moving, or a session that cannot be verified, refuses. The PI id is
+    // re-checked under the invoice lock below.
+    const openPiId = invoice.stripe_payment_intent_id || null;
+    const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'removing the annual prepay flag' });
+    if (openPi) return res.status(openPi.status).json({ error: openPi.error });
 
     // Visit invoices this term settled as coverage, which the cancel reopens.
     // Settlement stopped their reminders and the reopen skips the re-arm
@@ -2350,9 +2359,13 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // invoice under its own lock: a payment landing on it waits for us.
       await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate()
-        .first('customer_id', 'annual_prepay_term_id', 'status', 'paid_at', 'payment_recorded_at', 'credit_applied');
+        .first('customer_id', 'annual_prepay_term_id', 'status', 'paid_at', 'payment_recorded_at', 'credit_applied', 'stripe_payment_intent_id');
       if (!locked || locked.customer_id !== invoice.customer_id) {
         throw refuse('This invoice changed while the annual prepay flag was being removed — retry.');
+      }
+      // A customer opened a NEW payment session after the triage above.
+      if ((locked.stripe_payment_intent_id || null) !== openPiId) {
+        throw refuse('A new payment session started for this invoice — retry removing the annual prepay flag.');
       }
       const termId = locked.annual_prepay_term_id;
       if (termId) {
