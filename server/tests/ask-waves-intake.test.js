@@ -238,6 +238,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ["It won't do your pets any harm.", ''],
     ["This won't do any harm to children.", ''],
     ['El pesticida no es nocivo para mascotas.', ''],
+    ['There is nothing harmful about this pesticide.', ''],
+    ['Nothing about this spray poses a risk to pets.', ''],
+    ['The product is in no way harmful to children.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -449,6 +452,21 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['No.', 'Can the spray injure children?'],
   ])('a terse denial of a kill/damage/injure question is replaced: %s', (reply, active) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply).toMatch(/label directions/);
+  });
+
+  test('a treatment-linked pet symptom gets the veterinary script', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My dog is coughing after the pesticide treatment');
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test('a generic new request after an old emergency is not a follow-up', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'Your invoice is $50.', intent: 'existing_customer', service_keys: [], ready_for_quote: false },
+      'openai',
+      'My child swallowed pesticide\nI need help with my invoice',
+      'I need help with my invoice',
+    );
+    expect(out.reply).toBe(SUPPORT_FALLBACK_RESULT.reply);
   });
 
   test.each(['Your child should be fine.', 'It should be okay.'])('a reassuring reply to an emergency turn gets the emergency script: %s', (reply) => {
@@ -782,6 +800,9 @@ describe('normalizeIntakeResult', () => {
     ["Don't worry about your appointment; we can reschedule it.", ''],
     ["Don't worry about the invoice; support can fix it.", ''],
     ['No need to worry about scheduling.', ''],
+    ['Keep the bait dry and place it in 2 stations.', ''],
+    ['Store the product in a dry location below 90°F.', ''],
+    ['You can go back into your account in 2 hours.', ''],
     ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
     ['Please wait 30 minutes for our dispatcher to call you back.', ''],
     ['Please wait 2 business days for the refund to appear.', ''],
@@ -1715,6 +1736,9 @@ describe('looksLikeEmergency', () => {
     'After the pesticide treatment, my child started vomiting',
     'After you sprayed the house, my son became dizzy',
     'Since the lawn chemicals were applied, I have a rash',
+    'The pesticide made my child vomit',
+    'The spray made my son dizzy',
+    'The treatment caused my child to cough',
     'my dog licked the roach spray',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
@@ -1760,6 +1784,8 @@ describe('looksLikeEmergency', () => {
     'My child did not swallow pesticide',
     'My dog never ate the bait',
     'Mi hijo no se tragó el veneno',
+    'My child is not vomiting after the pesticide treatment',
+    'After the spray, my child has no rash',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
