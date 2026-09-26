@@ -162,8 +162,9 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
   // caller will mint a bearer token for (the page) or email one (the
   // gone-quiet follow-up) — both consultation surfaces share this helper
   // and never re-derive eligibility themselves. The page mints right after
-  // this; the email's mint and send claim follow, so it records `context`
-  // and re-runs finalEligibility after the claim (reconfirmConsultationLead).
+  // this. The email runs this before the engine's own send checks, records
+  // `context`, and re-runs finalEligibility as its last step before the
+  // send (reconfirmConsultationLead).
   const fresh = await finalEligibility(estimate.id, leadId, result.address);
   if (fresh && context) Object.assign(context, { estimateId: estimate.id, leadId, probedAddress: result.address });
   return fresh;
@@ -225,8 +226,9 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
 // link, owner ruling 2026-09-26) — the same shared eligibility this
 // module's own page offer above already uses, never re-derived.
 // The probe-free final check, re-run by a caller that awaits more work
-// (a short-link mint, a send claim) between eligibility and the send
-// (Codex #4918 r9 P2). `context` is what estimateConsultationLead recorded.
+// (the engine's send checks and claim, a short-link mint) between
+// eligibility and the send (Codex #4918 r9/r12). `context` is what
+// estimateConsultationLead recorded.
 async function reconfirmConsultationLead(context) {
   if (!context?.leadId || !leadInspectionLinkLive()) return null;
   return finalEligibility(context.estimateId, context.leadId, context.probedAddress);

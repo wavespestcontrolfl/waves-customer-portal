@@ -70,12 +70,13 @@ jest.mock('../services/estimate-follow-up', () => ({
   },
 }));
 // gone_quiet's own consultation-offer link (owner ruling 2026-09-26) — its
-// own suite (estimate-email-consultation-offer.test.js) pins the builder
-// itself; this suite only pins that the engine calls it for the RIGHT rule
-// with the RIGHT arguments and threads the result into the payload.
+// own suites (estimate-email-consultation-offer*.test.js) pin the two steps
+// themselves; this suite pins WHERE the engine runs them (the probe before
+// its fresh re-read, the finalize as the last await before the send), for
+// the RIGHT rule only, and that the result threads into the payload.
 jest.mock('../services/estimate-email-consultation-offer', () => ({
-  buildGoneQuietConsultationUrl: jest.fn(async () => ''),
-  reconfirmGoneQuietConsultation: jest.fn(async () => true),
+  probeGoneQuietConsultation: jest.fn(async () => null),
+  finalizeGoneQuietConsultationUrl: jest.fn(async () => ''),
 }));
 
 const db = require('../models/db');
@@ -87,7 +88,7 @@ const { sessionsForEstimate } = require('../services/estimate-engagement-session
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { leadConvertedSince, phoneConvertedSince } = require('../services/click-followup-gate');
 const followupShared = require('../services/estimate-follow-up')._private;
-const { buildGoneQuietConsultationUrl, reconfirmGoneQuietConsultation } = require('../services/estimate-email-consultation-offer');
+const { probeGoneQuietConsultation, finalizeGoneQuietConsultationUrl } = require('../services/estimate-email-consultation-offer');
 const Engine = require('../services/estimate-engagement-engine');
 
 // Builder stub — chain methods return the builder; awaiting resolves by
@@ -228,8 +229,8 @@ beforeEach(() => {
   followupShared.hasRepliedRecently.mockResolvedValue(false);
   followupShared.bumpFollowupCounters.mockResolvedValue(undefined);
   followupShared.repairFollowupCounters.mockResolvedValue(null);
-  buildGoneQuietConsultationUrl.mockResolvedValue('');
-  reconfirmGoneQuietConsultation.mockResolvedValue(true);
+  probeGoneQuietConsultation.mockResolvedValue(null);
+  finalizeGoneQuietConsultationUrl.mockResolvedValue('');
 });
 
 describe('onEstimateViewed (view-event rules)', () => {
@@ -467,83 +468,90 @@ describe('processDueJobs', () => {
   });
 
   describe('gone_quiet consultation-offer link (owner ruling 2026-09-26)', () => {
-    test('viewed_gone_quiet_72h calls the builder with the engine\'s own verified state and threads a non-blank result into the payload', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
-      enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } }); // post-claim recipient re-read
+    const CONTEXT = { estimateId: 'est-1', leadId: 'lead-1', probedAddress: { line1: '123 Palm St' } };
+    const OFFER_URL = 'https://portal.wavespestcontrol.com/l/abc123';
+    // One ordered log: the engine's table reads (makeBuilder's where()) plus
+    // the steps these mocks mark.
+    const step = (name, value) => async () => { reads.push({ step: name }); return value; };
+    const order = () => reads.map((r) => r.step || r.table);
+
+    test('the probe runs FIRST — before the estimate re-read and every check that reads it — and the link is finalized LAST, against the post-probe recipient (Codex #4918 r7–r12)', async () => {
+      probeGoneQuietConsultation.mockImplementation(step('probe', CONTEXT));
+      followupShared.claimFollowupSend.mockImplementation(step('claim', true));
+      finalizeGoneQuietConsultationUrl.mockImplementation(step('finalize', OFFER_URL));
+      followupShared.sendDualChannel.mockImplementation(step('send', true));
+      // The row the engine reads AFTER the probe — reassigned mid-probe to a
+      // new contact. The send, and the link's final re-judge, use this row.
+      enqueueProcessorHappyPath({ est: baseEstimate({ customer_name: 'Jordan Reyes', customer_email: 'jordan@example.com' }) });
 
       const result = await Engine.processDueJobs(NOW);
 
       expect(result.sent).toBe(1);
-      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith({
-        estimate: expect.objectContaining({ id: 'est-1' }),
-        estimateData: null, // baseEstimate() carries no estimate_data
-        acceptActive: true,
-        recipientEmail: 'taylor@example.com',
-        context: expect.any(Object),
-      });
-      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
-        expect.objectContaining({ consultation_url: 'https://portal.wavespestcontrol.com/l/abc123' }),
-      );
+      const seq = order();
+      expect(seq.indexOf('probe')).toBeGreaterThanOrEqual(0);
+      expect(seq.indexOf('probe')).toBeLessThan(seq.indexOf('estimates'));
+      expect(seq.indexOf('estimates')).toBeLessThan(seq.indexOf('notification_prefs'));
+      expect(seq.indexOf('notification_prefs')).toBeLessThan(seq.indexOf('claim'));
+      // Nothing the engine reads sits between the claim and the send but the
+      // finalize step (the link mints are mocked; post-send bookkeeping follows).
+      expect(seq.slice(seq.indexOf('claim'), seq.indexOf('send') + 1)).toEqual(['claim', 'finalize', 'send']);
+      expect(probeGoneQuietConsultation).toHaveBeenCalledWith('est-1');
+      expect(finalizeGoneQuietConsultationUrl).toHaveBeenCalledWith(CONTEXT, 'jordan@example.com');
+      expect(followupShared.sendDualChannel.mock.calls[0][0]).toEqual(expect.objectContaining({ customer_email: 'jordan@example.com' }));
+      expect(followupShared.estimateEmailPayload.mock.calls[0][1]).toBe('Jordan');
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: OFFER_URL }));
     });
 
-    test('an estimate held off the customer surface (lead linkage invalidated) passes acceptActive: false — never a consultation bearer', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      const estimate_data = JSON.stringify({ estimatorEngine: { linkage_invalidated_at: new Date(NOW.getTime() - H).toISOString() } });
-      enqueueProcessorHappyPath({ est: baseEstimate({ estimate_data }) });
+    test('a customer back on the estimate during the probe is judged by the post-probe read — deferred, nothing claimed, nothing minted (Codex #4918 r12)', async () => {
+      probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
+      enqueueProcessorHappyPath({ est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 2 * MIN) }) });
 
-      await Engine.processDueJobs(NOW);
+      const result = await Engine.processDueJobs(NOW);
 
-      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith(expect.objectContaining({ acceptActive: false }));
+      expect(result.sent).toBe(0);
+      expect(probeGoneQuietConsultation).toHaveBeenCalled();
+      expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+      expect(defer.payload).toEqual(expect.objectContaining({ due_at: expect.any(Date) }));
+      expect(defer.payload).not.toHaveProperty('status');
     });
 
-    // Same wiring (`acceptActive: !estimateOffCustomerSurface(est)`), pinned
-    // against the OTHER two off-surface branches the real, un-mocked
-    // estimate-claim-sql.js checks — not just the linkage-invalidated one
-    // above — so a regression narrowing the negation to a single branch is
-    // caught here, not just in estimate-claim-sql's own suite.
-    test.each([
-      ['a county-roll-unverified address', { addressUnverified: true }],
-      ['a reprice pending on the estimator engine', { estimatorEngine: { invalidation_pending_at: new Date(NOW.getTime() - H).toISOString() } }],
-    ])('an off-surface estimate (%s) also passes acceptActive: false', async (_label, dataOverrides) => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      const estimate_data = JSON.stringify(dataOverrides);
-      enqueueProcessorHappyPath({ est: baseEstimate({ estimate_data }) });
-
-      await Engine.processDueJobs(NOW);
-
-      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith(expect.objectContaining({ acceptActive: false }));
-    });
-
-    test('an on-surface estimate (no off-surface markers) passes acceptActive: true', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      enqueueProcessorHappyPath({ est: baseEstimate({ estimate_data: JSON.stringify({ lead_id: 'lead-1', lead_linkage: 'sid' }) }) });
-
-      await Engine.processDueJobs(NOW);
-
-      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith(expect.objectContaining({ acceptActive: true }));
-    });
-
-    test('a blank builder result still sends the email with consultation_url === "" (gate off / ineligible / build error)', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
+    test('a lost claim never mints the link — finalize runs only after the claim is won', async () => {
+      probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
+      followupShared.claimFollowupSend.mockResolvedValue(false);
       enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } }); // post-claim recipient re-read
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(0);
+      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
+    });
+
+    test('no offer from the probe → finalize never runs; the email still sends with consultation_url ""', async () => {
+      enqueueProcessorHappyPath();
 
       const result = await Engine.processDueJobs(NOW);
 
       expect(result.sent).toBe(1);
-      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
-        expect.objectContaining({ consultation_url: '' }),
-      );
+      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: '' }));
     });
 
-    test('the builder throwing (a regression in its own fail-closed contract) hits the existing poison-guard retry before any claim, never a broken send', async () => {
-      // The builder's own contract is "never throws" (see its unit suite);
-      // this pins that a regression there is caught by the SAME poison-job
-      // guard every other unexpected error in this loop already uses. The
-      // builder runs BEFORE claimFollowupSend (Codex #4918 r7 P2), so there
-      // is no claim to release.
-      buildGoneQuietConsultationUrl.mockRejectedValue(new Error('should never happen'));
+    test('eligibility lost between the probe and the send (finalize → "") → the email still sends, without the link', async () => {
+      probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
+      finalizeGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath();
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(1);
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: '' }));
+    });
+
+    test('the probe throwing (a regression in its own fail-closed contract) hits the existing poison-guard retry before any claim, never a broken send', async () => {
+      probeGoneQuietConsultation.mockRejectedValue(new Error('should never happen'));
       enqueueProcessorHappyPath();
 
       const result = await Engine.processDueJobs(NOW);
@@ -558,126 +566,17 @@ describe('processDueJobs', () => {
       expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('should never happen'));
     });
 
-    test('the slot probe runs BEFORE the claim, so the claim\'s terminal-status check sees an accept/decline that lands during it (Codex #4918 r7 P2)', async () => {
-      const order = [];
-      buildGoneQuietConsultationUrl.mockImplementation(async () => { order.push('probe'); return ''; });
-      followupShared.claimFollowupSend.mockImplementation(async () => { order.push('claim'); return false; });
+    test('shadow jobs never probe — a job that cannot send costs no slot probe', async () => {
+      isEnabled.mockImplementation(() => false); // engine gate off → every job is shadow
       enqueueProcessorHappyPath();
 
       const result = await Engine.processDueJobs(NOW);
 
-      expect(order).toEqual(['probe', 'claim']);
-      expect(result.sent).toBe(0); // the claim lost (e.g. accepted mid-probe) → nothing sent
-      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      expect(result.shadow).toBe(1);
+      expect(probeGoneQuietConsultation).not.toHaveBeenCalled();
     });
 
-    test('the recipient email changed during the probe → the send goes to the NEW address WITHOUT the offer (Codex #4918 r7 P2)', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
-      enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'new-owner@example.com' } });
-
-      const result = await Engine.processDueJobs(NOW);
-
-      expect(result.sent).toBe(1);
-      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
-        expect.objectContaining({ consultation_url: '' }),
-      );
-      expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('new-owner@example.com');
-    });
-
-    test('no offer (probe timed out / no slots) but the recipient email changed during the probe → the send still goes to the NEW address (Codex #4918 r8 P2)', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'new-owner@example.com' } });
-
-      const result = await Engine.processDueJobs(NOW);
-
-      expect(result.sent).toBe(1);
-      expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('new-owner@example.com');
-    });
-
-    test('an unchanged recipient keeps the send exactly as before', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
-
-      await Engine.processDueJobs(NOW);
-
-      expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('taylor@example.com');
-    });
-
-    test('eligibility lost between the builder and the send (hold / linkage / lead edit) → the email still goes, WITHOUT the link (Codex #4918 r9 P2)', async () => {
-      const order = [];
-      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
-      followupShared.claimFollowupSend.mockImplementation(async () => { order.push('claim'); return true; });
-      reconfirmGoneQuietConsultation.mockImplementation(async () => { order.push('reconfirm'); return false; });
-      enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
-
-      const result = await Engine.processDueJobs(NOW);
-
-      expect(result.sent).toBe(1);
-      expect(order).toEqual(['claim', 'reconfirm']);
-      expect(reconfirmGoneQuietConsultation).toHaveBeenCalledWith(expect.any(Object), 'taylor@example.com');
-      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
-        expect.objectContaining({ consultation_url: '' }),
-      );
-    });
-
-    test('no link built → the reconfirm never runs', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
-
-      await Engine.processDueJobs(NOW);
-
-      expect(reconfirmGoneQuietConsultation).not.toHaveBeenCalled();
-    });
-
-    test('an email opt-out landing during the probe wins: the claim is released and the job skipped, nothing sent (Codex #4918 r10 P2)', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      enqueueProcessorHappyPath({ est: baseEstimate({ customer_id: 'cust-1' }) });
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com', customer_id: 'cust-1' } });
-      enqueue('notification_prefs', { first: { email_enabled: false } }); // post-probe re-read
-
-      const result = await Engine.processDueJobs(NOW);
-
-      expect(result.sent).toBe(0);
-      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
-      expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
-      const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
-      expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped' }));
-    });
-
-    test('the estimate moved to another customer during the probe → THAT customer\'s opt-out is the one checked (Codex #4918 r11 P2)', async () => {
-      buildGoneQuietConsultationUrl.mockResolvedValue('');
-      enqueueProcessorHappyPath({ est: baseEstimate({ customer_id: 'cust-1' }) });
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com', customer_id: 'cust-2' } });
-      enqueue('notification_prefs', { first: { email_enabled: false } });
-
-      const result = await Engine.processDueJobs(NOW);
-
-      expect(result.sent).toBe(0);
-      const prefsReads = reads.filter((r) => r.table === 'notification_prefs');
-      expect(prefsReads.pop().where).toEqual(expect.objectContaining({ customer_id: 'cust-2' }));
-    });
-
-    test('the final refresh runs AFTER the link mints, right before the send, and the reconfirm gets the fresh recipient (Codex #4918 r11 P2)', async () => {
-      const order = [];
-      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
-      followupShared.mintStageLinks.mockImplementation(async () => { order.push('mint'); return { emailUrl: 'https://x/e' }; });
-      reconfirmGoneQuietConsultation.mockImplementation(async () => { order.push('reconfirm'); return true; });
-      followupShared.sendDualChannel.mockImplementation(async () => { order.push('send'); return true; });
-      enqueueProcessorHappyPath();
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com', customer_id: 'cust-1' } });
-
-      await Engine.processDueJobs(NOW);
-
-      expect(order).toEqual(['mint', 'mint', 'reconfirm', 'send']);
-      expect(reconfirmGoneQuietConsultation).toHaveBeenCalledWith(expect.any(Object), 'taylor@example.com');
-    });
-
-    test('every other rule\'s payload never gets consultation_url — the builder is never even called for them', async () => {
+    test('every other rule never probes or finalizes, and its payload never gets consultation_url', async () => {
       enqueueProcessorHappyPath({
         job: pendingJob({ rule_key: 'return_visit_hot' }),
         est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 5 * MIN) }),
@@ -686,7 +585,8 @@ describe('processDueJobs', () => {
       const result = await Engine.processDueJobs(NOW);
 
       expect(result.sent).toBe(1);
-      expect(buildGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(probeGoneQuietConsultation).not.toHaveBeenCalled();
+      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).not.toHaveProperty('consultation_url');
     });
   });

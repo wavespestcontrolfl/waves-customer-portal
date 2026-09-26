@@ -41,13 +41,13 @@ const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = req
 // re-evaluation would never come).
 const PRICING_AUTHORITY_RECHECK_MS = 6 * 60 * 60 * 1000;
 const { sessionsForEstimate, SESSION_GAP_MINUTES } = require('./estimate-engagement-sessions');
-const { inferEstimateServiceLines, parseEstimateData } = require('./estimate-service-lines');
+const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
 const { followupEmailVars } = require('./estimate-followup-copy');
 // gone_quiet's own "Rather have us come look first?" link (owner ruling
 // 2026-09-26) — the ONLY rule whose payload calls this; every other rule's
 // payload never references it.
-const { buildGoneQuietConsultationUrl, reconfirmGoneQuietConsultation } = require('./estimate-email-consultation-offer');
+const { probeGoneQuietConsultation, finalizeGoneQuietConsultationUrl } = require('./estimate-email-consultation-offer');
 // Shared lane mechanics from the stage engine (see module doc above).
 const followupShared = require('./estimate-follow-up')._private;
 
@@ -533,6 +533,19 @@ async function processDueBatch(now = new Date()) {
         await markJob(job.id, 'skipped', 'rule-disabled');
         continue;
       }
+      // ONE new variable, ONE rule (owner ruling 2026-09-26): only the
+      // gone-quiet email carries the consultation-offer link; every other
+      // rule's payload is byte-identical and never calls either step.
+      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
+      // The offer's slot probe can take up to 3 s, so it runs FIRST — before
+      // the fresh re-read below (Codex #4918 r7–r12): every check and every
+      // payload field this job uses is then read after the probe, exactly as
+      // before the offer existed. Only its probe-free re-judge runs later,
+      // as the last step before the send. Shadow jobs never send, so they
+      // never probe.
+      const consultationContext = live && isGoneQuiet
+        ? await probeGoneQuietConsultation(job.estimate_id)
+        : null;
       // Re-read the estimate fresh — everything below judges CURRENT state,
       // not what was true at enqueue time.
       const est = await db('estimates').where({ id: job.estimate_id }).first();
@@ -721,29 +734,6 @@ async function processDueBatch(now = new Date()) {
         await deferOrShadow(live, job, new Date(nowMs + PRICING_AUTHORITY_RECHECK_MS), 'pricing-authority-not-server');
         continue;
       }
-      // ONE new variable, ONE rule (owner ruling 2026-09-26): every other
-      // rule's payload is byte-identical — this never even calls the
-      // builder for them. acceptActive: processDueBatch has already checked
-      // archived / ACTIVE_STATUSES / expiry for THIS send; the one part of
-      // the page's isEstimateAcceptActive verdict it does not check is
-      // estimateOffCustomerSurface (linkage invalidated or pending, reprice
-      // hold, unverified address) — an estimate held off the customer
-      // surface must never carry a consultation bearer.
-      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
-      // Runs BEFORE the claim (Codex #4918 r7 P2): the slot probe inside can
-      // take up to 3 s, and the claim's terminal-status check below must see
-      // an accept/decline that lands during it — the window between claim and
-      // send stays the milliseconds it was before this offer existed.
-      const consultationContext = {};
-      let consultationUrl = isGoneQuiet
-        ? await buildGoneQuietConsultationUrl({
-          estimate: est,
-          estimateData: parseEstimateData(est.estimate_data),
-          acceptActive: !require('../utils/estimate-claim-sql').estimateOffCustomerSurface(est),
-          recipientEmail: est.customer_email,
-          context: consultationContext,
-        })
-        : '';
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
         job_id: job.id,
         trigger: job.trigger,
@@ -786,37 +776,12 @@ async function processDueBatch(now = new Date()) {
       const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
-      if (isGoneQuiet) {
-        // ONE post-claim refresh, immediately before the send (Codex #4918
-        // r8–r11): the gone-quiet probe (up to 3 s), the claim and the link
-        // mints all awaited after the estimate/prefs reads above, so the
-        // recipient, the customer behind it, that customer's email opt-out
-        // and the offer's eligibility are all re-judged here together. A
-        // moved recipient gets the send without the offer; an opt-out wins
-        // (claim released, job skipped); lost eligibility drops only the
-        // link. Any read error throws to the loop's catch (claim released,
-        // bounded retry). The residual is the ms from here to the provider
-        // call — the same residual the deadline re-read above accepts.
-        const fresh = await db('estimates').where({ id: est.id }).first('customer_email', 'customer_id');
-        if (String(fresh?.customer_email || '').trim().toLowerCase()
-          !== String(est.customer_email || '').trim().toLowerCase()) {
-          consultationUrl = '';
-        }
-        est.customer_email = fresh?.customer_email || null;
-        est.customer_id = fresh?.customer_id || null;
-        if (est.customer_id) {
-          const freshPrefs = await db('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled');
-          if (freshPrefs?.email_enabled === false) {
-            await followupShared.releaseFollowupSend(est.id, rule.rule_key);
-            claimed = false;
-            await markJob(job.id, 'skipped', 'email-prefs-off');
-            continue;
-          }
-        }
-        if (consultationUrl && !(await reconfirmGoneQuietConsultation(consultationContext, est.customer_email))) {
-          consultationUrl = '';
-        }
-      }
+      // The LAST await before the send (Codex #4918 r9/r12): mint the link,
+      // then re-judge the probe-free shared eligibility and the lead's-own-
+      // inbox rule against THIS send's recipient. '' drops only the link.
+      const consultationUrl = consultationContext
+        ? await finalizeGoneQuietConsultationUrl(consultationContext, est.customer_email)
+        : '';
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,

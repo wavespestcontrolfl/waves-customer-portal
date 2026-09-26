@@ -1443,6 +1443,14 @@ the same one the email block uses) finds at least one open slot AT THIS
 ESTIMATE'S PROPERTY — the address the page resolved matches the estimate's
 (same street key, unit and zip); an out-of-area, unresolved, no-address,
 retired-catalog, no-open-times or other-property result omits the field.
+The probe is bounded, and either bound omits the field for that load: it
+is time-boxed at 3 s (`PROBE_BUDGET_MS` — a slower probe is abandoned, left
+to finish in the background, and nothing it resolves is used), and at most
+3 probes run at once per server process (`MAX_PROBES_IN_FLIGHT`, abandoned
+ones counted until their work settles — past the cap no probe starts).
+After the probe the estimate and the lead are re-read and every rule above
+is re-judged on the fresh rows (`finalEligibility`), so a status change,
+hold, re-link or contact edit that lands during the probe omits the field.
 Quote-first only: never on an estimate drafted from a visit
 (`estimate_data.scheduled_service_id`) or on a grouped estimate
 (`estimate_group_id`). Composed on the page's own first `/data` load only —

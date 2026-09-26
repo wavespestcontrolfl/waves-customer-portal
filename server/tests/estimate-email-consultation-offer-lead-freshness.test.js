@@ -1,18 +1,14 @@
 /**
- * Integration coverage for the post-probe fresh-read recheck
- * (server/services/estimate-consultation-offer.js's finalEligibility,
- * Codex #4918 r5 P2) as it actually changes buildGoneQuietConsultationUrl's
- * OUTCOME — estimate-email-consultation-offer.test.js mocks
- * estimateConsultationLead entirely and so cannot observe this; this file
- * exercises the real estimateConsultationLead chain underneath it.
+ * Integration coverage for the gone-quiet email offer's two steps over the
+ * REAL shared eligibility chain (estimate-consultation-offer.js's
+ * estimateConsultationLead + finalEligibility) — the sibling unit suite
+ * mocks that chain entirely and so cannot observe freshness.
  *
- * Finding 3 (Codex #4918 r5): estimateConsultationLead returned the lead
- * snapshot loaded BEFORE the up-to-3s slot probe, so a lead whose email
- * changed DURING the probe still had its OLD (pre-probe) email compared
- * against the send's recipient — approving a mailbox that is no longer the
- * lead's own. finalEligibility re-reads the lead fresh after the probe and
- * the email builder's recipientIsLead check now runs against that fresh
- * lead, single-sourced.
+ * Reads, in order: probeGoneQuietConsultation reads the estimate, the lead
+ * (pre-probe), runs the slot probe, then re-reads the estimate and lead
+ * (post-probe, Codex #4918 r5). finalizeGoneQuietConsultationUrl — the last
+ * await before the engine's send — mints, then re-reads both once more
+ * (Codex #4918 r9/r12). A change in either window drops the link.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -45,7 +41,10 @@ jest.mock('../services/lead-consultation-email-block', () => {
   return { ...actual, shortWrap: (...args) => mockShortWrap(...args) };
 });
 
-const { buildGoneQuietConsultationUrl } = require('../services/estimate-email-consultation-offer');
+const {
+  probeGoneQuietConsultation,
+  finalizeGoneQuietConsultationUrl,
+} = require('../services/estimate-email-consultation-offer');
 
 const LEAD_ID = 'lead-fresh-1';
 const ESTIMATE_ID = 'est-fresh-1';
@@ -83,30 +82,31 @@ function estimateRow(overrides = {}) {
   };
 }
 
-// A `leads` builder whose .first() returns `first` on its OWN first call and
-// `second` (the "changed during the probe" row) on every call after — models
-// the lead row being edited underneath the in-flight slot probe. Both the
-// pre-probe read and finalEligibility's post-probe re-read go through this
-// SAME table key, so a real DB update landing between them is exactly one
-// extra .first() call apart.
-function leadsBuilder({ first, second = first, pointing = [] } = {}) {
-  const b = {};
+// Builders whose .first() walks a per-call sequence (the last entry
+// repeats) — a DB edit landing between two reads of the SAME table is one
+// sequence step apart. Lead reads: [pre-probe, post-probe, final re-judge].
+// Estimate reads: [probe step's own read, post-probe, final re-judge].
+function sequence(rows) {
   let calls = 0;
+  return () => rows[Math.min(calls++, rows.length - 1)];
+}
+
+function leadsBuilder({ rows, pointing = [] } = {}) {
+  const next = sequence(rows);
+  const b = {};
   b.where = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
   b.limit = jest.fn(() => b);
   b.pluck = jest.fn(async () => pointing);
-  b.first = jest.fn(async () => {
-    calls += 1;
-    return calls === 1 ? first : second;
-  });
+  b.first = jest.fn(async () => next());
   return b;
 }
 
-function estimatesBuilder(row) {
+function estimatesBuilder(rows) {
+  const next = sequence(rows);
   const b = {};
   b.where = jest.fn(() => b);
-  b.first = jest.fn(async () => row);
+  b.first = jest.fn(async () => next());
   return b;
 }
 
@@ -118,8 +118,8 @@ beforeEach(() => {
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
   process.env.LEAD_PREFILL_SECRET = 'test-prefill-secret';
   mockBuilders = {
-    leads: leadsBuilder({ first: leadRow() }),
-    estimates: estimatesBuilder(estimateRow()),
+    leads: leadsBuilder({ rows: [leadRow()] }),
+    estimates: estimatesBuilder([estimateRow()]),
   };
   mockComputeConsultationSlotsForLead.mockResolvedValue({
     ok: true,
@@ -138,73 +138,86 @@ afterEach(() => {
   else process.env.LEAD_PREFILL_SECRET = originalSecret;
 });
 
-function callArgs(overrides = {}) {
-  return {
-    estimate: estimateRow(),
-    estimateData: { lead_id: LEAD_ID, lead_linkage: 'sid' },
-    acceptActive: true,
-    recipientEmail: 'original@example.com',
-    ...overrides,
-  };
+async function offerFor(recipientEmail = 'original@example.com') {
+  const context = await probeGoneQuietConsultation(ESTIMATE_ID);
+  const url = await finalizeGoneQuietConsultationUrl(context, recipientEmail);
+  return { context, url };
 }
 
-describe('buildGoneQuietConsultationUrl — post-probe lead freshness (Codex #4918 r5 P2 finding 3)', () => {
-  test('the lead keeps the same email through the probe — recipient still matches, URL minted', async () => {
-    const result = await buildGoneQuietConsultationUrl(callArgs());
-    expect(result).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/l\//);
+describe('unchanged state — the offer goes through', () => {
+  test('eligible, the recipient is the lead\'s own inbox → one short URL, minted once in the final step', async () => {
+    const { context, url } = await offerFor();
+    expect(context).toEqual(expect.objectContaining({ estimateId: ESTIMATE_ID, leadId: LEAD_ID }));
+    expect(url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/l\//);
     expect(mockShortWrap).toHaveBeenCalledTimes(1);
-  });
-
-  test("the lead's email changes DURING the probe — the stale-match recipient is rejected, \"\" returned, nothing minted", async () => {
-    mockBuilders.leads = leadsBuilder({
-      first: leadRow({ email: 'original@example.com' }),
-      second: leadRow({ email: 'changed-mid-probe@example.com' }),
-    });
-    const result = await buildGoneQuietConsultationUrl(callArgs());
-    expect(result).toBe('');
-    expect(mockShortWrap).not.toHaveBeenCalled();
-  });
-
-  test("the lead's email changes DURING the probe to the recipient itself — now eligible again (fresh state governs, not a frozen refusal)", async () => {
-    mockBuilders.leads = leadsBuilder({
-      first: leadRow({ email: 'someone-else@example.com' }),
-      second: leadRow({ email: 'original@example.com' }),
-    });
-    const result = await buildGoneQuietConsultationUrl(callArgs());
-    expect(result).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/l\//);
   });
 });
 
-describe('estimateConsultationLead (shared helper) — post-probe estimate freshness (Codex #4918 r5 P2 finding 1)', () => {
-  test('the estimate is accepted/off-surface by the time the probe returns → no lead returned, no mint, no send-bearing offer', async () => {
-    // The pre-probe acceptActive the caller computed was true (still true at
-    // the top of estimateConsultationLead); isEstimateAcceptActive is the
-    // POST-probe recheck and now says the fresh row is no longer active.
-    mockIsEstimateAcceptActive.mockReturnValue(false);
-    const result = await buildGoneQuietConsultationUrl(callArgs());
-    expect(result).toBe('');
+describe('a change DURING the slot probe (Codex #4918 r5)', () => {
+  test("the lead's email changes during the probe → no context, nothing minted", async () => {
+    mockBuilders.leads = leadsBuilder({
+      rows: [leadRow({ email: 'original@example.com' }), leadRow({ email: 'changed-mid-probe@example.com' })],
+    });
+    const { context, url } = await offerFor();
+    expect(context).toBeNull();
+    expect(url).toBe('');
     expect(mockShortWrap).not.toHaveBeenCalled();
   });
 
-  test('the estimate gains a quote-first disqualifier (scheduled_service_id) during the probe → null', async () => {
-    mockBuilders.estimates = estimatesBuilder(estimateRow({
-      estimate_data: JSON.stringify({ scheduled_service_id: 'svc-mid-probe' }),
-    }));
-    const result = await buildGoneQuietConsultationUrl(callArgs());
-    expect(result).toBe('');
-    expect(mockShortWrap).not.toHaveBeenCalled();
+  test("the lead's email changes during the probe TO the recipient → eligible (fresh state governs, not a frozen refusal)", async () => {
+    mockBuilders.leads = leadsBuilder({
+      rows: [leadRow({ email: 'someone-else@example.com' }), leadRow({ email: 'original@example.com' })],
+    });
+    const { url } = await offerFor();
+    expect(url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/l\//);
   });
 
-  test('the estimate becomes grouped during the probe → null', async () => {
-    mockBuilders.estimates = estimatesBuilder(estimateRow({ estimate_group_id: 'grp-mid-probe' }));
-    const result = await buildGoneQuietConsultationUrl(callArgs());
-    expect(result).toBe('');
-    expect(mockShortWrap).not.toHaveBeenCalled();
+  test('the estimate turns accepted/off-surface during the probe → no context', async () => {
+    mockIsEstimateAcceptActive.mockReturnValueOnce(true).mockReturnValue(false);
+    const { context, url } = await offerFor();
+    expect(context).toBeNull();
+    expect(url).toBe('');
   });
 
-  test('nothing changes during the probe → still eligible, one clean mint', async () => {
-    const result = await buildGoneQuietConsultationUrl(callArgs());
-    expect(result).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/l\//);
-    expect(mockShortWrap).toHaveBeenCalledTimes(1);
+  test('the estimate gains a quote-first disqualifier or becomes grouped during the probe → no context', async () => {
+    mockBuilders.estimates = estimatesBuilder([
+      estimateRow(), estimateRow({ estimate_data: JSON.stringify({ lead_id: LEAD_ID, lead_linkage: 'sid', scheduled_service_id: 'svc-mid-probe' }) }),
+    ]);
+    expect((await offerFor()).context).toBeNull();
+    mockBuilders.estimates = estimatesBuilder([estimateRow(), estimateRow({ estimate_group_id: 'grp-mid-probe' })]);
+    expect((await offerFor()).context).toBeNull();
+  });
+});
+
+describe('a change AFTER the probe, before the send (Codex #4918 r9/r12) — the final step drops only the link', () => {
+  test("the lead's email changes between the probe and the send → \"\"", async () => {
+    mockBuilders.leads = leadsBuilder({
+      rows: [leadRow(), leadRow(), leadRow({ email: 'changed-before-send@example.com' })],
+    });
+    const { context, url } = await offerFor();
+    expect(context).not.toBeNull();
+    expect(url).toBe('');
+  });
+
+  test('the estimate gets a hold (off-surface) between the probe and the send → ""', async () => {
+    mockIsEstimateAcceptActive.mockReturnValueOnce(true).mockReturnValueOnce(true).mockReturnValue(false);
+    const { context, url } = await offerFor();
+    expect(context).not.toBeNull();
+    expect(url).toBe('');
+  });
+
+  test('the estimate is re-linked to a different lead between the probe and the send → ""', async () => {
+    mockBuilders.estimates = estimatesBuilder([
+      estimateRow(), estimateRow(), estimateRow({ estimate_data: JSON.stringify({ lead_id: 'another-lead', lead_linkage: 'sid' }) }),
+    ]);
+    const { context, url } = await offerFor();
+    expect(context).not.toBeNull();
+    expect(url).toBe('');
+  });
+
+  test("the send's recipient (read by the engine after the probe) is no longer the lead's inbox → \"\"", async () => {
+    const { context, url } = await offerFor('new-owner@example.com');
+    expect(context).not.toBeNull();
+    expect(url).toBe('');
   });
 });
