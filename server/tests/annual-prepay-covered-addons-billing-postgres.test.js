@@ -150,6 +150,15 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     .update({ status: 'side_effects_pending' });
   const officeAddonDiscount = (x) => ({ client_id: `discount_office_${x.addonId}`, _kind: 'discount', discount_for: addonLine(x).client_id,
     description: 'Office courtesy', amount: -10, quantity: 1, unit_price: -10 });
+  // The office bell fails to save for these dedupe keys (notifyAdmin's
+  // null return); every other notification lands as usual.
+  function failAlerts(matches) {
+    const NotificationService = require('../services/notification-service');
+    const realNotify = NotificationService.notifyAdmin.bind(NotificationService);
+    return jest.spyOn(NotificationService, 'notifyAdmin').mockImplementation(async (...args) => (
+      matches(String(args[3]?.dedupeKey || '')) ? null : realNotify(...args)));
+  }
+  const attemptStatus = async (f) => (await trx('service_completion_attempts').where({ service_id: f.serviceId }).first('status'))?.status;
   const addonsAlert = (f) => trx('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]).first();
 
@@ -392,6 +401,50 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(retry.body?.invoiceId).toBe(bill.id);
     expect(retry.body?.invoicePaymentActionRequired).toBe(true);
     expect((await liveInvoices(f)).filter((i) => i.id !== f.invoiceId).map((i) => i.id)).toEqual([bill.id]);
+  });
+
+  test('an add-ons alert that is not recorded leaves the closeout unfinalized, and the retry raises it (pre-push P1 r3)', async () => {
+    const f = await coveredVisit({ discountDollars: 9 });
+    const idempotencyKey = randomUUID();
+    const spy = failAlerts((key) => key === `annual_prepay_addons_unbilled:${f.serviceId}`);
+    let first;
+    try {
+      first = await complete(f, {}, { idempotencyKey });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(first).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_alert_failed' } });
+    expect(await attemptStatus(f)).toBe('side_effects_pending');
+    expect(await addonsAlert(f)).toBeUndefined();
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(await liveInvoices(f)).toHaveLength(0);
+  });
+
+  test('a voided-invoice alert that is not recorded holds the add-ons bill until the retry raises it', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x),
+      { description: 'Synthetic trip charge', amount: 15, quantity: 1, unit_price: 15 }] });
+    const reconcileAlert = () => trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).first();
+    const idempotencyKey = randomUUID();
+    const spy = failAlerts((key) => key === `annual_prepay_invoice_reconcile:${f.serviceId}`);
+    let first;
+    try {
+      first = await complete(f, {}, { idempotencyKey });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(first).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_alert_failed' } });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('void');
+    expect(await liveInvoices(f)).toHaveLength(0);
+    expect(await reconcileAlert()).toBeUndefined();
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(await reconcileAlert()).toBeTruthy();
+    const invoices = await liveInvoices(f);
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(ADDON);
   });
 
   test('a visit that performed no application bills no add-ons', async () => {

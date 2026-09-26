@@ -10818,15 +10818,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Add-ons are owed but only alerted: the completion text must not say
     // "all paid" (the plain report-ready text goes instead).
     let annualPrepayAddonsUnbilled = false;
+    // An office alert that did not land leaves the add-ons neither billed
+    // nor flagged; the closeout then stays unfinalized (the release/503
+    // after these blocks) and the retry re-derives the same alert.
+    let annualPrepayAlertError = null;
     const alertAnnualPrepayAddons = async (reason, extra = {}) => {
       annualPrepayAddonsUnbilled = true;
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('billing', 'Annual-prepay add-ons not billed — bill by hand',
+        const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay add-ons not billed — bill by hand',
           `Completing ${svc.service_type} for customer ${svc.customer_id}: the visit is covered by the annual prepay, but its add-ons were not billed automatically (${reason}). Bill the add-ons by hand.`,
           { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_addons_unbilled:${svc.id}`,
             metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, reason, ...extra } });
+        // notifyAdmin returns null when its insert fails.
+        if (!bell) throw new Error('the office notification was not recorded');
       } catch (bellErr) {
+        annualPrepayAlertError = annualPrepayAlertError || bellErr;
         logger.error(`[dispatch] annual-prepay add-ons alert FAILED for ${svc.id} (${reason}): ${bellErr.message}`);
       }
     };
@@ -10923,12 +10930,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (unknownCharges) {
         try {
           const NotificationService = require('../services/notification-service');
-          await NotificationService.notifyAdmin('billing', 'Annual-prepay visit invoice voided — check its other charges',
+          const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay visit invoice voided — check its other charges',
             `Completing ${svc.service_type} for customer ${svc.customer_id}: invoice ${voidedInvoice.id} was voided because the annual prepay covers the visit, but it also carried charges that are neither the covered visit nor its add-ons. Re-bill any that are owed.`,
             { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_invoice_reconcile:${svc.id}`,
               metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, voidedInvoiceId: voidedInvoice.id } });
+          if (!bell) throw new Error('the office notification was not recorded');
         } catch (bellErr) {
+          annualPrepayAlertError = annualPrepayAlertError || bellErr;
           logger.error(`[dispatch] annual-prepay voided-invoice reconcile alert FAILED for ${svc.id}: ${bellErr.message}`);
+          // No bill yet: the retry must come back through here (no live
+          // invoice → the saved void) to raise this alert before billing.
+          return;
         }
       }
       if (visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ voidedInvoice });
@@ -11035,6 +11047,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && svc.annual_prepay_term_id
       && String(invoice.annual_prepay_covered_term_id || '') === String(svc.annual_prepay_term_id)) {
       await billAnnualPrepayAddons({ coveredInvoiceId: invoice.id });
+    }
+    // The alerts above are the ONLY follow-up for add-ons this closeout did
+    // not bill, and for charges on an invoice it voided. One that did not
+    // land keeps the closeout unfinalized — same release/503 shape as the
+    // manual-billing alert — so the retry raises it again.
+    if (annualPrepayAlertError) {
+      const alertErr = annualPrepayAlertError;
+      logger.error(`[dispatch] annual-prepay add-ons alert FAILED for ${svc.id} — closeout NOT finalized: ${alertErr.message}`);
+      const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);
+      if (!released) {
+        logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+      }
+      return ({ status: 503, body: {
+        error: released
+          ? 'This visit\'s add-ons need the office\'s attention and the office alert could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
+          : `This visit's add-ons need the office's attention and the office alert could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+        code: 'annual_prepay_addons_alert_failed',
+        ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+        serviceRecordId: record.id,
+      } });
     }
 
     // Auto-apply available account credit (e.g. the referral reward) to the
