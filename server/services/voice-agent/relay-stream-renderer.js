@@ -160,14 +160,19 @@ const ORDINAL_WORDS = 'first|second|third|fourth|fifth|sixth|seventh|eighth|nint
 // over-hold unrelated pleasantries.
 const RELATIVE_DAY_QUALIFIER_SOURCE = 'next|following|this coming|later this';
 const RELATIVE_DAY_RE_SOURCE = `\\b(?:${RELATIVE_DAY_QUALIFIER_SOURCE})\\s+(?:day|days|week|weekend)\\b`
-  + '|\\bday\\s+after\\s+(?:next|tomorrow)\\b';
+  + '|\\bday\\s+(?:after|before)\\b';
 const DATE_TIME_RE = new RegExp(
   '\\d'
   + '|\\b(?:'
   + 'sunday|monday|tuesday|wednesday|thursday|friday|saturday|weekday|weekend|'
-  + 'january|february|march|april|may|june|july|august|september|october|november|december|'
+  + 'january|february|march|april|june|july|august|september|october|november|december|'
+  // "may" and "am" are also ordinary grammar ("May I check that?", "What am
+  // I looking for?"), so they hold only in calendar/clock context (codex r5);
+  // a digit next to either already holds via \\d above.
+  + `(?:in|on|of|by|until|till|since|early|late|mid|this|next|last)\\s+may\\b|may\\s+(?:the\\s+)?(?:${ORDINAL_WORDS})\\b|`
+  + `(?:${HOUR_WORDS}|noon|thirty|fifteen|forty[- ]five)\\s+am\\b|`
   + 'today|tomorrow|tonight|yesterday|morning|afternoon|evening|noon|midday|midnight|overnight|'
-  + 'week|weeks|month|months|asap|a\\.m\\.|p\\.m\\.|am|pm|o[\'’]clock|'
+  + 'week|weeks|month|months|asap|a\\.m\\.|p\\.m\\.|pm|o[\'’]clock|'
   + `(?:at|by|around|until|till|after|before|from|between)\\s+(?:${HOUR_WORDS})\\b|`
   + `(?:${HOUR_WORDS})\\s+(?:thirty|fifteen|forty[- ]five|o[\'’]clock)|`
   // An ordinal is a date when it closes a phrase ("how about the fifteenth?")
@@ -189,7 +194,9 @@ const DATE_TIME_RE = new RegExp(
 // (work(s)/open/available/free/good/okay/ok/fine, or "how about"/"what
 // about") — never triggered by the hour word alone, so "One moment.",
 // "Sure, one moment." and "Give me one second" are unaffected.
-const HOUR_OR_NOON_RE = new RegExp(`\\b(?:${HOUR_WORDS}|noon|midnight)\\b`, 'i');
+// "may" rides the same pairing ("Is May okay?", "Would May work?") so the
+// grammatical "May I check that?" still streams.
+const HOUR_OR_NOON_RE = new RegExp(`\\b(?:${HOUR_WORDS}|noon|midnight|may)\\b`, 'i');
 const SCHEDULE_QUESTION_WORD_RE = /\b(?:works?|open|available|free|good|okay|ok|fine)\b|how about|what about/i;
 
 // A COMMITMENT-OR-SUCCESS CLAIM: an explicit commitment verb, OR a success

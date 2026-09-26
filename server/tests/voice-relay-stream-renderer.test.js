@@ -1539,6 +1539,35 @@ describe('say() — a failed send never claims an undelivered line was heard (P2
     expect(convo._transcript.find((e) => e.role === 'agent')).toBe(entry);
   });
 
+  test('stream renderer: a failed say() leaves no first-send stamp or playback bookkeeping (codex r5)', () => {
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn(() => false);
+    const convo = new RelayConversation({ callSid: 'CA-say-fail-metrics', from: '+19415551234', send });
+    const stat = { turn: 1, firstSendAt: null, agentEntries: [], playedSource: 'assumed' };
+    convo._turnStats.push(stat);
+    convo._currentTurn = stat;
+
+    const entry = convo.say('Sorry, something went wrong.');
+
+    expect(entry.notPlayed).toBe(true);
+    expect(stat.firstSendAt).toBeNull();
+    expect(stat.agentEntries).not.toContain(entry);
+    expect(convo._playing).not.toContain(entry);
+  });
+
+  test('stream renderer: a failed say() keeps an earlier real first-send stamp', () => {
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn(() => false);
+    const convo = new RelayConversation({ callSid: 'CA-say-fail-prior', from: '+19415551234', send });
+    const stat = { turn: 1, firstSendAt: 12345, agentEntries: [], playedSource: 'assumed' };
+    convo._turnStats.push(stat);
+    convo._currentTurn = stat;
+
+    convo.say('Sorry, something went wrong.');
+
+    expect(stat.firstSendAt).toBe(12345);
+  });
+
   test('block renderer: a strict `false` from _send leaves the transcript exactly as on main', () => {
     delete process.env.VOICE_RELAY_RENDERER;
     const send = jest.fn(() => false);
@@ -1562,5 +1591,29 @@ describe('say() — a failed send never claims an undelivered line was heard (P2
 
     expect(entry.notPlayed).toBe(false);
     expect(entry.text).toBe(spoken);
+  });
+});
+
+describe('needsHold — codex r5 date/time context', () => {
+  test.each([
+    'Would the day after work?',
+    'Would the day before work?',
+    'How about in May?',
+    'Is May okay?',
+    'Would May the fifteenth work?',
+    'Does nine am work?',
+    'Could we do 9 am?',
+  ])('holds %p', (sentence) => {
+    expect(needsHold(sentence)).toBe(true);
+  });
+
+  test.each([
+    'May I check that for you?',
+    'May I have your last name?',
+    'What am I looking for?',
+    'One moment.',
+  ])('does not hold grammatical may/am: %p', (sentence) => {
+    expect(needsHold(sentence)).toBe(false);
+    expect(isStreamSafe(sentence)).toBe(true);
   });
 });

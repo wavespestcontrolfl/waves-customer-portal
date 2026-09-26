@@ -1363,6 +1363,7 @@ class RelayConversation {
     if (t) {
       const entry = this._recordTurn('agent', t);
       const stat = this._currentTurn;
+      const priorFirstSendAt = stat ? stat.firstSendAt : null;
       if (stat) {
         if (stat.firstSendAt == null) stat.firstSendAt = now();
         if (entry) {
@@ -1376,11 +1377,19 @@ class RelayConversation {
       // undelivered line was heard. Distinct from the `[not played — caller
       // interrupted]` copy `_syncPlayedEntry` renders (this is not an
       // interruption). Scoped to `stream` so the default block renderer's
-      // transcript stays byte-identical to main.
+      // transcript stays byte-identical to main. Nothing reached Twilio, so
+      // the line also leaves the latency/playback metrics (codex r5): no
+      // first-send stamp, no queued playback, no turn played-source vote.
       const delivered = this._send(t);
       if (delivered === false && entry && this.renderer === 'stream') {
         entry.notPlayed = true;
+        entry.done = true;
         entry.text = '[not played — send failed]';
+        this._playing = this._playing.filter((e) => e !== entry);
+        if (stat) {
+          stat.firstSendAt = priorFirstSendAt;
+          stat.agentEntries = stat.agentEntries.filter((e) => e !== entry);
+        }
       }
       return entry;
     }
