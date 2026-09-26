@@ -152,7 +152,7 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
     ]) {
       expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
         .toMatchObject({
-          watering: expect.stringMatching(/does not include a specific amount or timing/i),
+          watering: expect.stringMatching(/Confirm the amount and timing for watering-in/i),
           waterInRequired: true,
           evidenceSource: 'incomplete_product_instruction',
           needsReview: true,
@@ -183,7 +183,7 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
     const conditional = 'Water with 0.25 in. when directed by the service report.';
     expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: conditional } }]))
       .toMatchObject({
-        watering: expect.stringMatching(/does not include a specific amount or timing/i),
+        watering: expect.stringMatching(/Confirm the amount and timing for watering-in/i),
         evidenceSource: 'incomplete_product_instruction',
         needsReview: true,
         creditableWaterIn: false,
@@ -296,13 +296,16 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
     'Irrigation is not permitted for 24 hours.',
     'Watering must not be allowed for 24 hours.',
   ])('recorded restriction is a hold and cannot earn water-in credit: %s', (irrigationNotes) => {
-    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
-      .toMatchObject({
-        wateringHold: true,
-        waterInRequired: true,
-        needsReview: true,
-        creditableWaterIn: false,
-      });
+    const aftercare = buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]);
+    expect(aftercare).toMatchObject({
+      wateringHold: true,
+      waterInRequired: true,
+      needsReview: true,
+      creditableWaterIn: false,
+    });
+    expect(aftercare.watering).toContain(irrigationNotes);
+    expect(aftercare.watering).toMatch(/Confirm the amount and timing for watering-in/);
+    expect(aftercare.watering).not.toMatch(/does not include a specific amount or timing/);
   });
 
   test.each([
