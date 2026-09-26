@@ -145,6 +145,7 @@ const DEDICATED_SERVICE_PROFILES = new Map(Object.entries({
   one_time_pest_control: ['pest', null], pest_initial_cleanout: ['pest', null], pest_re_service: ['pest', null],
   pest_rodent_quarterly: ['pest', null], pest_termite_bait_quarterly: ['pest', null],
   lawn_care_monthly: ['lawn', null], lawn_care_recurring: ['lawn', null],
+  lawn_fertilization: ['lawn', null], palm_treatment: ['tree_shrub', null],
   lawn_care_6week: ['lawn', null], lawn_care_quarterly: ['lawn', null],
   lawn_re_service: ['lawn', 'one_time_lawn_treatment'],
   lawn_care_one_time: ['lawn', 'one_time_lawn_treatment'],
@@ -157,15 +158,19 @@ const DEDICATED_SERVICE_PROFILES = new Map(Object.entries({
 const DEDICATED_FINDINGS_FAMILIES = new Map(Object.entries({
   one_time_lawn_treatment: 'lawn', tree_shrub: 'tree_shrub',
 }));
+const EXISTING_SHARED_PROFILES = new Map([
+  ['termite_pretreatment', 'termite_treatment'], ['waveguard_membership', null],
+]);
 
 function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   const remaining = selectRemainingServicePrompt(context, 'main');
   if (remaining) return `# ${REMAINING_SERVICE_PROMPT_VERSION}\n\n${remaining}`;
   let serviceLine = null;
   if (context.serviceKey) {
-    // This established typed report is distinct from the slab certificate.
-    // Preserve its existing writer rather than guessing a liquid/foam module.
-    if (context.serviceKey === 'termite_pretreatment' && context.findingsType === 'termite_treatment') return sharedPrompt;
+    // Preserve established typed pretreatment and mixed membership writers
+    // without guessing a liquid/foam treatment or a single membership family.
+    if (EXISTING_SHARED_PROFILES.has(context.serviceKey)
+      && context.findingsType === EXISTING_SHARED_PROFILES.get(context.serviceKey)) return sharedPrompt;
     const profile = DEDICATED_SERVICE_PROFILES.get(context.serviceKey);
     if (!profile) return null;
     if (Object.hasOwn(context, 'findingsType') && context.findingsType !== profile[1]) return null;

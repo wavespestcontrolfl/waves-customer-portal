@@ -1,4 +1,5 @@
 const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
+const { ALL_LISTS, CUTOVER_IN_FLIGHT_KEYS } = require('../config/completion-lane-registry');
 
 const shared = `# Shared writer
 ## HARD CONSTRAINTS
@@ -7,6 +8,13 @@ Keep provenance and never invent an observation.
 Old examples and unrelated service guidance.`;
 
 describe('service-specific main report writer selection', () => {
+  test.each([
+    ...ALL_LISTS.recurring_generic_by_design,
+    ...ALL_LISTS.one_time_generic_by_design,
+    ...Object.keys(CUTOVER_IN_FLIGHT_KEYS).filter((key) => CUTOVER_IN_FLIGHT_KEYS[key].before === 'generic'),
+  ])('the declared generic report lane %s retains a writer', (serviceKey) => {
+    expect(selectReportCopyPrompt(shared, 'Old label', { serviceKey, findingsType: null })).not.toBeNull();
+  });
   test.each([
     ['Every 6 Weeks Lawn Care Service', 'LAWN v5', 'LAWN'],
     ['Quarterly Pest Control Service', 'RECURRING PEST v1', 'PEST'],
