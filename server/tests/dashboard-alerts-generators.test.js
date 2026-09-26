@@ -673,8 +673,8 @@ describe('Action Inbox generators', () => {
     });
     const { alerts } = await computeDashboardAlertsUncached();
     expect(alerts.find((a) => a.id === 'ar_overdue_60').kind).toBe('alert');
-    // Opens the Overdue view oldest-first (the page reads ?filter=/?sort=), not the unfiltered list.
-    expect(alerts.find((a) => a.id === 'ar_overdue_60').href).toBe('/admin/invoices?filter=overdue&sort=oldest');
+    // Opens the AR aging that shares its predicate, not the unfiltered invoice list.
+    expect(alerts.find((a) => a.id === 'ar_overdue_60').href).toBe('/admin/billing-recovery');
     expect(alerts.find((a) => a.id === 'leads_awaiting_contact').kind).toBe('action');
   });
 

@@ -167,8 +167,10 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         count,
         amount: parseFloat(overdue60.amount || 0),
         label: `${count} invoice${count === 1 ? '' : 's'} 60+ days overdue`,
-        // Overdue view, oldest first — the 60+ day invoices lead the list.
-        href: '/admin/invoices?filter=overdue&sort=oldest',
+        // Billing Recovery's AR aging reads the same paid_at-IS-NULL predicate
+        // (getOutstandingBalances); the invoice list's Overdue filter drops
+        // statuses this count keeps, so it could open short of the count.
+        href: '/admin/billing-recovery',
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] ar_overdue_60: ${err.message}`); }

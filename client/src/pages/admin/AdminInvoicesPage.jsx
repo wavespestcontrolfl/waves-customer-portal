@@ -978,32 +978,6 @@ export function invoiceCreatedSendFailedToast(
   const label = invoiceNumber ? `Invoice ${invoiceNumber}` : "Invoice";
   return `${label} created but not ${action} — ${err?.message || "send failed"}. ${recovery}`;
 }
-// ?filter= / ?sort= deep links (dashboard AR cards): only a key the page's
-// own control offers is honoured; anything else falls back to the default.
-export const INVOICE_LIST_FILTERS = ["all", "overdue", "unpaid", "paid", "prepaid", "needs_receipt", "draft", "archived"];
-export const INVOICE_LIST_SORTS = ["newest", "oldest", "amount_high", "amount_low"];
-export function listParamValue(value, allowed) {
-  return allowed.includes(value) ? value : allowed[0];
-}
-// Seeds a list control from the URL and follows later URL changes; a pick
-// on the page drops the param so a reload or Back doesn't resurrect the
-// deep link's value over the operator's choice.
-function useUrlSeededListParam(searchParams, setSearchParams, key, allowed) {
-  const urlValue = searchParams.get(key);
-  const [value, setValue] = useState(() => listParamValue(urlValue, allowed));
-  useEffect(() => {
-    if (urlValue) setValue(listParamValue(urlValue, allowed));
-  }, [urlValue, allowed]);
-  const change = (next) => {
-    setValue(next);
-    if (searchParams.has(key)) {
-      const params = new URLSearchParams(searchParams);
-      params.delete(key);
-      setSearchParams(params, { replace: true });
-    }
-  };
-  return [value, change];
-}
 export function buildInvoiceListParams({
   limit = 100,
   pageNo = 1,
@@ -1597,9 +1571,9 @@ function InvoiceList({
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [filter, changeFilter] = useUrlSeededListParam(searchParams, setSearchParams, "filter", INVOICE_LIST_FILTERS);
+  const [filter, setFilter] = useState("all");
   const [datePeriod, setDatePeriod] = useState("all");
-  const [sort, changeSort] = useUrlSeededListParam(searchParams, setSearchParams, "sort", INVOICE_LIST_SORTS);
+  const [sort, setSort] = useState("newest");
   const [query, setQuery] = useState("");
   // The list fetch follows the search box by 300 ms (the customer search in
   // CreateInvoice already does) and only the newest response paints, so fast
@@ -2264,7 +2238,7 @@ function InvoiceList({
           label="Filter"
           disabled={batchSending}
           value={filter}
-          onChange={changeFilter}
+          onChange={setFilter}
           options={[
             {
               key: "all",
@@ -2332,7 +2306,7 @@ function InvoiceList({
           label="Sort"
           disabled={batchSending}
           value={sort}
-          onChange={changeSort}
+          onChange={setSort}
           options={[
             {
               key: "newest",
@@ -2456,7 +2430,7 @@ function InvoiceList({
                   className="mt-3"
                   onClick={() => {
                     setQuery("");
-                    changeFilter("all");
+                    setFilter("all");
                     setDatePeriod("all");
                   }}
                 >
