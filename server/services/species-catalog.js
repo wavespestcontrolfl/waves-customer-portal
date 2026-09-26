@@ -197,7 +197,7 @@ function nextPhoto(id) {
   if (!node) return null;
   if (node.next_photo) return node.next_photo;
   if (node.level === 'entry' && Array.isArray(node.look_alikes) && node.look_alikes[0]) {
-    return { ask: node.look_alikes[0].next_photo, why: node.difference || null };
+    return { ask: node.look_alikes[0].next_photo, why: node.look_alikes[0].difference || null };
   }
   return null;
 }

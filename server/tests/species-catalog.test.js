@@ -399,10 +399,11 @@ describe('loader API surface', () => {
     expect(np.why.length).toBeGreaterThan(0);
   });
 
-  test('nextPhoto falls back to the first look-alike photo for an entry', () => {
+  test('nextPhoto falls back to the first look-alike photo for an entry, with its rationale (Codex r3 P1)', () => {
     const np = catalog.nextPhoto('fire-ant');
-    expect(np).toBeTruthy();
-    expect(np.ask.length).toBeGreaterThan(0);
+    const firstLookAlike = catalog.getEntry('fire-ant').look_alikes[0];
+    expect(np).toEqual({ ask: firstLookAlike.next_photo, why: firstLookAlike.difference });
+    expect(np.why).toBeTruthy();
   });
 
   test('lookAlikes resolves each pair, leaving node null for an unbuilt cross-worker slug', () => {
