@@ -225,6 +225,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['The product poses no concerns for children.', ''],
     ['The treatment is perfectly fine around children and pets.', ''],
     ['Está bien para sus mascotas.', ''],
+    ['Your pets will not get sick from this pesticide.', ''],
+    ['Sus mascotas no se enfermarán.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -258,6 +260,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['You may re-enter at sunrise.', ''],
     ['Stay off the treated lawn until dark.', ''],
     ['Avoid going outside until 4 PM after treatment.', ''],
+    ['Keep your pets inside until 4 PM.', 'When is my appointment?'],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
@@ -1581,6 +1584,9 @@ describe('looksLikeEmergency', () => {
     "I found bait in the roach's mouth",
     'I am not allergic; I just need the wasp nest removed',
     'There was no allergic reaction after the sting',
+    "I don't need a doctor; I just need the wasp nest removed",
+    'No necesito un médico, solo control de plagas',
+    'I ate lunch\nWhich bug spray do you use?',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });

@@ -150,9 +150,15 @@ const CONTACT_EXPOSURE_RE = new RegExp(`\\b${PRODUCT_NOUN}(?![a-zñáéíóú])[
 // reaction", "no tuvo reacción") is not an emergency signal.
 const NEGATED_ALLERGY_RE = /\b(?:not|no|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|none|no\s+es|no\s+hubo|no\s+tuvo|no\s+tiene|sin|nunca)\s+(?:(?:an?|any|real|serious|major|known|signs?\s+of|ninguna?|alguna?)\s+){0,2}(?:allergic(?:\s+reactions?)?|allerg(?:y|ies)|reactions?|al[eé]rgic[oa]s?|alergias?|reacci[oó]n(?:es)?(?:\s+al[eé]rgicas?)?)(?![a-zñáéíóú])/gi;
 
+// "I don't need a doctor" / "No necesito un médico" is a denial, not a request.
+const NEGATED_NEED_RE = /\b(?:don'?t|do\s+not|doesn'?t|does\s+not|no|not|never|won'?t)\s+(?:\w+\s+)?need\s+(?:a\s+|an\s+|the\s+|to\s+(?:see|go\s+to|call)\s+(?:a\s+|an\s+|the\s+)?)?(?:doctor|hospital|ambulance|er|medical\s+\w+)\b|\bno\s+(?:\w+\s+)?necesit\w*\s+(?:un\s+|una\s+|ir\s+al\s+)?(?:m[eé]dico|doctor|hospital|ambulancia)(?![a-zñáéíóú])/gi;
+
 function looksLikeEmergency(text) {
-  const t = String(text || '').replace(NEGATED_ALLERGY_RE, ' ');
-  return EMERGENCY_RE.test(t) || INGESTION_RE.test(t) || EAT_EXPOSURE_RE.test(t) || CONTACT_EXPOSURE_RE.test(t)
+  const t = String(text || '').replace(NEGATED_ALLERGY_RE, ' ').replace(NEGATED_NEED_RE, ' ');
+  // Exposure shapes are judged one turn (line) at a time — "I ate lunch" in
+  // history must not pair with "Which bug spray do you use?" now.
+  const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn));
+  return EMERGENCY_RE.test(t) || exposure
     || (BITE_STING_RE.test(t) && REACTION_RE.test(t.replace(NEGATED_REACTION_RE, ' ')));
 }
 
@@ -322,8 +328,11 @@ const SAFETY_SUBJECT_WORDS = '(?:your\\s+|the\\s+|any\\s+|sus\\s+|los\\s+|las\\s
 const NOMINAL_NO_IMPACT_RE = new RegExp(`\\b(?:no|zero|without|poses?\\s+no|presents?\\s+no|has\\s+no|have\\s+no|(?:won'?t|will\\s+not|doesn'?t|does\\s+not|don'?t|do\\s+not|not|shouldn'?t|should\\s+not)\\s+(?:have|pose|cause|create|present|be)|no\\s+(?:tiene|tienen|tendr[aá]n?|representa|representan|causa|causan|genera|generan|produce|producen))\\s+(?:(?:any|an?|real|significant|major|known|negative|adverse|ning[uú]n|ninguna|alg[uú]n|alguna)\\s+){0,2}(?:effects?|impacts?|concerns?|problems?|issues?|worr\\w*|trouble|consequences?|efectos?|impactos?|problemas?|preocupaci\\w*|consecuencias?)\\s+(?:on|for|to|with|in|en|para|sobre|a)\\s+${SAFETY_SUBJECT_WORDS}\\b`, 'i');
 // "Perfectly fine around children and pets" / "está bien para sus mascotas".
 const FINE_AROUND_SUBJECT_RE = new RegExp(`\\b(?:fine|okay|ok|alright|all\\s+right|no\\s+problem|no\\s+issue|bien|no\\s+pasa\\s+nada)\\s+(?:(?:to\\s+be|to\\s+use|to\\s+have)\\s+)?(?:around|for|with|near|by|para|con|cerca\\s+de|alrededor\\s+de)\\s+${SAFETY_SUBJECT_WORDS}\\b`, 'i');
+// Subject-first guarantees: "Your pets will not get sick from this",
+// "Sus mascotas no se enfermarán".
+const SUBJECT_FIRST_NO_HARM_RE = new RegExp(`\\b${SAFETY_SUBJECT_WORDS}\\s+(?:(?:will|would|should|can|could|are|is|do|does)\\s*)?(?:not|n'?t|never)\\s+(?:\\w+\\s+){0,2}?(?:sick|ill|hurt|harmed|affected|poisoned|bothered|irritated|injured|at\\s+risk|in\\s+danger|have\\s+(?:a\\s+)?(?:problem|reaction|issue)s?)\\b|\\b${SAFETY_SUBJECT_WORDS}\\s+no\\s+(?:se\\s+)?(?:enferm\\w*|sufr\\w*|ser[aá]n?\\s+afectad\\w*|correr[aá]n?\\s+(?:ning[uú]n\\s+)?riesgo|tendr[aá]n?\\s+(?:ning[uú]n\\s+)?problema)`, 'i');
 function safetyClaimIn(text) {
-  return POSITIVE_SAFETY_RE.test(text) || NEGATED_ACTION_ON_SUBJECT_RE.test(text) || NOMINAL_NO_IMPACT_RE.test(text) || FINE_AROUND_SUBJECT_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
+  return POSITIVE_SAFETY_RE.test(text) || NEGATED_ACTION_ON_SUBJECT_RE.test(text) || NOMINAL_NO_IMPACT_RE.test(text) || FINE_AROUND_SUBJECT_RE.test(text) || SUBJECT_FIRST_NO_HARM_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
 }
 // Model typography (non-breaking / Unicode hyphens, curly quotes, NBSP) is
 // folded to ASCII once, before any matcher runs — "non‑toxic" (U+2011) must
@@ -468,8 +477,10 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawC
   // "tell me about your treatment" must not make "About 2 hours." (answering
   // "How long is the inspection?") a re-entry figure.
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${activeMessage}`);
+  const physicalReply = t.replace(DIGITAL_ACCESS_RE, ' ');
   if (!treatmentContext && !INTAKE_TREATMENT_CONTEXT_RE.test(t) && SCHEDULING_DURATION_RE.test(activeMessage)
-    && !ACCESS_SIGNAL_RE.test(physicalActive) && !ACCESS_TOPIC_RE.test(physicalActive)) return false;
+    && !ACCESS_SIGNAL_RE.test(physicalActive) && !ACCESS_TOPIC_RE.test(physicalActive)
+    && !ACCESS_SIGNAL_RE.test(physicalReply) && !ACCESS_TOPIC_RE.test(physicalReply)) return false;
   return fixedTimingClaim(t, contextText, treatmentContext, activeMessage);
 }
 
