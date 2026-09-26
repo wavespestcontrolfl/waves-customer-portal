@@ -713,3 +713,71 @@ describe('schedule-quality alert reconciliation is the nightly band\'s alone (co
     expect(refreshScheduleQualityAlerts).toHaveBeenCalledWith({ dates: BAND, now: NOW }, db);
   });
 });
+
+describe('the baseline is certified with Google\'s real legs when it IS Google\'s order (codex pre-push P1)', () => {
+  // a (09:00, unpositioned) and b (10:00–11:00, numbered 2): stored reads
+  // b,a; the promised-window baseline is a,b — exactly Google's (lng-sorted)
+  // order, and every order here totals the same 6000 m, so nothing clears
+  // the floor and the fallback write is the only thing that could happen.
+  // The model's legs are 0 minutes (feasible); Google's REAL legs are not:
+  // 30 min out, then 200 min to b, which misses its 11:00 deadline.
+  const day = () => [
+    stop('a', { window_start: '09:00', route_order: null, lng: 1 }),
+    stop('b', { window_start: '10:00', window_end: '11:00', route_order: 2, lng: 2 }),
+  ];
+  const googleWithLegs = (legMinutes) => async (stops) => ({
+    orderedStops: [...stops].sort((p, q) => p.lng - q.lng),
+    legs: legMinutes.map((durationMinutes) => ({ durationMinutes })),
+    totalDistanceMeters: 12345,
+    totalDurationSeconds: 600,
+    source: 'google_routes_api',
+  });
+  const FIT_GATES = ['GATE_ROUTE_REORDER_WINDOW_FIT', 'GATE_DRIVE_TIME_CALIBRATION'];
+  afterEach(() => { for (const g of FIT_GATES) delete process.env[g]; });
+
+  test('window-fit fallback OFF: Google\'s legs rejected the identical order — the baseline is never written on legless travel', async () => {
+    stopsByDate[DAY] = day();
+    RouteOptimizer.optimizeRoute.mockImplementationOnce(googleWithLegs([30, 200, 10]));
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    // The day keeps its ORIGINAL skip (window-fit off: Google's order is
+    // judged by the floor alone, exactly as before this lane).
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'BELOW_MIN_SAVINGS', saved_meters: 0 });
+    expect(ledger().reorders).toEqual([]);
+  });
+
+  test('window-fit fallback ON: same — the identical order Google\'s legs rejected is never written', async () => {
+    for (const g of FIT_GATES) process.env[g] = 'true';
+    stopsByDate[DAY] = day();
+    RouteOptimizer.optimizeRoute.mockImplementationOnce(googleWithLegs([30, 200, 10]));
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({
+      reason: 'BELOW_MIN_SAVINGS', conflict: 'WINDOW_FIT_CONFLICT',
+    });
+    expect(ledger().reorders).toEqual([]);
+  });
+
+  test('control: when Google\'s real legs are feasible the same baseline IS written', async () => {
+    stopsByDate[DAY] = day();
+    RouteOptimizer.optimizeRoute.mockImplementationOnce(googleWithLegs([30, 20, 10]));
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(res.applied).toBe(1);
+    expect(trxUpdates).toEqual([{ id: 'a', route_order: 1 }, { id: 'b', route_order: 2 }]);
+    expect(ledger().reorders[0]).toMatchObject({ source: 'promised_window' });
+  });
+
+  test('canonicalizeBaselineOrder: Google\'s legs are used only when they align (identical order); a different order is certified on the model', () => {
+    const stops = day();
+    const bad = { legs: [30, 200, 10].map((durationMinutes) => ({ durationMinutes })), source: 'google_routes_api' };
+    expect(_internals.canonicalizeBaselineOrder(RouteOptimizer, stops, { ...bad, orderedStops: [stops[0], stops[1]] })).toBeNull();
+    // Google drove b,a — its legs describe a different drive, so the a,b
+    // baseline is certified on the model (feasible) exactly as without Google.
+    expect(_internals.canonicalizeBaselineOrder(RouteOptimizer, stops, { ...bad, orderedStops: [stops[1], stops[0]] }))
+      .toMatchObject({ orderedStops: [expect.objectContaining({ id: 'a' }), expect.objectContaining({ id: 'b' })] });
+    expect(_internals.canonicalizeBaselineOrder(RouteOptimizer, stops))
+      .toMatchObject({ orderedStops: [expect.objectContaining({ id: 'a' }), expect.objectContaining({ id: 'b' })] });
+  });
+});

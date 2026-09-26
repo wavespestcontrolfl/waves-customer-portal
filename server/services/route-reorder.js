@@ -958,11 +958,30 @@ function boundedDateList(rawDates, today, lastDate) {
  *     plain `null`, fail closed, the day keeps its original skip reason.
  * Only an order the guard accepts AS IS is returned; its window-fit repair
  * (when the gates run one) is never substituted for the baseline.
+ *
+ * `googleRun` ({ orderedStops, legs, source } — Google's result for this
+ * tech-day, null when Google never ran): Google's legs are the best travel
+ * truth the day has, so the baseline is certified with them wherever they
+ * describe the baseline's own drive. Legs are POSITIONAL (legs[i] = the
+ * drive into Google's i-th stop from the one before it, HQ first), so they
+ * align to the baseline exactly when the baseline IS Google's sequence —
+ * any other order has at least one consecutive pair Google never drove.
+ * That identical-order case is certified with Google's legs and source, so
+ * an order Google's real legs already rejected (WINDOW_FIT_CONFLICT) is
+ * rejected here too and never written on the model's shorter legless
+ * travel (codex pre-push P1). A different order has no aligned live legs
+ * and is certified on the shared model — exactly how the guard certifies
+ * any non-Google order (its own window-fit repair included). Legless
+ * certification is otherwise only for a day Google never ran on.
  */
-function canonicalizeBaselineOrder(RouteOptimizer, techStops) {
+function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null) {
   const orderedStops = promisedWindowOrder(techStops);
+  const ids = (order) => order.map((s) => s.id).join(',');
+  const googleAligned = !!googleRun && ids(googleRun.orderedStops || []) === ids(orderedStops);
   const guard = chooseWindowSafeOrder({
-    RouteOptimizer, googleOrder: orderedStops, sourceStops: techStops, googleSource: 'promised_window',
+    RouteOptimizer, googleOrder: orderedStops, sourceStops: techStops,
+    googleSource: googleAligned ? googleRun.source : 'promised_window',
+    legs: googleAligned ? googleRun.legs : null,
   });
   if (UNCERTIFIABLE_REASONS.has(guard.reason)) return null;
   if (guard.conflict === 'WINDOW_ORDER_CONFLICT') return { conflict: 'WINDOW_ORDER_CONFLICT' };
@@ -1218,8 +1237,10 @@ function classifyWriteError(writeErr, { summary, entryBase }) {
  * true, failed } once this function has itself pushed the outcome (applied,
  * dry-run plan, or a classified write failure) onto `summary`.
  */
-async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates }) {
-  const baseline = canonicalizeBaselineOrder(RouteOptimizer, techStops);
+async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, baseline: certified }) {
+  // `certified`: the baseline the caller already certified against Google's
+  // run (canonicalFloorBaseline); absent on the paths where Google never ran.
+  const baseline = certified !== undefined ? certified : canonicalizeBaselineOrder(RouteOptimizer, techStops);
   if (!baseline) return { handled: false };
   if (baseline.conflict) {
     // A DISTINCT, reported skip — never silently falls through to this
@@ -1330,9 +1351,9 @@ function techDayCanonicalizeState({ canonicalizeStaleEnabled, techStops, dayFroz
  *  from: the baseline's own distance, else the stored order's (byte-identical
  *  to today when not canonicalizing). A conflicted baseline ({ conflict }, no
  *  `.meters`) is not a usable comparator either — same fallback as none. */
-function canonicalFloorBaseline(RouteOptimizer, { repair, staleReasons, techStops, beforeMeters }) {
+function canonicalFloorBaseline(RouteOptimizer, { repair, staleReasons, techStops, beforeMeters, googleRun }) {
   const canonicalBaseline = (!repair && staleReasons.length > 0)
-    ? canonicalizeBaselineOrder(RouteOptimizer, techStops) : null;
+    ? canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun) : null;
   const floorBaselineMeters = canonicalBaseline?.meters != null ? canonicalBaseline.meters : beforeMeters;
   return { canonicalBaseline, floorBaselineMeters };
 }
@@ -1549,9 +1570,9 @@ async function runRouteReorder(opts = {}, conn = db) {
           // tech-day (applied, a dry-run plan entry, or a classified write
           // failure), or `skipEntry` is recorded instead (after `onSkip`) —
           // exactly the day's original skip. Callers always `continue`.
-          const canonicalizeOrSkip = async (attempt, skipEntry, onSkip) => {
+          const canonicalizeOrSkip = async (attempt, skipEntry, onSkip, certified) => {
             if (attempt) {
-              const outcome = await attemptCanonicalizeWrite(canonicalizeArgs);
+              const outcome = await attemptCanonicalizeWrite({ ...canonicalizeArgs, ...certified });
               if (outcome.handled && outcome.failed) status = 'completed_with_errors';
               if (outcome.handled) return;
             }
@@ -1673,6 +1694,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // own distance, byte-identical to today).
           const { canonicalBaseline, floorBaselineMeters } = canonicalFloorBaseline(RouteOptimizer, {
             repair, staleReasons, techStops, beforeMeters,
+            googleRun: repair ? null : { orderedStops: result.orderedStops, legs: result.legs, source: result.source },
           });
           // Savings floor for GOOGLE's order. Fallback ON + a guard conflict
           // defers the floor to the fallback's own check below: Google
@@ -1697,7 +1719,10 @@ async function runRouteReorder(opts = {}, conn = db) {
           // below-floor exits share one decision: write the baseline if it
           // differs from stored and is drivable, else fall through to the
           // ORIGINAL skip below (no baseline write, exactly today's outcome).
-          const canonicalizeFallbackOrSkip = (skipEntry) => canonicalizeOrSkip(canonicalBaseline != null, skipEntry);
+          // The baseline certified against Google's own run above — never
+          // re-certified legless (see canonicalizeBaselineOrder's googleRun).
+          const canonicalizeFallbackOrSkip = (skipEntry) => canonicalizeOrSkip(canonicalBaseline != null, skipEntry, null,
+            { baseline: canonicalBaseline });
           if (!repair && Math.max(0, floorBaselineMeters - afterMeters) < floorMeters
               && (guardOutcome.conflict === null || guardOutcome.gateOff === 'WINDOW_FIT')) {
             await canonicalizeFallbackOrSkip({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
