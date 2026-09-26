@@ -38,6 +38,7 @@
 const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 // A due time typed by the office arrives either as an ISO instant (the
@@ -702,7 +703,8 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   // claim-holding pass must not sit through the SDK's per-attempt timeouts.
   const response = await anthropic.messages.create({
     model: MODELS.FLAGSHIP,
-    max_tokens: 2000,
+    ...anthropicEffortConfig(MODELS.FLAGSHIP),
+    max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
     messages: [{ role: 'user', content: buildCommitmentsPrompt({ transcript, callStartedAt }) }],
   }, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 });
   const text = (response?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
