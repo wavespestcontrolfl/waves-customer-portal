@@ -226,8 +226,8 @@ CI and Codex results are recorded on PR #3980.
 
 Opening the PR also invoked the repository's existing Railway integration,
 which automatically created a PR preview. Read-only configuration inspection
-confirmed a dedicated preview Postgres connection, `GATE_CRON_JOBS=false`,
-`GATE_TWILIO_SMS=false` and `SMS_PREVIEW_MODE=true`. No credentials were printed
+confirmed a dedicated preview Postgres connection, `GATE_CRON_JOBS=false` and
+`GATE_TWILIO_SMS=false`. No credentials were printed
 or copied to a checkout, and no database/provider request was made by this
 session. This automatic preview is separate from local frontend verification;
 it must not be described as "no deployment occurred." Production and merge

@@ -7,10 +7,82 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
 const { anthropicText } = require('../llm/call');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, validCalendarDate } = require('../../utils/datetime-et');
 const { taxPeriodFor } = require('../../utils/tax-period');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const anthropic = new Anthropic();
+
+// A reply of {"total":"unknown",...} is a non-null, truthy string that slips
+// past a bare `== null` check, and then wins `amount = parsedInvoice?.total
+// || parseFloat(...) || 0` below (the string "unknown" is truthy) — no
+// crash, `amount > 0` is just false on a NaN-ish comparison, so the expense
+// is silently skipped ("no_amount") while the call is recorded a success
+// (Codex r10 on #4884). `total`, when present, must be usable as a number —
+// a plain finite number, or a strict numeric string (the only string shape
+// `amount > 0` and the numeric `expenses.amount` column downstream actually
+// coerce correctly).
+function isUsableInvoiceTotal(total) {
+  if (total == null) return true;
+  const n = typeof total === 'number' ? total
+    : (typeof total === 'string' && /^-?\d+(\.\d+)?$/.test(total.trim()) ? Number(total) : NaN);
+  // expenses.amount is decimal(12,2): a larger total (or a digit run that
+  // converts to Infinity) failed the expense insert after acceptance (Codex r21).
+  return Number.isFinite(n) && Math.abs(n) < 1e10;
+}
+
+// The one read of the extraction: everything downstream uses these values,
+// never the raw reply. A present field that is off the prompt's contract is
+// dropped to null (so the classifier's own figure is used instead) and marks
+// the answer degraded: an invalid invoice_date used to become today's date
+// (wrong expense_date / tax_year), and an object invoice_number was written
+// into the expense description as "#[object Object]" (Codex-class gap on
+// #4884). A zero or negative total is a real value (e.g. a credit memo) that
+// simply creates no expense. Returns { invoice, degraded }; invoice is null
+// when the reply is not an object.
+const INVOICE_NUMBER_MAX = 64;
+function readParsedInvoice(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { invoice: null, degraded: true };
+  let degraded = false;
+  const invoice = { ...raw };
+  const present = (v) => v !== undefined && v !== null;
+
+  invoice.total = null;
+  if (present(raw.total)) {
+    if (isUsableInvoiceTotal(raw.total)) invoice.total = Number(raw.total);
+    else degraded = true;
+  }
+  invoice.invoice_number = null;
+  if (present(raw.invoice_number)) {
+    const n = typeof raw.invoice_number === 'string' || (typeof raw.invoice_number === 'number' && Number.isFinite(raw.invoice_number))
+      ? String(raw.invoice_number).trim() : '';
+    // A real invoice number is short; an OCR run-on long enough to push the
+    // expense description past its varchar(300) failed the insert after the
+    // call was accepted (Codex r19 on #4884).
+    if (n && n.length <= INVOICE_NUMBER_MAX) invoice.invoice_number = n;
+    else degraded = true;
+  }
+  invoice.invoice_date = null;
+  if (present(raw.invoice_date)) {
+    // The shared calendar check (the same one taxPeriodFor applies): a hand-
+    // rolled month/day check let years 0000-0099 through, which Date.UTC
+    // remaps to 19xx, and taxPeriodFor then returned null and the tax-period
+    // destructuring threw (Codex r20 on #4884).
+    const date = typeof raw.invoice_date === 'string' ? validCalendarDate(raw.invoice_date.trim()) : null;
+    if (date) invoice.invoice_date = date;
+    else degraded = true;
+  }
+  invoice.line_items = [];
+  if (present(raw.line_items)) {
+    if (Array.isArray(raw.line_items)) {
+      invoice.line_items = raw.line_items.filter((l) => l && typeof l === 'object' && !Array.isArray(l));
+      if (invoice.line_items.length !== raw.line_items.length) degraded = true;
+    } else degraded = true;
+  }
+  // Neither a total nor an invoice number: the extraction answered nothing.
+  if (invoice.total === null && !invoice.invoice_number) degraded = true;
+  return { invoice, degraded };
+}
 
 function parseClaudeJson(text) {
   try {
@@ -55,7 +127,7 @@ async function processVendorInvoice(email, classification) {
         is_invoice: true,
       });
 
-      const parseResponse = await anthropic.messages.create({
+      const parseResponse = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1024),
@@ -85,9 +157,15 @@ async function processVendorInvoice(email, classification) {
             },
           ],
         }],
-      });
+      }), { laneId: 'invoice_pdf' });
 
-      parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
+      const rawInvoice = parseClaudeJson(anthropicText(parseResponse));
+      if (!rawInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
+      else {
+        const read = readParsedInvoice(rawInvoice);
+        if (read.degraded) ledgerCallRejected(parseResponse, 'schema_invalid');
+        parsedInvoice = read.invoice;
+      }
 
       if (parsedInvoice) {
         await db('email_attachments').where({ id: pdfAttachment.id }).update({
@@ -100,14 +178,20 @@ async function processVendorInvoice(email, classification) {
   }
 
   // Create expense record
-  const amount = parsedInvoice?.total || parseFloat(classification.extracted?.invoice_amount) || 0;
+  // `??`, not `||`: a parsed total of 0 (a zero-total invoice or credit memo)
+  // is the extraction's answer, not a missing one — `||` fell through to the
+  // classifier's amount and created an expense for it (Codex r18 on #4884).
+  const amount = parsedInvoice?.total ?? (parseFloat(classification.extracted?.invoice_amount) || 0);
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
   const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
   const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
   const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
-  const invoiceDate = invoiceDateValid
-    ? parsedDate.toISOString().split('T')[0]
-    : etDateString();
+  // The classifier's own date is not calendar-checked upstream: a date
+  // taxPeriodFor cannot place (e.g. year 0012) falls back to today — date and
+  // tax period together — instead of throwing before the email outcome is
+  // recorded (Codex r20 on #4884).
+  const candidateDate = invoiceDateValid ? parsedDate.toISOString().split('T')[0] : null;
+  const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   if (amount > 0) {
@@ -124,7 +208,7 @@ async function processVendorInvoice(email, classification) {
       let aiSuggestionNote = '';
       if (!categoryRow) {
         try {
-          const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
+          const ai = await autoCategorizeExpense(vendorName, (parsedInvoice ? parsedInvoice.line_items.map(l => (typeof l.description === 'string' ? l.description : '')).filter(Boolean).join('; ') : '') || email.subject, amount);
           if (ai?.categoryName) aiSuggestionNote = ` AI-suggested category: ${ai.categoryName} (unconfirmed).`;
         } catch (err) {
           logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
@@ -141,11 +225,14 @@ async function processVendorInvoice(email, classification) {
       }
 
       const [expense] = await db('expenses').insert({
-        description: `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`,
+        // Column limits (description varchar 300, vendor_name varchar 200): the
+        // vendor name and the classifier's own invoice number are not bounded
+        // upstream, so clip here rather than fail the insert.
+        description: `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`.slice(0, 300),
         amount,
         tax_deductible_amount: deductibleAmount,
         category_id: categoryRow?.id || null,
-        vendor_name: vendorName,
+        vendor_name: String(vendorName).slice(0, 200),
         expense_date: invoiceDate,
         tax_year: taxYear,
         quarter,
@@ -175,4 +262,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice };

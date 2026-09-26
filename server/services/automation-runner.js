@@ -119,12 +119,31 @@ async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancel
   return { sent: false, blocked: true, reason };
 }
 
+// OWNER RULING (2026-07-13, renewal-reminder.js): "renewal" language is
+// reserved for termite bonds, so the service_renewal sequence reaches only
+// customers with a termite_renewal_date on file — checked at enrollment, at
+// delivery, and in the Automations-tab segment query.
+function requiresTermiteBond(templateKey) {
+  return templateKey === 'service_renewal';
+}
+
 async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient }) {
   if (testRecipient) return null;
   const suppression = await activeAutomationSuppressionFor(template, recipient);
   if (suppression) {
     const reason = automationSuppressionReason(suppression);
     return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason: 'email_suppressed' });
+  }
+  if (requiresTermiteBond(template.key)) {
+    // Same termite-bond rule as enrollCustomer, re-read at delivery: an
+    // enrollment queued before that gate, or a bond cleared since, is
+    // cancelled here instead of sent.
+    const bond = enrollment.customer_id
+      ? await db('customers').where({ id: enrollment.customer_id }).first('termite_renewal_date')
+      : null;
+    if (bond?.termite_renewal_date) return null;
+    return blockSendAndCancelEnrollment({ enrollment, sendId,
+      reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
   }
   if (template.key !== 'payment_failed' || !enrollment.customer_id) return null;
   // SELECT * keeps this consumer deployable before the additive foundation
@@ -192,6 +211,9 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   if (!customer?.email) return { enrolled: false, reason: 'no email' };
   const normalizedEmail = String(customer.email || '').trim().toLowerCase();
   if (!normalizedEmail) return { enrolled: false, reason: 'no email' };
+  // A lead-email-only enrollment has no customer row, so it can have no
+  // termite bond (see the post-lock check in runEnrollment).
+  if (requiresTermiteBond(templateKey) && !customer.id) return { enrolled: false, reason: 'not_termite_bond' };
 
   const steps = await dbh('automation_steps')
     .where({ template_key: templateKey, enabled: true })
@@ -225,8 +247,14 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
     if (customer.id) {
       const fresh = await conn('customers')
         .where({ id: customer.id })
-        .first('id', 'email', 'first_name', 'last_name', 'deleted_at');
+        .first('id', 'email', 'first_name', 'last_name', 'deleted_at', 'termite_renewal_date');
       if (!fresh || fresh.deleted_at) return { enrolled: false, reason: 'customer gone' };
+      // Every enrollment path (manual trigger, segment send, executeAutomation)
+      // passes here. The bond is read off this post-lock row, not the caller's
+      // snapshot, which may not carry the column at all.
+      if (requiresTermiteBond(templateKey) && !fresh.termite_renewal_date) {
+        return { enrolled: false, reason: 'not_termite_bond' };
+      }
       const liveEmail = String(fresh.email || '').trim().toLowerCase();
       if (normalizedEmail !== liveEmail) {
         // Merge-specific evidence only (r30), checked across EVERY live
@@ -753,4 +781,5 @@ module.exports = {
   automationSuppressionGroupKey,
   automationSuppressionMatches,
   activeAutomationSuppressionFor,
+  requiresTermiteBond,
 };

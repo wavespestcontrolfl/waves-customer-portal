@@ -268,7 +268,7 @@ a{color:#0ea5e9;text-decoration:none}</style></head><body><div class="card">
 	<p>Tokens exchanged, persisted, and loaded in-memory. Mileage tracking is active.</p>
 	<div class="warn"><strong>Stored in the application database.</strong><br>
 	Token values are never rendered or logged. Keep Railway env vars as a fallback only.</div>
-<p style="margin-top:20px"><a href="/admin/mileage">&#8592; Back to Mileage Dashboard</a></p>
+<p style="margin-top:20px"><a href="/admin/tax">&#8592; Back to Taxes (open the Mileage tab there)</a></p>
 </div></body></html>`);
   } catch (err) {
     next(err);

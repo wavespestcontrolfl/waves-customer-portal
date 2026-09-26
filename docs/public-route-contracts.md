@@ -811,7 +811,11 @@ estimate+service+day, suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
-before either provider path; both provider paths re-read the row and repeat
+before either provider path — and, with the gate on or off, so does a row
+whose stored estimate-tool price the 2026-09-26 lookup guards refuse
+(legacy autofill hold, #4941: `rowHeldForLegacyAutofillPrice`; gate off it
+judges the row alone, read-free — its group siblings are judged only while
+the gate is on); both provider paths re-read the row and repeat
 the customer-viewable + call-side-hold check as the LAST step before the
 SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
 PDF render withholds the packet with the same generic 404 and releases the
@@ -849,9 +853,11 @@ quoted).)
 expired, I still want this" from the React estimate page's expired/
 not-found screen. Estimate token format gate (same slug-or-64-hex regex as
 the slots router), generic 404 — unknown token, malformed token, ineligible
-row, gate-off, and (while GATE_SEND_REQUIRES_SERVER_PRICING is on) a row or
+row, gate-off, (while GATE_SEND_REQUIRES_SERVER_PRICING is on) a row or
 group link that fails the engine-pricing-authority verdict (#3750; judged
-before the auto-grant claim, nothing burned) are indistinguishable — 5
+before the auto-grant claim, nothing burned), and — gate on or off — a row
+under the legacy autofill hold (#4941; gate off the row alone, its revivable
+siblings only while the gate is on) are indistinguishable — 5
 req/hr per-IP limit, dark
 behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
 gate is off so a dark probe sees only generic 404s, never a revealing 429,
@@ -1447,8 +1453,11 @@ owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)
 is the "Want us to come look first?" section's link to the SAME
 `/inspection/:token` self-booking page the recurring-lead new_lead email
-offers (`lead-consultation-email-block.js`) — this covers the estimate page
-only, never the email. Present only when: both gates are live; the estimate
+offers (`lead-consultation-email-block.js`). This entry covers the page
+field only; the gone-quiet follow-up email's own link
+(`estimate-email-consultation-offer.js`) reuses the same eligibility and is
+not part of this route's payload.
+Present only when: both gates are live; the estimate
 is in an open, customer-actionable state (never accepted/declined/expired/
 send_failed/unpublished/past-expiry, and never a staff draft or verified
 staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
@@ -1468,6 +1477,22 @@ the same one the email block uses) finds at least one open slot AT THIS
 ESTIMATE'S PROPERTY — the address the page resolved matches the estimate's
 (same street key, unit and zip); an out-of-area, unresolved, no-address,
 retired-catalog, no-open-times or other-property result omits the field.
+The probe is bounded, and either bound omits the field for that load: it
+is time-boxed at 3 s (`PROBE_BUDGET_MS` — a slower probe is abandoned, left
+to finish in the background, and nothing it resolves is used), and at most
+3 probes run at once per server process (`MAX_PROBES_IN_FLIGHT`, abandoned
+ones counted until their work settles — past the cap no probe starts).
+After the probe the estimate and the lead are re-read and every row-level
+rule above is re-judged on the fresh rows (`finalEligibility`, all from one
+read-only REPEATABLE READ snapshot so every check sees the same instant), so
+a status change, hold, re-link or contact edit that lands during the probe
+omits the field — and so does a change to what the page's booking address
+resolves from (the lead's own address, its trusted customer's stored address
+or coordinates, or which customer that is: `inspection-public.js`
+`bookingAddressInputs`, compared, never re-geocoded), or a booking that
+leaves the page's own lead-wide state no longer bookable (an assessment or
+visit booked meanwhile: `currentBookingState`, the same `readEligibility`
+the probe ran).
 Quote-first only: never on an estimate drafted from a visit
 (`estimate_data.scheduled_service_id`) or on a grouped estimate
 (`estimate_group_id`). Composed on the page's own first `/data` load only —
