@@ -1278,7 +1278,7 @@ async function replayCall(call, context) {
   // selects it — an operator relink outranks the phone lookup, an explicit
   // unlink is no known caller — never read straight off call.customer_id,
   // which can disagree with the live selection (carried from #4933 r3).
-  const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone).catch(() => null);
+  const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone, { db }).catch(() => null);
   const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
     call,
     customer: linkedCustomer,
