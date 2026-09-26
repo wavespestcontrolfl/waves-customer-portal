@@ -9,7 +9,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { match: { matched: false, reason: 'unmatched' }, liveRequest: null, adjustResult: null, adjustError: null, updateResult: null, updateError: null };
+const mockState = { match: { matched: false, reason: 'unmatched' }, liveRequest: null, adjustResult: null, adjustError: null, updateResult: null, updateError: null, claimUpdateError: null };
 
 jest.mock('../services/purchase-receipts/product-matcher', () => ({
   matchAmazonTitleToProduct: jest.fn(async () => mockState.match),
@@ -54,6 +54,7 @@ jest.mock('../models/db', () => {
       return res;
     };
     q.update = async (fields) => {
+      if (mockState.claimUpdateError && fields.movement_id !== undefined) throw mockState.claimUpdateError;
       const found = Object.values(dbState.lines).find((l) => l.id === q._cond?.id);
       if (found) Object.assign(found, fields);
       return found ? 1 : 0;
@@ -65,7 +66,22 @@ jest.mock('../models/db', () => {
     };
     return q;
   };
-  return jest.fn(fn);
+  const mockDb = jest.fn(fn);
+  // Simulates real knex transaction rollback for the purposes of this
+  // suite: a callback that throws restores purchase_receipt_lines to its
+  // pre-transaction state (mirroring an actual ROLLBACK undoing the claim
+  // insert along with everything after it), rather than a bespoke
+  // delete-on-failure compensation.
+  mockDb.transaction = async (cb) => {
+    const snapshot = JSON.parse(JSON.stringify(dbState.lines));
+    try {
+      return await cb(mockDb);
+    } catch (err) {
+      dbState.lines = snapshot;
+      throw err;
+    }
+  };
+  return mockDb;
 });
 
 const { processReceiptLine, classifyItem } = require('../services/purchase-receipts/receipt-processor');
@@ -80,6 +96,7 @@ beforeEach(() => {
   mockState.adjustError = null;
   mockState.updateResult = { movement: { id: 'mv-2' }, request: { id: 'req-1' } };
   mockState.updateError = null;
+  mockState.claimUpdateError = null;
   for (const k of Object.keys(dbState.lines)) delete dbState.lines[k];
   mockAdjustStock.mockClear();
   mockUpdateRestockRequest.mockClear();
@@ -194,17 +211,29 @@ describe('processReceiptLine', () => {
     expect(outcome).toEqual({ skipped: true, reason: 'no_shipment_key' });
   });
 
-  test('a restock/adjust failure rolls back the claim so the next run retries the line', async () => {
+  test('the movement (adjustStock) throwing rolls back the WHOLE transaction — no claim row remains, re-run logs once', async () => {
     mockState.match = { matched: true, product: taurus };
     mockState.adjustError = new Error('DB unavailable');
     const args = { email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 };
     await expect(processReceiptLine(args)).rejects.toThrow('DB unavailable');
-    expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toBeUndefined();
+    expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toBeUndefined(); // claim insert itself rolled back, not just left un-updated
     // A clean retry now succeeds and logs exactly once.
     mockState.adjustError = null;
     const retried = await processReceiptLine(args);
     expect(retried.status).toBe('logged');
     expect(mockAdjustStock).toHaveBeenCalledTimes(2); // one failed attempt + one successful retry
+  });
+
+  test('the claim\'s own movement_id update throwing rolls back too — no movement/claim persisted, re-run logs cleanly', async () => {
+    mockState.match = { matched: true, product: taurus };
+    mockState.claimUpdateError = new Error('update failed');
+    const args = { email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-3', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 };
+    await expect(processReceiptLine(args)).rejects.toThrow('update failed');
+    expect(dbState.lines['amazon|114-9578837-7732259|ship-3|1']).toBeUndefined(); // the claim insert is rolled back along with the failed update
+    mockState.claimUpdateError = null;
+    const retried = await processReceiptLine(args);
+    expect(retried.status).toBe('logged');
+    expect(mockAdjustStock).toHaveBeenCalledTimes(2); // one attempt whose write never persisted + one clean retry
   });
 
   test('no Order # on the email -> skipped, never inserted', async () => {

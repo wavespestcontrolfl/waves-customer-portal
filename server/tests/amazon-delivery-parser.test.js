@@ -1,13 +1,10 @@
 /**
  * purchase-receipts/amazon-delivery-parser.js — pure parsing of Amazon
  * "Delivered" order-confirmation emails into { orderNumber, shipmentId,
- * shipmentKey, items }, plus the sibling Ordered:/Shipped: item lookup used
- * for the itemless "N Lawn & Garden item(s)" template.
+ * shipmentKey, items }. (No sibling Ordered:/Shipped: lookup any more —
+ * removed; see the module header and sweep.js for why.)
  */
-const {
-  parseAmazonDeliveredEmail, parseAmazonOrderSiblingItems,
-  isAmazonDeliveredEmail, isAmazonOrderSiblingEmail,
-} = require('../services/purchase-receipts/amazon-delivery-parser');
+const { parseAmazonDeliveredEmail, isAmazonDeliveredEmail } = require('../services/purchase-receipts/amazon-delivery-parser');
 
 describe('isAmazonDeliveredEmail', () => {
   test('true only for order-update@amazon.com with a Delivered: subject', () => {
@@ -20,16 +17,6 @@ describe('isAmazonDeliveredEmail', () => {
   test('false for a non-Delivered subject from the same sender (e.g. "Shipped:", "Out for delivery")', () => {
     expect(isAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Shipped: your order' })).toBe(false);
     expect(isAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Out for delivery: your order' })).toBe(false);
-  });
-});
-
-describe('isAmazonOrderSiblingEmail', () => {
-  test('true for auto-confirm@amazon.com (Ordered:) and shipment-tracking@amazon.com (Shipped:)', () => {
-    expect(isAmazonOrderSiblingEmail({ from_address: 'auto-confirm@amazon.com' })).toBe(true);
-    expect(isAmazonOrderSiblingEmail({ from_address: 'Shipment-Tracking@Amazon.com' })).toBe(true);
-  });
-  test('false for order-update@amazon.com (that is the Delivered sender, not a sibling)', () => {
-    expect(isAmazonOrderSiblingEmail({ from_address: 'order-update@amazon.com' })).toBe(false);
   });
 });
 
@@ -200,36 +187,5 @@ describe('parseAmazonDeliveredEmail — itemless "N Lawn & Garden item(s)" templ
 
   test('"2 Lawn & Garden items" subject variant is still a Delivered email', () => {
     expect(isAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: 2 Lawn & Garden items' })).toBe(true);
-  });
-});
-
-describe('parseAmazonOrderSiblingItems', () => {
-  const orderNumber = '100-0000000-0000000';
-  const orderedEmail = {
-    from_address: 'auto-confirm@amazon.com', subject: 'Ordered: "Bora-Care..."',
-    body_text: `Order # ${orderNumber}\n\n* Bora-Care Termiticide/Insecticide, 1 Gallon\n  Quantity: 1\n`,
-  };
-
-  test('reads item blocks off a matching Ordered: sibling', () => {
-    expect(parseAmazonOrderSiblingItems(orderedEmail, orderNumber)).toEqual([{ title: 'Bora-Care Termiticide/Insecticide, 1 Gallon', quantity: 1 }]);
-  });
-
-  test('reads item blocks off a matching Shipped: sibling', () => {
-    const shippedEmail = { ...orderedEmail, from_address: 'shipment-tracking@amazon.com', subject: 'Shipped: "Bora-Care..."' };
-    expect(parseAmazonOrderSiblingItems(shippedEmail, orderNumber)).toEqual([{ title: 'Bora-Care Termiticide/Insecticide, 1 Gallon', quantity: 1 }]);
-  });
-
-  test('never reads from the Delivered sender itself (that is not a sibling)', () => {
-    const deliveredEmail = { ...orderedEmail, from_address: 'order-update@amazon.com' };
-    expect(parseAmazonOrderSiblingItems(deliveredEmail, orderNumber)).toEqual([]);
-  });
-
-  test('rejects a sibling whose OWN Order # does not match the expected one (no coincidental substring trust)', () => {
-    expect(parseAmazonOrderSiblingItems(orderedEmail, '999-9999999-9999999')).toEqual([]);
-  });
-
-  test('an unparseable sibling (no item blocks) gives up (empty array, never throws)', () => {
-    const empty = { ...orderedEmail, body_text: `Order # ${orderNumber}\n\nNothing to parse here.\n` };
-    expect(parseAmazonOrderSiblingItems(empty, orderNumber)).toEqual([]);
   });
 });

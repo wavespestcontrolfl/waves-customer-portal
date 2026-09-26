@@ -9,6 +9,14 @@
  * always sets — an automated writer's own provenance (e.g. the Amazon
  * delivery auto-restock lane's { source: 'amazon_delivery', orderNumber,
  * emailId, rawTitle }) without inventing a second movement-writing path.
+ *
+ * options.trx (adjustStock, updateRestockRequest): an already-open knex
+ * transaction to run on, instead of opening a new one — lets a caller that
+ * itself needs to be atomic with the movement (e.g. the Amazon delivery
+ * lane's claim-insert -> movement -> claim-update) wrap all three in ONE
+ * db.transaction rather than compensating by hand after the fact. Omitted
+ * (every existing caller), behavior is byte-for-byte unchanged: a fresh
+ * db.transaction is opened here exactly as before.
  */
 const crypto = require('crypto');
 const Joi = require('joi');
@@ -142,7 +150,7 @@ async function previewStockAdjustment(productId, raw, options = {}) {
 
 async function adjustStock(productId, raw, options = {}) {
   const input = validated(adjustmentSchema, raw);
-  return db.transaction(async trx => {
+  const run = async (trx) => {
     const product = await loadProduct(productId, trx, true);
     const preview = adjustmentPreview(product, input, options);
     assertVersion(preview._version, options.expectedVersion);
@@ -166,7 +174,8 @@ async function adjustStock(productId, raw, options = {}) {
     }
     return { success: true, product: updated, movement,
       verification: { persisted: true, product_id: productId, movement_id: movement.id, stock_match: true }, href: `/admin/inventory?tab=products&search=${encodeURIComponent(product.name)}&productId=${productId}` };
-  });
+  };
+  return options.trx ? run(options.trx) : db.transaction(run);
 }
 
 function restockPlan(product, input, { source = 'intelligence_bar' } = {}) {
@@ -280,7 +289,7 @@ async function previewRestockAction(requestId, raw) {
 
 async function updateRestockRequest(requestId, raw, options = {}) {
   const input = validated(actionSchema, raw);
-  return db.transaction(async trx => {
+  const run = async (trx) => {
     await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
     const request = await loadRequest(requestId, trx, true);
     const dispatch = require('./procurement/order-dispatch');
@@ -318,7 +327,8 @@ async function updateRestockRequest(requestId, raw, options = {}) {
     return { success: true, request: updated, ...(movement ? { movement } : {}),
       verification: { persisted: true, request_id: requestId, product_id: product.id, status_match: true,
         ...(movement ? { movement_id: movement.id, stock_match: true } : {}) }, href: `/admin/inventory?tab=restock&requestId=${requestId}` };
-  });
+  };
+  return options.trx ? run(options.trx) : db.transaction(run);
 }
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,

@@ -1,14 +1,16 @@
 /**
  * purchase-receipts/amazon-delivery-parser.js — pure parser for Amazon
- * "Delivered" order-confirmation emails (and, for the itemless template
- * below, their sibling Ordered:/Shipped: emails).
+ * "Delivered" order-confirmation emails.
  *
  * Only order-update@amazon.com messages whose subject starts with
  * "Delivered:" are Delivered candidates (e.g.
  * `Delivered: 2 "Atticus Talak 7.9 F..."`,
  * `Delivered: "Southern Ag Thuricide BT..." and 1 more item`,
  * `Delivered: 1 Lawn & Garden item`). body_text is empty on some of these —
- * extractText falls back to a stripped body_html.
+ * extractText falls back to a stripped body_html. from/subject are
+ * spoofable text, though — the caller (sweep.js) MUST check aligned
+ * SPF/DKIM authentication before treating anything parsed here as license
+ * to write stock; this module has no opinion on authentication.
  *
  * Real item-block shape (confirmed against prod): a line starting `* ` is
  * the title; its quantity is on the NEXT non-blank line by itself,
@@ -26,16 +28,19 @@
  * "Delivered: N Lawn & Garden item(s)" is a template with an Order # and a
  * Track link but NO `* title` blocks at all — parseAmazonDeliveredEmail
  * still returns an object (orderNumber set, items: []) rather than null, so
- * the caller (sweep.js) can go look for the same order's items on a sibling
- * Ordered:/Shipped: email via parseAmazonOrderSiblingItems below.
+ * the caller (sweep.js) can record a single 'no_items' placeholder line
+ * instead of silently dropping the delivery. (An earlier version of this
+ * lane tried recovering the items from a sibling Ordered:/Shipped: email —
+ * removed: it can't tie an item to a SPECIFIC shipment, so a multi-shipment
+ * order would log the whole order's items once per itemless package, and a
+ * replay against every prod itemless Delivered email recovered zero items
+ * from it anyway.)
  *
  * Deliberately knows nothing about products, matching, inventory units, or
  * the `emails` table — see product-matcher.js, receipt-processor.js and
  * sweep.js for the rest of the pipeline.
  */
 const AMAZON_DELIVERY_FROM = 'order-update@amazon.com';
-const AMAZON_ORDERED_FROM = 'auto-confirm@amazon.com';
-const AMAZON_SHIPPED_FROM = 'shipment-tracking@amazon.com';
 const ORDER_NUMBER_RE = /Order\s*#\s*([\d-]+)/i;
 // The "Track package" (or "Track your package") link's shipmentId query
 // param. Deliberately never the same URL's orderId=/orderID= — that value
@@ -47,15 +52,6 @@ function isAmazonDeliveredEmail(email) {
   const from = String(email?.from_address || '').trim().toLowerCase();
   const subject = String(email?.subject || '').trim();
   return from === AMAZON_DELIVERY_FROM && /^delivered:/i.test(subject);
-}
-
-// An "Ordered:" (auto-confirm@amazon.com) or "Shipped:" (shipment-tracking@
-// amazon.com) email — used ONLY as an item-title/quantity source for an
-// itemless Delivered email on the same order, never processed as its own
-// delivery event (no stock is ever logged from one directly).
-function isAmazonOrderSiblingEmail(email) {
-  const from = String(email?.from_address || '').trim().toLowerCase();
-  return from === AMAZON_ORDERED_FROM || from === AMAZON_SHIPPED_FROM;
 }
 
 // The classifier only ever hands this parser already-plain text; stripping
@@ -164,29 +160,8 @@ function parseAmazonDeliveredEmail(email) {
   };
 }
 
-/**
- * Item titles/quantities from a SIBLING Ordered:/Shipped: email for the
- * SAME order — only when its own from_address matches one of those two
- * senders and (when expectedOrderNumber is given) its own Order # line
- * matches exactly, never a substring coincidence elsewhere in the body.
- * Returns [] (never throws) when the email isn't a sibling, has no usable
- * text, its order number doesn't match, or it has no parseable item blocks
- * either — the caller (sweep.js) treats an empty result as "give up".
- */
-function parseAmazonOrderSiblingItems(email, expectedOrderNumber) {
-  if (!isAmazonOrderSiblingEmail(email)) return [];
-  const text = extractText(email);
-  if (!text) return [];
-  if (expectedOrderNumber && extractOrderNumber(text) !== expectedOrderNumber) return [];
-  return parseItemBlocksFromText(text);
-}
-
 module.exports = {
   parseAmazonDeliveredEmail,
-  parseAmazonOrderSiblingItems,
   isAmazonDeliveredEmail,
-  isAmazonOrderSiblingEmail,
   AMAZON_DELIVERY_FROM,
-  AMAZON_ORDERED_FROM,
-  AMAZON_SHIPPED_FROM,
 };

@@ -1,11 +1,15 @@
 /**
  * purchase-receipts/sweep.js — the two gates (GATE_PURCHASE_RECEIPT_RESTOCK
- * + PURCHASE_RECEIPT_SINCE), the per-email hook path, the bell for a
- * 'logged' line, and the ~15-min sweep's aggregation across emails.
+ * + PURCHASE_RECEIPT_SINCE), sender authentication (P0: from/subject are
+ * spoofable — only an aligned SPF/DKIM pass earns any processing), the
+ * per-email hook path, the bell for a 'logged' line, and the ~15-min
+ * sweep's aggregation across emails.
  *
  * receipt-processor's own matching/sizing/idempotency logic is covered in
  * purchase-receipts-processor.test.js — here it is mocked so this suite
- * tests only sweep.js's own orchestration.
+ * tests only sweep.js's own orchestration. hasAlignedAuth/domainFromAddress
+ * are the REAL (unmocked) functions from inbox-hygiene.js/spam-blocker.js —
+ * this suite is exactly what proves the integration actually authenticates.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -14,11 +18,10 @@ jest.mock('../services/purchase-receipts/receipt-processor', () => ({
   processReceiptLine: jest.fn(async () => mockState.outcomes.shift()),
 }));
 jest.mock('../models/db', () => {
-  // Shared by BOTH the main sweep's own emails query and findSiblingItems'
-  // sibling-email query — no test in this file needs both to answer
-  // differently at once, so one fixed array (mockState.emails) is enough.
+  // Only runPurchaseReceiptRestockSweep's own emails query touches db in
+  // this file — processReceiptEmail takes an already-fetched row.
   const q = {};
-  for (const m of ['whereRaw', 'where', 'orderBy', 'limit', 'whereILike', 'orWhereILike']) q[m] = () => q;
+  for (const m of ['whereRaw', 'where', 'orderBy']) q[m] = () => q;
   q.then = (resolve, reject) => Promise.resolve(mockState.emails).then(resolve, reject);
   return jest.fn(() => q);
 });
@@ -26,10 +29,18 @@ jest.mock('../models/db', () => {
 const { processReceiptEmail, runPurchaseReceiptRestockSweep } = require('../services/purchase-receipts/sweep');
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 
+// A real "dkim=pass header.i=@amazon.com" clause — the shape a genuine
+// Amazon delivery email carries (prod check: every order-update@amazon.com
+// email since 2026-08-05 has this). hasAlignedAuth/domainFromAddress are
+// real, unmocked code — this is what makes every other test in this file
+// (which all use this fixture) an actual proof the auth gate passes real
+// deliveries, not just a mock that ignores it.
+const ALIGNED_AMAZON_AUTH = 'dkim=pass header.i=@amazon.com; spf=pass smtp.mailfrom=amazon.com';
+
 const deliveredEmail = {
   id: 'e1', from_address: 'order-update@amazon.com', subject: 'Delivered: 2 "Atticus Talak..."',
   body_text: 'Order # 114-9578837-7732259\n\n* Taurus SC Termiticide 78 oz Quantity: 2\n* Chromebook Quantity: 1\n',
-  received_at: new Date(),
+  received_at: new Date(), authentication_results: ALIGNED_AMAZON_AUTH,
 };
 
 beforeEach(() => {
@@ -68,6 +79,32 @@ describe('gating', () => {
     process.env.PURCHASE_RECEIPT_SINCE = '2026-01-01T00:00:00Z';
     const shipped = { ...deliveredEmail, subject: 'Shipped: your order' };
     expect(await processReceiptEmail(shipped)).toEqual({ skipped: 'not_a_delivery_email' });
+  });
+});
+
+describe('sender authentication (P0: from/subject are spoofable)', () => {
+  beforeEach(() => {
+    process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
+    process.env.PURCHASE_RECEIPT_SINCE = '2026-01-01T00:00:00Z';
+  });
+
+  test('no Authentication-Results at all -> refused, no processing, no DB write', async () => {
+    const spoofed = { ...deliveredEmail, authentication_results: null };
+    expect(await processReceiptEmail(spoofed)).toEqual({ skipped: 'unauthenticated' });
+    expect(processReceiptLine).not.toHaveBeenCalled();
+  });
+
+  test('DKIM passes but for a DIFFERENT domain -> refused (from_address claims amazon.com, auth says otherwise)', async () => {
+    const spoofed = { ...deliveredEmail, authentication_results: 'dkim=pass header.i=@evil-spoofer.example; spf=fail' };
+    expect(await processReceiptEmail(spoofed)).toEqual({ skipped: 'unauthenticated' });
+    expect(processReceiptLine).not.toHaveBeenCalled();
+  });
+
+  test('an aligned DKIM pass for amazon.com is accepted and processing proceeds', async () => {
+    mockState.outcomes = [{ status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 156, receivedUnit: 'fl_oz' }, { status: 'unmatched', inserted: true }];
+    const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn(async () => ({})) });
+    expect(result.skipped).toBeUndefined();
+    expect(processReceiptLine).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -124,39 +161,12 @@ describe('processReceiptEmail', () => {
     expect(result.unmatched).toEqual([{ title: 'Chromebook' }]);
   });
 
-  test('an itemless Delivered email ("N Lawn & Garden item(s)") pulls its items from a sibling Ordered: email', async () => {
-    const itemless = {
-      id: 'e3', from_address: 'order-update@amazon.com', subject: 'Delivered: 1 Lawn & Garden item',
-      body_text: 'Order # 100-0000000-0000000\n\nTrack your package: https://www.amazon.com/x?orderId=100-0000000-0000000\n',
-      received_at: new Date(),
-    };
-    // Consumed by findSiblingItems' `emails` query (processReceiptEmail
-    // itself never runs the main sweep's own emails query).
-    mockState.emails = [{
-      from_address: 'auto-confirm@amazon.com', subject: 'Ordered: "Bora-Care..."',
-      body_text: 'Order # 100-0000000-0000000\n\n* Bora-Care Termiticide/Insecticide, 1 Gallon\n  Quantity: 1\n',
-    }];
-    mockState.outcomes = [{ status: 'unmatched', inserted: true }];
-    const notify = jest.fn(async () => ({}));
-    const result = await processReceiptEmail(itemless, { notify });
-
-    expect(processReceiptLine).toHaveBeenCalledTimes(1);
-    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({
-      orderNumber: '100-0000000-0000000', item: { title: 'Bora-Care Termiticide/Insecticide, 1 Gallon', quantity: 1 }, lineNo: 1,
-    });
-    expect(processReceiptLine.mock.calls[0][0].forcedStatus).toBeUndefined(); // a recovered item is processed normally, not as a placeholder
-    expect(result.unmatched).toEqual([{ title: 'Bora-Care Termiticide/Insecticide, 1 Gallon' }]);
-    expect(result.noItems).toEqual([]);
-    expect(notify).not.toHaveBeenCalled();
-  });
-
-  test('an itemless Delivered email with NO recoverable sibling records exactly one no_items placeholder line', async () => {
+  test('an itemless Delivered email ("N Lawn & Garden item(s)") records exactly one no_items placeholder line (no sibling recovery)', async () => {
     const itemless = {
       id: 'e4', from_address: 'order-update@amazon.com', subject: 'Delivered: 2 Lawn & Garden items',
       body_text: 'Order # 100-1111111-1111111\n\nTrack your package: https://www.amazon.com/x\n',
-      received_at: new Date(),
+      received_at: new Date(), authentication_results: ALIGNED_AMAZON_AUTH,
     };
-    mockState.emails = []; // no sibling candidates at all
     mockState.outcomes = [{ status: 'no_items', inserted: true, product: null }];
     const notify = jest.fn(async () => ({}));
     const result = await processReceiptEmail(itemless, { notify });
@@ -189,5 +199,13 @@ describe('runPurchaseReceiptRestockSweep', () => {
     expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', receivedQty: 156, receivedUnit: 'fl_oz', productId: 'p1', emailId: 'e1' }]);
     expect(result.unmatched).toHaveLength(2);
     expect(result.unmatched[1].emailId).toBe('e2');
+  });
+
+  test('an unauthenticated candidate email in the same sweep is skipped and never touches processReceiptLine', async () => {
+    mockState.emails = [{ ...deliveredEmail, authentication_results: null }];
+    const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn() });
+    expect(result.emailsScanned).toBe(1);
+    expect(processReceiptLine).not.toHaveBeenCalled();
+    expect(result.logged).toEqual([]);
   });
 });

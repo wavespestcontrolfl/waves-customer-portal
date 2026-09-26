@@ -12,17 +12,17 @@
  * the second shipment's line collide with, and be dropped as a duplicate
  * of, the first (see the migration's header and sweep.js/parser for where
  * shipmentKey comes from). Every call first checks for an existing row
- * (cheap, covers the ordinary re-run case) and then, for the 'logged' path,
- * claims the row with an insert BEFORE calling the shared restock/adjust
- * path — that insert's ON CONFLICT ... IGNORE is the at-most-once guard
- * against a concurrent second run claiming the same line. If the
- * restock/adjust call throws after the claim, the claim row is deleted so
- * the next sweep retries the line rather than leaving it silently stuck.
- * See the module's PR report for the one narrow crash window this can't
- * close (a process kill between the movement committing and this module's
- * own follow-up update) — an accepted tradeoff of reusing the shared,
- * already-transactional adjust path instead of re-implementing its locking
- * here.
+ * (cheap, covers the ordinary re-run case, but not itself the guard) and
+ * then, for the 'logged' path, runs the claim insert, the restock/adjust
+ * write (via adjustStock/updateRestockRequest's options.trx — the SAME
+ * transaction, not a nested one of their own) and the claim's movement_id
+ * update all inside ONE db.transaction (performLoggedMovement). A failure
+ * anywhere in that transaction rolls back everything, including the claim
+ * insert — the next sweep simply sees no row and retries the line cleanly,
+ * no manual delete-on-failure compensation needed. The claim insert's own
+ * ON CONFLICT ... IGNORE (inside the transaction) is the at-most-once guard
+ * against a concurrent second run claiming the same line; it returning no
+ * row is a normal "already claimed" outcome, not a failure.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -130,41 +130,40 @@ async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineN
     return { status: classified.status, inserted: true, product: classified.product || null };
   }
 
-  const claim = await claimLine(conn, { ...baseRow, received_qty: classified.receivedQty, received_unit: classified.receivedUnit, status: 'logged' });
-  if (!claim) return { skipped: true, reason: 'already_processed' };
-  return performLoggedMovement(conn, { claim, classified, orderNumber, email, item });
+  // Claim + movement + claim-update all inside ONE transaction: a throw
+  // anywhere (the claim insert racing a concurrent claimant aside — that's
+  // a normal no-row outcome, not a throw) rolls back the whole thing, so
+  // there is never a claim row left behind with no movement to show for it.
+  return conn.transaction(async (trx) => {
+    const claim = await claimLine(trx, { ...baseRow, received_qty: classified.receivedQty, received_unit: classified.receivedUnit, status: 'logged' });
+    if (!claim) return { skipped: true, reason: 'already_processed' };
+    return performLoggedMovement(trx, { claim, classified, orderNumber, email, item });
+  });
 }
 
 // The actual restock write for an already-claimed 'logged' line, through the
-// shared adjustStock / updateRestockRequest path — split out of
-// processReceiptLine purely to keep that function's own branching flat.
-async function performLoggedMovement(conn, { claim, classified, orderNumber, email, item }) {
+// shared adjustStock / updateRestockRequest path — on the SAME transaction
+// (options.trx) the claim was inserted on, so a failure here rolls back the
+// claim too. Split out of processReceiptLine purely to keep that function's
+// own branching flat.
+async function performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) {
   const extraMetadata = { source: SOURCE, orderNumber, emailId: email?.id || null, rawTitle: item.title };
-  try {
-    const liveRequest = await findLiveRestockRequest(conn, classified.productId);
-    const result = liveRequest
-      ? await updateRestockRequest(liveRequest.id, {
-        action: 'receive', quantity: classified.receivedQty, unit: classified.receivedUnit,
-      }, { source: SOURCE, extraMetadata })
-      : await adjustStock(classified.productId, {
-        movementType: 'restock', quantity: classified.receivedQty, unit: classified.receivedUnit,
-      }, { source: SOURCE, extraMetadata });
+  const liveRequest = await findLiveRestockRequest(trx, classified.productId);
+  const result = liveRequest
+    ? await updateRestockRequest(liveRequest.id, {
+      action: 'receive', quantity: classified.receivedQty, unit: classified.receivedUnit,
+    }, { source: SOURCE, extraMetadata, trx })
+    : await adjustStock(classified.productId, {
+      movementType: 'restock', quantity: classified.receivedQty, unit: classified.receivedUnit,
+    }, { source: SOURCE, extraMetadata, trx });
 
-    await conn('purchase_receipt_lines').where({ id: claim.id }).update({
-      movement_id: result.movement.id, restock_request_id: liveRequest ? liveRequest.id : null,
-    });
-    return {
-      status: 'logged', product: classified.product, receivedQty: classified.receivedQty,
-      receivedUnit: classified.receivedUnit, movement: result.movement, viaRequest: Boolean(liveRequest),
-    };
-  } catch (err) {
-    // Roll back the claim so the next sweep retries this line instead of
-    // treating a failed movement as permanently handled.
-    await conn('purchase_receipt_lines').where({ id: claim.id }).del().catch((delErr) => {
-      logger.error(`[purchase-receipts] could not roll back claim ${claim.id} after a failed restock: ${delErr.message}`);
-    });
-    throw err;
-  }
+  await trx('purchase_receipt_lines').where({ id: claim.id }).update({
+    movement_id: result.movement.id, restock_request_id: liveRequest ? liveRequest.id : null,
+  });
+  return {
+    status: 'logged', product: classified.product, receivedQty: classified.receivedQty,
+    receivedUnit: classified.receivedUnit, movement: result.movement, viaRequest: Boolean(liveRequest),
+  };
 }
 
 module.exports = { classifyItem, processReceiptLine, VENDOR, SOURCE };

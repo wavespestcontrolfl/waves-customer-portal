@@ -10,6 +10,16 @@
  * Amazon delivery ever synced (which a physical shelf count already
  * accounts for) as a fresh restock the moment the gate flips.
  *
+ * Authentication is a THIRD, non-optional gate, checked for every candidate
+ * before anything is processed: from_address and subject are attacker-typed
+ * text, so a Delivered email is only ever acted on when Gmail's own
+ * Authentication-Results header shows it actually authenticated as
+ * amazon.com (hasAlignedAuth, the same DKIM/SPF-alignment check
+ * auto-unsubscribe.js and email-sync.js's customer bell already gate
+ * spoofable sender action on — see inbox-hygiene.js). A spoofed or
+ * unauthenticated "delivery" is refused before any purchase_receipt_lines
+ * row is written and before any stock ever moves.
+ *
  * Two entry points sharing one path:
  *   - processReceiptEmail(email): called right after email-sync inserts a
  *     brand-new row (best-effort, fire-and-forget — see email-sync.js).
@@ -22,17 +32,12 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
-const {
-  parseAmazonDeliveredEmail, parseAmazonOrderSiblingItems,
-  AMAZON_DELIVERY_FROM, AMAZON_ORDERED_FROM, AMAZON_SHIPPED_FROM,
-} = require('./amazon-delivery-parser');
+const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { domainFromAddress } = require('../email/spam-blocker');
+const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-delivery-parser');
 const { processReceiptLine } = require('./receipt-processor');
 
 const GATE = 'GATE_PURCHASE_RECEIPT_RESTOCK';
-// How many recent Ordered:/Shipped: candidates to check for the same Order #
-// before giving up on an itemless Delivered email — small and bounded; this
-// is an occasional fallback, not the common path.
-const SIBLING_LOOKUP_LIMIT = 5;
 
 function sinceBoundary() {
   const raw = process.env.PURCHASE_RECEIPT_SINCE;
@@ -66,35 +71,9 @@ function round(value) {
   return Math.round(value * 10000) / 10000;
 }
 
-// Some Delivered emails ("Delivered: 1 Lawn & Garden item") carry an Order #
-// and a Track link but no `* title` blocks at all. Their item titles/
-// quantities, when recoverable, live on a SIBLING Ordered:/Shipped: email
-// for the SAME order — checked here, but NEVER processed as its own
-// delivery (no stock is ever logged from an Ordered/Shipped email itself).
-// Bounded, recent-first; the first sibling that actually parses wins.
-async function findSiblingItems(orderNumber) {
-  if (!orderNumber) return [];
-  let candidates;
-  try {
-    candidates = await db('emails')
-      .whereRaw('LOWER(from_address) IN (?, ?)', [AMAZON_ORDERED_FROM, AMAZON_SHIPPED_FROM])
-      .where((b) => b.whereILike('body_text', `%${orderNumber}%`).orWhereILike('body_html', `%${orderNumber}%`))
-      .orderBy('received_at', 'desc')
-      .limit(SIBLING_LOOKUP_LIMIT);
-  } catch (err) {
-    logger.warn(`[purchase-receipts] sibling email lookup failed for order ${orderNumber}: ${err.message}`);
-    return [];
-  }
-  for (const candidate of candidates) {
-    const items = parseAmazonOrderSiblingItems(candidate, orderNumber);
-    if (items.length) return items;
-  }
-  return [];
-}
-
 // The ONE placeholder row for an itemless Delivered email (see the parser's
-// header) whose sibling lookup also came up empty. Pulled out of
-// processReceiptEmail purely to keep that function's own branching flat.
+// header). Pulled out of processReceiptEmail purely to keep that function's
+// own branching flat.
 async function recordNoItemsPlaceholder({ email, orderNumber, shipmentKey, summary }) {
   const placeholderTitle = email.subject || `Amazon delivery, order ${orderNumber || 'unknown'}`;
   try {
@@ -141,6 +120,14 @@ async function processReceiptEmail(email, { notify } = {}) {
   const parsed = parseAmazonDeliveredEmail(email);
   if (!parsed) return { skipped: 'not_a_delivery_email' };
 
+  // From/subject are spoofable; only an aligned SPF/DKIM pass for
+  // amazon.com earns any inventory write. Fail closed — checked before any
+  // purchase_receipt_lines row is written, not just before the movement.
+  if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+    logger.warn(`[purchase-receipts] email ${email.id} claims to be from ${email.from_address} but failed sender authentication — refusing to process`);
+    return { skipped: 'unauthenticated' };
+  }
+
   const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
   // NOTE: this bucket is named `alreadyProcessed`, never `skipped` — the
   // whole-function early returns above use `{ skipped: '<reason>' }` (a
@@ -149,9 +136,7 @@ async function processReceiptEmail(email, { notify } = {}) {
   // (result.skipped) continue;` swallow every successfully processed email.
   const summary = { logged: [], unmatched: [], sizeMismatch: [], needsSize: [], noItems: [], alreadyProcessed: [], errors: [] };
 
-  let items = parsed.items;
-  if (!items.length && parsed.orderNumber) items = await findSiblingItems(parsed.orderNumber);
-
+  const items = parsed.items;
   if (!items.length) {
     await recordNoItemsPlaceholder({ email, orderNumber: parsed.orderNumber, shipmentKey: parsed.shipmentKey, summary });
     return summary;
@@ -188,9 +173,10 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   for (const email of emails) {
     const result = await processReceiptEmail(email, { notify });
     // `result.skipped` here is only ever the whole-function string sentinel
-    // ('before_since' / 'not_a_delivery_email' — 'gated'/'no_since' can't
-    // reach this loop, both gates were already checked above); a
-    // successfully processed email's summary object has no `skipped` key.
+    // ('before_since' / 'not_a_delivery_email' / 'unauthenticated' —
+    // 'gated'/'no_since' can't reach this loop, both gates were already
+    // checked above); a successfully processed email's summary object has
+    // no `skipped` key.
     if (result.skipped) continue;
     for (const key of ['logged', 'unmatched', 'sizeMismatch', 'needsSize', 'noItems', 'alreadyProcessed', 'errors']) {
       if (Array.isArray(result[key])) totals[key].push(...result[key].map((row) => ({ ...row, emailId: email.id })));
@@ -199,4 +185,4 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   return totals;
 }
 
-module.exports = { processReceiptEmail, runPurchaseReceiptRestockSweep, findSiblingItems };
+module.exports = { processReceiptEmail, runPurchaseReceiptRestockSweep };
