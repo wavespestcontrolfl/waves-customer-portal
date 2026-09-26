@@ -272,6 +272,8 @@ describe('service report — every shipped chip answers its own category (AW-06)
   test.each([
     'When can I go inside after the treatment?',
     'Can I go indoors after the application? How long until I can go in?',
+    'Is it okay to be outside after you sprayed?',
+    'Can I go outside now that it was applied?',
   ])('temporal re-entry question naming the treatment gets re-entry: %s', (question) => {
     const answer = answerServiceReportQuestion({ question, data: pestData });
     expect(answer).toBe(answerServiceReportQuestion({ question: 'When can my pets go back out?', data: pestData }));

@@ -24,7 +24,7 @@ const FINDINGS_QUESTION_RE = /\b(find|found|finding|see|saw|notice|noticed|activ
 // re-entry even when it names the treatment ("When can I go inside after
 // the treatment?").
 // ("When will you come back?" stays a scheduling question.)
-const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:go|get|let|walk|play)\b[^?.]*\b(?:in|out|inside|outside|indoors|outdoors)\b/;
+const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:go|get|let|walk|play|be|stay|sit)\b[^?.]*\b(?:in|out|inside|outside|indoors|outdoors)\b|\b(?:okay|ok|fine|alright|safe)\s+to\s+(?:be|go|stay|sit|play|walk|let)\b[^?.]*\b(?:in|out|inside|outside|indoors|outdoors)\b|\bcan\s+(?:i|we|they|he|she|my\s+\w+|the\s+\w+)\s+(?:go|be|get|play|walk|stay|sit)\s+(?:back\s+)?(?:in|out|inside|outside|indoors|outdoors)\b/;
 function isReentryIntent(q) {
   return SAFETY_SUBJECT_RE.test(q)
     || REENTRY_PHRASE_RE.test(q)
