@@ -6,7 +6,7 @@ const {
   normalizePath,
   summarize,
   parseArgs,
-  utcMidnight,
+  resolveWindow,
 } = require('../../ops/agents/blog-engagement-scorecard');
 
 describe('blog scorecard path classes', () => {
@@ -16,6 +16,8 @@ describe('blog scorecard path classes', () => {
     ['/lawn-care/fertilizer-blackout-manatee-county', 'blog-post'],
     ['/pest-control/', 'blog-category'],
     ['/lawn-care/', 'blog-category'],
+    ['/pest-control/page/2/', 'blog-category'],
+    ['/pest-control/florida-huntsman-spider/extra/', 'other'],
     ['/blog/', 'blog-index'],
     ['/pest-control-calculator/', 'estimate'],
     ['/pest-control-quote-sarasota-fl/', 'estimate'],
@@ -23,6 +25,11 @@ describe('blog scorecard path classes', () => {
     ['/contact/', 'estimate'],
     ['/pest-control-bradenton-fl/', 'service'],
     ['/pest-control-services/', 'service'],
+    ['/pest-inspection/', 'service'],
+    ['/cockroach-control/', 'service'],
+    ['/mosquito-misting-systems/', 'service'],
+    ['/waves-lawn-care/', 'service'],
+    ['/sarasota-lawn-weed-control/', 'service'],
     ['/waveguard-memberships/', 'service'],
     ['/pest-library/', 'pest-library'],
     ['/pest-identifier/huntsman-spider/', 'pest-identifier'],
@@ -164,24 +171,49 @@ describe('script arguments', () => {
     expect(parseArgs(['--days', '14', '--json', '--end=2026-09-25'])).toEqual({ days: '14', json: true, end: '2026-09-25' });
   });
 
-  test('utcMidnight accepts valid calendar dates', () => {
-    expect(utcMidnight('2026-09-25').toISOString()).toBe('2026-09-25T00:00:00.000Z');
-    expect(utcMidnight('2024-02-29').toISOString()).toBe('2024-02-29T00:00:00.000Z');
-    expect(utcMidnight('2000-02-29').toISOString()).toBe('2000-02-29T00:00:00.000Z');
+  test('windows run Eastern midnight to Eastern midnight, across DST', () => {
+    const w = resolveWindow({ days: 3, end: '2026-11-03' });
+    expect(w.startStr).toBe('2026-10-31');
+    expect(w.lastDayStr).toBe('2026-11-02');
+    expect(w.slices).toHaveLength(1);
+    expect(w.slices[0].from.toISOString()).toBe('2026-10-31T04:00:00.000Z'); // EDT
+    expect(w.slices[0].to.toISOString()).toBe('2026-11-03T05:00:00.000Z'); // EST
   });
 
-  test('utcMidnight rejects malformed dates', () => {
-    expect(() => utcMidnight('09/25/2026')).toThrow('--end must be YYYY-MM-DD');
+  test('long windows split into consecutive 7-day slices with no gaps', () => {
+    const w = resolveWindow({ days: 16, end: '2026-09-26' });
+    expect(w.startStr).toBe('2026-09-10');
+    expect(w.slices.map((s) => s.fromStr)).toEqual(['2026-09-10', '2026-09-17', '2026-09-24']);
+    for (let i = 1; i < w.slices.length; i += 1) {
+      expect(w.slices[i].from.getTime()).toBe(w.slices[i - 1].to.getTime());
+    }
+    expect(w.slices[2].to.toISOString()).toBe('2026-09-26T04:00:00.000Z');
+  });
+
+  test('defaults the end to today in Eastern time', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-27T02:30:00.000Z')); // 10:30 PM ET on Sept 26
+    try {
+      expect(resolveWindow({ days: 7 }).endStr).toBe('2026-09-26');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('accepts leap days', () => {
+    expect(resolveWindow({ days: 1, end: '2024-02-29' }).lastDayStr).toBe('2024-02-28');
+    expect(resolveWindow({ days: 1, end: '2000-02-29' }).startStr).toBe('2000-02-28');
   });
 
   test.each([
+    '09/25/2026',
     '2026-00-15',
     '2026-13-01',
     '2026-01-00',
     '2026-04-31',
     '2026-02-29',
     '1900-02-29',
-  ])('utcMidnight rejects impossible calendar date %s', (value) => {
-    expect(() => utcMidnight(value)).toThrow('--end must be a valid calendar date');
+    true,
+  ])('rejects an impossible or malformed --end (%s)', (value) => {
+    expect(() => resolveWindow({ days: 7, end: value })).toThrow('--end must be a valid calendar date');
   });
 });

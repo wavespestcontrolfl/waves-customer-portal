@@ -25,21 +25,30 @@
 //
 // Flags:
 //   --days=N      window length in days, default 7
-//   --end=DATE    first day AFTER the window (YYYY-MM-DD, exclusive), default today (UTC)
+//   --end=DATE    first Eastern-time day AFTER the window (YYYY-MM-DD, exclusive),
+//                 default today (ET); windows run ET midnight to ET midnight
 //   --top=N       posts listed in the markdown table, default 20
 //   --json        print the full summary as JSON instead of markdown
 
 const BLOG_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'seasonal', 'tree-shrub']);
 const HUB_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
 const ESTIMATE_ROOTS = new Set(['pest-control-calculator', 'estimate', 'quote', 'book', 'contact']);
+// Generic (non-city) service pages on the hub; city pages end in -fl and lawn
+// service pages end in a lawn/tree service suffix.
 const SERVICE_HUBS = new Set([
   'pest-control-services',
+  'pest-inspection',
+  'inspections',
   'termite-control',
   'termite-inspection',
+  'cockroach-control',
   'mosquito-control',
+  'mosquito-misting-systems',
   'rodent-control',
+  'commercial',
   'waveguard-memberships',
 ]);
+const LAWN_SERVICE_RE = /(?:^|-)(?:lawn-care|lawn-aeration|lawn-fertilization|lawn-pest-control|lawn-weed-control|tree-shrub-care)$/;
 
 const CLASS_LABELS = {
   'blog-post': 'Another blog post',
@@ -69,12 +78,17 @@ function classifyPath(path) {
   if (segs.length === 0) return 'home';
   const [first] = segs;
   if (first === 'blog') return 'blog-index';
-  if (BLOG_CATEGORIES.has(first)) return segs.length === 1 ? 'blog-category' : 'blog-post';
+  if (BLOG_CATEGORIES.has(first)) {
+    // /{category}/ and its /{category}/page/N/ listing pages are category pages;
+    // a post is exactly /{category}/{slug}/; anything deeper is not a post.
+    if (segs.length === 1 || segs[1] === 'page') return 'blog-category';
+    return segs.length === 2 ? 'blog-post' : 'other';
+  }
   if (first === 'pest-library') return 'pest-library';
   if (first === 'pest-identifier') return 'pest-identifier';
   if (first === 'tools') return 'tools';
   if (ESTIMATE_ROOTS.has(first) || first.startsWith('pest-control-quote')) return 'estimate';
-  if (SERVICE_HUBS.has(first) || /-fl$/.test(first)) return 'service';
+  if (SERVICE_HUBS.has(first) || /-fl$/.test(first) || LAWN_SERVICE_RE.test(first)) return 'service';
   return 'other';
 }
 
@@ -204,9 +218,15 @@ function formatMarkdown(summary, { start, end, top = 20 } = {}) {
   return `${lines.join('\n')}\n`;
 }
 
-const CF_API = process.env.CF_API_BASE || 'https://api.cloudflare.com/client/v4';
+const { cfRequest } = require('../../server/services/intelligence-bar/cloudflare-ops-tools');
+const {
+  addETDays,
+  etDateString,
+  parseETDateTime,
+  validCalendarDate,
+} = require('../../server/utils/datetime-et');
+
 const HUB_HOST = 'wavespestcontrol.com';
-const DAY_MS = 86400000;
 const SLICE_DAYS = 7;
 const GROUP_LIMIT = 5000;
 
@@ -237,73 +257,66 @@ function positiveInt(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function utcMidnight(dateStr) {
-  if (!dateStr) {
-    const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  }
-  const value = String(dateStr);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new Error(`--end must be YYYY-MM-DD, got "${dateStr}"`);
-  }
-  const [year, month, day] = value.split('-').map(Number);
-  const base = new Date(`${value}T00:00:00Z`);
-  if (
-    Number.isNaN(base.getTime())
-    || base.getUTCFullYear() !== year
-    || base.getUTCMonth() !== month - 1
-    || base.getUTCDate() !== day
-  ) {
-    throw new Error(`--end must be a valid calendar date in YYYY-MM-DD format, got "${dateStr}"`);
-  }
-  return base;
+function shiftETDate(dateStr, days) {
+  return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), days));
 }
 
-async function cf(path, init = {}) {
-  const res = await fetch(`${CF_API}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${process.env.CF_API_TOKEN}`,
-      'Content-Type': 'application/json',
-      ...(init.headers || {}),
-    },
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`Cloudflare ${path} returned HTTP ${res.status}${body.errors?.[0]?.message ? `: ${body.errors[0].message}` : ''}`);
+function etMidnight(dateStr) {
+  return parseETDateTime(`${dateStr}T00:00`);
+}
+
+/**
+ * The report window in Eastern time: `days` ET calendar days ending the day
+ * BEFORE `end` (exclusive; default today ET), queried in 7-day slices that each
+ * run ET midnight to ET midnight (DST-safe via parseETDateTime).
+ */
+function resolveWindow({ days, end } = {}) {
+  let endStr;
+  if (end == null) {
+    endStr = etDateString();
+  } else {
+    endStr = typeof end === 'string' ? validCalendarDate(end) : null;
+    if (!endStr) throw new Error(`--end must be a valid calendar date in YYYY-MM-DD format, got "${end}"`);
   }
-  return body;
+  const startStr = shiftETDate(endStr, -days);
+  const slices = [];
+  for (let from = startStr; from < endStr;) {
+    const next = shiftETDate(from, SLICE_DAYS);
+    const to = next < endStr ? next : endStr;
+    slices.push({ fromStr: from, from: etMidnight(from), to: etMidnight(to) });
+    from = to;
+  }
+  return { startStr, endStr, lastDayStr: shiftETDate(endStr, -1), slices };
 }
 
 async function hubSiteTag(accountId) {
   if (process.env.CF_RUM_SITE_TAG) return process.env.CF_RUM_SITE_TAG;
-  const body = await cf(`/accounts/${accountId}/rum/site_info/list?per_page=100`);
+  const body = await cfRequest(`/accounts/${accountId}/rum/site_info/list?per_page=100`);
   const site = (body.result || []).find((s) => [s.host, s.ruleset?.zone_name].includes(HUB_HOST));
   if (!site) throw new Error(`No Cloudflare Web Analytics site found for ${HUB_HOST}`);
   return site.site_tag;
 }
 
-const QUERY = `query($acct: String!, $tag: String!, $from: Time!, $to: Time!, $limit: Int!) {
+const QUERY = `query($acct: string!, $tag: string!, $from: Time!, $to: Time!) {
   viewer { accounts(filter: { accountTag: $acct }) {
-    rumPageloadEventsAdaptiveGroups(filter: { siteTag: $tag, datetime_geq: $from, datetime_lt: $to }, limit: $limit, orderBy: [count_DESC]) {
+    rumPageloadEventsAdaptiveGroups(filter: { siteTag: $tag, datetime_geq: $from, datetime_lt: $to }, limit: ${GROUP_LIMIT}, orderBy: [count_DESC]) {
       count dimensions { requestPath refererHost refererPath navigationType }
     } } } }`;
 
-async function fetchGroups(accountId, siteTag, start, end) {
+async function fetchGroups(accountId, siteTag, slices) {
   const groups = [];
-  for (let from = start; from < end; from = new Date(from.getTime() + SLICE_DAYS * DAY_MS)) {
-    const to = new Date(Math.min(end.getTime(), from.getTime() + SLICE_DAYS * DAY_MS));
-    const body = await cf('/graphql', {
+  for (const slice of slices) {
+    const body = await cfRequest('/graphql', {
       method: 'POST',
-      body: JSON.stringify({
+      body: {
         query: QUERY,
-        variables: { acct: accountId, tag: siteTag, from: from.toISOString(), to: to.toISOString(), limit: GROUP_LIMIT },
-      }),
+        variables: { acct: accountId, tag: siteTag, from: slice.from.toISOString(), to: slice.to.toISOString() },
+      },
     });
     if (Array.isArray(body.errors) && body.errors.length) throw new Error(`Cloudflare analytics: ${body.errors[0].message}`);
     const rows = body.data?.viewer?.accounts?.[0]?.rumPageloadEventsAdaptiveGroups || [];
     if (rows.length >= GROUP_LIMIT) {
-      console.warn(`warning: ${from.toISOString().slice(0, 10)} slice hit the ${GROUP_LIMIT}-group limit; totals may be low`);
+      console.warn(`warning: the slice starting ${slice.fromStr} hit the ${GROUP_LIMIT}-group limit; totals may be low`);
     }
     for (const r of rows) {
       groups.push({
@@ -324,17 +337,13 @@ async function main() {
   if (!process.env.CF_API_TOKEN || !accountId) {
     throw new Error('CF_API_TOKEN and CF_ACCOUNT_ID are required (run under `railway run --service waves-customer-portal`).');
   }
-  const days = positiveInt(args.days, 7);
-  const end = utcMidnight(typeof args.end === 'string' ? args.end : null);
-  const start = new Date(end.getTime() - days * DAY_MS);
+  const window = resolveWindow({ days: positiveInt(args.days, 7), end: args.end });
   const siteTag = await hubSiteTag(accountId);
-  const summary = summarize(await fetchGroups(accountId, siteTag, start, end));
-  const startStr = start.toISOString().slice(0, 10);
-  const lastDay = new Date(end.getTime() - DAY_MS).toISOString().slice(0, 10);
+  const summary = summarize(await fetchGroups(accountId, siteTag, window.slices));
   if (args.json) {
-    process.stdout.write(`${JSON.stringify({ start: startStr, end: lastDay, ...summary }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ start: window.startStr, end: window.lastDayStr, timezone: 'America/New_York', ...summary }, null, 2)}\n`);
   } else {
-    process.stdout.write(formatMarkdown(summary, { start: startStr, end: lastDay, top: positiveInt(args.top, 20) }));
+    process.stdout.write(formatMarkdown(summary, { start: window.startStr, end: window.lastDayStr, top: positiveInt(args.top, 20) }));
   }
 }
 
@@ -352,6 +361,6 @@ module.exports = {
   isInternalHost,
   normalizePath,
   parseArgs,
+  resolveWindow,
   summarize,
-  utcMidnight,
 };
