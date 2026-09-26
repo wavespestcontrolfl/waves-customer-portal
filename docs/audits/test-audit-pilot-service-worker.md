@@ -1,5 +1,8 @@
 # Service-worker test-audit pilot
 
+The original pilot is recorded below at its audited revision. The final section
+records the authorized implementation of its eight improvement candidates.
+
 ## Scope and result
 
 Audited revision: `c71cbebfe1353aa1ea33e1a85868a6fe117da5c9`.
@@ -96,3 +99,50 @@ Database and full server suites were outside this pilot's scope.
 No entire test met the skill's deletion threshold. Static shape and shared
 setup alone supplied no removal evidence. Pilot feedback added one clarification: assess
 mixed assertion groups separately before dropping any entire test.
+
+## Follow-up: executable contracts
+
+The follow-up starts from `7ab29d674281a23635e2b2a55f7c516bf973805a`.
+It extends the same test harness with response JSON parsing, request cache
+options, observed badge/lifecycle APIs, activation, and notification clicks.
+Production `sw.js`, CI selection, and coverage thresholds are unchanged.
+
+The seven source-contract cases now have executable proof. All 42 cache
+regressions and the visible-client push case remain. The worker suite grows
+from 50 to 66 cases because valid/invalid URL and badge inputs are parameterized.
+The assertion replacements are mapped here; test names refer to
+`client/src/service-worker-contract.test.js`.
+
+| Original candidate | Retained executable proof |
+| --- | --- |
+| Preload/order (`158`) | `reloads shell assets and finishes their writes before replacing the shell or activating` observes reload-mode requests and holds an asset write while the old shell remains. `waits for every started asset write before rolling back a failed install` proves a rejected write cannot release the batch before a delayed sibling settles. Existing navigation/memo/rollback cases retain the other behavioral contracts; private helper spelling and write-count shape are obsolete. |
+| Shared locks (`172`) | `uses cache lock names shared with previously installed workers` observes the stable cross-version lock names. The existing two-worker prune/re-tag and install-shell-fetch races retain serialization proof. |
+| Install failure/cache scope (`182`) | `does not sweep buckets when the precache fails for a non-quota reason` now also rejects activation via `skipWaiting`; the successful install case observes it only after the writes. Existing quota-reclaim and failed-retry cases preserve the active shell and stale buckets. |
+| Legacy sweep (`191`) | `activates by sweeping only stale Waves buckets and preserving current, badge, and unrelated caches` drives the actual activate event and asserts exact cache survivors plus client claiming. |
+| Notification destination (`203`) | `constrains pushed notification URL … through click navigation to …` covers eight valid, foreign, malformed, and missing URL inputs through push, notification data, and click/openWindow. |
+| Numeric badge gate (`208`) | `sets positive unread badges and clears zero without Web Locks support`, seven `ignores non-integer badge …` cases, and `still shows a notification when the Badging API is unavailable` observe real handler calls and fallbacks. |
+| Badge order/isolation (`215`) | `preserves badge ordering through activation and restart, including equal stamps and a newer clear` verifies durable state, older snapshots, tied counts, and clears. `waits for the page badge lock so a delayed push cannot undo a newer page clear` holds the page's shared lock and checks the resulting badge state. |
+| Timing (`1153`) | `does not let an active navigation that began before an install replace the installed shell (two instances)` uses explicit clock values 1000 → 2000 → 3000 instead of two 5 ms sleeps. Its shell and asset assertions are retained. |
+
+Validation used Node 20, lockfile dependencies, and a credential-free environment:
+
+```sh
+npm --prefix client test -- src/service-worker-contract.test.js src/components/NotificationBell.test.jsx src/hooks/useUnreadConversations.test.jsx
+```
+
+Baseline: **88 passed** (50 worker + 38 related notification tests).
+After: **104 passed** (66 worker + the same 38), zero failures or skips.
+ESLint for the changed test, `check:portal-brand`, `check:domain-rules`, and
+`git diff --check` pass. No performance improvement is claimed from local
+timing samples. Browser/native end-to-end and database migrations were not run.
+
+Nineteen temporary production mutations each failed the intended assertion:
+asset reload removal; batch `allSettled` → `all`; premature shell write;
+each cache lock rename; cache-lock bypass; swallowed install failure;
+premature `skipWaiting`; omitted legacy sweep; overly broad cache sweep;
+foreign-origin acceptance; unsanitized notification data; removed integer
+badge gate; removed API-support guard; removed older/tied badge guards;
+page badge-lock bypass; badge-cache rename into the app prefix; and disabled
+install-order marker. Each probe ran in the task-owned checkout, then restored
+`sw.js` byte for byte before the clean suite. Its SHA-256 remained
+`2e2cbedf500a2934da5f8882156b9a5464887a38c0d32ecbd42bccf19a1865ab`.

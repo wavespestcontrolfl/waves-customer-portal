@@ -1,0 +1,429 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "aphid",
+    "common_name": "Aphid",
+    "aliases": [
+      "aphid",
+      "aphids"
+    ],
+    "scientific_name": "Aphididae",
+    "rank": "family",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "traits": [
+      "Soft-bodied specks, green, black, or orange, clustered on new growth",
+      "Curling, sticky leaves from honeydew feeding",
+      "Winged forms have a black head/thorax and pale abdomen",
+      "Ladybugs showing up nearby is nature responding to the outbreak"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mealybug",
+        "difference": "Aphids are soft, pear-shaped, and clustered in the open on new growth; mealybugs are covered in white cottony wax and tucked into stem joints.",
+        "next_photo": "A close-up of the cluster showing whether it has a waxy white coating or is bare-bodied.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      2,
+      3,
+      4,
+      10,
+      11
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Aphids sap plant vigor and leave sticky honeydew that grows black sooty mold. Blast light infestations with water and let ladybugs work; persistent, heavy infestations across many plants are worth treating.",
+      "fact": "Aphids are born pregnant — generations telescope inside each other, which is how a clean plant is covered by Friday.",
+      "blurb": "Blast with water, let the ladybugs work; treat only persistent infestations."
+    },
+    "tech_notes": "ID color morph and host plant. Horticultural oil/insecticidal soap for light cases; systemic for persistent, heavy infestations.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/in330"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/aphid/",
+      "guides": []
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "mealybug",
+    "common_name": "Mealybug",
+    "aliases": [
+      "mealybug",
+      "mealybugs"
+    ],
+    "scientific_name": "Pseudococcidae",
+    "rank": "family",
+    "group": "plant-pests-small",
+    "subgroup": "mealybugs",
+    "site_category": "Plant pests",
+    "traits": [
+      "White, cottony wax clusters at stem joints and leaf bases",
+      "Sticky honeydew on leaves below the clusters",
+      "Ants often run protection patrols nearby, tending the colony",
+      "Slow-moving, oval body under the waxy coating, about 3 mm"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mealybug-destroyer",
+        "difference": "Mealybugs are stationary, waxy-white, and clustered on the plant; the mealybug destroyer beetle larva looks similar but moves around actively hunting them.",
+        "next_photo": "A close-up showing whether the waxy insect is moving and actively hunting versus stationary and feeding.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Ants literally farm mealybugs — guarding the colony and milking the honeydew. Small outbreaks wipe off with soapy water; recurring ones usually ride along with an ant problem worth addressing too.",
+      "fact": "Ants literally farm them — guarding the herd and milking the honeydew like six-legged dairy farmers.",
+      "blurb": "Small outbreaks wipe off with soapy water; recurring ones ride on the ant problem."
+    },
+    "tech_notes": "Check for attending ants; treat ant trail alongside mealybug control. Systemic or horticultural oil per plant/label; wax coating limits contact-spray success.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN947"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/mealybug/",
+      "guides": []
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "spiraling-whitefly",
+    "common_name": "Rugose Spiraling Whitefly",
+    "aliases": [
+      "spiraling whitefly",
+      "rugose spiraling whitefly",
+      "whitefly",
+      "white fly"
+    ],
+    "scientific_name": "Aleurodicus rugioperculatus",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "whiteflies",
+    "site_category": "Plant pests",
+    "traits": [
+      "White waxy spirals laid in concentric circles on palm frond undersides",
+      "Sticky honeydew film on cars, pool decks, and furniture below infested trees",
+      "Black sooty mold following the sticky film",
+      "Adults about 2.5 mm with light brown bands on the wings"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ficus-whitefly",
+        "difference": "Rugose spiraling whitefly lays eggs in a visible spiral, mainly on palms; ficus whitefly doesn't spiral and targets ficus hedges.",
+        "next_photo": "A close-up of the leaf underside egg pattern, plus which plant it is on.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler",
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "The spiral pattern is the female's egg-laying signature — like a tiny crop circle under every frond. Trees usually survive, but the sticky fallout zone on patios, pools, and cars makes treatment worthwhile.",
+      "fact": "The spiral pattern is her egg-laying signature — like a tiny crop circle under every frond.",
+      "blurb": "Trees usually survive, but the sticky fallout zone makes treatment worth it."
+    },
+    "tech_notes": "Confirm spiral egg pattern on palm/gumbo limbo/avocado. Systemic soil or trunk treatment outperforms contact sprays; mechanical wash-down helps short-term.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1015"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/spiraling-whitefly/",
+      "guides": []
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "tea-scale",
+    "common_name": "Tea Scale",
+    "aliases": [
+      "tea scale"
+    ],
+    "scientific_name": "Fiorinia theae",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "scale-insects",
+    "site_category": "Plant pests",
+    "traits": [
+      "White-to-brown flecking stuck to leaf undersides, mainly camellias and hollies",
+      "Yellow blotches (chlorosis) on the corresponding leaf top side",
+      "Doesn't wipe off easily — it's cemented in place",
+      "Dead scales exude no fluid when pinched, unlike a living insect"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-wax-scale",
+        "difference": "Tea scale is flat, brown flecking on leaf undersides of camellias and hollies; Florida wax scale is a raised, pinkish-white waxy bump on stems.",
+        "next_photo": "A close-up of the scale shape (flat vs. raised) and which plant part it is on.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Adult scales cement themselves in place and live under a waxy shell for life, which is why a quick spray often doesn't reach them. A technician picks the approach — product choice, coverage on leaf undersides, timing and follow-up — based on how established the infestation is and the plant's condition.",
+      "fact": "Adult scales never move again once they settle — they cement themselves down and live under that shell for the rest of their life.",
+      "blurb": "The waxy shell is why timing and coverage on leaf undersides matter as much as which product is used."
+    },
+    "tech_notes": "Confirm flat brown armor on leaf underside plus matching top-side chlorosis. Evaluate product choice (horticultural oil applied to leaf undersides is a recognized option), timing, plant condition and follow-up rather than one fixed treatment.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN522"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/tea-scale/",
+      "guides": []
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]

@@ -9,6 +9,9 @@ const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
 const CLAIM_LIMIT = 10;
 const STALE_CLAIM_MS = 10 * 60 * 1000;
+const HANDOFF_PHASE_PENDING = 'pending';
+const HANDOFF_PHASE_STARTED = 'started';
+const HANDOFF_PHASE_REJECTED = 'rejected';
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -42,15 +45,24 @@ function isTransactionalRetryEligible(message) {
 function retryStateForProviderBlock(message, now = new Date()) {
   if (!isTransactionalRetryEligible(message)) return {};
   const retryCount = Math.max(0, Number(message.provider_retry_count || 0));
+  // Runtime rows selected after the migration carry this key (including
+  // NULL), so webhook scheduling records positive rejection evidence. Keep
+  // the helper's legacy return shape for older callers that supply a partial
+  // pre-column object during rolling deploys.
+  const phase = Object.prototype.hasOwnProperty.call(message, 'provider_handoff_phase')
+    ? { provider_handoff_phase: HANDOFF_PHASE_REJECTED, provider_handoff_attempt_token: message.send_attempt_token || null }
+    : {};
   if (retryCount >= MAX_RETRIES) {
     return {
       provider_retry_next_at: null,
       provider_retry_exhausted_at: now,
+      ...phase,
     };
   }
   return {
     provider_retry_next_at: new Date(now.getTime() + RETRY_DELAYS_MS[retryCount]),
     provider_retry_exhausted_at: null,
+    ...phase,
   };
 }
 
@@ -68,7 +80,7 @@ async function activeSuppressionForMessage(message) {
 
 async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
   return db.transaction(async (trx) => {
-    const rows = await trx('email_messages')
+    const rows = await retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED])
       .where({ status: 'failed', has_attachments: false })
       .whereNotNull('provider_retry_next_at')
       .where('provider_retry_next_at', '<=', now)
@@ -81,8 +93,8 @@ async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
     const claimed = [];
     for (const row of rows) {
       const sendAttemptToken = crypto.randomUUID();
-      const [updated] = await trx('email_messages')
-        .where({ id: row.id, status: 'failed' })
+      const [updated] = await retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED])
+        .where({ id: row.id, status: 'failed', send_attempt_token: row.send_attempt_token })
         .where('provider_retry_next_at', '<=', now)
         .update({
           status: 'queued',
@@ -92,6 +104,8 @@ async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
           queued_at: now,
           provider_retry_next_at: null,
           provider_retry_count: trx.raw('provider_retry_count + 1'),
+          provider_handoff_phase: HANDOFF_PHASE_PENDING,
+          provider_handoff_attempt_token: sendAttemptToken,
           updated_at: now,
         })
         .returning('*');
@@ -112,6 +126,15 @@ const HANDOFF_STARTED = 'provider_handoff_started';
 // becomes HANDOFF_STARTED at the Mail Send boundary itself.
 const HANDOFF_PENDING = 'provider_handoff_pending';
 
+// Old workers replace send_attempt_token without knowing about these fields.
+// A phase from the previous token cannot prove the current request was unsent.
+function retryEvidence(query, phases, matches = true) {
+  return query.whereRaw(`COALESCE(
+    (provider_handoff_phase = ANY(?::text[]) AND provider_handoff_attempt_token = send_attempt_token)
+    OR (provider_handoff_phase IS NULL AND error_message = ?), FALSE) = ?`,
+  [phases, HANDOFF_PENDING, matches]);
+}
+
 async function recoverStaleClaims(now = new Date()) {
   const staleBefore = new Date(now.getTime() - STALE_CLAIM_MS);
   // provider_retry_count > 0 distinguishes retry-worker claims from normal
@@ -125,30 +148,37 @@ async function recoverStaleClaims(now = new Date()) {
     .whereNull('provider_message_id')
     .whereNull('sent_at')
     .where('queued_at', '<=', staleBefore);
-  // A summary interrupted after its handoff began has no known provider
-  // outcome: terminal for the office, exactly like an exhausted retry. The
-  // row's settlement and the summary's transition commit together, per
-  // row, so a failure between them leaves the row queued for this sweep to
-  // find again instead of exhausted with the summary still reading as sent.
-  const started = await stale().where({ error_message: HANDOFF_STARTED }).select('id', 'send_attempt_token');
+  // Only a durable positive pending marker proves that no request began.
+  // Started rows and legacy unmarked rows are ambiguous and must never have
+  // their bounded attempt refunded. A stale queued `rejected` row is rolling-
+  // deploy evidence from a worker that claimed without writing the new
+  // pending phase; `rejected` describes the previous attempt, so the current
+  // one is ambiguous too.
+  const ambiguous = await retryEvidence(stale(), [HANDOFF_PHASE_PENDING], false)
+    .select('id', 'send_attempt_token', 'provider_handoff_phase');
   let uncertain = 0;
-  for (const claim of started) {
-    uncertain += await db.transaction(async (trx) => {
-      const [row] = await trx('email_messages').where({ id: claim.id, send_attempt_token: claim.send_attempt_token, status: 'queued', error_message: HANDOFF_STARTED })
+  for (const claim of ambiguous) {
+    const updated = await db.transaction(async (trx) => {
+      const query = retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING], false)
+        .where({ id: claim.id, send_attempt_token: claim.send_attempt_token, status: 'queued' });
+      const [row] = await query
         .update({
           status: 'failed',
           provider_retry_next_at: null,
           provider_retry_exhausted_at: now,
-          error_message: 'Provider outcome unknown: interrupted after the provider handoff began',
+          error_message: 'Provider outcome unknown: interrupted provider retry without positive pending evidence',
           updated_at: now,
         }).returning('*');
-      if (!row) return 0;
+      if (!row) return null;
       await reconcileExhaustedSummary(row, trx);
-      return 1;
+      return row;
     });
+    if (updated) {
+      uncertain += 1;
+      await alertExhausted(updated, updated.error_message);
+    }
   }
-  const requeued = await stale()
-    .where((q) => q.whereNull('error_message').orWhereNot('error_message', HANDOFF_STARTED))
+  const requeued = await retryEvidence(stale(), [HANDOFF_PHASE_PENDING])
     .update({
       status: 'failed',
       provider_retry_next_at: now,
@@ -156,10 +186,42 @@ async function recoverStaleClaims(now = new Date()) {
       // provider id nor a sent timestamp, so refund the interrupted claim and
       // let the next worker consume the same bounded attempt slot.
       provider_retry_count: db.raw('GREATEST(provider_retry_count - 1, 0)'),
+      provider_handoff_phase: HANDOFF_PHASE_PENDING,
+      provider_handoff_attempt_token: db.raw('send_attempt_token'),
       error_message: 'Interrupted provider retry claim recovered',
       updated_at: now,
     });
-  return Number(requeued || 0) + uncertain;
+
+  // Rows scheduled before this phase existed cannot prove that their prior
+  // provider handoff was rejected. Park them for office review instead of
+  // repeatedly selecting them or guessing that another send is safe.
+  const unsafeScheduled = await retryEvidence(db('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED], false)
+    .where({ status: 'failed' })
+    .whereNotNull('provider_retry_next_at')
+    .where('provider_retry_next_at', '<=', now)
+    .where('provider_retry_count', '<', MAX_RETRIES)
+    .select('id', 'send_attempt_token', 'provider_handoff_phase', 'provider_retry_next_at');
+  let held = 0;
+  for (const candidate of unsafeScheduled) {
+    const updated = await db.transaction(async (trx) => {
+      const query = retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED], false)
+        .where({ id: candidate.id, status: 'failed', send_attempt_token: candidate.send_attempt_token,
+          provider_retry_next_at: candidate.provider_retry_next_at });
+      const [row] = await query.update({
+        provider_retry_next_at: null,
+        provider_retry_exhausted_at: now,
+        error_message: 'Provider outcome unknown: scheduled retry lacks positive pending evidence',
+        updated_at: now,
+      }).returning('*');
+      if (row) await reconcileExhaustedSummary(row, trx);
+      return row || null;
+    });
+    if (updated) {
+      held += 1;
+      await alertExhausted(updated, updated.error_message);
+    }
+  }
+  return Number(requeued || 0) + uncertain + held;
 }
 
 // A summary whose retries ended without a delivery — the provider block
@@ -206,18 +268,21 @@ async function alertIfProviderRetriesExhausted(message, ev) {
   );
 }
 
-async function markRetryFailure(message, err, now = new Date()) {
+async function markRetryFailure(message, err, now = new Date(), { rejectedAfterStart = false } = {}) {
   const reason = emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed')).slice(0, 1000);
   const retryCount = Number(message.provider_retry_count || 0);
   const exhausted = retryCount >= MAX_RETRIES;
   const nextAt = exhausted ? null : new Date(now.getTime() + RETRY_DELAYS_MS[retryCount]);
+  const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
   const [updated] = await db('email_messages')
-    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
+      provider_handoff_phase: expectedPhase, provider_handoff_attempt_token: message.send_attempt_token })
     .update({
       status: 'failed',
       error_message: reason,
       provider_retry_next_at: nextAt,
       provider_retry_exhausted_at: exhausted ? now : null,
+      provider_handoff_phase: rejectedAfterStart ? HANDOFF_PHASE_REJECTED : HANDOFF_PHASE_PENDING,
       updated_at: now,
     })
     .returning('*');
@@ -242,7 +307,9 @@ async function markRetryUncertain(message, err, now = new Date()) {
   const updated = await db.transaction(async (trx) => {
     const [row] = await trx('email_messages')
       .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-      .update({ status: 'failed', error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: now, updated_at: now })
+      .where({ provider_handoff_phase: HANDOFF_PHASE_STARTED, provider_handoff_attempt_token: message.send_attempt_token })
+      .update({ status: 'failed', error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: now,
+        provider_handoff_phase: HANDOFF_PHASE_STARTED, updated_at: now })
       .returning('*');
     if (row) await reconcileExhaustedSummary(row, trx);
     return row || null;
@@ -253,12 +320,15 @@ async function markRetryUncertain(message, err, now = new Date()) {
 
 // A row stopped before any provider request: terminal for the rail, and a
 // summary's aggregate is settled from the ledger since no webhook follows.
-async function stopRetry(message, { status, reason, exhaustedAlert = false }) {
+async function stopRetry(message, { status, reason, exhaustedAlert = false, rejectedAfterStart = false }) {
   const isSummary = message.template_key === 'service.visit_summary';
   const settle = async (trx) => {
+    const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
     const [row] = await trx('email_messages')
-      .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-      .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
+      .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
+        provider_handoff_phase: expectedPhase, provider_handoff_attempt_token: message.send_attempt_token })
+      .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(),
+        provider_handoff_phase: rejectedAfterStart ? HANDOFF_PHASE_REJECTED : HANDOFF_PHASE_PENDING, updated_at: new Date() })
       .returning('*');
     if (row && isSummary) {
       // The ledger terminalization and the summary settlement commit
@@ -287,13 +357,18 @@ async function retrySummaryThroughHandoff(message, dispatchToProvider, state) {
   // recovery, not exhausted. The update must own the queued row, or the
   // claim has moved on.
   const marked = await db('email_messages')
-    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
+      provider_handoff_phase: HANDOFF_PHASE_PENDING, provider_handoff_attempt_token: message.send_attempt_token })
     .update({ error_message: HANDOFF_PENDING, updated_at: new Date() });
   if (Number(marked) !== 1) return { outcome: { sent: false, stopped: true, reason: 'claim_lost' } };
   let fence;
   try {
     fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(message, dispatchToProvider);
   } catch (err) {
+    if (state.rejected) {
+      await markRetryFailure(message, err, new Date(), { rejectedAfterStart: true });
+      return { outcome: { sent: false, error: err } };
+    }
     if (state.dispatchStarted && !state.result) {
       await markRetryUncertain(message, err);
       return { outcome: { sent: false, uncertain: true, error: err } };
@@ -314,6 +389,7 @@ async function retrySummaryThroughHandoff(message, dispatchToProvider, state) {
     return { outcome: await stopRetry(message, {
       status: 'blocked',
       reason: state.blocked ? 'annual_offer_withheld' : `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}`,
+      rejectedAfterStart: state.blocked,
     }) };
   }
   return { result: state.result };
@@ -325,7 +401,8 @@ async function recordRetrySend(message, result) {
   let updated;
   try {
     [updated] = await db('email_messages')
-      .where({ id: message.id, send_attempt_token: message.send_attempt_token })
+      .where({ id: message.id, send_attempt_token: message.send_attempt_token,
+        provider_handoff_phase: HANDOFF_PHASE_STARTED, provider_handoff_attempt_token: message.send_attempt_token })
       .update({
         provider_message_id: result.messageId,
         sent_at: new Date(),
@@ -342,12 +419,10 @@ async function recordRetrySend(message, result) {
       })
       .returning('*');
   } catch (err) {
-    if (message.template_key === 'service.visit_summary') {
-      await markRetryUncertain(message, new Error(`bookkeeping failed after acceptance: ${err.message}`)).catch(() => {});
-      return { sent: false, uncertain: true, error: err };
-    }
-    throw err;
+    await markRetryUncertain(message, new Error(`bookkeeping failed after acceptance: ${err.message}`)).catch(() => {});
+    return { sent: false, uncertain: true, error: err };
   }
+  if (!updated) return { sent: false, uncertain: true, reason: 'claim_lost_after_acceptance' };
   if (updated?.template_key === 'service.visit_summary') {
     await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
       .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));
@@ -375,7 +450,7 @@ async function retryOne(message) {
   // dispatchStarted is set immediately before the Mail Send request: a
   // failure clearing the provider block is provably pre-send and keeps the
   // ordinary retry schedule.
-  const state = { dispatchStarted: false, result: null, blocked: false };
+  const state = { dispatchStarted: false, rejected: false, result: null, blocked: false };
   const dispatchToProvider = async () => {
     // Blocks are a provider-specific suppression distinct from hard bounces.
     // If it remains, SendGrid will drop the retry before attempting delivery.
@@ -386,11 +461,19 @@ async function retryOne(message) {
     // after this point settles as uncertain and one lost before it requeues.
     // Zero rows means stale-claim recovery already reclaimed the row: nothing
     // may reach the provider.
-    if (message.template_key === 'service.visit_summary') {
-      const started = await require('../models/marker-db')()('email_messages')
-        .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued', error_message: HANDOFF_PENDING })
-        .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
-      if (Number(started) !== 1) throw new Error('Visit summary retry claim was reclaimed before the provider request');
+    const marker = require('../models/marker-db')()('email_messages')
+      .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
+        provider_handoff_phase: HANDOFF_PHASE_PENDING, provider_handoff_attempt_token: message.send_attempt_token });
+    if (message.template_key === 'service.visit_summary') marker.where({ error_message: HANDOFF_PENDING });
+    const started = await marker.update({
+      provider_handoff_phase: HANDOFF_PHASE_STARTED,
+      ...(message.template_key === 'service.visit_summary' ? { error_message: HANDOFF_STARTED } : {}),
+      updated_at: new Date(),
+    });
+    if (Number(started) !== 1) {
+      const lost = new Error('Provider retry claim was reclaimed before the provider request');
+      lost.retryClaimLost = true;
+      throw lost;
     }
     // Codex round 3 on #4608 (structural move): the annual-offer guard's
     // AUTHORITATIVE check now runs inside sendgrid.sendOne itself, the true
@@ -449,9 +532,10 @@ async function retryOne(message) {
       // unchanged so the ordinary retry-later classification applies (this
       // file's ownnot-dispatched branches, both here and in retryOne's own
       // catch), same as any other pre-send recheck failure.
-      if (err && (err.annualOfferWithheld || err.annualOfferGuardFailed)) {
-        state.dispatchStarted = false;
-      }
+      state.rejected = !!(err && (err.annualOfferWithheld
+        || err.annualOfferGuardFailed
+        || err.code === 'SENDGRID_NOT_CONFIGURED'
+        || sendgrid.isDefiniteRejection(err)));
       if (err && err.annualOfferWithheld) {
         state.blocked = true;
         return;
@@ -471,7 +555,7 @@ async function retryOne(message) {
       await dispatchToProvider();
     }
     if (state.blocked) {
-      return await stopRetry(message, { status: 'blocked', reason: 'annual_offer_withheld' });
+      return await stopRetry(message, { status: 'blocked', reason: 'annual_offer_withheld', rejectedAfterStart: true });
     }
     return await recordRetrySend(message, state.result);
   } catch (err) {
@@ -479,11 +563,12 @@ async function retryOne(message) {
     // if the uncertain settlement itself failed above, it is attempted once
     // more here, and a row it still cannot settle keeps its started marker
     // for stale-claim recovery to settle as uncertain.
-    if (message.template_key === 'service.visit_summary' && state.dispatchStarted) {
+    if (err?.retryClaimLost) return { sent: false, stopped: true, reason: 'claim_lost' };
+    if (state.dispatchStarted && !state.rejected) {
       await markRetryUncertain(message, err).catch((again) => logger.error(`[email-provider-retry] uncertain settlement failed twice for ${message.id}: ${again.message}`));
       return { sent: false, uncertain: true, error: err };
     }
-    await markRetryFailure(message, err);
+    await markRetryFailure(message, err, new Date(), { rejectedAfterStart: state.rejected });
     return { sent: false, error: err };
   }
 }
@@ -511,6 +596,9 @@ async function runDueRetries({ limit = CLAIM_LIMIT } = {}) {
 module.exports = {
   HANDOFF_STARTED,
   HANDOFF_PENDING,
+  HANDOFF_PHASE_PENDING,
+  HANDOFF_PHASE_STARTED,
+  HANDOFF_PHASE_REJECTED,
   RETRY_DELAYS_MS,
   MAX_RETRIES,
   asArray,

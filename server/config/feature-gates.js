@@ -1024,6 +1024,20 @@ const gates = {
   // reschedule flips status, and the SMS line renders empty again.
   reserviceStreamline: process.env.GATE_RESERVICE_STREAMLINE === 'true',
 
+  // Re-service ranking demotion (owner ruling 2026-09-24: "prefer new
+  // customers over existing — new-customer bookings get first pick of open
+  // time; re-service/callback pickers rank after"). Nested inside
+  // reserviceSelfServe — with that gate dark, /reservice/:token 404s and
+  // this one never runs. Ranking only: buildBookingAvailability's offered
+  // slot set (days[].slots, used for commit revalidation) never changes;
+  // only reservice-public's curated strip order and each day's is_best_fit
+  // badge move. This entry is for logGateStatus only — the one consumer
+  // (routes/booking.js's rankProfile:'reservice' branch, opted into only by
+  // reservice-public.js) reads reserviceRankAfterNewLive() at CALL time so a
+  // flip needs no redeploy. Kill switch: unset GATE_RESERVICE_RANK_AFTER_NEW
+  // — the strip returns to plain score ranking, byte-for-byte.
+  reserviceRankAfterNew: gateEnvValue('GATE_RESERVICE_RANK_AFTER_NEW'),
+
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
   // can offer the existing tokenized /pay checkout in-app instead of the
@@ -2830,6 +2844,13 @@ const gates = {
   // it would insert, inside a transaction it rolls back, and logs the count
   // only — no writes). This entry is for logGateStatus only.
   recurringSeriesTopUp: process.env.GATE_RECURRING_SERIES_TOPUP === 'true',
+  // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
+  // single-visit cancel inside a counted plan adds one visit back at the
+  // END of the series (services/recurring-series-cancel-reseed.js →
+  // routes/admin-schedule.js#reseedRecurringSeriesAfterCancel). Ships DARK:
+  // off unless exactly 'true'. Read live per call by
+  // cancelReseedsRecurringLive(); this entry is for logGateStatus only.
+  cancelReseedsRecurring: process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true',
   // Public estimate-page consultation offer ("Want us to come look first?",
   // consultation-first lane, owner ruling 2026-09-23): the same
   // /inspection/:token self-booking link the recurring-lead email offers,
@@ -2840,6 +2861,19 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
+  // Commercial suite sizing: a commercial tenant in a multi-tenant building
+  // is sized by the SUITE (state food-license seats, else a type default)
+  // instead of the whole building, in the estimator engine's call drafts.
+  // **Ships DARK: off unless exactly `true`**; canonical CALL-TIME reader
+  // commercialSuiteSizingLive(). Off = byte-identical to before.
+  commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
+  // Amazon "Delivered" email → auto-restock (server/services/purchase-receipts).
+  // Ships DARK: off unless set (gateEnvValue), read at call time by both the
+  // post-email-sync hook and the ~15-minute scheduler sweep — a flip needs no
+  // redeploy. Also requires PURCHASE_RECEIPT_SINCE (an ISO timestamp WITH an
+  // explicit offset, read by gateEnvTimestamp) set, independently of this
+  // gate, or the lane does nothing (see sweep.js).
+  purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2893,6 +2927,20 @@ function recurringSeriesTopUpLive() {
   return process.env.GATE_RECURRING_SERIES_TOPUP === 'true';
 }
 
+// Same live-read contract as recurringSeriesTopUpLive: a flip is a live
+// kill/enable with no redeploy. Kill = unset GATE_CANCEL_RESEEDS_RECURRING.
+function cancelReseedsRecurringLive() {
+  return process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true';
+}
+
+// GATE_COMMERCIAL_SUITE_SIZING read at CALL time — strict `=== 'true'`,
+// same convention as recurringSeriesTopUpLive(). The one reader for both
+// suite-sizing entry points (performPropertyLookup's opt-in and the
+// estimator engine's own resolve), so a flip is a live kill/enable.
+function commercialSuiteSizingLive() {
+  return process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true';
+}
+
 function leadInspectionLinkLive() {
   return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
 }
@@ -2917,6 +2965,14 @@ function estimateConsultationOfferLive() {
 // place either way — call sites just skip invoking them while this is off.
 function selfBookDayCapEnabled() {
   return gateEnvValue('GATE_SELF_BOOK_DAY_CAP');
+}
+
+// GATE_RESERVICE_RANK_AFTER_NEW read at CALL time — the one canonical
+// reader buildBookingAvailability's reservice rank-profile branch uses
+// (server/routes/booking.js). The `reserviceRankAfterNew` gates-map entry
+// above is for logGateStatus only.
+function reserviceRankAfterNewLive() {
+  return gateEnvValue('GATE_RESERVICE_RANK_AFTER_NEW');
 }
 
 // Fresh annual contracts require the term-aware cancellation path. Read both
@@ -2966,5 +3022,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, estimateConsultationOfferLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
 // gates 1775330914
