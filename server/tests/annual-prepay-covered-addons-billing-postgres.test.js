@@ -295,6 +295,19 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(out.body?.completionSmsType || '').not.toMatch(/with_invoice$/);
     });
 
+    test('a zero-due add-ons bill that will not close alerts the office rather than passing as settled (GitHub r5 P2)', async () => {
+      const f = await coveredVisit({ depositDollars: 60 });
+      const InvoiceService = require('../services/invoice');
+      const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: false, reason: 'collection_stopped' });
+      const out = await withFailure(() => settle.mockRestore(), () => complete(f, { sendCompletionSms: true }));
+      expect(out).toMatchObject({ status: 200 });
+      const [bill] = await liveInvoices(f);
+      expect(bill.status).not.toBe('prepaid');
+      expect((await addonsAlert(f)).body).toMatch(/nothing due but could not be closed \(collection_stopped\)/);
+      expect(out.body?.invoicePaymentActionRequired).not.toBe(true);
+      expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+    });
+
     test('a quiet backfill bills the add-ons at face value, due today, off any payer statement, and leaves the deposit on its ledger', async () => {
       const f = await coveredVisit({ depositDollars: 10, daysAgo: 3 });
       const InvoiceService = require('../services/invoice');
