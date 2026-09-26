@@ -22,7 +22,7 @@
  * (60 min), while the CURRENT placement used plain haversine and charged
  * nothing at all. This module gives both sides the same arithmetic.
  */
-const { plannedWorkMinutes } = require('../scheduling/planning-minutes');
+const { workDuration } = require('../route-reorder-window-fit');
 const { driveMin, haversine, HQ } = require('./geo');
 
 const DEFAULT_DURATION_MINUTES = 60;
@@ -35,19 +35,17 @@ const DEFAULT_DURATION_MINUTES = 60;
 const CLUSTER_RADIUS_MILES = 3;
 
 /**
- * Minutes a stop keeps a technician on site for THIS model: the owner
- * planning table when it names the service, else the stop's own promised
- * estimate/window (the legacy rule plannedWorkMinutes falls back to for an
- * unnamed service, or when GATE_SCHEDULING_CAPACITY is off). Charged to
- * EVERY stop passed in, including the moving visit — see the module doc for
- * why that is a deliberate departure from planning-minutes.js's general
- * `planning_exempt` convention.
+ * Minutes a stop keeps a technician on site for THIS model: the canonical
+ * route work duration (route-reorder-window-fit.js workDuration — the owner
+ * planning table when it names the service, else the legacy rule: the larger
+ * of the stored window span and the estimate, else 60; Codex r2: reuse it,
+ * never re-derive it). Charged to EVERY stop passed in, including the moving
+ * visit — see the module doc for why that is a deliberate departure from
+ * planning-minutes.js's general `planning_exempt` convention.
  */
 function stopPlanningMinutes(stop) {
   if (!stop) return DEFAULT_DURATION_MINUTES;
-  const planned = plannedWorkMinutes({ ...stop, planning_exempt: false });
-  if (planned != null) return planned;
-  return Number(stop.estimated_duration_minutes) || DEFAULT_DURATION_MINUTES;
+  return workDuration({ ...stop, planning_exempt: false }, DEFAULT_DURATION_MINUTES);
 }
 
 /** Total drive minutes for HQ -> ordered stops -> HQ, using the calibrated

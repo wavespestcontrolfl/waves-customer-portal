@@ -45,6 +45,18 @@ describe('stopPlanningMinutes', () => {
     expect(stopPlanningMinutes({ ...pestStop, planning_exempt: true })).toBe(25);
   });
 
+  // Codex r2 (PRRT_kwDOR3YQi86mQebJ): the fallback is the canonical legacy
+  // workDuration rule — the larger of the stored window span and the estimate.
+  test('fallback matches route-reorder workDuration: max(stored window span, estimate), else 60', () => {
+    const { workDuration } = require('../services/route-reorder-window-fit');
+    const wide = { window_start: '08:00', window_end: '10:00', estimated_duration_minutes: 60 };
+    const long = { window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 90 };
+    expect(stopPlanningMinutes(wide)).toBe(120);
+    expect(stopPlanningMinutes(long)).toBe(90);
+    expect(stopPlanningMinutes({})).toBe(60);
+    [wide, long].forEach((stop) => expect(stopPlanningMinutes(stop)).toBe(workDuration(stop)));
+  });
+
   test('an unnamed service falls back to its own estimate even with the gate on', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     expect(stopPlanningMinutes({ service_type: 'General Pest + Lawn Combo', estimated_duration_minutes: 90 })).toBe(90);

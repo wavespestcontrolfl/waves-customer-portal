@@ -132,6 +132,8 @@ function serviceToRouteStop(service, geo, startMin, siblings = []) {
     is_recurring: service.is_recurring,
     is_callback: service.is_callback,
     estimated_duration_minutes: service.estimated_duration_minutes,
+    window_start: service.window_start,
+    window_end: service.window_end,
     unitMembers: siblings,
   };
 }
@@ -206,26 +208,32 @@ async function resolveCurrentDayTech(db, service) {
 
 // The moving unit: its ids (self + every open group member — the rebooker's
 // excludeServiceIds for a unit move, so members never conflict with each
-// other and never count as a stationary "other stop" for scoring) and the
-// sibling rows predictMemberWindows (windows) and routeCost (planning fields)
-// need. ONE `openMembers` read (the accessor the unit mover itself uses) and,
-// only when there ARE siblings, one read of those rows. An unreadable group
+// other and never count as a stationary "other stop" for scoring), the
+// sibling rows predictMemberWindows (dates, windows, durations) and
+// routeCost (planning fields) need, and the visit's canonical start (the
+// unit mover's anchor when the tapped row is windowless). ONE `openMembers`
+// read (the accessor the unit mover itself uses) and, only when there ARE
+// siblings, one read of those rows and one of the visit. An unreadable group
 // degrades to a standalone visit.
 async function loadGroupContext(db, service) {
   const selfId = String(service.id);
-  if (!service.visit_id) return { excludeIds: new Set([selfId]), siblings: [] };
+  const standalone = { excludeIds: new Set([selfId]), siblings: [], visitWindowStart: null };
+  if (!service.visit_id) return standalone;
   try {
     const { openMembers } = require('../visit-groups');
     const members = await openMembers(db, service.visit_id);
     const excludeIds = new Set([selfId, ...(members || []).map((m) => String(m.id))]);
     const siblingIds = [...excludeIds].filter((id) => id !== selfId);
-    if (!siblingIds.length) return { excludeIds, siblings: [] };
-    const siblings = await db('scheduled_services')
-      .whereIn('id', siblingIds)
-      .select('id', 'window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback');
-    return { excludeIds, siblings };
+    if (!siblingIds.length) return { ...standalone, excludeIds };
+    const [siblings, visit] = await Promise.all([
+      db('scheduled_services')
+        .whereIn('id', siblingIds)
+        .select('id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback'),
+      db('service_visits').where({ id: service.visit_id }).first('window_start'),
+    ]);
+    return { excludeIds, siblings, visitWindowStart: (visit && visit.window_start) || null };
   } catch {
-    return { excludeIds: new Set([selfId]), siblings: [] };
+    return standalone;
   }
 }
 
@@ -278,34 +286,65 @@ async function loadOccupiedSpansByDate(db, dates, excludeIds) {
   return byDate;
 }
 
-// The windows the writer probes for this candidate. Standalone: reschedule()'s
-// own span — the requested end, else the stored end, else occupancyProbeEnd's
-// duration/one-hour rule. Grouped: every member's target window from
-// predictMemberWindows (moveVisitAsUnit's own derivation), each probed by
-// that member's reschedule() with the same end rule; a windowless member is
-// not probed. null when the writer refuses the placement outright (a member
-// shifted across midnight, or an open end that would cross it).
-function unitProbeWindows(service, members, cand) {
+// Where the writer would put the moving unit for this candidate, or null
+// when it would refuse the placement outright. Standalone: reschedule()'s own
+// span — the requested end, else the stored end, else occupancyProbeEnd's
+// duration/one-hour rule. Grouped: predictMemberWindows — moveVisitAsUnit's
+// own planning (anchor, shifted windows, midnight and admin-window
+// refusals) — then each member's span by the same end rule, as that
+// member's reschedule() probes it; a windowless member is not probed.
+// Returns `{ windows, unitStart }`: the probe spans, and the unit's earliest
+// start (where route scoring places the stop).
+function planUnitPlacement(service, group, cand) {
   const { occupancyProbeEnd } = require('../rebooker');
   let targets = [{ start: cand.start_time, end: cand.end_time || service.window_end, duration: service.estimated_duration_minutes }];
-  if (members) {
+  let unitStart = cand.start_time;
+  if (group.members) {
     const { predictMemberWindows } = require('../visit-groups');
     const predicted = predictMemberWindows({
-      members, primaryId: service.id, anchorStart: service.window_start, requestedStart: cand.start_time, requestedEnd: cand.end_time,
+      members: group.members,
+      primaryId: service.id,
+      visitWindowStart: group.visitWindowStart,
+      requestedStart: cand.start_time,
+      requestedEnd: cand.end_time,
+      newDateStr: cand.date,
     });
-    if (predicted.some((p) => p.invalid)) return null;
-    targets = predicted.map((p, i) => ({ start: p.windowStart, end: p.windowEnd, duration: members[i].estimated_duration_minutes }));
+    if (!predicted.ok) return null;
+    targets = predicted.targets.map((t, i) => ({ start: t.start, end: t.end, duration: group.members[i].estimated_duration_minutes }));
+    unitStart = predicted.unitStart || cand.start_time;
   }
   try {
-    return targets.filter((t) => t.start).map((t) => ({ start: t.start, end: occupancyProbeEnd(t.start, t.end, t.duration) }));
+    const windows = targets.filter((t) => t.start).map((t) => ({ start: t.start, end: occupancyProbeEnd(t.start, t.end, t.duration) }));
+    return { windows, unitStart };
   } catch {
     return null;
   }
 }
 
-function slotTaken(windows, occupied) {
-  if (!windows) return true;
-  return windows.some((w) => {
+// The grouped visit's rows in the shape predictMemberWindows reads (the
+// primary first), or null for a standalone visit.
+function unitMembers(service, siblings) {
+  if (!siblings.length) return null;
+  const self = {
+    id: service.id,
+    scheduled_date: service.scheduled_date,
+    window_start: service.window_start,
+    window_end: service.window_end,
+    estimated_duration_minutes: service.estimated_duration_minutes,
+  };
+  return [self, ...siblings];
+}
+
+// The unit's earliest CURRENT start in minutes (the tapped row or any
+// sibling), else DAY_OPEN — the current placement's position in the chain.
+function currentUnitStartMin(service, siblings) {
+  const starts = [service, ...siblings].map((r) => hhmmToMin(r.window_start)).filter((v) => v != null);
+  return starts.length ? Math.min(...starts) : DAY_OPEN;
+}
+
+function slotTaken(placement, occupied) {
+  if (!placement) return true;
+  return placement.windows.some((w) => {
     const s = hhmmToMin(w.start);
     const e = hhmmToMin(w.end);
     return occupied.some((o) => windowsOverlap(s, e, o.startMin, o.endMin));
@@ -315,8 +354,8 @@ function slotTaken(windows, occupied) {
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
-function scoreOnSharedModel(service, geo, cand, stops, siblings) {
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), siblings));
+function scoreOnSharedModel(service, geo, cand, stops, siblings, unitStart) {
+  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(unitStart), siblings));
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
@@ -331,15 +370,13 @@ function scoreOnSharedModel(service, geo, cand, stops, siblings) {
 /**
  * GATE_AUTO_DISPATCH_SHARED_MODEL applied to a HARD-filtered candidate list:
  * drops every candidate the rebooker's writer would refuse with SLOT_TAKEN
- * (unitProbeWindows against the writer's own probe, loaded once per date),
+ * (planUnitPlacement against the writer's own probe, loaded once per date),
  * and re-scores each survivor on the shared model over its technician's day
  * (one batched day-stop read). Nothing here writes.
  */
 async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops) {
-  const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
-  const members = siblings.length
-    ? [{ id: service.id, window_start: service.window_start, window_end: service.window_end, estimated_duration_minutes: service.estimated_duration_minutes }, ...siblings]
-    : null;
+  const { excludeIds, siblings, visitWindowStart } = await loadGroupContext(ctx.db, service);
+  const group = { members: unitMembers(service, siblings), visitWindowStart };
   const dates = candidates.map((c) => c.date);
   const [occupiedByDate, dayStops] = await Promise.all([
     loadOccupiedSpansByDate(ctx.db, dates, excludeIds),
@@ -348,13 +385,14 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   const stopsByTechDay = new Map();
   const kept = [];
   for (const cand of candidates) {
-    if (slotTaken(unitProbeWindows(service, members, cand), occupiedByDate.get(cand.date) || [])) {
+    const placement = planUnitPlacement(service, group, cand);
+    if (slotTaken(placement, occupiedByDate.get(cand.date) || [])) {
       if (drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
       continue;
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings));
+    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement.unitStart));
   }
   return kept;
 }
@@ -466,7 +504,7 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     date: dateStr,
     start_time: service.window_start ? String(service.window_start).slice(0, 5) : null,
     capability_level: ctx.capabilityFor(techId, category),
-    ...(await sharedModelCurrentPlacement(service, geo, ctx, { dateStr, myStart })),
+    ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr)),
   };
 }
 
@@ -478,12 +516,14 @@ async function computeCurrentPlacement(service, prefs, ctx) {
 // share all describe one stop list (Codex r1: stops_that_day counted the
 // legacy list). Overrides the legacy fields above; gate off returns {} so the
 // legacy object is byte-for-byte unchanged.
-async function sharedModelCurrentPlacement(service, geo, ctx, { dateStr, myStart }) {
+async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   if (!autoDispatchSharedModelLive()) return {};
   const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
   const dayTech = await resolveCurrentDayTech(ctx.db, service);
   const stops = await loadDayStops(ctx.db, { technicianId: dayTech, dateStr, excludeIds });
-  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, myStart, siblings)) : null;
+  // The unit sits at its earliest current start (Codex r2), as a candidate
+  // sits at its earliest predicted one.
+  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, currentUnitStartMin(service, siblings), siblings)) : null;
   return {
     ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
     stops_that_day: stops.length + 1,
@@ -664,6 +704,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, unitProbeWindows,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin,
   },
 };

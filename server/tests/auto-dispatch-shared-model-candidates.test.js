@@ -37,7 +37,7 @@ const {
   findValidCandidateSlots,
   computeCurrentPlacement,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, unitProbeWindows,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -485,6 +485,18 @@ describe('loadDayStops: tech-scoped route scoring (+ the single tech\'s unassign
 // (predictMemberWindows) rather than a summed/widened interval.
 // Call 1 = loadGroupContext's sibling rows; later calls = the batched
 // candidate tech-day stops (none).
+// Serves the unit's visit row (service_visits.window_start — the unit
+// mover's anchor fallback) and hands every other table to `db`.
+function withVisit(db, visitWindowStart = null) {
+  return (table) => {
+    if (table !== 'service_visits') return db(table);
+    const c = {};
+    c.where = () => c;
+    c.first = async () => ({ window_start: visitWindowStart });
+    return c;
+  };
+}
+
 function groupDb(siblingRows) {
   let call = 0;
   return () => {
@@ -518,9 +530,10 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
       ];
       return c;
     };
-    const result = await loadGroupContext(db, { id: 's1', visit_id: 'v1' });
+    const result = await loadGroupContext(withVisit(db, '09:00'), { id: 's1', visit_id: 'v1' });
     expect(result.excludeIds).toEqual(new Set(['s1', 'sib1', 'sib2']));
     expect(result.siblings.map((s) => s.id).sort()).toEqual(['sib1', 'sib2']);
+    expect(result.visitWindowStart).toBe('09:00');
   });
 
   test('loadGroupContext: an unreadable group degrades to standalone (fail-safe)', async () => {
@@ -559,7 +572,7 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
     const service = { id: 's1', visit_id: 'v1', window_start: '08:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
     const geo = { lat: 27.4, lng: -82.5 };
     const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
-    await filterAndScoreSharedModelCandidates(service, geo, candidates, { db }, {});
+    await filterAndScoreSharedModelCandidates(service, geo, candidates, { db: withVisit(db) }, {});
 
     expect(new Set(capturedDayStopExcludeIds)).toEqual(new Set(['s1', 'sib1']));
     expect(new Set(probeMoveConflicts.mock.calls[0][0].excludeServiceIds)).toEqual(new Set(['s1', 'sib1']));
@@ -575,7 +588,7 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
     // Requesting a MUCH later start shifts the sibling well past 24:00.
     const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '22:00', end_time: '23:00' }];
     const drops = { slot_taken: 0 };
-    const kept = await filterAndScoreSharedModelCandidates(service, geo, candidates, { db }, drops);
+    const kept = await filterAndScoreSharedModelCandidates(service, geo, candidates, { db: withVisit(db) }, drops);
     expect(kept).toHaveLength(0);
     expect(drops.slot_taken).toBe(1);
   });
@@ -609,7 +622,7 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
       }
       return c;
     };
-    await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db });
+    await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db: withVisit(db) });
     expect(new Set(capturedExcludeIds)).toEqual(new Set(['s1', 'sib1']));
   });
 });
@@ -665,19 +678,20 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
     const service = { id: 's1', visit_id: 'v1', window_start: '09:00', estimated_duration_minutes: 60 };
     const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '11:00', end_time: '12:00' }];
     const drops = { slot_taken: 0 };
-    const kept = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, candidates, { db }, drops);
+    const kept = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, candidates, { db: withVisit(db) }, drops);
     expect(kept).toHaveLength(0);
     expect(drops.slot_taken).toBe(1);
   });
 
   test('co-timed overlapping sibling windows do NOT falsely reject — the members\' own rows are excluded exactly as the unit move excludes them', async () => {
-    // A combo booking: both members 09:00-10:00. The date's occupancy holds
-    // BOTH members' current rows plus an unrelated 13:00 job.
+    // A combo booking: both members 09:00-10:00, occupying 09:00-11:00 on the
+    // date between them. The date's occupancy holds BOTH members' current
+    // rows plus an unrelated 13:00 job.
     openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
     const db = groupDb([{ id: 'sib1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }]);
     const dateRows = [
-      { ...conflictRow('09:00', '10:00'), id: 's1' },
-      { ...conflictRow('09:00', '10:00'), id: 'sib1' },
+      { ...conflictRow('09:00', '11:00'), id: 's1' },
+      { ...conflictRow('09:00', '11:00'), id: 'sib1' },
       { ...conflictRow('13:00', '14:00'), id: 'other' },
     ];
     // Honors excludeServiceIds the way findConflictingVisits' WHERE does.
@@ -686,28 +700,69 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
     }));
     const service = { id: 's1', visit_id: 'v1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 };
     const candidates = [
-      { technician_id: 't1', date: '2026-08-06', start_time: '09:30', end_time: '10:30' }, // both members land co-timed, overlapping their own old rows
+      { technician_id: 't1', date: '2026-08-06', start_time: '10:00', end_time: '11:00' }, // both members land co-timed, overlapping their own old rows
       { technician_id: 't1', date: '2026-08-06', start_time: '13:00', end_time: '14:00' }, // collides with the unrelated job
     ];
     const drops = { slot_taken: 0 };
-    const kept = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, candidates, { db }, drops);
-    expect(kept.map((k) => k.start_time)).toEqual(['09:30']);
+    const kept = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, candidates, { db: withVisit(db) }, drops);
+    expect(kept.map((k) => k.start_time)).toEqual(['10:00']);
     expect(drops.slot_taken).toBe(1);
   });
 
-  test('unitProbeWindows: the writer\'s own spans — an open end probes the duration (else one hour); a group probes each member\'s derived window', () => {
-    expect(unitProbeWindows({ id: 's1', estimated_duration_minutes: 45 }, null, { start_time: '10:00', end_time: null }))
-      .toEqual([{ start: '10:00', end: '10:45' }]);
-    expect(unitProbeWindows({ id: 's1' }, null, { start_time: '10:00', end_time: null }))
-      .toEqual([{ start: '10:00', end: '11:00' }]);
+  test('planUnitPlacement: the writer\'s own spans — an open end probes the duration (else one hour); a group probes each member\'s derived window', () => {
+    const cand = { date: '2026-08-06', start_time: '10:00', end_time: null };
+    expect(planUnitPlacement({ id: 's1', estimated_duration_minutes: 45 }, {}, cand))
+      .toEqual({ windows: [{ start: '10:00', end: '10:45' }], unitStart: '10:00' });
+    expect(planUnitPlacement({ id: 's1' }, {}, cand).windows).toEqual([{ start: '10:00', end: '11:00' }]);
     const members = [
       { id: 's1', window_start: '09:00', window_end: '10:00' },
       { id: 'sib1', window_start: '10:00', window_end: null, estimated_duration_minutes: 30 },
       { id: 'sib2', window_start: null, window_end: null },
     ];
-    expect(unitProbeWindows({ id: 's1', window_start: '09:00' }, members, { start_time: '13:00', end_time: '14:00' }))
-      .toEqual([{ start: '13:00', end: '14:00' }, { start: '14:00', end: '14:30' }]); // windowless sib2 is not probed
+    expect(planUnitPlacement({ id: 's1', window_start: '09:00' }, { members }, { date: '2026-08-06', start_time: '13:00', end_time: '14:00' }))
+      .toEqual({ windows: [{ start: '13:00', end: '14:00' }, { start: '14:00', end: '14:30' }], unitStart: '13:00' }); // windowless sib2 is not probed
   });
+
+  // Codex r2 (PRRT_kwDOR3YQi86mQebG): a windowless tapped row anchors on the
+  // visit's canonical start, exactly as moveVisitAsUnit does.
+  test('a windowless tapped row shifts its siblings from the VISIT\'s start', () => {
+    const members = [
+      { id: 's1', window_start: null, window_end: null },
+      { id: 'sib1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
+    ];
+    const service = { id: 's1', window_start: null };
+    const cand = { date: '2026-08-06', start_time: '11:00', end_time: '12:00' };
+    expect(planUnitPlacement(service, { members, visitWindowStart: '09:00' }, cand).windows)
+      .toEqual([{ start: '11:00', end: '12:00' }, { start: '11:00', end: '12:00' }]); // sibling +2h from the visit's 09:00
+    expect(planUnitPlacement(service, { members, visitWindowStart: null }, cand)).toBeNull(); // the writer refuses: no anchor
+  });
+
+  // Codex r2 (PRRT_kwDOR3YQi86mQebH): a shifted sibling that fails the admin
+  // window rules is refused, not only one crossing midnight.
+  test('a sibling whose shifted window breaks the admin window rules rejects the candidate', () => {
+    const members = [
+      { id: 's1', window_start: '09:00', window_end: '10:00' },
+      { id: 'sib1', window_start: '10:30', window_end: '11:30', estimated_duration_minutes: 60 }, // a legacy :30 sibling
+    ];
+    const service = { id: 's1', window_start: '09:00' };
+    expect(planUnitPlacement(service, { members }, { date: '2026-08-06', start_time: '13:00', end_time: '14:00' })).toBeNull();
+    const onTheHour = [members[0], { ...members[1], window_start: '10:00', window_end: '11:00' }];
+    expect(planUnitPlacement(service, { members: onTheHour }, { date: '2026-08-06', start_time: '13:00', end_time: '14:00' })).not.toBeNull();
+  });
+
+  // Codex r2 (PRRT_kwDOR3YQi86mQebI): the unit is placed at its EARLIEST
+  // start — a preceding sibling's — on both sides of the comparison.
+  test('route scoring places a grouped unit at its earliest start (current and predicted)', async () => {
+    openMembers.mockResolvedValue([{ id: 's1' }, { id: 'sib1' }]);
+    const sibling = { id: 'sib1', window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 60 };
+    const service = { id: 's1', visit_id: 'v1', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 };
+    const placement = planUnitPlacement(service, { members: [{ ...service }, sibling] }, { date: '2026-08-06', start_time: '13:00', end_time: '14:00' });
+    expect(placement.unitStart).toBe('11:00'); // the sibling, shifted +3h, leads the unit
+    expect(currentUnitStartMin(service, [sibling])).toBe(8 * 60); // today the sibling's 08:00 leads it
+    expect(currentUnitStartMin({ window_start: null }, [])).toBe(8 * 60); // no window at all: the day's open
+    openMembers.mockReset();
+  });
+
 });
 
 // Codex pre-push P1: group siblings are excluded from the day's stops because
@@ -731,11 +786,12 @@ test('a grouped visit charges its siblings\' planning minutes on both the curren
   const geo = { lat: SERVICE.lat, lng: SERVICE.lng };
 
   openMembers.mockResolvedValue([{ id: 's1' }, { id: 'sib1' }]);
-  const [groupedCand] = await filterAndScoreSharedModelCandidates(grouped, geo, cand, { db }, {});
-  const groupedCurrent = await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db });
+  const vdb = withVisit(db);
+  const [groupedCand] = await filterAndScoreSharedModelCandidates(grouped, geo, cand, { db: vdb }, {});
+  const groupedCurrent = await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db: vdb });
   openMembers.mockResolvedValue([{ id: 's1' }]);
-  const [aloneCand] = await filterAndScoreSharedModelCandidates(grouped, geo, cand, { db }, {});
-  const aloneCurrent = await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db });
+  const [aloneCand] = await filterAndScoreSharedModelCandidates(grouped, geo, cand, { db: vdb }, {});
+  const aloneCurrent = await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db: vdb });
   openMembers.mockReset();
 
   expect(siblingSelect).toEqual(expect.arrayContaining(['service_type', 'is_recurring', 'is_callback', 'estimated_duration_minutes']));
