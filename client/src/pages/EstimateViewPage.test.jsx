@@ -1551,6 +1551,40 @@ describe('SuccessCard — already-accepted retry', () => {
     expect(screen.getByText(/Payment is optional right now/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Pay now and save card/ })).toHaveAttribute('href', 'https://pay.example/inv');
   });
+
+  it('sign_agreement (termite annual-plan sign-before-pay): plain wording, no dollar amount, no "booked" copy', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true, nextStep: 'sign_agreement', billingTerm: 'prepay_annual',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Next step: sign your plan agreement.')).toBeInTheDocument();
+    // Channel-neutral (codex round 3): the agreement may go out by email
+    // only, or be drafted for the office to send.
+    expect(screen.getByText("We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.")).toBeInTheDocument();
+    expect(screen.queryByText(/text and email/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/approved/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("You're booked!")).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
+  });
+
+  it('activation_pending (signed, plan still being set up): acknowledges the signature and never asks to sign again', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true, nextStep: 'activation_pending', billingTerm: 'prepay_annual',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('We received your signature.')).toBeInTheDocument();
+    expect(screen.getByText(/setting up your plan/)).toBeInTheDocument();
+    expect(screen.queryByText(/sign your plan agreement/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pay/i)).not.toBeInTheDocument();
+  });
 });
 
 describe('oneTimeExtrasForPaymentNote', () => {
