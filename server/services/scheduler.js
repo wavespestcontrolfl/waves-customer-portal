@@ -816,6 +816,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — retry committed route-quality refreshes, including dates
+  // outside the nightly optimizer's six-day band. The durable row claim
+  // fences overlapping ticks/deploys; no second cron lease is needed.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const result = await require('./scheduling/quality-after-change').retryScheduleQualityRefreshes();
+      if (result.processed > 0) {
+        logger.info(`[schedule-quality] retry sweep: processed=${result.processed} succeeded=${result.succeeded} failed=${result.failed}`);
+      }
+      if (result.status === 'failed' || result.failed > 0) {
+        logger.error('[schedule-quality] retry sweep has pending failures');
+      }
+    } catch (err) {
+      logger.error(`[schedule-quality] retry sweep failed (${err.code || 'retry_sweep_error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // HOURLY :20 — geocode backstop. Several customer-create paths never call
   // ensureCustomerGeocoded (and the ones that do swallow transient Google
   // failures), leaving latitude/longitude NULL — which silently drops those
