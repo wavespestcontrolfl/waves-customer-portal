@@ -228,12 +228,14 @@ function amazonLine(item, orderNumber) {
 }
 
 // The lines one SiteOne invoice email records, or null for none this pass:
-// not an invoice we can key, still being read, or the other copy of an
-// invoice already recorded.
-async function siteOneInvoiceLines(email, now) {
+// not an invoice we can key, still being read, already in the physical count
+// (another copy came before the cutoff), or the other copy of an invoice
+// already recorded.
+async function siteOneInvoiceLines(email, { now, since }) {
   if (!siteOne.isSiteOneInvoiceEmail(email) || !authenticated(email)) return null;
   const invoice = await siteOne.readSiteOneInvoice(email, now);
   if (!invoice || invoice.pending) return null;
+  if (await siteOne.copyReceivedBefore(invoice.number, since)) return null;
   // The store and billing emails carry the same invoice: the first handled
   // owns it. (A hand-off placeholder also stops this email's own later lines,
   // under the shipment lock in receipt-processor.js.)
@@ -260,11 +262,11 @@ function siteOneHold(problem, quantity, uom) {
   return problem || uom !== 'EA' ? 'unverified' : undefined;
 }
 
-async function processSiteOneInvoices({ floor, now, notifyAdmin, totals }) {
+async function processSiteOneInvoices({ floor, since, now, notifyAdmin, totals }) {
   for (const email of await siteOne.findSiteOneInvoiceEmails(floor)) {
     let found;
     try {
-      found = await siteOneInvoiceLines(email, now);
+      found = await siteOneInvoiceLines(email, { now, since });
     } catch (err) {
       // One invoice that can't be read never stops the others.
       logger.error(`[purchase-receipts] SiteOne invoice email ${email.id} failed: ${err.message}`);
@@ -313,7 +315,7 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   const { undelivered, errors } = await alertUndeliveredShipments({ since, now, notifyAdmin });
   totals.undelivered = undelivered;
   totals.errors.push(...errors);
-  await processSiteOneInvoices({ floor, now, notifyAdmin, totals });
+  await processSiteOneInvoices({ floor, since, now, notifyAdmin, totals });
   return totals;
 }
 

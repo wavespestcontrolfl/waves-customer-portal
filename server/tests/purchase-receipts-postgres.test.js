@@ -321,6 +321,20 @@ jest.setTimeout(30000);
       expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toHaveLength(1);
     });
 
+    test('copies straddling the cutoff: the store copy before it means the billing copy adds nothing', async () => {
+      const lines = [{ description: TAURUS_LINE, quantity: 1, unit_price: 95, total: 95 }];
+      const since = new Date(process.env.PURCHASE_RECEIPT_SINCE);
+      await mockConn('emails').insert({
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com',
+        subject: `SiteOne Confirmation : Invoice #${INVOICE}`, authentication_results: 'dkim=pass header.i=@siteone.com',
+        received_at: new Date(since.getTime() - 5 * HOUR),
+      });
+      await billingCopy(lines, 101.65);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(0);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toEqual([]);
+    });
+
     test('a return of a stocked product is held for a hand adjustment, never subtracted or added', async () => {
       await storeCopy([{ description: TAURUS_LINE, quantity: -1, unit_price: 95, total: -95 }], -101.65);
       await runPurchaseReceiptRestockSweep({ notify });

@@ -11,7 +11,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { outcomes: [], emails: [], whereCalls: [], siteOneEmails: [], siteOneInvoice: null, otherCopy: undefined };
+const mockState = { outcomes: [], emails: [], whereCalls: [], siteOneEmails: [], siteOneInvoice: null, otherCopy: undefined, copyBeforeCutoff: undefined };
 // Like the real processor, a recorded outcome's bell is rung through the
 // ringBell callback on the line's transaction ('trx-stub' here).
 jest.mock('../services/purchase-receipts/receipt-processor', () => ({
@@ -27,6 +27,7 @@ jest.mock('../services/purchase-receipts/siteone-invoices', () => ({
   ...jest.requireActual('../services/purchase-receipts/siteone-invoices'),
   findSiteOneInvoiceEmails: jest.fn(async () => mockState.siteOneEmails),
   readSiteOneInvoice: jest.fn(async () => mockState.siteOneInvoice),
+  copyReceivedBefore: jest.fn(async () => mockState.copyBeforeCutoff),
 }));
 // Covered against Postgres in purchase-receipts-postgres.test.js; here only
 // its place in the sweep.
@@ -74,6 +75,7 @@ beforeEach(() => {
   mockState.siteOneEmails = [];
   mockState.siteOneInvoice = null;
   mockState.otherCopy = undefined;
+  mockState.copyBeforeCutoff = undefined;
   processReceiptLine.mockClear();
   alertUndeliveredShipments.mockClear();
   logger.warn.mockClear();
@@ -387,6 +389,7 @@ describe('SiteOne invoices in the sweep', () => {
   test.each([
     ['still being read', () => { mockState.siteOneInvoice = { pending: true }; }],
     ['the other copy of the invoice already recorded', () => { mockState.otherCopy = { id: 'line-from-store-copy' }; }],
+    ['already in the physical count (its other copy came before the cutoff)', () => { mockState.copyBeforeCutoff = { id: 'store-copy-email' }; }],
     ['unauthenticated', () => { mockState.siteOneEmails = [{ ...siteOneEmail, authentication_results: 'dkim=pass header.i=@evil.example' }]; }],
   ])('nothing is recorded when the invoice is %s', async (_label, arrange) => {
     mockState.siteOneEmails = [siteOneEmail];

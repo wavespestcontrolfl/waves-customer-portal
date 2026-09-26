@@ -18,7 +18,10 @@
  * A quantity of cases would reconcile just as well and still read as one
  * container per case, so a missing or other unit is held 'unverified' too.
  * An invoice never read into lines within EXTRACTION_GRACE_MS gets one
- * 'unreadable' placeholder line. Matching and sizing are the Amazon lane's
+ * 'unreadable' placeholder line. PURCHASE_RECEIPT_SINCE applies to the
+ * invoice, not to each copy: the billing copy lands hours after the store's,
+ * so a copy of an invoice whose other copy came before the cutoff is already
+ * in the physical count (copyReceivedBefore). Matching and sizing are the Amazon lane's
  * (receipt-processor.js); SiteOne descriptions carry the container size
  * ("... 78 fl oz. Bottle (QGCY) UOM:EA").
  */
@@ -48,6 +51,18 @@ function findSiteOneInvoiceEmails(floor, conn = db) {
       .orWhere((billing) => billing.whereRaw('LOWER(from_address) = ?', [BILLING_FROM]).whereRaw('subject ILIKE ?', ['%Your Invoice From SiteOne%'])))
     .where('received_at', '>=', floor)
     .orderBy('received_at', 'asc');
+}
+
+// Another emailed copy of this invoice (the store subject or the billing body
+// naming its number) received before `since` — then the physical count at
+// the cutoff already includes the purchase.
+function copyReceivedBefore(number, since, conn = db) {
+  return conn('emails').where('received_at', '<', since)
+    .where((either) => either
+      .where((store) => store.whereRaw('LOWER(from_address) LIKE ?', [`%${STORE_DOMAIN}`]).whereRaw('subject ILIKE ?', [`%Invoice #${number}%`]))
+      .orWhere((billing) => billing.whereRaw('LOWER(from_address) = ?', [BILLING_FROM])
+        .where((body) => body.whereRaw('body_html LIKE ?', [`%${number}%`]).orWhereRaw('body_text LIKE ?', [`%${number}%`]))))
+    .first('id');
 }
 
 // The invoice number the email itself names: the store email's subject, or
@@ -132,4 +147,6 @@ function lineUom(line) {
   return uom ? String(uom).trim().toUpperCase() : null;
 }
 
-module.exports = { VENDOR, isSiteOneInvoiceEmail, findSiteOneInvoiceEmails, readSiteOneInvoice, verificationProblem, emailInvoiceNumber };
+module.exports = {
+  VENDOR, isSiteOneInvoiceEmail, findSiteOneInvoiceEmails, copyReceivedBefore, readSiteOneInvoice, verificationProblem, emailInvoiceNumber,
+};
