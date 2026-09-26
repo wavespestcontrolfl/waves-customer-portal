@@ -439,7 +439,7 @@ const NotificationService = {
       // Preserve the successful bell even if dispatch fails synchronously.
       logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
     }
-    return { ...notification, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
+    return { ...notification, deduped, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
   },
 
   // Get notifications for admin

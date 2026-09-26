@@ -8065,34 +8065,41 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   const sentCol = paymentReminderColumnForDaysOut(daysOut);
   const claimCol = paymentReminderClaimColumnForDaysOut(daysOut);
   const attemptForCol = paymentReminderAttemptForColumn(daysOut);
-  if (!sentCol || !claimCol) return { sent: false, reason: 'unsupported_days_out' };
+  if (![sentCol, claimCol].every(Boolean)) return { sent: false, reason: 'unsupported_days_out' };
   const cols = await annualPrepayColumns();
-  if (!cols[sentCol] || !cols[claimCol]) return { sent: false, reason: 'columns_missing' };
+  if (![sentCol, claimCol].every((column) => cols[column])) return { sent: false, reason: 'columns_missing' };
 
   // The status/sent checks on this row are advisory (the caller's candidate
   // read may be moments old) — the conditional claim UPDATE below re-checks
   // both atomically, and the fresh invoice read below catches a payment the
   // webhook hasn't flipped onto the term yet.
-  const term = typeof termOrId === 'object' && termOrId?.id
+  const suppliedTerm = Object(termOrId);
+  const term = suppliedTerm.id
     ? termOrId
     : await db('annual_prepay_terms').where({ id: termOrId }).first();
-  if (!term) return { sent: false, reason: 'term_not_found' };
-  if (term.status !== PAYMENT_PENDING_STATUS) return { sent: false, reason: 'not_payment_pending' };
-  if (term[sentCol]) return { sent: false, reason: 'already_sent' };
-  if (!term.prepay_invoice_id) return { sent: false, reason: 'no_invoice' };
+  const candidate = Object(term);
+  const termBlock = [
+    [!term, 'term_not_found'],
+    [candidate.status !== PAYMENT_PENDING_STATUS, 'not_payment_pending'],
+    [Boolean(candidate[sentCol]), 'already_sent'],
+    [!candidate.prepay_invoice_id, 'no_invoice'],
+  ].find(([blocked]) => blocked);
+  if (termBlock) return { sent: false, reason: termBlock[1] };
 
   let invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first();
-  if (!invoice) return { sent: false, reason: 'invoice_missing' };
   // Canonical collectibility (invoice-helpers): paid/prepaid/PROCESSING/void/
   // refunded/cancelled all skip — an in-flight ACH must not be asked to pay
   // again, and the pay page would refuse these states anyway.
   const { isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
-  if (!isInvoiceCollectibleStatus(invoice.status)) {
-    return { sent: false, reason: 'invoice_not_collectible' };
-  }
   // Never text the homeowner a pay link for a payer-billed invoice — the
   // pay link + AR route to the payer (mirrors InvoiceService.sendViaSMS).
-  if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
+  const candidateInvoice = Object(invoice);
+  const invoiceBlock = [
+    [!invoice, 'invoice_missing'],
+    [!isInvoiceCollectibleStatus(candidateInvoice.status), 'invoice_not_collectible'],
+    [Boolean(candidateInvoice.payer_id), 'payer_billed'],
+  ].find(([blocked]) => blocked);
+  if (invoiceBlock) return { sent: false, reason: invoiceBlock[1] };
 
   if (await invoiceDunningActiveToday(invoice.id)) {
     return { sent: false, reason: 'dunning_active_today' };
@@ -8106,7 +8113,8 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   const staleClaimCutoff = new Date(now.getTime() - NOTICE_CLAIM_TTL_MS);
   const attemptedFor = effectiveFirstVisitDate(term);
   const claimUpdate = { [claimCol]: now, updated_at: now };
-  if (attemptForCol && cols[attemptForCol]) claimUpdate[attemptForCol] = attemptedFor;
+  const attemptColumns = [attemptForCol].filter((column) => cols[column]);
+  Object.assign(claimUpdate, Object.fromEntries(attemptColumns.map((column) => [column, attemptedFor])));
   const [claimedTerm] = await db('annual_prepay_terms')
     .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
     .whereNull(sentCol)
@@ -8162,7 +8170,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       const creditResult = await autoApplyAccountCreditIfEnabled(invoice.id, { createdBy: 'system:annual_prepay_payment_reminder' });
       reminderAppliedCredit = Number(creditResult?.applied) || 0;
       const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
-      if (freshInvoice) invoice = freshInvoice;
+      Object.assign(invoice, freshInvoice);
     } catch (err) {
       logger.warn(`[annual-prepay] credit seam skipped for invoice ${invoice.id}: ${err.message}`);
     }
