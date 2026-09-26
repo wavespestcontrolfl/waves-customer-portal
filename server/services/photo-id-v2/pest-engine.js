@@ -104,6 +104,16 @@ function escalateBelow() {
   return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.80;
 }
 
+// Codex round-0 P1 (round 4): `dispatch()`'s `ok:true` only means the
+// provider answered with SOME parseable JSON — it is not validated against
+// the request's `jsonSchema` locally. Every call site that reads a
+// `candidates` array must check this first, or a shape like
+// `{candidates: {}}` throws on `.map`/`.filter` instead of degrading like
+// any other provider miss.
+function hasCandidatesArray(json) {
+  return !!json && Array.isArray(json.candidates);
+}
+
 function clamp01(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return 0;
@@ -215,7 +225,23 @@ async function callWithProvider(route, payload) {
   return { ...result, provider: route.provider, model: result.model || route.model };
 }
 
-async function callCandidatesModel(images, catalogEntries) {
+// Codex round-0 P1 (round 4): a plain `dispatch()` call (unlike
+// `dispatchWithFallback`) installs no abort/timeout on its own — three
+// SEQUENTIAL vision calls with no `timeoutMs` could each ride the
+// adapter's own 10-minute default, so one stalled leg could block
+// escalation indefinitely on a customer-facing request. `identifyPestV2`
+// passes each leg a bounded share of one overall wall-clock budget.
+const DEFAULT_TOTAL_BUDGET_MS = 4 * 60 * 1000;
+function totalBudgetMs() {
+  const raw = Number(process.env.PHOTO_ID_V2_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOTAL_BUDGET_MS;
+}
+// A floor so a nearly-exhausted budget still gets a short bounded attempt
+// rather than 0 (which `callGemini`/`callOpenAI` treat as "no timeout at
+// all" — the opposite of what an exhausted budget should mean).
+const MIN_LEG_TIMEOUT_MS = 1000;
+
+async function callCandidatesModel(images, catalogEntries, timeoutMs) {
   const route = MODELS.TEXT_POLICIES?.photoIdVision?.primary;
   return callWithProvider(route, {
     system: buildCandidatesSystemPrompt(buildCatalogIndexText(catalogEntries)),
@@ -224,12 +250,13 @@ async function callCandidatesModel(images, catalogEntries) {
     jsonMode: true,
     jsonSchema: CANDIDATES_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
+    timeoutMs,
     laneId: 'photo_id_v2_candidates',
     promptVersion: PROMPT_VERSION,
   });
 }
 
-async function callVerifyModel(images, candidateContext) {
+async function callVerifyModel(images, candidateContext, timeoutMs) {
   const route = MODELS.TEXT_POLICIES?.photoIdVision?.primary;
   return callWithProvider(route, {
     system: buildVerifySystemPrompt(candidateContext),
@@ -238,12 +265,13 @@ async function callVerifyModel(images, candidateContext) {
     jsonMode: true,
     jsonSchema: VERIFY_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
+    timeoutMs,
     laneId: 'photo_id_v2_verify',
     promptVersion: PROMPT_VERSION,
   });
 }
 
-async function callEscalationModel(images, catalogEntries, candidateContext) {
+async function callEscalationModel(images, catalogEntries, candidateContext, timeoutMs) {
   const route = MODELS.TEXT_POLICIES?.photoIdVision?.fallback;
   return callWithProvider(route, {
     system: buildEscalationSystemPrompt(buildCatalogIndexText(catalogEntries), candidateContext),
@@ -252,6 +280,7 @@ async function callEscalationModel(images, catalogEntries, candidateContext) {
     jsonMode: true,
     jsonSchema: ESCALATION_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
+    timeoutMs,
     laneId: 'photo_id_v2_escalation',
     promptVersion: PROMPT_VERSION,
   });
@@ -704,12 +733,18 @@ function mapToV1(built) {
  * complexity) — this piece is pure given its three inputs.
  */
 function combineEscalation(geminiCandidates, escalationResult) {
-  if (!escalationResult?.ok) {
-    // OpenAI unavailable — Gemini's result stands, capped from reading
-    // pretty_sure by `unansweredTrigger` inside `buildAnswer`.
+  // Codex round-0 P1 (round 4): `dispatch()` does not locally validate a
+  // provider's JSON against the requested schema — an `ok:true` response
+  // whose `candidates` field isn't an array (or is missing) must be
+  // treated as a failed/unavailable leg, never consumed as-is (it would
+  // throw on `.map` below, breaking the engine's never-throws contract).
+  if (!escalationResult?.ok || !hasCandidatesArray(escalationResult.json)) {
+    // OpenAI unavailable (or answered something invalid) — Gemini's result
+    // stands, capped from reading pretty_sure by `unansweredTrigger` inside
+    // `buildAnswer`.
     return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false };
   }
-  const openaiCandidates = dedupeCandidates((escalationResult.json?.candidates || []).map(resolveCandidate));
+  const openaiCandidates = dedupeCandidates(escalationResult.json.candidates.map(resolveCandidate));
   const openaiTop = openaiCandidates[0] || null;
   const geminiTop = geminiCandidates[0] || null;
   // Codex round-0 P1 (round 2): the provider answered (HTTP ok, valid
@@ -778,19 +813,27 @@ async function identifyPestV2(photos = []) {
   if (!images.length) return { ok: false, reason: 'no_photos' };
 
   const catalogEntries = catalog.listEntries();
-  const candidatesResult = await callCandidatesModel(images, catalogEntries);
-  const candidatesJson = candidatesResult.ok ? candidatesResult.json : null;
-  const candidatesFromCall1 = candidatesJson ? dedupeCandidates((candidatesJson.candidates || []).map(resolveCandidate)) : [];
+  // One overall wall-clock budget across the (up to three) SEQUENTIAL
+  // provider legs, so a stalled candidates or verify call can never starve
+  // escalation of its share (Codex round-0 P1, round 4).
+  const deadline = Date.now() + totalBudgetMs();
+  const legTimeoutMs = (legsRemaining) => Math.max(MIN_LEG_TIMEOUT_MS, Math.ceil((deadline - Date.now()) / legsRemaining));
+
+  const candidatesResult = await callCandidatesModel(images, catalogEntries, legTimeoutMs(3));
+  // An `ok:true` response whose shape doesn't match what was requested is
+  // treated the same as a failed leg — see `hasCandidatesArray`.
+  const candidatesJson = candidatesResult.ok && hasCandidatesArray(candidatesResult.json) ? candidatesResult.json : null;
+  const candidatesFromCall1 = candidatesJson ? dedupeCandidates(candidatesJson.candidates.map(resolveCandidate)) : [];
   const catalogCandidates1 = candidatesFromCall1.filter((c) => c.entry);
 
   let verifyResult = null;
   let verifiedCandidates = candidatesFromCall1;
   if (catalogCandidates1.length) {
-    verifyResult = await callVerifyModel(images, candidateContextFor(catalogCandidates1));
+    verifyResult = await callVerifyModel(images, candidateContextFor(catalogCandidates1), legTimeoutMs(2));
     verifiedCandidates = mergeVerify(candidatesFromCall1, verifyResult);
   }
 
-  const geminiMissed = !candidatesResult.ok
+  const geminiMissed = !candidatesJson
     || (catalogCandidates1.length > 0 && !verifyCoversAllCandidates(verifyResult, catalogCandidates1));
   const contradicted = catalogCandidates1.length > 0 && detectSelfContradiction(candidatesJson, verifiedCandidates);
   const lookAlikeClose = consequentialLookAlikeClose(verifiedCandidates);
@@ -815,11 +858,12 @@ async function identifyPestV2(photos = []) {
   let openaiAnswered = false;
 
   if (escalationTriggered) {
-    escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1));
+    escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1));
     ({ finalCandidates, disagreed, disagreementNode, openaiAnswered } = combineEscalation(finalCandidates, escalationResult));
   }
 
-  const quality = combineQuality(candidatesJson?.quality, escalationResult?.ok ? escalationResult.json?.quality : null);
+  const escalationJson = escalationResult?.ok && hasCandidatesArray(escalationResult.json) ? escalationResult.json : null;
+  const quality = combineQuality(candidatesJson?.quality, escalationJson?.quality);
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({

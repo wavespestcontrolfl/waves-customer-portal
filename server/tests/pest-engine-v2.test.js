@@ -565,6 +565,46 @@ describe('identifyPestV2 — escalation triggers', () => {
   });
 });
 
+describe('identifyPestV2 — malformed provider responses never throw (Codex round-0 P1, round 4)', () => {
+  test('a candidates response with a non-array `candidates` field is treated as gemini_missed, not a crash', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: {} } }) // malformed
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' }); // escalation unavailable
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    expect(result.v2.answer.level).toBe('unknown'); // no usable candidate from either leg
+  });
+
+  test('an escalation response with a non-array `candidates` field never throws and is treated as unavailable', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({ ok: true, json: { candidates: 'not-an-array' } }); // malformed escalation response
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.internal.models.escalation.ok).toBe(true); // the HTTP/parse call succeeded
+    expect(result.v2.answer.wording).not.toBe('pretty_sure'); // but it is not treated as an OpenAI confirmation
+  });
+});
+
+describe('identifyPestV2 — bounded per-leg timeout budget (Codex round-0 P1, round 4)', () => {
+  test('every dispatched leg carries a positive numeric timeoutMs', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+
+    await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    for (const call of dispatch.mock.calls) {
+      expect(call[1].timeoutMs).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe('identifyPestV2 — combined photo quality (Codex round-0 P1, round 3)', () => {
   test('an unusable/multiple_subjects quality read from EITHER leg forces needs_more_evidence, even at high combined confidence', async () => {
     dispatch
