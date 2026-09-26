@@ -574,6 +574,21 @@ function redactedPayloadSnapshot(value) {
 }
 
 const BILLING_REPLAY_CONTEXT_KEY = '__billing_replay_context';
+const BILLING_REPLAY_TEMPLATES = new Set(['billing.notice', 'billing.receipt_notice']);
+
+function parsedObject(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function parsedStringArray(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? value : null;
+}
 
 function billingReplayContextForSnapshot(context, facts = {}) {
   const out = sanitizeBillingReplayContext(context);
@@ -584,6 +599,23 @@ function billingReplayContextForSnapshot(context, facts = {}) {
     || String(facts.recipientId) !== out.customer_id || facts.triggerEventId !== out.notificationEventKey
     || facts.idempotencyKey !== expectedKey || !(facts.categories || []).includes(out.category)) return null;
   return out;
+}
+
+function readStoredBillingReplayContext(message) {
+  const templateKey = String(message?.template_key || '').trim();
+  if (!BILLING_REPLAY_TEMPLATES.has(templateKey)) return null;
+  const payload = parsedObject(message.payload_snapshot);
+  const categories = parsedStringArray(message.categories);
+  const recipientEmail = String(message.recipient_email_snapshot || '').trim().toLowerCase();
+  if (!payload || !categories || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) return null;
+  return billingReplayContextForSnapshot(payload[BILLING_REPLAY_CONTEXT_KEY], {
+    templateKey,
+    recipientType: message.recipient_type,
+    recipientId: message.recipient_id,
+    triggerEventId: message.trigger_event_id,
+    idempotencyKey: message.idempotency_key,
+    categories,
+  });
 }
 
 function payloadSnapshotForSend(payload, billingReplayContext, facts) {
@@ -792,26 +824,33 @@ async function renderVersion(versionId, payload = {}, opts = {}) {
 }
 
 async function createDraftVersion(templateKey, technicianId) {
-  const template = await db('email_templates').where({ template_key: templateKey }).first();
-  if (!template) throw new Error('template not found');
-  const latest = await db('email_template_versions')
-    .where({ template_id: template.id })
-    .orderBy('version_number', 'desc')
-    .first();
-  const source = template.active_version_id
-    ? await db('email_template_versions').where({ id: template.active_version_id }).first()
-    : latest;
-  const [draft] = await db('email_template_versions').insert({
-    template_id: template.id,
-    version_number: (latest?.version_number || 0) + 1,
-    status: 'draft',
-    subject: source?.subject || template.name,
-    preview_text: source?.preview_text || null,
-    blocks: JSON.stringify(normalizeBlocks(source?.blocks || [])),
-    text_body: source?.text_body || null,
-    created_by: technicianId || null,
-  }).returning('*');
-  return draft;
+  // One transaction holding the template row lock (Codex #4918 r7 P2):
+  // publishVersion and the 20260926* migrations lock this row before they
+  // write a version, so the max(version_number) read and the insert below
+  // must sit under the same lock, or a concurrent publisher can take the
+  // same number and one side fails the (template_id, version_number) unique.
+  return db.transaction(async (trx) => {
+    const template = await trx('email_templates').where({ template_key: templateKey }).forUpdate().first();
+    if (!template) throw new Error('template not found');
+    const latest = await trx('email_template_versions')
+      .where({ template_id: template.id })
+      .orderBy('version_number', 'desc')
+      .first();
+    const source = template.active_version_id
+      ? await trx('email_template_versions').where({ id: template.active_version_id }).first()
+      : latest;
+    const [draft] = await trx('email_template_versions').insert({
+      template_id: template.id,
+      version_number: (latest?.version_number || 0) + 1,
+      status: 'draft',
+      subject: source?.subject || template.name,
+      preview_text: source?.preview_text || null,
+      blocks: JSON.stringify(normalizeBlocks(source?.blocks || [])),
+      text_body: source?.text_body || null,
+      created_by: technicianId || null,
+    }).returning('*');
+    return draft;
+  });
 }
 
 async function publishVersion(versionId, technicianId) {
@@ -829,6 +868,12 @@ async function publishVersion(versionId, technicianId) {
     throw err;
   }
   await db.transaction(async (trx) => {
+    // Template row first, then its versions: the order every other publisher
+    // takes (the 2026-09-26 copy-audit migrations and their down paths CAS
+    // email_templates.active_version_id before archiving the version they
+    // replace), so an admin publish racing a deploy's migration on the same
+    // template waits for it instead of deadlocking.
+    await trx('email_templates').where({ id: row.template_id }).forUpdate().first('id');
     await trx('email_template_versions')
       .where({ template_id: row.template_id, status: 'active' })
       .update({ status: 'archived', updated_at: new Date() });
@@ -1615,6 +1660,7 @@ module.exports = {
   validationFor,
   redactedPayloadSnapshot,
   payloadSnapshotForSend,
+  readStoredBillingReplayContext,
   redactEmailAddresses,
   safeUrl,
   productionPlaceholderPayloadValues,

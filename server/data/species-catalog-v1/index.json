@@ -1,0 +1,1150 @@
+{
+  "catalog_version": "2026-09-26.1",
+  "section": "pest",
+  "site_categories": [
+    "Ants",
+    "Termites",
+    "Roaches",
+    "Mosquitoes & biters",
+    "Lawn",
+    "Spiders",
+    "Rodents",
+    "Biting",
+    "Stingers",
+    "Occasional invaders",
+    "Wildlife neighbors",
+    "Plant pests",
+    "Flies & gnats",
+    "Beetles & bugs",
+    "Pantry & fabric pests"
+  ],
+  "categories": {
+    "insect": {
+      "id": "insect",
+      "label": "Insect",
+      "generic": "an insect",
+      "next_photo": {
+        "ask": "A sharp photo of the whole insect from above and one from the side, next to a coin for size.",
+        "why": "Body shape, wings, legs and antennae tell us which group it belongs to."
+      }
+    },
+    "arachnid": {
+      "id": "arachnid",
+      "label": "Arachnid",
+      "generic": "a spider or other arachnid",
+      "next_photo": {
+        "ask": "Zoom in from a safe distance for a sharp photo of the body from above, showing the legs and any markings.",
+        "why": "Body shape, eye pattern and markings separate spiders, ticks and scorpions."
+      }
+    },
+    "rodent": {
+      "id": "rodent",
+      "label": "Rodent",
+      "generic": "a rat, mouse, or other rodent",
+      "next_photo": {
+        "ask": "A photo of the animal, droppings or gnaw marks next to a coin or ruler for size. Don’t handle droppings.",
+        "why": "Size and shape of droppings and marks separate rats from mice."
+      }
+    },
+    "wildlife": {
+      "id": "wildlife",
+      "label": "Wildlife",
+      "generic": "a wildlife visitor",
+      "next_photo": {
+        "ask": "From a safe distance, a clear photo of the whole animal, head and markings included. Never approach or handle it.",
+        "why": "Head shape, markings and size identify the animal and whether it is protected."
+      }
+    },
+    "other": {
+      "id": "other",
+      "label": "Other",
+      "generic": "something we want a closer look at",
+      "next_photo": {
+        "ask": "A sharp, well-lit close-up of the whole creature or sign, next to a coin for size.",
+        "why": "A clearer view of the body or the damage tells us which group to look in."
+      }
+    }
+  },
+  "groups": [
+    {
+      "id": "ants",
+      "label": "Ants",
+      "generic": "an ant",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A sharp close-up from directly above, showing the waist and antennae, next to a coin for scale.",
+        "why": "The waist shape and antennae are what separate ant genera and rule out a termite swarmer."
+      }
+    },
+    {
+      "id": "termites",
+      "label": "Termites",
+      "generic": "termite activity",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the mud tubes, wings, or pellets, plus a wide shot of where on the structure you found it.",
+        "why": "Location and the exact sign (tube vs. pellet vs. wing) point to which follow-up applies."
+      }
+    },
+    {
+      "id": "roaches",
+      "label": "Cockroaches",
+      "generic": "a cockroach",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A side-on close-up showing the band behind the head and whether the wings reach past the abdomen.",
+        "why": "The head-band pattern and wing length separate species with very different treatments."
+      }
+    },
+    {
+      "id": "mosquitoes",
+      "label": "Mosquitoes",
+      "generic": "a mosquito",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the legs and back markings while it's resting (on skin or a wall works).",
+        "why": "Leg-stripe pattern and back markings separate day-biting container mosquitoes from the rest."
+      }
+    },
+    {
+      "id": "biting-flies",
+      "label": "Biting flies & midges",
+      "generic": "a biting fly",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the wings and body, plus where and when you were bitten (dawn, dusk, near water).",
+        "why": "Wing pattern and bite timing separate no-see-ums from horse, deer, and stable flies."
+      }
+    },
+    {
+      "id": "flies-gnats",
+      "label": "Flies & gnats",
+      "generic": "a fly or gnat",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the wings and body size next to a coin, plus where you saw it (drain, plant, window).",
+        "why": "Size, wing shape, and location separate lovebugs, drain flies, and fungus gnats."
+      }
+    },
+    {
+      "id": "fleas",
+      "label": "Fleas",
+      "generic": "a flea",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up on a white paper towel or pet comb, plus a photo of any dark specks on bedding.",
+        "why": "Jumping behavior and flea dirt confirm fleas rather than another tiny biter."
+      }
+    },
+    {
+      "id": "ticks-mites",
+      "label": "Ticks, mites & chiggers",
+      "generic": "a tick or mite",
+      "category": "arachnid",
+      "next_photo": {
+        "ask": "A close-up of the body shape and legs, plus a wide shot of where it was found (skin, pet, or grass).",
+        "why": "Body shape and where it was found separate ticks from chiggers and other mites."
+      }
+    },
+    {
+      "id": "bed-bugs",
+      "label": "Bed bugs & relatives",
+      "generic": "a bed bug or close relative",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the insect next to a mattress seam, plus a photo of any dark spotting on the fabric.",
+        "why": "Body shape and the fecal-spotting pattern confirm bed bugs versus a bat bug or carpet beetle."
+      }
+    },
+    {
+      "id": "spiders",
+      "label": "Spiders",
+      "generic": "a spider",
+      "category": "arachnid",
+      "next_photo": {
+        "ask": "A close-up of the top and underside of the abdomen from a few feet away, plus the web if there is one.",
+        "why": "Underside markings and web style are what separate a harmless spider from a widow."
+      }
+    },
+    {
+      "id": "scorpions-arachnids",
+      "label": "Scorpions & other arachnids",
+      "generic": "a scorpion or other arachnid",
+      "category": "arachnid",
+      "next_photo": {
+        "ask": "A close-up of the tail and pincers from a few feet away — don't handle it.",
+        "why": "Tail and pincer shape separate a scorpion from a harmless daddy longlegs."
+      }
+    },
+    {
+      "id": "wasps-bees",
+      "label": "Wasps, bees & hornets",
+      "generic": "a wasp or bee",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the nest shape and a wide shot of where it's attached, taken from a few feet away.",
+        "why": "Nest shape and location separate paper wasps, yellowjackets, and bees, which are handled very differently."
+      }
+    },
+    {
+      "id": "caterpillars-moths",
+      "label": "Caterpillars & moths",
+      "generic": "a caterpillar or moth",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the body markings and any spines or hairs, without touching it.",
+        "why": "Spine pattern and color are what separate a harmless caterpillar from one that stings."
+      }
+    },
+    {
+      "id": "beetles",
+      "label": "Beetles & weevils",
+      "generic": "a beetle",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up from above showing the wing covers and head/snout shape, next to a coin.",
+        "why": "Snout length and wing-cover pattern separate weevils, grubs, and other beetles."
+      }
+    },
+    {
+      "id": "true-bugs",
+      "label": "Stink bugs, assassin bugs & relatives",
+      "generic": "a true bug",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up from above showing the shield or wing shape and the head, next to a coin.",
+        "why": "Shield shape and head/beak shape separate stink bugs, assassin bugs, and chinch bugs."
+      }
+    },
+    {
+      "id": "plant-pests-small",
+      "label": "Tiny plant pests",
+      "generic": "a tiny plant-feeding pest",
+      "category": "insect",
+      "next_photo": {
+        "ask": "An extreme close-up of the leaf underside where the insects are clustered, plus the whole plant.",
+        "why": "Cluster shape and any waxy coating separate aphids, scale, mealybugs, and whiteflies."
+      }
+    },
+    {
+      "id": "crickets-grasshoppers",
+      "label": "Crickets, grasshoppers & katydids",
+      "generic": "a cricket or grasshopper",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A side-on close-up showing the back legs and wings, plus where you found it (in turf, on a wall).",
+        "why": "Leg shape and where it was found separate mole crickets, lubbers, and other grasshoppers."
+      }
+    },
+    {
+      "id": "small-crawlers",
+      "label": "Silverfish, earwigs & other small crawlers",
+      "generic": "a small crawling insect",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up from above showing the tail end (pincers vs. bristles) next to a coin.",
+        "why": "The tail end tells silverfish, earwigs, and other small crawlers apart."
+      }
+    },
+    {
+      "id": "pantry-fabric",
+      "label": "Pantry & fabric pests",
+      "generic": "a pantry or fabric pest",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A close-up of the insect next to the food package or fabric it was found in.",
+        "why": "What it's found in — food vs. fabric — narrows this group fast."
+      }
+    },
+    {
+      "id": "many-legged",
+      "label": "Millipedes, centipedes & pillbugs",
+      "generic": "a millipede, centipede, or pillbug",
+      "category": "other",
+      "next_photo": {
+        "ask": "A close-up from the side showing how many legs there are per body segment, next to a coin.",
+        "why": "Leg count per segment separates millipedes, centipedes, and pillbugs."
+      }
+    },
+    {
+      "id": "other-insects",
+      "label": "Other insects",
+      "generic": "an insect",
+      "category": "insect",
+      "next_photo": {
+        "ask": "A clear, well-lit close-up of the whole insect from above and from the side.",
+        "why": "A full-body view from two angles is what a generic ID needs to narrow further."
+      }
+    },
+    {
+      "id": "snails-slugs-worms",
+      "label": "Snails, slugs & worms",
+      "generic": "a snail, slug, or worm",
+      "category": "other",
+      "next_photo": {
+        "ask": "A close-up of the whole body and, for anything shelled, the shell pattern.",
+        "why": "Shell presence and body texture separate snails, slugs, and worms."
+      }
+    },
+    {
+      "id": "rodents",
+      "label": "Rats & mice",
+      "generic": "a rat or mouse, or signs of one",
+      "category": "rodent",
+      "next_photo": {
+        "ask": "A close-up of the droppings next to a coin, plus a wide shot of where you found them.",
+        "why": "Dropping size and shape, plus location, tell rat from mouse before a tech ever sets a trap."
+      }
+    },
+    {
+      "id": "wild-mammals",
+      "label": "Wild mammals",
+      "generic": "a wild animal",
+      "category": "wildlife",
+      "next_photo": {
+        "ask": "A photo from a safe distance showing the whole animal and any digging or damage nearby.",
+        "why": "Body shape and the damage pattern point to which animal it is."
+      }
+    },
+    {
+      "id": "lizards",
+      "label": "Lizards",
+      "generic": "a lizard",
+      "category": "wildlife",
+      "next_photo": {
+        "ask": "A close-up of the head and throat from a few feet away, plus the whole body for size.",
+        "why": "Throat color (dewlap) and overall size separate native anoles from the larger invasive lizards."
+      }
+    },
+    {
+      "id": "snakes",
+      "label": "Snakes",
+      "generic": "a snake",
+      "category": "wildlife",
+      "next_photo": {
+        "ask": "A photo of the head and body pattern from several feet away — never approach or handle it.",
+        "why": "Head shape and body pattern are what separate a harmless snake from a venomous one."
+      }
+    },
+    {
+      "id": "turtles",
+      "label": "Turtles & tortoises",
+      "generic": "a turtle or tortoise",
+      "category": "wildlife",
+      "next_photo": {
+        "ask": "A wide photo of the shell and the burrow entrance if there is one.",
+        "why": "Shell shape and a burrow nearby point to a protected gopher tortoise versus another turtle."
+      }
+    },
+    {
+      "id": "frogs-toads",
+      "label": "Frogs & toads",
+      "generic": "a frog or toad",
+      "category": "wildlife",
+      "next_photo": {
+        "ask": "A close-up of the skin texture and the area just behind the eyes.",
+        "why": "Skin texture and the glands behind the eyes separate toxic toads from harmless frogs."
+      }
+    },
+    {
+      "id": "birds",
+      "label": "Birds",
+      "generic": "a bird",
+      "category": "wildlife",
+      "next_photo": {
+        "ask": "A photo of the whole bird and any nest, burrow, or damage nearby.",
+        "why": "Body shape plus where it's nesting narrows which bird and whether it's protected."
+      }
+    }
+  ],
+  "subgroups": [
+    {
+      "id": "fire-ants",
+      "group": "ants",
+      "label": "Fire Ants",
+      "generic": "a fire ant",
+      "scientific": "Solenopsis",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up from above of the largest workers from the mound, next to a coin.",
+        "why": "Major-worker head shape and node count separate red imported fire ants from tropical fire ants."
+      }
+    },
+    {
+      "id": "crazy-ants",
+      "group": "ants",
+      "label": "Crazy Ants",
+      "generic": "a crazy ant",
+      "scientific": "Nylanderia / Paratrechina",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A sharp photo (or video frame) of the running trail from above.",
+        "why": "The zigzag running pattern and antenna length separate crazy ants from other trailing ants."
+      }
+    },
+    {
+      "id": "carpenter-ants",
+      "group": "ants",
+      "label": "Carpenter Ants",
+      "generic": "a carpenter ant",
+      "scientific": "Camponotus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up of the thorax profile from the side, next to a coin.",
+        "why": "An evenly rounded thorax in profile is the carpenter-ant tell versus other large ants."
+      }
+    },
+    {
+      "id": "subterranean-termites",
+      "group": "termites",
+      "label": "Subterranean Termites",
+      "generic": "subterranean termite activity",
+      "scientific": "Rhinotermitidae / Coptotermes",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up of the mud tube broken open, plus a wide shot of where it climbs the foundation.",
+        "why": "An active (moist, repaired) tube versus an old dry one changes how urgent the inspection is."
+      }
+    },
+    {
+      "id": "drywood-termites",
+      "group": "termites",
+      "label": "Drywood Termites",
+      "generic": "drywood termite activity",
+      "scientific": "Kalotermitidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up of the pellet pile and the hole above it, next to a coin.",
+        "why": "Pellet shape and the kick-out hole confirm drywood termites over carpenter-ant frass."
+      }
+    },
+    {
+      "id": "large-roaches",
+      "group": "roaches",
+      "label": "Large Roaches",
+      "generic": "a large cockroach",
+      "scientific": "Periplaneta / Eurycotis",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up from above showing the band behind the head and how far the wings reach.",
+        "why": "The head band and wing length separate American, smokybrown, and woods roaches."
+      }
+    },
+    {
+      "id": "small-roaches",
+      "group": "roaches",
+      "label": "Small Roaches",
+      "generic": "a small cockroach",
+      "scientific": "Blattella / Supella",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up from above showing the stripe pattern on the back, next to a coin.",
+        "why": "Stripe pattern and whether it was found only indoors separate German from brown-banded roaches."
+      }
+    },
+    {
+      "id": "aedes",
+      "group": "mosquitoes",
+      "label": "Container Mosquitoes",
+      "generic": "a container-breeding mosquito",
+      "scientific": "Aedes",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up of the legs and back while it rests on skin or a wall.",
+        "why": "Leg-stripe pattern and back marking separate Aedes species from each other."
+      }
+    },
+    {
+      "id": "ticks",
+      "group": "ticks-mites",
+      "label": "Ticks",
+      "generic": "a tick",
+      "scientific": "Ixodida",
+      "rank": "order",
+      "next_photo": {
+        "ask": "A close-up from above showing body shape and color, next to a coin, plus where it was attached.",
+        "why": "Body shape and where it was found (pet, person, indoors) separate tick species."
+      }
+    },
+    {
+      "id": "mites",
+      "group": "ticks-mites",
+      "label": "Mites",
+      "generic": "a mite",
+      "scientific": "Acari",
+      "rank": "order",
+      "next_photo": {
+        "ask": "The closest photo the camera can manage, plus when and where (after yard work, near a bird nest).",
+        "why": "Because mites are nearly invisible, timing and location do most of the work separating chiggers from bird/rodent mites."
+      }
+    },
+    {
+      "id": "widow-spiders",
+      "group": "spiders",
+      "label": "Widow Spiders",
+      "generic": "a widow spider",
+      "scientific": "Latrodectus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up of the underside of the abdomen from a few feet away — don't handle it.",
+        "why": "The hourglass shape and color (red vs. tan) tell black widow from brown widow."
+      }
+    },
+    {
+      "id": "orb-weavers",
+      "group": "spiders",
+      "label": "Orb-weavers",
+      "generic": "an orb-weaver spider",
+      "scientific": "Araneidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A photo of the whole web shape plus the spider sitting in it.",
+        "why": "Web shape and body pattern separate the harmless orb-weavers from each other."
+      }
+    },
+    {
+      "id": "jumping-spiders",
+      "group": "spiders",
+      "label": "Jumping Spiders",
+      "generic": "a jumping spider",
+      "scientific": "Salticidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up of the face and the large front eyes.",
+        "why": "Eye arrangement and color pattern confirm a jumping spider and which one."
+      }
+    },
+    {
+      "id": "social-wasps",
+      "group": "wasps-bees",
+      "label": "Social Wasps",
+      "generic": "a social wasp",
+      "scientific": "Vespidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A photo of the whole nest shape from a few feet away — don't approach it closely.",
+        "why": "An open umbrella comb versus a paper-covered nest separates paper wasps from yellowjackets and hornets."
+      }
+    },
+    {
+      "id": "solitary-wasps",
+      "group": "wasps-bees",
+      "label": "Solitary Wasps",
+      "generic": "a solitary wasp",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A close-up of the waist and the nest material (mud tube vs. burrow) from a few feet away.",
+        "why": "Waist shape and nest type separate mud daubers from cicada killers and other solitary wasps."
+      }
+    },
+    {
+      "id": "bees",
+      "group": "wasps-bees",
+      "label": "Bees",
+      "generic": "a bee",
+      "scientific": "Apidae / Megachilidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A close-up of the abdomen (fuzzy vs. shiny) and the hole or gap it's using.",
+        "why": "A shiny black abdomen and a drilled hole point to carpenter bee; fuzzy and a wall gap points to honey bee."
+      }
+    },
+    {
+      "id": "stinging-caterpillars",
+      "group": "caterpillars-moths",
+      "label": "Stinging Caterpillars",
+      "generic": "a stinging caterpillar",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A close-up of the spines or hairs and the color pattern, without touching it.",
+        "why": "Spine density and color tell a merely fuzzy caterpillar from one with venomous spines."
+      }
+    },
+    {
+      "id": "lawn-caterpillars",
+      "group": "caterpillars-moths",
+      "label": "Lawn Caterpillars",
+      "generic": "a lawn-damaging caterpillar",
+      "scientific": "Noctuidae / Crambidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A close-up of the head markings, plus a wide shot of the damage pattern in the turf.",
+        "why": "Head markings and whether damage is patchy or uniform separate sod webworm from fall armyworm."
+      }
+    },
+    {
+      "id": "garden-caterpillars",
+      "group": "caterpillars-moths",
+      "label": "Garden Caterpillars",
+      "generic": "a caterpillar on your plants",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A close-up of the caterpillar and the specific plant it's feeding on.",
+        "why": "The host plant plus body pattern narrows garden caterpillars fast."
+      }
+    },
+    {
+      "id": "lady-beetles",
+      "group": "beetles",
+      "label": "Lady Beetles",
+      "generic": "a lady beetle",
+      "scientific": "Coccinellidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up from above of the spot pattern and the head/pronotum color.",
+        "why": "Spot count and pronotum pattern separate native lady beetles from the Asian lady beetle."
+      }
+    },
+    {
+      "id": "weevils",
+      "group": "beetles",
+      "label": "Weevils",
+      "generic": "a weevil",
+      "scientific": "Curculionidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up from the side showing the snout length and body color.",
+        "why": "Snout length and body color separate the weevil species and which plant is at risk."
+      }
+    },
+    {
+      "id": "scarabs-grubs",
+      "group": "beetles",
+      "label": "Scarabs & Grubs",
+      "generic": "a scarab beetle or grub",
+      "scientific": "Scarabaeidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "For a grub, dig a shovelful of turf and photograph it C-shaped next to a coin.",
+        "why": "Grub size and the spine pattern on the tail end identify which scarab it is."
+      }
+    },
+    {
+      "id": "assassin-bugs",
+      "group": "true-bugs",
+      "label": "Assassin Bugs",
+      "generic": "an assassin bug",
+      "scientific": "Reduviidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up from above of the head shape and front legs, next to a coin.",
+        "why": "Head and leg shape separate a beneficial assassin bug from the kissing bug that bites people."
+      }
+    },
+    {
+      "id": "stink-leaf-footed",
+      "group": "true-bugs",
+      "label": "Stink & Leaf-footed Bugs",
+      "generic": "a stink bug or leaf-footed bug",
+      "scientific": "Pentatomidae / Coreidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A close-up from above of the body outline and hind-leg shape, next to a coin.",
+        "why": "A flared hind leg versus a plain shield shape separates leaf-footed bugs from stink bugs."
+      }
+    },
+    {
+      "id": "chinch-big-eyed",
+      "group": "true-bugs",
+      "label": "Chinch & Big-eyed Bugs",
+      "generic": "a chinch bug or big-eyed bug",
+      "scientific": "Blissidae / Geocoridae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "The closest possible photo of the insect on a blade of grass, next to a coin.",
+        "why": "Wing-margin marking and eye size separate the lawn-killing chinch bug from the beneficial big-eyed bug."
+      }
+    },
+    {
+      "id": "whiteflies",
+      "group": "plant-pests-small",
+      "label": "Whiteflies",
+      "generic": "a whitefly",
+      "scientific": "Aleyrodidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up of the leaf underside showing the egg pattern and any waxy coating.",
+        "why": "Egg-laying pattern (spiral vs. scattered) separates whitefly species."
+      }
+    },
+    {
+      "id": "scale-insects",
+      "group": "plant-pests-small",
+      "label": "Scale Insects",
+      "generic": "a scale insect",
+      "scientific": "Coccoidea",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A close-up of the leaf or stem where the armor is stuck, plus one gently scraped open.",
+        "why": "Armor color and shape, and what's under it, separate the scale species."
+      }
+    },
+    {
+      "id": "mealybugs",
+      "group": "plant-pests-small",
+      "label": "Mealybugs",
+      "generic": "a mealybug",
+      "scientific": "Pseudococcidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up of the white cottony cluster at a stem joint or leaf base.",
+        "why": "Cluster location and any ants tending it confirm mealybugs over scale."
+      }
+    },
+    {
+      "id": "rats",
+      "group": "rodents",
+      "label": "Rats",
+      "generic": "a rat",
+      "scientific": "Rattus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up of the droppings next to a coin, plus a wide shot of where you found them (attic vs. ground level).",
+        "why": "Where the activity is (roofline vs. foundation) separates roof rats from Norway rats."
+      }
+    },
+    {
+      "id": "mice",
+      "group": "rodents",
+      "label": "Mice",
+      "generic": "a mouse",
+      "scientific": "Mus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up of the droppings next to a coin, plus the gap it may be using to get in.",
+        "why": "Dropping size and a dime-sized gap nearby confirm a mouse over a rat."
+      }
+    },
+    {
+      "id": "anoles",
+      "group": "lizards",
+      "label": "Anoles",
+      "generic": "an anole",
+      "scientific": "Anolis",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "A close-up of the throat fan (dewlap) color while it displays.",
+        "why": "Dewlap color and body color separate the native green anole from the invasive brown anole."
+      }
+    },
+    {
+      "id": "geckos",
+      "group": "lizards",
+      "label": "Geckos",
+      "generic": "a gecko",
+      "scientific": "Gekkonidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up at night near a light, showing skin texture and toe pads.",
+        "why": "Skin texture and toe-pad shape confirm a gecko species."
+      }
+    },
+    {
+      "id": "large-lizards",
+      "group": "lizards",
+      "label": "Large Lizards",
+      "generic": "a large lizard",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A wide photo of the whole animal from a safe distance, including the tail.",
+        "why": "Overall size, coloring, and tail shape separate iguanas, tegus, and monitors, which need different responses."
+      }
+    },
+    {
+      "id": "venomous-snakes",
+      "group": "snakes",
+      "label": "Venomous Snakes",
+      "generic": "a venomous snake",
+      "scientific": "Viperidae / Elapidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "A photo of the head shape and body pattern from several feet away — never approach or handle it.",
+        "why": "Head shape and banding pattern are the safe way to tell a venomous snake from a look-alike."
+      }
+    },
+    {
+      "id": "toads",
+      "group": "frogs-toads",
+      "label": "Toads",
+      "generic": "a toad",
+      "scientific": "Bufonidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up of the area just behind the eyes (the parotoid glands).",
+        "why": "The size and shape of the parotoid glands separate the toxic cane toad from the native southern toad."
+      }
+    },
+    {
+      "id": "treefrogs",
+      "group": "frogs-toads",
+      "label": "Treefrogs",
+      "generic": "a treefrog",
+      "scientific": "Hylidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "A close-up of the toe pads and the stripe pattern along the side.",
+        "why": "Toe-pad size and the side stripe separate the oversized Cuban treefrog from native treefrogs."
+      }
+    }
+  ],
+  "look_alike_groups": [
+    {
+      "groups": [
+        "ants",
+        "termites"
+      ],
+      "note": "Winged ants and winged termites swarm at the same time of year and are often confused. Check the waist (pinched vs. straight), antennae (bent vs. straight), and wing pairs (unequal vs. equal length)."
+    },
+    {
+      "groups": [
+        "spiders",
+        "scorpions-arachnids"
+      ],
+      "note": "Both have eight legs and startle people the same way. A scorpion has visible pincers and a segmented tail with a stinger; a spider does not."
+    },
+    {
+      "groups": [
+        "snakes",
+        "snails-slugs-worms"
+      ],
+      "note": "The brahminy blind snake is small, shiny, and nearly legless-looking — it's very often mistaken for an earthworm."
+    }
+  ],
+  "legacy_slug_map": {
+    "ghost-ant": {
+      "node": "ghost-ant",
+      "kind": "entry",
+      "note": ""
+    },
+    "fire-ant": {
+      "node": "fire-ant",
+      "kind": "entry",
+      "note": ""
+    },
+    "carpenter-ant": {
+      "node": "carpenter-ant",
+      "kind": "entry",
+      "note": ""
+    },
+    "bigheaded-ant": {
+      "node": "bigheaded-ant",
+      "kind": "entry",
+      "note": ""
+    },
+    "american-roach": {
+      "node": "american-cockroach",
+      "kind": "entry",
+      "note": "v1 slug renamed; catalog uses \"american-cockroach\"."
+    },
+    "german-roach": {
+      "node": "german-cockroach",
+      "kind": "entry",
+      "note": "v1 slug renamed; catalog uses \"german-cockroach\"."
+    },
+    "subterranean-termite": {
+      "node": "subterranean-termite",
+      "kind": "entry",
+      "note": ""
+    },
+    "drywood-termite": {
+      "node": "drywood-termite",
+      "kind": "entry",
+      "note": ""
+    },
+    "black-widow": {
+      "node": "widow-spiders",
+      "kind": "subgroup",
+      "note": "v1 did not distinguish black vs. brown widow; maps to the Widow Spiders subgroup rather than over-claiming one species."
+    },
+    "wolf-spider": {
+      "node": "wolf-spider",
+      "kind": "entry",
+      "note": ""
+    },
+    "paper-wasp": {
+      "node": "paper-wasp",
+      "kind": "entry",
+      "note": ""
+    },
+    "yellow-jacket": {
+      "node": "yellowjacket",
+      "kind": "entry",
+      "note": "v1 slug spelled \"yellow-jacket\"; catalog uses \"yellowjacket\"."
+    },
+    "honey-bee": {
+      "node": "bees",
+      "kind": "subgroup",
+      "note": "v1 did not distinguish a resting swarm from an established wall colony (very different next steps); maps to the Bees subgroup. Judgment call — owner should confirm this reads correctly in the app fallback."
+    },
+    "mosquito": {
+      "node": "mosquitoes",
+      "kind": "group",
+      "note": "v1 was genus-agnostic; maps to the Mosquitoes group rather than a specific Aedes entry."
+    },
+    "chinch-bug": {
+      "node": "chinch-bug",
+      "kind": "entry",
+      "note": ""
+    },
+    "sod-webworm": {
+      "node": "lawn-caterpillars",
+      "kind": "subgroup",
+      "note": "v1 aliases covered both sod webworm and armyworm (\"Sod Webworms / Armyworms\"); maps to the Lawn Caterpillars subgroup, which holds both entries."
+    },
+    "white-grub": {
+      "node": "white-grub",
+      "kind": "entry",
+      "note": ""
+    },
+    "flea": {
+      "node": "fleas",
+      "kind": "group",
+      "note": "Only entry today is cat flea; maps to the group so a future dog-flea entry does not orphan this mapping."
+    },
+    "tick": {
+      "node": "ticks",
+      "kind": "subgroup",
+      "note": "v1 aliases were tick species names, not mites; maps to the Ticks subgroup."
+    },
+    "bed-bug": {
+      "node": "bed-bug",
+      "kind": "entry",
+      "note": ""
+    },
+    "silverfish": {
+      "node": "silverfish",
+      "kind": "entry",
+      "note": "v1 alias list also included \"firebrat\" (a separate species, added by another owner in this batch); resolves to silverfish for now."
+    },
+    "earwig": {
+      "node": "earwig",
+      "kind": "entry",
+      "note": ""
+    },
+    "millipede": {
+      "node": "millipede",
+      "kind": "entry",
+      "note": ""
+    },
+    "centipede": {
+      "node": "house-centipede",
+      "kind": "entry",
+      "note": "v1's own alias list named \"house centipede\" specifically; other centipede species added later stay separate."
+    },
+    "stink-bug": {
+      "node": "stink-bug",
+      "kind": "entry",
+      "note": ""
+    },
+    "rodent": {
+      "node": "rodents",
+      "kind": "group",
+      "note": "v1 was species-agnostic (rat, mouse, or generic droppings); maps to the Rats & Mice group."
+    },
+    "whitefly": {
+      "node": "whiteflies",
+      "kind": "subgroup",
+      "note": "v1 aliases named both a generic \"whitefly\" and \"ficus whitefly\" (a different species added by another owner); maps to the subgroup so it doesn't over-claim species."
+    },
+    "aphid-scale": {
+      "node": "plant-pests-small",
+      "kind": "group",
+      "note": "v1 combined aphids, scale, mealybugs, and sooty mold into one entry, spanning several subgroups; maps to the Tiny Plant Pests group."
+    },
+    "lovebug": {
+      "node": "lovebug",
+      "kind": "entry",
+      "note": ""
+    },
+    "beneficial": {
+      "node": null,
+      "kind": null,
+      "note": "v1 lumped many unrelated beneficial species (lady beetle, lacewing, dragonfly, mantis, earthworm, anole, gecko, frog, toad) under one slug. No single catalog node covers all of them without over-claiming, so this resolves to null; the caller should keep its own generic beneficial fallback copy until each species is looked up individually."
+    }
+  },
+  "planned_slugs": [
+    "acrobat-ant",
+    "american-dog-tick",
+    "antlion",
+    "argentine-tegu",
+    "asian-citrus-psyllid",
+    "asian-cockroach",
+    "asian-lady-beetle",
+    "asian-subterranean-termite",
+    "australian-cockroach",
+    "azalea-lace-bug",
+    "bagworm",
+    "bald-faced-hornet",
+    "bark-lice",
+    "bat-bug",
+    "bed-bug-signs",
+    "bess-beetle",
+    "big-eyed-bug",
+    "bird-rodent-mites",
+    "black-soldier-fly",
+    "blacklegged-tick",
+    "blow-fly",
+    "blue-winged-scoliid-wasp",
+    "booklice",
+    "brahminy-blind-snake",
+    "brazilian-free-tailed-bat",
+    "brown-banded-cockroach",
+    "brown-cockroach",
+    "brown-recluse",
+    "buck-moth-caterpillar",
+    "bumble-bee",
+    "burrowing-owl",
+    "camel-cricket",
+    "cane-toad",
+    "carolina-mantis",
+    "carpet-beetle",
+    "cellar-spider",
+    "chiggers",
+    "chilli-thrips",
+    "cicada",
+    "cicada-killer",
+    "cigarette-beetle",
+    "citrus-leafminer",
+    "corn-snake",
+    "crab-spider",
+    "crane-fly",
+    "cuban-cockroach",
+    "cycad-aulacaspis-scale",
+    "dampwood-termite",
+    "dark-rover-ant",
+    "deer-fly",
+    "diaprepes-root-weevil",
+    "discarded-wings",
+    "dragonfly",
+    "drugstore-beetle",
+    "drywood-termite-frass",
+    "dusky-pygmy-rattlesnake",
+    "earthworm",
+    "eastern-coral-snake",
+    "eastern-diamondback-rattlesnake",
+    "eastern-gray-squirrel",
+    "eastern-mole",
+    "eastern-rat-snake",
+    "eyed-click-beetle",
+    "feral-hog-rooting",
+    "ficus-whitefly",
+    "field-cricket",
+    "fire-ant-mound",
+    "firebrat",
+    "florida-bark-scorpion",
+    "florida-blue-centipede",
+    "florida-cottonmouth",
+    "florida-harvester-ant",
+    "florida-wax-scale",
+    "florida-woods-roach",
+    "fruit-fly",
+    "gallinipper",
+    "garden-snails",
+    "giant-african-land-snail",
+    "graceful-twig-ant",
+    "great-golden-digger-wasp",
+    "green-anole",
+    "green-iguana",
+    "green-lacewing",
+    "green-lynx-spider",
+    "green-treefrog",
+    "greenhouse-millipede",
+    "ground-beetle",
+    "hag-moth-caterpillar",
+    "hammerhead-flatworm",
+    "harvestman",
+    "hentz-striped-scorpion",
+    "hispid-cotton-rat",
+    "horse-fly",
+    "house-fly",
+    "hover-fly",
+    "hunting-billbug",
+    "indian-meal-moth",
+    "june-beetle",
+    "katydid",
+    "kissing-bug",
+    "lady-beetle",
+    "leaf-footed-bug",
+    "leafcutter-bee",
+    "little-fire-ant",
+    "lobate-lac-scale",
+    "lone-star-tick",
+    "longhorn-crazy-ant",
+    "mealybug-destroyer",
+    "milkweed-assassin-bug",
+    "monarch-caterpillar",
+    "mosquito-larvae",
+    "muscovy-duck",
+    "nile-monitor",
+    "non-biting-midge",
+    "oleander-caterpillar",
+    "orange-dog-caterpillar",
+    "orchard-orbweaver",
+    "ox-beetle",
+    "palmetto-weevil",
+    "pharaoh-ant",
+    "phorid-fly",
+    "pink-hibiscus-mealybug",
+    "polka-dot-wasp-moth",
+    "potter-wasp",
+    "powderpost-beetle",
+    "pyramid-ant",
+    "raccoon",
+    "red-flour-beetle",
+    "regal-jumping-spider",
+    "rice-weevil",
+    "ring-necked-snake",
+    "roach-droppings-egg-cases",
+    "robber-fly",
+    "rodent-droppings",
+    "rodent-gnaw-marks",
+    "rodent-rub-marks",
+    "royal-palm-bug",
+    "saddleback-caterpillar",
+    "saltmarsh-mosquito",
+    "sawtoothed-grain-beetle",
+    "scarlet-kingsnake",
+    "slugs",
+    "sooty-mold",
+    "south-american-palm-weevil",
+    "southeastern-pocket-gopher",
+    "southern-black-racer",
+    "southern-flying-squirrel",
+    "southern-house-mosquito",
+    "southern-house-spider",
+    "southern-toad",
+    "southern-water-snake",
+    "sowbug",
+    "spider-mites",
+    "spiny-tailed-iguana",
+    "spinybacked-orbweaver",
+    "springtails",
+    "squirrel-treefrog",
+    "stable-fly",
+    "surinam-cockroach",
+    "tailless-whip-scorpion",
+    "termite-mud-tubes",
+    "termite-swarmers",
+    "thief-ant",
+    "tomato-hornworm",
+    "tortoise-beetle",
+    "trap-jaw-ant",
+    "tropical-fire-ant",
+    "tropical-orbweaver",
+    "tussock-moth-caterpillar",
+    "two-striped-walkingstick",
+    "velvet-ant",
+    "virginia-opossum",
+    "webbing-clothes-moth",
+    "wheel-bug",
+    "winged-ants",
+    "woodpecker-damage",
+    "yellow-fly",
+    "yellow-garden-spider",
+    "yellow-sac-spider"
+  ]
+}
