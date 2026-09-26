@@ -21,6 +21,16 @@ const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
+const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
+
+// GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
+// backlog item 3): total placements tried per visit, including the first —
+// the finder's writer-agreement pre-filter (candidate-slots.js) already
+// drops most conflicts, so a SLOT_TAKEN here means the schedule moved
+// between scoring and apply; a small bounded retry against the next-best
+// still-valid candidate captures that case without an unbounded loop. Gate
+// off ⇒ exactly 1 attempt, byte-identical to before this lane.
+const MAX_APPLY_ATTEMPTS = 3;
 
 // Location belongs to the scored placement as much as its date and time do.
 // Reuse this field set in the preflight read and the atomic rebooker predicate.
@@ -255,7 +265,17 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   };
 }
 
-async function applyAutoDispatchMove(service, best, runId, config = {}) {
+/**
+ * One placement attempt against a specific candidate `best` — the ENTIRE
+ * original applyAutoDispatchMove body, parameterized on the candidate and
+ * the already-revalidated `fresh` row (so a bounded retry over several
+ * candidates re-reads the row once, not once per attempt: the rebooker's own
+ * atomic `expect` CAS re-asserts the row's state inside the move transaction
+ * on every attempt regardless, so re-reading it here first would not close
+ * any additional race). Throws SLOT_TAKEN (or any other rebooker refusal)
+ * exactly as before this lane's retry wrapper was added.
+ */
+async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config = {}) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
   // Remaining per-run change budget (orchestrator): a grouped visit whose
@@ -272,15 +292,6 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // move transaction (a standalone visit has no member guard).
   options.moveGuard = makeMoveGuard({ service, best });
 
-  // Stale-recommendation guard: the row was loaded + scored earlier this run.
-  // reschedule() reloads it but only guards status — if staff locked/excluded it
-  // or moved its date/window/tech since, do NOT overwrite that newer state. Same
-  // re-read the orchestrator's pass-2 reporting uses, so apply + report agree.
-  const check = await revalidatePlacement(service);
-  if (!check.ok) {
-    throw Object.assign(new Error(check.reason), { code: check.code });
-  }
-  const fresh = check.fresh;
   if (fresh.recurring_dispatch_due_date) {
     const drift = routeTiers.daysBetween(toDateStr(fresh.recurring_dispatch_due_date), best.date);
     if (drift == null || Math.abs(drift) > 3) {
@@ -458,6 +469,59 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   }
 
   return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification, movedCount };
+}
+
+/**
+ * Apply an auto-dispatch move, with a bounded next-best fallback on a
+ * SLOT_TAKEN refusal (GATE_AUTO_DISPATCH_SHARED_MODEL, owner-approved
+ * 2026-09-26 dispatch backlog item 3): the finder's writer-agreement
+ * pre-filter already screens candidates against the SAME window-overlap
+ * predicate the rebooker's writer enforces, but the live schedule can still
+ * move between scoring and this apply call (another run, an operator edit).
+ * `config.alternateCandidates` (set by the orchestrator from its ranked
+ * scoring pass, gate on only) supplies the next-best still-scored
+ * candidates; each is re-checked exactly like the first (moveGuard,
+ * memberGuard, the atomic `expect` CAS) — never a loosened check.
+ *
+ * Gate off, or no alternates supplied: exactly one attempt against `best`,
+ * byte-identical to this function before the retry wrapper existed.
+ */
+async function applyAutoDispatchMove(service, best, runId, config = {}) {
+  // Stale-recommendation guard: the row was loaded + scored earlier this run.
+  // reschedule() reloads it but only guards status — if staff locked/excluded it
+  // or moved its date/window/tech since, do NOT overwrite that newer state. Same
+  // re-read the orchestrator's pass-2 reporting uses, so apply + report agree.
+  // Read ONCE for every attempt (see attemptApplyAutoDispatchMove's doc) —
+  // the rebooker's own atomic `expect` is what actually re-checks the row on
+  // each attempt.
+  const check = await revalidatePlacement(service);
+  if (!check.ok) {
+    throw Object.assign(new Error(check.reason), { code: check.code });
+  }
+  const fresh = check.fresh;
+
+  const sharedModelOn = autoDispatchSharedModelLive();
+  const alternates = sharedModelOn && Array.isArray(config.alternateCandidates)
+    ? config.alternateCandidates.filter((c) => c && c !== best)
+    : [];
+  const attempts = [best, ...alternates].slice(0, MAX_APPLY_ATTEMPTS);
+
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    try {
+      // Bounded (MAX_APPLY_ATTEMPTS): each attempt must complete or fail
+      // before trying the next, so a sequential await here is intentional.
+      return await attemptApplyAutoDispatchMove(service, attempts[i], fresh, runId, config);
+    } catch (err) {
+      lastErr = err;
+      const canRetry = sharedModelOn && err && err.code === 'SLOT_TAKEN' && i < attempts.length - 1;
+      if (!canRetry) throw err;
+      logger.warn(`[auto-dispatch] SLOT_TAKEN for ${service.id} on attempt ${i + 1}/${attempts.length} — trying next-best candidate`);
+    }
+  }
+  // Unreachable (the loop above always returns or throws), but keeps the
+  // function's contract explicit for a 0-length attempts array.
+  throw lastErr || Object.assign(new Error('No candidate to attempt'), { code: 'NO_VALID_SLOT' });
 }
 
 /**

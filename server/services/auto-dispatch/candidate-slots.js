@@ -20,11 +20,25 @@
  *
  * Also computes the CURRENT placement's marginal drive cost (detour the visit
  * adds to its present day/route) so the scorer can measure improvement.
+ *
+ * GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
+ * backlog item 3): when on, this module additionally (a) re-scores the
+ * current placement AND every surviving candidate's drive/cluster numbers
+ * with the ONE shared model (route-model.js) instead of the current
+ * placement's own two-neighbor haversine calc and find-time's independent
+ * simulation, and (b) drops any candidate the rebooker's writer would refuse
+ * with SLOT_TAKEN — the SAME window-overlap predicate the writer's hard
+ * occupancy probe applies (overlap-predicate.js), so the finder only ever
+ * offers a slot the move writer will actually accept. Gate off: byte-for-byte
+ * today's behavior (find-time's own numbers, no overlap pre-filter).
  */
 const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
+const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
+const { candidateHasOverlap } = require('./overlap-predicate');
+const { routeCost, clusterShare } = require('./route-model');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -41,6 +55,142 @@ function hhmmToMin(t) {
   const [h, m] = String(t).split(':').map(Number);
   if (Number.isNaN(h)) return null;
   return h * 60 + (m || 0);
+}
+
+// Columns a technician-day's OTHER stops need for the shared route model
+// (route-model.js: geo + planning-minutes category) and the overlap
+// predicate (overlap-predicate.js: status/window/reservation). Shared by
+// computeCurrentPlacement's neighbor query and loadDayStops below so both
+// sides of the comparison read the identical shape.
+const DAY_STOP_COLUMNS = [
+  'scheduled_services.id',
+  'scheduled_services.window_start',
+  'scheduled_services.window_end',
+  'scheduled_services.estimated_duration_minutes',
+  'scheduled_services.status',
+  'scheduled_services.reservation_expires_at',
+  'scheduled_services.service_type',
+  'scheduled_services.is_recurring',
+  'scheduled_services.is_callback',
+  'scheduled_services.service_address_line1',
+  'scheduled_services.service_address_city',
+  'scheduled_services.service_address_zip',
+  'customers.address_line1 as customer_address_line1',
+  'customers.city as customer_city',
+  'customers.zip as customer_zip',
+  'scheduled_services.lat as svc_lat',
+  'scheduled_services.lng as svc_lng',
+  'customers.latitude as customer_latitude',
+  'customers.longitude as customer_longitude',
+];
+
+// Shapes a DAY_STOP_COLUMNS row into the plain {geo, startMin, ...} object
+// both route-model.js and overlap-predicate.js read.
+function rowToDayStop(r) {
+  const startMin = hhmmToMin(r.window_start) ?? DAY_OPEN;
+  return {
+    id: r.id,
+    geo: resolveGeo(r),
+    startMin,
+    endMin: r.window_end != null ? hhmmToMin(r.window_end) : startMin + (Number(r.estimated_duration_minutes) || DEFAULT_DURATION),
+    window_start: r.window_start,
+    window_end: r.window_end,
+    status: r.status,
+    reservation_expires_at: r.reservation_expires_at,
+    service_type: r.service_type,
+    is_recurring: r.is_recurring,
+    is_callback: r.is_callback,
+    estimated_duration_minutes: r.estimated_duration_minutes,
+  };
+}
+
+// One technician-day's OTHER stops (never `excludeId`), shaped for the
+// shared model. Status filter matches computeCurrentPlacement's existing
+// neighbor query (cancelled/completed/skipped/rescheduled excluded at the
+// query level — a no_show row is fetched but overlap-predicate.js excludes
+// it from a conflict verdict, matching the rebooker's own occupancy probe).
+async function loadDayStops(db, { technicianId, dateStr, excludeId }) {
+  if (!technicianId) return [];
+  const rows = await db('scheduled_services')
+    .where('scheduled_services.scheduled_date', dateStr)
+    .where('scheduled_services.technician_id', technicianId)
+    .whereNot('scheduled_services.id', excludeId)
+    .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select(...DAY_STOP_COLUMNS);
+  return rows.map(rowToDayStop);
+}
+
+// Visit-group members moving together are never a conflict for each other
+// (mirrors the rebooker's excludeServiceIds for a unit move). Best-effort:
+// an unreadable group read still excludes the visit's own id, same as a
+// standalone (non-grouped) visit.
+async function loadOverlapExcludeIds(db, service) {
+  const selfId = String(service.id);
+  if (!service.visit_id) return new Set([selfId]);
+  try {
+    // Required lazily (not at module load) to avoid a require cycle: visit-groups
+    // requires scheduling modules that touch this file's siblings.
+    const { openMembers } = require('../visit-groups');
+    const members = await openMembers(db, service.visit_id);
+    return new Set([selfId, ...members.map((m) => String(m.id))]);
+  } catch (_) {
+    return new Set([selfId]);
+  }
+}
+
+/**
+ * GATE_AUTO_DISPATCH_SHARED_MODEL applied to a HARD-filtered candidate list:
+ * drops any candidate the rebooker's writer would refuse with SLOT_TAKEN,
+ * and re-scores every survivor's drive/cluster numbers with route-model.js —
+ * the SAME function computeCurrentPlacement uses below, so the current
+ * placement and every candidate are finally comparable on one scale (root
+ * cause b of the 2026-09-26 incident). One DB round trip per distinct
+ * (technician, date) pair among the candidates (cached).
+ */
+async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops) {
+  const excludeIds = await loadOverlapExcludeIds(ctx.db, service);
+  const cache = new Map();
+  const dayStopsFor = async (technicianId, dateStr) => {
+    const key = `${technicianId}|${dateStr}`;
+    if (!cache.has(key)) {
+      cache.set(key, await loadDayStops(ctx.db, { technicianId, dateStr, excludeId: service.id }));
+    }
+    return cache.get(key);
+  };
+  const kept = [];
+  for (const cand of candidates) {
+    const stops = await dayStopsFor(cand.technician_id, cand.date);
+    const startMin = hhmmToMin(cand.start_time);
+    const endMin = hhmmToMin(cand.end_time);
+    if (candidateHasOverlap(stops, { startMin, endMin, excludeIds })) {
+      if (drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
+      continue;
+    }
+    const { detourMinutes, driveWithMinutes } = routeCost(stops, { geo, startMin });
+    kept.push({
+      ...cand,
+      detour_minutes: detourMinutes,
+      total_drive_minutes: driveWithMinutes,
+      same_area_share: clusterShare(stops, geo),
+      model: 'shared_v1',
+    });
+  }
+  return kept;
+}
+
+// Single entry point findValidCandidateSlots calls unconditionally — the
+// gate check and the shared-model re-rank both live HERE (not at the call
+// site) so adding this feature contributes exactly one statement, not one
+// more branch, to findValidCandidateSlots' own complexity count. Gate off:
+// returns `candidates` untouched, same array reference.
+async function rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops) {
+  if (!autoDispatchSharedModelLive()) return candidates;
+  const survivors = await filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops);
+  // Re-rank on the shared model's own detour so the SCORE_CAP trim below
+  // keeps the survivors THIS model favors, not find-time's independent
+  // ordering.
+  return survivors.slice().sort((a, b) => (a.detour_minutes || 0) - (b.detour_minutes || 0));
 }
 
 function inBlackout(dateStr, blackout) {
@@ -102,31 +252,9 @@ async function computeCurrentPlacement(service, prefs, ctx) {
       // not a real stop the tech will work, so exclude from detour/density too.
       .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(
-        'scheduled_services.id',
-        'scheduled_services.window_start',
-        'scheduled_services.window_end',
-        'scheduled_services.estimated_duration_minutes',
-        'scheduled_services.service_address_line1',
-        'scheduled_services.service_address_city',
-        'scheduled_services.service_address_zip',
-        'customers.address_line1 as customer_address_line1',
-        'customers.city as customer_city',
-        'customers.zip as customer_zip',
-        'scheduled_services.lat as svc_lat',
-        'scheduled_services.lng as svc_lng',
-        'customers.latitude as customer_latitude',
-        'customers.longitude as customer_longitude',
-      );
+      .select(...DAY_STOP_COLUMNS);
     neighbors = rows
-      .map((r) => {
-        const startMin = hhmmToMin(r.window_start) ?? DAY_OPEN;
-        return {
-          geo: resolveGeo(r),
-          startMin,
-          endMin: hhmmToMin(r.window_end) ?? (startMin + (r.estimated_duration_minutes || DEFAULT_DURATION)),
-        };
-      })
+      .map(rowToDayStop)
       .filter((n) => n.geo)
       .sort((a, b) => a.startMin - b.startMin);
   }
@@ -147,19 +275,36 @@ async function computeCurrentPlacement(service, prefs, ctx) {
   }
 
   let detour = 0;
+  let totalDrive = 0;
   if (geo) {
     detour = Math.max(0, driveMin(prev.geo, geo) + driveMin(geo, next.geo) - driveMin(prev.geo, next.geo));
+    totalDrive = driveMin(prev.geo, geo) + driveMin(geo, next.geo);
+  }
+
+  // GATE_AUTO_DISPATCH_SHARED_MODEL: re-derive detour/drive through the SAME
+  // route-model.js function every candidate is scored with below, and add
+  // the "same area already on that day" cluster share. Mathematically this
+  // agrees with the two-neighbor formula above (both sum the identical set
+  // of chain edges), but floating-point addition is not strictly
+  // associative — routing through the shared function ONLY when the gate is
+  // on keeps gate-off byte-for-byte the legacy computation.
+  const sharedModelOn = autoDispatchSharedModelLive();
+  if (sharedModelOn && geo) {
+    const shared = routeCost(neighbors, { geo, startMin: myStart });
+    detour = shared.detourMinutes;
+    totalDrive = shared.driveWithMinutes;
   }
 
   return {
     is_current: true,
     detour_minutes: detour,
-    total_drive_minutes: geo ? driveMin(prev.geo, geo) + driveMin(geo, next.geo) : 0,
+    total_drive_minutes: totalDrive,
     stops_that_day: neighbors.length + 1,
     technician_id: techId,
     date: dateStr,
     start_time: service.window_start ? String(service.window_start).slice(0, 5) : null,
     capability_level: ctx.capabilityFor(techId, category),
+    ...(sharedModelOn ? { same_area_share: clusterShare(neighbors, geo), model: 'shared_v1' } : {}),
   };
 }
 
@@ -272,7 +417,9 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   // Drop tally — why feasible slots were rejected. Surfaced to the audit so an
   // empty candidate set reads as "honored the customer's preference, nothing
   // better available" rather than an opaque NO_VALID_SLOT.
-  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0 };
+  // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
+  // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
+  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0 };
   const candidates = [];
   for (const slot of slots) {
     // HARD: find-time (findAvailableSlots) shares ONE admission bound across
@@ -316,9 +463,18 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     });
   }
 
-  // find-time returns slots sorted best-first (lowest detour); after the HARD
-  // filters, score only the top survivors to bound cost.
-  const scored = candidates.slice(0, ctx.scoreCap || SCORE_CAP);
+  // GATE_AUTO_DISPATCH_SHARED_MODEL: drop any candidate the rebooker's writer
+  // would refuse (SLOT_TAKEN) and re-score survivors on the shared model,
+  // BEFORE the SCORE_CAP trim below — otherwise a genuinely-better candidate
+  // that find-time's own (different) ranking placed past the cap could be
+  // sliced away before the shared model ever saw it. Gate off: `candidates`
+  // passes through untouched (see rankSurvivorsForSharedModel).
+  const survivors = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
+
+  // find-time (or the shared-model re-rank above) returns candidates
+  // best-first; after the HARD filters, score only the top survivors to
+  // bound cost.
+  const scored = survivors.slice(0, ctx.scoreCap || SCORE_CAP);
   const current = await computeCurrentPlacement(service, prefs, ctx);
   return { current, candidates: scored, drops, feasible: slots.length };
 }

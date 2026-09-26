@@ -48,6 +48,17 @@ async function geocodeAndRecheck(service, eligCtx) {
   };
 }
 
+// Which model scored a placement (ids/numbers-only audit tag, GATE_AUTO_DISPATCH_SHARED_MODEL
+// dispatch backlog item 3) — a tiny named helper rather than an inline
+// `||` chain so it doesn't add its own branches to evaluatePlacement's
+// complexity count.
+function modelLabelFor(...placements) {
+  for (const p of placements) {
+    if (p && p.model) return p.model;
+  }
+  return 'legacy';
+}
+
 async function loadCapabilityMap() {
   // Fail closed: the deactivated-tech HARD filter depends on this data. An empty
   // map would report every tech as 'missing' (a soft penalty only), so a read
@@ -146,7 +157,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_description: prefDropped
         ? 'No candidate slot honored the customer\'s explicit day/time preference'
         : 'No valid candidate slot found',
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
     };
   }
 
@@ -154,10 +165,22 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const currentScore = scoreAppointmentPlacement(current, prefs, scoreCtx);
   let best = null;
   let bestScore = null;
+  // Every candidate's score, in encounter order — kept (not just the single
+  // best) so a SLOT_TAKEN apply-time refusal (GATE_AUTO_DISPATCH_SHARED_MODEL)
+  // can fall back to the next-best still-scored candidate rather than giving
+  // up. Does not change which candidate wins `best`/`bestScore` below (still
+  // the first strictly-greater score encountered) — this is additional
+  // bookkeeping only.
+  const scored = [];
   for (const cand of candidates) {
     const sc = scoreAppointmentPlacement(cand, prefs, scoreCtx);
+    scored.push({ cand, sc });
     if (!bestScore || sc.total_score > bestScore.total_score) { best = cand; bestScore = sc; }
   }
+  // Stable sort (Node/V8 Array#sort is stable): ties keep candidates' original
+  // encounter order, matching the strict `>` tie-break above — rankedCandidates[0]
+  // is always the SAME object as `best`.
+  const rankedCandidates = scored.slice().sort((a, b) => b.sc.total_score - a.sc.total_score).map((s) => s.cand);
 
   const improvement = Math.round((bestScore.total_score - currentScore.total_score) * 100) / 100;
   // Already-moved visits must clear a higher bar (defeats the stability penalty)
@@ -174,6 +197,10 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     stops_that_day: best.stops_that_day,
     current_score_breakdown: currentScore,
     candidate_score_breakdown: bestScore,
+    // Which model scored this visit (ids/numbers only) — GATE_AUTO_DISPATCH_SHARED_MODEL,
+    // dispatch backlog item 3: a dry-run night's audit rows must say which
+    // arithmetic produced the numbers being reviewed.
+    model: modelLabelFor(current, best),
   };
   // apply preserves pending (restores it after the rebooker), so the projected
   // status must reflect that — don't claim a pending visit would be confirmed.
@@ -193,7 +220,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   if (!(service.recurring_dispatch_due_date && !service.window_start) && improvement < threshold) {
     return { kind: 'no_change', reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}`, audit: auditCtx };
   }
-  return { kind: 'move', improvement, best, threshold, audit: auditCtx };
+  return { kind: 'move', improvement, best, rankedCandidates, threshold, audit: auditCtx };
 }
 
 async function runAutoDispatch(opts = {}) {
@@ -493,7 +520,13 @@ async function runAutoDispatch(opts = {}) {
             continue;
           }
 
-          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, { ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary });
+          // Next-best still-scored candidates (GATE_AUTO_DISPATCH_SHARED_MODEL) —
+          // apply falls back to one of these on a SLOT_TAKEN refusal instead of
+          // failing the visit outright. No effect when the gate is off.
+          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, {
+            ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary,
+            alternateCandidates: fresh.rankedCandidates,
+          });
           totals.changed += result.movedCount || 1;
           await audit.logDecision(runId, {
             action: 'changed',
@@ -547,4 +580,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded, geocode_attempts: geocodeAttempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement } };

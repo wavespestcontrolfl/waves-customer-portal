@@ -9,7 +9,19 @@
  * The same function scores the CURRENT placement and each candidate; the
  * orchestrator compares totals and only moves when the gain clears the
  * configured minimum (AUTO_DISPATCH_MIN_SCORE_IMPROVEMENT, points on this scale).
+ *
+ * GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
+ * backlog item 3): the stop-COUNT density term (WEIGHTS.density, "more
+ * stops that day = better") is replaced by a stop-CLUSTER term at the SAME
+ * 10-point weight — the share of the placement's day already within a few
+ * miles of the visit (route-model.js clusterShare, on `p.same_area_share`).
+ * Total weights and the move thresholds are unchanged either way. Gate off,
+ * or a placement carrying no `same_area_share` (candidate-slots.js only
+ * populates it when the gate is on): the legacy stop-count density term,
+ * byte for byte.
  */
+
+const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 
 const WEIGHTS = { route: 40, preference: 25, technician: 15, density: 10, workload: 5, continuity: 5 };
 const DETOUR_CAP_MIN = 45;   // detour ≥ cap → 0 route-efficiency credit
@@ -32,6 +44,17 @@ function weekdayOf(dateStr) {
   if (!dateStr) return null;
   const d = new Date(`${String(dateStr).split('T')[0]}T12:00:00Z`);
   return Number.isNaN(d.getTime()) ? null : d.getUTCDay();
+}
+
+// --- route density: same-area clustering (shared model) or stop count
+// (legacy) --- a separate function (rather than inline in
+// scoreAppointmentPlacement) so its own branching doesn't add to that
+// function's complexity count; see the module doc for the gate contract.
+function densityOrClusterScore(p, stops) {
+  const useClusterTerm = autoDispatchSharedModelLive() && Number.isFinite(p.same_area_share);
+  return useClusterTerm
+    ? WEIGHTS.density * clamp(p.same_area_share, 0, 1)
+    : WEIGHTS.density * clamp(stops / DENSITY_CAP, 0, 1);
 }
 
 /**
@@ -80,9 +103,9 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
   // --- technician skill ---
   const techScore = WEIGHTS.technician * (CAPABILITY_FACTOR[p.capability_level] ?? 0.5);
 
-  // --- route density (more nearby stops that day = better) ---
+  // --- route density: same-area clustering (shared model) or stop count (legacy) ---
   const stops = p.stops_that_day || 0;
-  const densityScore = WEIGHTS.density * clamp(stops / DENSITY_CAP, 0, 1);
+  const densityScore = densityOrClusterScore(p, stops);
 
   // --- workload balance (penalize overloaded days) ---
   const workloadScore = WEIGHTS.workload * (stops <= 6 ? 1 : clamp(1 - (stops - 6) / 4, 0, 1));

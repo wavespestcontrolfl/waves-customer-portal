@@ -87,3 +87,43 @@ describe('scoreAppointmentPlacement', () => {
     expect(r.total_score).toBeLessThanOrEqual(100);
   });
 });
+
+// GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
+// backlog item 3): the stop-count density term is replaced by the
+// same-area clustering term at the SAME 10-point weight.
+describe('density/cluster term (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
+  const ORIGINAL_GATE = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+  afterEach(() => {
+    if (ORIGINAL_GATE === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = ORIGINAL_GATE;
+  });
+
+  test('gate off: same_area_share is ignored — legacy stop-count density term', () => {
+    delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    const sparse = scoreAppointmentPlacement(placement({ stops_that_day: 1, same_area_share: 1 }), NEUTRAL_PREFS, {});
+    const dense = scoreAppointmentPlacement(placement({ stops_that_day: 6, same_area_share: 0 }), NEUTRAL_PREFS, {});
+    expect(dense.density_score).toBeGreaterThan(sparse.density_score); // stop count still wins
+  });
+
+  test('gate on: a clustered day beats a busier-but-scattered day on the density term', () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const clustered = scoreAppointmentPlacement(placement({ stops_that_day: 2, same_area_share: 1 }), NEUTRAL_PREFS, {});
+    const scattered = scoreAppointmentPlacement(placement({ stops_that_day: 6, same_area_share: 0 }), NEUTRAL_PREFS, {});
+    expect(clustered.density_score).toBeGreaterThan(scattered.density_score); // cluster share wins, not stop count
+    expect(clustered.density_score).toBe(10); // full 10-point credit at share 1
+    expect(scattered.density_score).toBe(0);
+  });
+
+  test('gate on but no same_area_share on the placement: falls back to the legacy stop-count term (defensive)', () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const legacyShape = placement({ stops_that_day: 6 });
+    delete legacyShape.same_area_share;
+    const r = scoreAppointmentPlacement(legacyShape, NEUTRAL_PREFS, {});
+    expect(r.density_score).toBe(10); // stops_that_day=6 hits DENSITY_CAP → full legacy credit
+  });
+
+  test('total weights are unchanged (cluster term still worth exactly 10 of 100)', () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const full = scoreAppointmentPlacement(placement({ detour_minutes: 0, stops_that_day: 6, same_area_share: 1, capability_level: 'qualified', is_current: true }), { ...NEUTRAL_PREFS, preferred_day_indexes: [2] }, {});
+    expect(full.total_score).toBeLessThanOrEqual(100);
+  });
+});

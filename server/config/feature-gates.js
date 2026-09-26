@@ -2846,6 +2846,22 @@ const gates = {
   // **Ships DARK: off unless exactly `true`**; canonical CALL-TIME reader
   // commercialSuiteSizingLive(). Off = byte-identical to before.
   commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
+  // Auto-Dispatch shared route model + day clustering (owner-approved
+  // 2026-09-26 dispatch-backlog item 3, incident: the 04:10 ET run scored a
+  // visit's CURRENT placement with plain haversine while CANDIDATES went
+  // through the arrival-route/planning-minutes simulation, then proposed
+  // moves the rebooker's own hard window-overlap probe refused — 17 applied,
+  // 72 SLOT_TAKEN failures). On: current and candidate placements score on
+  // ONE model (calibrated drive + owner planning minutes, the moving visit
+  // included), candidates are pre-filtered by the SAME window-overlap
+  // predicate the rebooker's writer enforces so a proposed move is one the
+  // writer will actually accept, and the density score term is replaced by a
+  // same-day-area clustering term (same 10-point weight). **Ships DARK: off
+  // unless exactly `true`/`1`/`on`**, canonical CALL-TIME reader
+  // autoDispatchSharedModelLive() below — off is today's auto-dispatch
+  // scoring/candidate/apply behavior, byte for byte. Kill switch: unset
+  // GATE_AUTO_DISPATCH_SHARED_MODEL.
+  autoDispatchSharedModel: gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2909,6 +2925,18 @@ function commercialSuiteSizingLive() {
 
 function leadInspectionLinkLive() {
   return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
+}
+
+// GATE_AUTO_DISPATCH_SHARED_MODEL read at CALL time via gateEnvValue (same
+// convention as GATE_ROUTE_TIERS / GATE_DRIVE_TIME_CALIBRATION — it moves
+// the numbers auto-dispatch ranks placements with, so the flip is deliberate
+// in every environment and needs no redeploy). The one canonical reader for
+// every entry point: candidate-slots.js (current-placement scoring + the
+// writer-agreement pre-filter), scoring.js (the clustering term), and
+// apply.js (the SLOT_TAKEN next-candidate fallback). The `autoDispatchSharedModel`
+// gates-map entry above is for logGateStatus only.
+function autoDispatchSharedModelLive() {
+  return gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL');
 }
 
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
@@ -2980,5 +3008,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, estimateConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
 // gates 1775330914
