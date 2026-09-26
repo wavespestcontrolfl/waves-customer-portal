@@ -453,4 +453,148 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect((await db('estimates').where({ id: older.estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
     });
   });
+
+  // ---- verification sweep 2026-09-26: edge cases not yet proven ----------
+  describe('additional edge cases', () => {
+    test('nudges a contract the document-lifecycle cron already flipped to literal status "expired"', async () => {
+      // expireDocumentRequests (the 6:10am document-lifecycle cron, runs
+      // before this sweep) flips a lapsed contract's own `status` column to
+      // literal 'expired' — the nudge query only excludes signed/cancelled/
+      // voided, so this status must still be nudge-worthy.
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, {
+        estimateId, customerId, status: 'expired', shareTokenExpiresAt: daysAgo(1),
+      });
+
+      const counts = await sweep();
+      expect(counts.signatureNudgeScanned).toBe(1);
+      expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(1);
+    });
+
+    test('a deduped notifyAdmin result is scanned but never counted as nudged', async () => {
+      const { sweep, db } = load({ notifyAdminImpl: async () => ({ id: randomUUID(), deduped: true }) });
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(1) });
+
+      const counts = await sweep();
+      expect(counts.signatureNudgeScanned).toBe(1);
+      expect(counts.signatureNudged).toBe(0);
+    });
+
+    test('a suppressed notifyAdmin result is scanned but never counted as nudged', async () => {
+      const { sweep, db } = load({ notifyAdminImpl: async () => ({ suppressed: true }) });
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(1) });
+
+      const counts = await sweep();
+      expect(counts.signatureNudgeScanned).toBe(1);
+      expect(counts.signatureNudged).toBe(0);
+    });
+
+    test('one candidate\'s notifyAdmin throwing does not stop the rest of the nudge batch', async () => {
+      const failEstimateId = { current: null };
+      const notifyAdminImpl = jest.fn(async (type, title, body, opts) => {
+        if (opts?.metadata?.estimateId === failEstimateId.current) throw new Error('notifyAdmin boom');
+        return { id: randomUUID(), deduped: false };
+      });
+      const { sweep, db } = load({ notifyAdminImpl });
+      const bad = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId: bad.estimateId, customerId: bad.customerId, shareTokenExpiresAt: daysAgo(1) });
+      failEstimateId.current = bad.estimateId;
+      const good = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId: good.estimateId, customerId: good.customerId, shareTokenExpiresAt: daysAgo(2) });
+
+      const counts = await sweep();
+      expect(counts.signatureNudgeScanned).toBe(2);
+      expect(counts.signatureNudged).toBe(1);
+    });
+
+    test('a parkedAt with a non-Z timezone offset is still parsed and expires on schedule', async () => {
+      const { sweep, db } = load();
+      const target = daysAgo(ABANDON_DAYS + 1);
+      // Same instant as `target`, rendered with an explicit -04:00 offset
+      // rather than Z (isoParkedAt's regex must accept both forms).
+      const localWallClock = new Date(target.getTime() - 4 * 60 * 60 * 1000);
+      const offsetIso = `${localWallClock.toISOString().replace('Z', '')}-04:00`;
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(1), parkedAtRaw: offsetIso });
+      await makeAgreement(db, { estimateId, customerId });
+
+      const counts = await sweep();
+      expect(counts.signatureExpired).toBe(1);
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('signature_expired');
+    });
+
+    test('a parkedAt in the future is never treated as abandoned, even with an old accepted_at fallback value on the row', async () => {
+      const { sweep, db } = load();
+      const future = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+      // accepted_at is 100 days old — if the code ever fell back to it
+      // despite parkedAt being present, this would wrongly expire.
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(100), parkedAtRaw: future.toISOString() });
+      await makeAgreement(db, { estimateId, customerId });
+
+      const counts = await sweep();
+      expect(counts.signatureExpireScanned).toBe(0);
+      expect(counts.signatureExpired).toBe(0);
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+    });
+
+    test('a contract with no customer_id falls back to the estimate customer_id for the retirement event', async () => {
+      // customer_contracts.customer_id is NOT NULL in the real schema
+      // (20260511000002_contract_signing_workflow) — this scratch schema
+      // relaxes it to nullable, so this proves the `row.customer_id ||
+      // estimate.customer_id` fallback itself is correct if that ever
+      // changed, without asserting the (currently unreachable) prod case.
+      const { sweep, db } = load();
+      const [customer] = await db('customers').insert({}).returning('*');
+      const [estimate] = await db('estimates').insert({
+        customer_id: customer.id,
+        accepted_at: daysAgo(ABANDON_DAYS + 1),
+        annual_plan_activation_status: 'awaiting_signature',
+        annual_plan_deferred_invoice: JSON.stringify({ version: 1, parkedAt: daysAgo(ABANDON_DAYS + 1).toISOString() }),
+      }).returning('*');
+      const [contract] = await db('customer_contracts').insert({
+        customer_id: null,
+        document_template_key: ANNUAL_TEMPLATE_KEY,
+        status: 'sent',
+        share_token_hash: 'a-token-hash',
+        document_variables_snapshot: JSON.stringify({ estimate: { id: estimate.id } }),
+      }).returning('*');
+
+      const counts = await sweep();
+      expect(counts.signatureExpired).toBe(1);
+      const events = await db('customer_contract_events').where({ contract_id: contract.id });
+      expect(events).toHaveLength(1);
+      expect(events[0].customer_id).toBe(customer.id);
+    });
+
+    test('DOCUMENTED (unreachable in prod): a contract AND estimate both missing customer_id fail the close-out closed, never half-committed', async () => {
+      // Real schema guarantees customer_contracts.customer_id NOT NULL, so
+      // this is not reachable in production — but it proves the code fails
+      // CLOSED (rolls the whole transaction back — the estimate stays
+      // 'awaiting_signature', nothing cancelled) rather than crashing the
+      // sweep or leaving a half-retired agreement, if that invariant were
+      // ever violated by a future migration or data-repair script.
+      const { sweep, db } = load();
+      const [estimate] = await db('estimates').insert({
+        customer_id: null,
+        accepted_at: daysAgo(ABANDON_DAYS + 1),
+        annual_plan_activation_status: 'awaiting_signature',
+        annual_plan_deferred_invoice: JSON.stringify({ version: 1, parkedAt: daysAgo(ABANDON_DAYS + 1).toISOString() }),
+      }).returning('*');
+      const [contract] = await db('customer_contracts').insert({
+        customer_id: null,
+        document_template_key: ANNUAL_TEMPLATE_KEY,
+        status: 'sent',
+        share_token_hash: 'a-token-hash',
+        document_variables_snapshot: JSON.stringify({ estimate: { id: estimate.id } }),
+      }).returning('*');
+
+      const counts = await sweep();
+      expect(counts.signatureExpireFailed).toBe(1);
+      expect((await db('estimates').where({ id: estimate.id }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+      expect((await db('customer_contracts').where({ id: contract.id }).first()).status).toBe('sent');
+      expect(await db('customer_contract_events').where({ contract_id: contract.id })).toHaveLength(0);
+    });
+  });
 });
