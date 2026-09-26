@@ -126,7 +126,20 @@ test('a definite not_sent initial result is trusted against this attempt\'s own 
   const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-definite', result, ['sms']);
   expect(queued).toMatchObject({ queued: true, uncertain: false });
   const row = db._rows.find((candidate) => candidate.id === queued.id);
-  expect(row).toMatchObject({ status: 'scheduled', metadata: { billing_email_uncertain: false } });
+  expect(row).toMatchObject({ status: 'scheduled', metadata: { billing_email_uncertain: false,
+    billing_email_safe_attempt_token: 'unrelated-token' } });
+});
+
+test('a definite not_sent trusted at enqueue is still retried by replay', async () => {
+  db._rows.push({ idempotency_key: obligation.obligationKey('receipt:event-definite-replay'), status: 'failed',
+    error_message: 'SendGrid rejected the recipient (429)', send_attempt_token: 'attempt-1', metadata: {} });
+  const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-definite-replay',
+    { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, ['sms']);
+  const row = db._rows.find((candidate) => candidate.id === queued.id);
+  sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', channel: 'email' });
+  await expect(obligation.replay({ ...row.metadata, scheduled_sms_log_id: queued.id }))
+    .resolves.toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 });
 
 test('a genuinely ambiguous in-flight collision row still holds even against a definite input result', async () => {

@@ -178,6 +178,12 @@ async function queueObligation(input, category, eventKey, result, siblings = [],
     const tiedToThisAttempt = !uncertain && collision.emailMessage?.status === 'failed';
     const holdUncertain = !accepted && !tiedToThisAttempt && (uncertain || evidence === 'uncertain');
     const metadata = queuedRowMetadata(input, category, eventKey, key, siblings, holdUncertain);
+    // Replay trusts a failed row only when its attempt token is this owner's
+    // recorded safe token, so the trusted failure's token must travel with the
+    // queued owner or replay re-reads it as uncertain and never retries.
+    if (tiedToThisAttempt && collision.emailMessage.send_attempt_token) {
+      metadata.billing_email_safe_attempt_token = String(collision.emailMessage.send_attempt_token);
+    }
     return insertQueuedRow(trx, input, category, metadata, accepted, holdUncertain);
   });
 }
