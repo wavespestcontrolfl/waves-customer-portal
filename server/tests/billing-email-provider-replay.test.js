@@ -1,4 +1,7 @@
-jest.mock('../services/email-template-library', () => ({ readStoredBillingReplayContext: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({
+  readStoredBillingReplayContext: jest.fn(),
+  hasStoredBillingReplayContext: jest.requireActual('../services/email-template-library').hasStoredBillingReplayContext,
+}));
 jest.mock('../services/billing-channel-email-authority', () => ({ dispatchUnderBillingEmailAuthority: jest.fn() }));
 jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn() }));
 
@@ -47,6 +50,13 @@ test('recognizes only the two canonical billing templates', () => {
   expect(isBillingEmailProviderReplay(message())).toBe(true);
   expect(isBillingEmailProviderReplay(message({ template_key: 'billing.receipt_notice' }))).toBe(true);
   expect(isBillingEmailProviderReplay(message({ template_key: 'invoice.sent' }))).toBe(false);
+});
+
+test('leaves a billing row stored without the replay contract on the ordinary retry path', () => {
+  expect(isBillingEmailProviderReplay(message({ payload_snapshot: JSON.stringify({ first_name: 'Casey' }) }))).toBe(false);
+  expect(isBillingEmailProviderReplay(message({
+    payload_snapshot: JSON.stringify({ first_name: 'Casey', __billing_replay_context: null }),
+  }))).toBe(true);
 });
 
 test('delegates stored row validation to the canonical context reader', () => {

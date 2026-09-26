@@ -618,12 +618,22 @@ function readStoredBillingReplayContext(message) {
   });
 }
 
-function payloadSnapshotForSend(payload, billingReplayContext, facts) {
+// A row from a producer that declares the replay contract keeps the key even
+// when its context is invalid (stored as null), so a provider retry of it
+// fails closed; a row with no key never had a contract and retries as before.
+function hasStoredBillingReplayContext(message) {
+  if (!BILLING_REPLAY_TEMPLATES.has(String(message?.template_key || '').trim())) return false;
+  const payload = parsedObject(message.payload_snapshot);
+  return !payload || Object.prototype.hasOwnProperty.call(payload, BILLING_REPLAY_CONTEXT_KEY);
+}
+
+function payloadSnapshotForSend(payload, billingReplayContext, facts, { replayDeclared = false } = {}) {
   const snapshot = redactedPayloadSnapshot(payload || {});
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
   delete snapshot[BILLING_REPLAY_CONTEXT_KEY];
   const safeContext = billingReplayContextForSnapshot(billingReplayContext, facts);
   if (safeContext) snapshot[BILLING_REPLAY_CONTEXT_KEY] = safeContext;
+  else if (replayDeclared) snapshot[BILLING_REPLAY_CONTEXT_KEY] = null;
   return snapshot;
 }
 
@@ -1159,6 +1169,9 @@ async function sendTemplate({
   attachments = [],
   suppressionGroupKey,
   billingReplayContext = null,
+  // Set by a producer whose source carries the replay contract, so a context
+  // that fails validation is still stored as a fail-closed marker.
+  billingReplayDeclared = false,
   // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
   // sendOne does NOT log the raw SendGrid response body — provider rejections
   // can echo the recipient address, and email addresses in logs are a P1. The
@@ -1419,7 +1432,7 @@ async function sendTemplate({
       triggerEventId: triggerEventId || null,
       idempotencyKey: idempotencyKey || null,
       categories: allCategories,
-    })),
+    }, { replayDeclared: billingReplayDeclared })),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
     // Attachments aren't persisted in the snapshot; flag their presence so the
@@ -1840,6 +1853,7 @@ module.exports = {
   redactedPayloadSnapshot,
   payloadSnapshotForSend,
   readStoredBillingReplayContext,
+  hasStoredBillingReplayContext,
   redactEmailAddresses,
   safeUrl,
   productionPlaceholderPayloadValues,

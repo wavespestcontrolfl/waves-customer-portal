@@ -1064,6 +1064,21 @@ describe('email template library rendering', () => {
     expect(snapshot).toEqual({});
   });
 
+  test('keeps a fail-closed marker when a declared producer context is invalid', () => {
+    const facts = {
+      templateKey: 'billing.notice', recipientType: 'customer', recipientId: 'cust-1', triggerEventId: 'event-1',
+      idempotencyKey: 'billing_channel_email:different-event:email', categories: ['billing'],
+    };
+    const snapshot = EmailTemplates.payloadSnapshotForSend({ first_name: 'Taylor' }, null, facts, { replayDeclared: true });
+    expect(snapshot).toEqual({ first_name: 'Taylor', __billing_replay_context: null });
+    const row = (payload, templateKey = 'billing.notice') => ({ template_key: templateKey, payload_snapshot: JSON.stringify(payload) });
+    expect(EmailTemplates.hasStoredBillingReplayContext(row(snapshot))).toBe(true);
+    expect(EmailTemplates.readStoredBillingReplayContext(row(snapshot))).toBeNull();
+    expect(EmailTemplates.hasStoredBillingReplayContext(row({ first_name: 'Taylor' }))).toBe(false);
+    expect(EmailTemplates.hasStoredBillingReplayContext(row(snapshot, 'invoice.sent'))).toBe(false);
+    expect(EmailTemplates.hasStoredBillingReplayContext({ template_key: 'billing.notice', payload_snapshot: '{not json' })).toBe(true);
+  });
+
   test('a reclaimed send persists fresh rendered content and replay context from the same attempt', async () => {
     const eventKey = 'precharge:cust-1:2026-09-29';
     const idempotencyKey = `billing_channel_email:${eventKey}:email`;

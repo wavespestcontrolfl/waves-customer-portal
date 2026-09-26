@@ -8,8 +8,12 @@ function clean(value) {
   return String(value || '').trim();
 }
 
+// Only rows stored under the replay contract are re-authorized here; a
+// billing row with no stored context (an unregistered producer, or one sent
+// before the contract) keeps the ordinary provider retry.
 function isBillingEmailProviderReplay(message) {
-  return BILLING_REPLAY_TEMPLATES.has(clean(message?.template_key));
+  return BILLING_REPLAY_TEMPLATES.has(clean(message?.template_key))
+    && EmailTemplateLibrary.hasStoredBillingReplayContext(message);
 }
 
 const { readStoredBillingReplayContext } = EmailTemplateLibrary;

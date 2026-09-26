@@ -91,7 +91,8 @@ test('replays a no-phone billing Email only after locked eligibility and reuses 
 });
 
 test.each([
-  { payload_snapshot: '{}' },
+  // A producer that declared the contract but stored no valid context.
+  { payload_snapshot: JSON.stringify({ __billing_replay_context: null }) },
   { recipient_id: 'another-customer' },
   { trigger_event_id: 'another-event' },
   { categories: JSON.stringify(['payment_receipt']) },
@@ -140,6 +141,16 @@ test('billing templates lacking a supported receipt source cannot use generic re
   await expect(retryOne(storedMessage({ template_key: 'billing.receipt_notice' })))
     .resolves.toMatchObject({ sent: false, stopped: true });
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
+});
+
+test('a billing receipt stored without the replay contract keeps the ordinary provider retry', async () => {
+  const contractless = { template_key: 'billing.receipt_notice', payload_snapshot: JSON.stringify({ first_name: 'Casey' }) };
+  query.returning.mockResolvedValue([storedMessage({ ...contractless, status: 'sent', sent_at: new Date() })]);
+  const outcome = await retryOne(storedMessage(contractless));
+  expect(outcome).toMatchObject({ sent: true });
+  expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  expect(authority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
 });
 
 test('an ambiguous billing provider request is held without scheduling another send', async () => {
