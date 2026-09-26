@@ -438,7 +438,7 @@ describe('processDueJobs', () => {
         service_label: 'pest control',
         category_headline: expect.any(String),
         category_hook: expect.any(String),
-        category_benefit: expect.stringContaining('90-day'),
+        category_benefit: expect.stringContaining('money-back guarantee'),
         category_question: expect.any(String),
         estimate_accept_url: expect.any(String),
       }),

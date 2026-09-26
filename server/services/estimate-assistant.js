@@ -619,7 +619,7 @@ function buildEstimateAssistantContext({
       items: oneTimeServices.map(rowWithSummary),
     } : null,
     guarantees: {
-      recurring: '90-day money-back guarantee on recurring WaveGuard service.',
+      recurring: 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.',
       oneTime: 'One-time pest service may include a 30-day callback period when shown on the estimate.',
     },
     contact: COMPANY,
@@ -1391,7 +1391,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
     if (context.serviceMode === 'one_time') {
       return `This is a one-time service, not a recurring WaveGuard membership. ${context.guarantees?.oneTime || 'One-time pest service may include a 30-day callback period when shown on the estimate.'}`;
     }
-    return `${tier} is the WaveGuard membership level shown on this estimate. Recurring WaveGuard service includes the 90-day money-back guarantee shown here, member pricing, and ongoing service support from Waves.`;
+    return `${tier} is the WaveGuard membership level shown on this estimate. Recurring WaveGuard service includes the money-back guarantee shown here, member pricing, and ongoing service support from Waves.`;
   }
 
   if (/\b(who|waves|company|local|license|insured|contact|phone|text|email)\b/.test(q)) {

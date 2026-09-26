@@ -1158,6 +1158,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
             original_message_type: mdPending ? 'bank_verification_incomplete' : 'invoice_followup',
             notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
             billingDeliveryCategory: category, billingDeliveryLeg: channel,
+            followup_sequence_id: row.id,
+            rendered_amount: amount,
+            collections_ledger_id: ledger.id,
             ...(channel === 'push' ? { appOnly: true } : {}),
           },
           hasEmailLeg: emailSelected,
@@ -1231,6 +1234,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
           billingDeliveryCategory: mdPending ? 'payment_issue' : 'invoice',
+          followup_sequence_id: row.id,
+          rendered_amount: amount,
+          collections_ledger_id: smsLedger.id,
         },
         hasEmailLeg: true,
         // The LAST ownership check, run by the canonical sender immediately
@@ -2016,8 +2022,8 @@ async function hasActiveSequence(invoiceId) {
  * texts. `hasActiveSequence` deliberately excludes 'stopped' (a stopped sequence is no
  * longer "active"/handling the invoice), so this is a separate, explicit check.
  */
-async function isDunningStopped(invoiceId) {
-  const seq = await db('invoice_followup_sequences')
+async function isDunningStopped(invoiceId, database = db) {
+  const seq = await database('invoice_followup_sequences')
     .where({ invoice_id: invoiceId, status: 'stopped' })
     .first();
   return !!seq;
