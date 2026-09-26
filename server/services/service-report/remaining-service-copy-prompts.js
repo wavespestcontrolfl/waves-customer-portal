@@ -4,8 +4,8 @@
  * user-authorized Waves Remaining Services prompt pack (2026-09-25).
  *
  * Registry bindings are exact local code identities. They do not assert that
- * a catalog row is active in any deployed environment. WDO, pre-slab,
- * wildlife/mole, fumigation, and unverified catch-all variants stay unbound.
+ * a catalog row is active in any deployed environment. WDO and pre-slab prompts are excluded entirely. Wildlife/mole, fumigation,
+ * and unverified catch-all variants stay unbound.
  */
 const REMAINING_SERVICE_PROMPT_VERSION = 'remaining_service_copy_v1';
 
@@ -118,16 +118,6 @@ A treated segment is not the same as a fully treated structure. Keep untreated, 
 Use confirmed current activity, previous evidence, and damage as separate findings. A treatment does not repair damage, verify structural soundness, establish concealed infestation extent, or prove colony removal. Product-capability language must be specific to the actual application and approved facts; do not promise an impenetrable barrier or a generic number of years of performance.
 
 Explain the approved monitoring or follow-up plan when supplied. Do not manufacture a damage bond, warranty term, insurance coverage, or a guarantee because this was a termite visit. Keep validated aftercare and any site constraints intact, without adding rates, dilution, re-entry periods, or homeowner digging/drilling instructions.`,
-  termite_preconstruction: `SERVICE MODULE — TERMITE PRECONSTRUCTION / PRE-SLAB
-Write for the property owner, builder, or site contact identified in the inputs. Describe the exact construction stage and treatment scope completed on this visit. A pre-slab area, perimeter stage, or follow-on stage must not become 'the entire termite treatment is complete.'
-
-Explain the supported purpose of protecting the recorded construction areas through the specified treatment system. Use only approved application facts. Do not infer gallons, concentration, square footage, linear footage, complete coverage, or label compliance from a scheduled service, calculation, photograph, or invoice alone.
-
-Separate actual treatment completion from future-stage work and from administrative certification. Do not issue or imply a building-code approval, certificate, inspection pass, permission to pour concrete, release of the site, or permission to disturb treated material. Those statements belong to the appropriate approved records and authorized personnel.
-
-If rain, grading, excavation, disturbance, obstruction, or an incomplete area was recorded, preserve that fact and the approved assessment or coordination step without inventing a need to re-treat. Do not instruct the builder to proceed or stop beyond supplied authoritative instructions.
-
-A later visit remains planned or required as recorded; it is scheduled only when a matching project appointment is supplied. Keep commercial terms out of the treatment narrative unless explicitly approved for that surface.`,
   termite_localized: `SERVICE MODULE — LOCALIZED TERMITE FOAM / WOOD TREATMENT
 Describe the particular wood, accessible area, void, or structural location treated, together with the recorded application method. Preserve the distinction between foam work, localized liquid application, wood treatment, and broader soil treatment. Do not equate borate wood treatment with soil trenching or whole-structure fumigation.
 
@@ -136,16 +126,6 @@ Connect the recorded work to its approved target and role. Confirmed termites, h
 Be clear about the boundaries of the work and any recorded access or inspection limitation. Do not claim the full building was treated, all damaged material was repaired, or a particular colony or queen was reached. Do not promise that activity will stop within a default period.
 
 Explain the approved inspection, monitoring, repair referral, or follow-on treatment recommendation without describing it as completed. Do not infer a warranty, a damage bond, or structural clearance. Protect the actual product aftercare and do not add homeowner drill, foam, or wood-removal directions.`,
-  wdo_companion: `SERVICE MODULE — WDO INSPECTION COMPANION EXPLANATION
-Explain the approved inspection findings faithfully. This module creates companion explanation, never the official inspection form or certification. The inspector's approved terminology, categories, scope, limitations, and conclusions control the narrative.
-
-Describe what was inspected, what evidence was recorded, and what areas were inaccessible or excluded. Preserve the distinction among live organisms, evidence, damage, conducive conditions, and an observation of none within the inspected scope. Do not reinterpret old damage as active termites, a moisture concern as a confirmed organism, or lack of accessible evidence as absence throughout the structure.
-
-Do not write 'passed,' 'termite-free,' 'structurally sound,' 'clear to close,' 'certified free,' or a comparable conclusion unless it is an exact authorized statement appropriate to the approved record, and do not broaden that statement. Do not imply treatment occurred during an inspection unless separate completed work supports it.
-
-Present the approved next step without pressure selling. A treatment or repair recommendation is not a scheduled job, completed repair, or warranty. Do not rewrite mandatory form language, alter signatures or inspection dates, expand the inspector's conclusion, or substitute these paragraphs for the formal record.
-
-Use the project/inspection adapter, not the typed-specialty JSON adapter, unless the actual authorized renderer expressly defines another format.`,
   cockroach: `SERVICE MODULE — COCKROACH TREATMENT PROGRAM
 Lead with the actual species when confirmed, the recorded activity location, and this visit's role in the accepted program. German, American, smoky brown, mixed, and unknown records must not collapse into the same biological explanation. An unknown species stays unknown or generic.
 
@@ -296,9 +276,9 @@ const SERVICE_KEY_MODULES = Object.freeze({
   rodent_monitoring: 'rodent_bait',
   rodent_trapping: 'rodent_trapping',
   rodent_trapping_followup: 'rodent_trapping',
-  rodent_trapping_exclusion: 'rodent_trapping',
-  rodent_trapping_sanitation: 'rodent_trapping',
-  rodent_trapping_exclusion_sanitation: 'rodent_trapping',
+  rodent_trapping_exclusion: ['rodent_trapping', 'rodent_exclusion'],
+  rodent_trapping_sanitation: ['rodent_trapping', 'rodent_sanitation'],
+  rodent_trapping_exclusion_sanitation: ['rodent_trapping', 'rodent_exclusion', 'rodent_sanitation'],
   trap_only_retainer_standard: 'rodent_trapping',
   trap_only_retainer_plus: 'rodent_trapping',
   trap_only_retainer_monthly: 'rodent_trapping',
@@ -352,6 +332,7 @@ const FINDINGS_TYPE_MODULES = Object.freeze({
   rodent_exclusion: 'rodent_exclusion',
   rodent_sanitation: 'rodent_sanitation',
   termite_bait_station: 'termite_stations',
+  termite_treatment: ['termite_liquid', 'termite_localized'],
   cockroach: 'cockroach',
   german_roach_knockdown: 'cockroach',
   palmetto_roach_knockdown: 'cockroach',
@@ -379,29 +360,34 @@ function selectedModifierKeys(context = {}) {
   return selected;
 }
 
-function resolveRemainingServiceModule({ serviceKey = null, findingsType = null } = {}) {
+function resolveRemainingServiceModules({ serviceKey = null, findingsType = null } = {}) {
   const key = String(serviceKey || '').trim();
   const type = String(findingsType || '').trim();
-  const byServiceKey = Object.hasOwn(SERVICE_KEY_MODULES, key) ? SERVICE_KEY_MODULES[key] : null;
-  const byFindingsType = Object.hasOwn(FINDINGS_TYPE_MODULES, type) ? FINDINGS_TYPE_MODULES[type] : null;
-  // An explicit unknown/excluded canonical key must not borrow a writer
-  // merely because a different findings type was attached to the request.
+  const byServiceKey = Object.hasOwn(SERVICE_KEY_MODULES, key) ? [SERVICE_KEY_MODULES[key]].flat() : null;
+  const byFindingsType = Object.hasOwn(FINDINGS_TYPE_MODULES, type) ? [FINDINGS_TYPE_MODULES[type]].flat() : null;
+  // Every supplied identity is authoritative, including an unmapped type.
+  // Shared schemas such as termite_treatment need a canonical service key.
   if (serviceKey && !byServiceKey) return null;
-  if (byServiceKey && byFindingsType && byServiceKey !== byFindingsType) return null;
-  return byServiceKey || byFindingsType || null;
+  if (findingsType && !byFindingsType) return null;
+  if (byServiceKey && byFindingsType && !byFindingsType.some((module) => byServiceKey.includes(module))) return null;
+  if (byServiceKey) return byServiceKey;
+  return byFindingsType?.length === 1 ? byFindingsType : null;
 }
 
 function selectRemainingServicePrompt(context = {}, surface = 'main') {
-  const moduleKey = resolveRemainingServiceModule(context);
+  const moduleKeys = resolveRemainingServiceModules(context);
   const adapter = Object.hasOwn(REMAINING_SERVICE_ADAPTERS, surface)
     ? REMAINING_SERVICE_ADAPTERS[surface]
     : null;
-  if (!moduleKey || !adapter) return null;
-  const modifierBlocks = selectedModifierKeys(context)
-    .map((key) => REMAINING_SERVICE_MODIFIERS[key]);
+  // A generic completion profile cannot consume the typed-summary schema.
+  if (!moduleKeys || !adapter || (surface === 'typed' && !context.findingsType)) return null;
+  const modifierBlocks = selectedModifierKeys({
+    ...context,
+    isBundled: moduleKeys.length > 1 || context.isBundled,
+  }).map((key) => REMAINING_SERVICE_MODIFIERS[key]);
   return [
     REMAINING_SERVICE_SHARED_CORE,
-    REMAINING_SERVICE_MODULES[moduleKey],
+    ...moduleKeys.map((key) => REMAINING_SERVICE_MODULES[key]),
     ...modifierBlocks,
     adapter,
   ].join('\n\n');
@@ -419,6 +405,6 @@ module.exports = {
   _test: {
     MODIFIER_KEYS,
     selectedModifierKeys,
-    resolveRemainingServiceModule,
+    resolveRemainingServiceModules,
   },
 };

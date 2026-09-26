@@ -14,9 +14,11 @@ function occurrences(text, fragment) {
 }
 
 describe('remaining service copy prompt registry', () => {
-  test('exports the complete pack as one shared core, 21 service modules, and two adapters', () => {
+  test('exports the supported pack as one shared core, 19 service modules, and two adapters', () => {
     expect(REMAINING_SERVICE_PROMPT_VERSION).toBe('remaining_service_copy_v1');
-    expect(Object.keys(REMAINING_SERVICE_MODULES)).toHaveLength(21);
+    expect(Object.keys(REMAINING_SERVICE_MODULES)).toHaveLength(19);
+    expect(REMAINING_SERVICE_MODULES).not.toHaveProperty('wdo_companion');
+    expect(REMAINING_SERVICE_MODULES).not.toHaveProperty('termite_preconstruction');
     expect(Object.keys(REMAINING_SERVICE_MODIFIERS)).toEqual([
       'callback', 'commercial', 'program_stage', 'bundled', 'inspection_only',
     ]);
@@ -67,6 +69,11 @@ describe('remaining service copy prompt registry', () => {
 
   test('fails closed for conflicting identities and noncanonical aliases', () => {
     expect(selectRemainingServicePrompt({ serviceKey: 'fire_ant', findingsType: 'flea' }, 'main')).toBeNull();
+    expect(selectRemainingServicePrompt({ serviceKey: 'fire_ant', findingsType: 'termite_treatment' }, 'main')).toBeNull();
+    expect(selectRemainingServicePrompt({ serviceKey: 'fire_ant', findingsType: 'unknown' }, 'main')).toBeNull();
+    expect(selectRemainingServicePrompt({ serviceKey: 'fire_ant' }, 'typed')).toBeNull();
+    expect(selectRemainingServicePrompt({ serviceKey: 'bed_bug_treatment' }, 'typed')).toBeNull();
+    expect(selectRemainingServicePrompt({ findingsType: 'termite_treatment' }, 'main')).toBeNull();
     expect(selectRemainingServicePrompt({ serviceKey: 'Fire Ant' }, 'main')).toBeNull();
     expect(selectRemainingServicePrompt({ serviceKey: 'FIRE_ANT' }, 'main')).toBeNull();
     expect(selectRemainingServicePrompt({ serviceKey: 'fumigation' }, 'main')).toBeNull();
@@ -102,4 +109,22 @@ describe('remaining service copy prompt registry', () => {
     expect(Object.values(SERVICE_KEY_MODULES)).not.toContain('termite_preconstruction');
     expect(Object.values(SERVICE_KEY_MODULES)).not.toContain('wdo_companion');
   });
+  test('bundled rodent services include every recorded service boundary exactly once', () => {
+    const prompt = selectRemainingServicePrompt({
+      serviceKey: 'rodent_trapping_exclusion_sanitation', findingsType: 'rodent_trapping',
+    }, 'typed');
+    for (const module of ['RODENT TRAPPING', 'RODENT EXCLUSION', 'RODENT SANITATION / CLEANUP']) {
+      expect(occurrences(prompt, `SERVICE MODULE — ${module}`)).toBe(1);
+    }
+    expect(occurrences(prompt, 'CROSS-SERVICE MODIFIER — BUNDLED / COMPANION SERVICES')).toBe(1);
+    expect(prompt).not.toContain('SERVICE MODULE — RODENT BAIT STATIONS');
+  });
+
+  test('a shared termite schema selects the exact canonical treatment rather than guessing from the schema', () => {
+    expect(selectRemainingServicePrompt({ serviceKey: 'termite_liquid', findingsType: 'termite_treatment' }, 'typed'))
+      .toContain('SERVICE MODULE — TERMITE LIQUID / SOIL TREATMENT');
+    expect(selectRemainingServicePrompt({ serviceKey: 'foam_drill', findingsType: 'termite_treatment' }, 'typed'))
+      .toContain('SERVICE MODULE — LOCALIZED TERMITE FOAM / WOOD TREATMENT');
+  });
+
 });
