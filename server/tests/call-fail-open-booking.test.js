@@ -2217,6 +2217,21 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     // A BARE weekday name on the ambiguous same day (dayDiff 0) still fails
     // closed — the relative-day exception never extends to weekday names.
     ['We will be there Thursday between 6 and 9.', '2026-07-30T18:00:00-04:00', false],
+    // codex #4919 review round P1 (:1603): the range's SECOND bound's period
+    // must NOT be copied onto the first — "between 11 and 1 pm" is 11 AM to
+    // 1 PM, never 11 PM.
+    ['We will be there Sunday between 11 and 1 pm.', '2026-08-02T23:00:00-04:00', false],
+    ['We will be there Sunday between 11 and 1 pm.', '2026-08-02T11:00:00-04:00', true],
+    // codex #4919 review round P1 (:1597): "noon"/"midnight" bind as a
+    // range bound too — both are the v11 prompt's own documented examples.
+    ['We will be there tomorrow between 10 and noon.', '2026-07-31T10:00:00-04:00', true],
+    ['We will be there today between noon and 1.', '2026-07-30T12:00:00-04:00', true],
+    // codex #4919 review round P1 (:1634): a weekday name AND a
+    // relative-day word both stated is CONFLICTING evidence — fails closed
+    // rather than picking one.
+    ['We will be there tomorrow Sunday at 6 pm.', '2026-08-02T18:00:00-04:00', false],
+    // Two relative-day words stated together is the same conflict.
+    ['We will be there today and tomorrow at 6 pm.', '2026-07-30T18:00:00-04:00', false],
   ])('ARRIVAL WINDOW / relative-day binding — %s @ %s → %s', (sentence, startAt, expected) => {
     const ns = normalizeCommitmentText(sentence);
     expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);

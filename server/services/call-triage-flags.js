@@ -1594,17 +1594,37 @@ function parseSpokenSlot(normalizedSentence) {
 // adjacency — "or" and any other connector are NOT range markers, so an
 // unrelated offer of two alternative slots ("we could do 10 am or 2 pm")
 // is untouched and still fails the (unchanged) single-time-mention check.
-// A period missing on BOTH bounds falls back to the same business-hours
-// inference parseSpokenSlot already applies to a bare hour elsewhere.
-const RANGE_RE = /\bbetween (\d{1,2})(?: (am|pm))? and (\d{1,2})(?: (am|pm))?\b|\b(\d{1,2})(?: (am|pm))? to (\d{1,2})(?: (am|pm))?\b/;
+// Either bound may be "noon"/"midnight" instead of a number (both
+// documented v11 prompt examples: "between 10 and noon tomorrow", "between
+// noon and 1 today") — collapsed to the literal word, which parseSpokenSlot
+// already reads as 12 pm/12 am. A number bound with no stated period infers
+// one from the SAME business-hours table parseSpokenSlot already applies to
+// a bare hour elsewhere — from the FIRST bound's own hour only; the second
+// bound's period is never copied onto the first ("between 11 and 1 pm" is
+// 11 AM–1 PM, not 11 PM — codex review round).
+const RANGE_RE = new RegExp(
+  '\\bbetween (?:(?<b1h>\\d{1,2})(?: (?<b1p>am|pm))?|(?<b1w>noon|midnight)) and '
+  + '(?:(?<b2h>\\d{1,2})(?: (?<b2p>am|pm))?|(?<b2w>noon|midnight))\\b'
+  + '|\\b(?:(?<c1h>\\d{1,2})(?: (?<c1p>am|pm))?|(?<c1w>noon|midnight)) to '
+  + '(?:(?<c2h>\\d{1,2})(?: (?<c2p>am|pm))?|(?<c2w>noon|midnight))\\b',
+);
 function collapseRangeToFirstBound(ns) {
   const m = RANGE_RE.exec(ns);
   if (!m) return ns;
-  const betweenBranch = m[1] !== undefined;
-  const hour = betweenBranch ? m[1] : m[5];
-  const period = (betweenBranch ? (m[2] || m[4]) : (m[6] || m[8])) || inferPeriodFromBusinessHours(Number(hour));
-  if (!period) return ns;
-  return `${ns.slice(0, m.index)}${hour} ${period}${ns.slice(m.index + m[0].length)}`;
+  const g = m.groups || {};
+  const betweenBranch = g.b1h !== undefined || g.b1w !== undefined;
+  const wordBound = betweenBranch ? g.b1w : g.c1w;
+  let replacement;
+  if (wordBound) {
+    replacement = wordBound;
+  } else {
+    const hour = betweenBranch ? g.b1h : g.c1h;
+    const explicitPeriod = betweenBranch ? g.b1p : g.c1p;
+    const period = explicitPeriod || inferPeriodFromBusinessHours(Number(hour));
+    if (!period) return ns;
+    replacement = `${hour} ${period}`;
+  }
+  return `${ns.slice(0, m.index)}${replacement}${ns.slice(m.index + m[0].length)}`;
 }
 
 // The complete MULTI-number shapes a slot explains: [hour12, 00] (spoken
@@ -1630,11 +1650,19 @@ const SLOT_BINDING_CHECKS = [
   // between today and next week, per confirmedSlotFacts) or by a RELATIVE-day
   // word with no weekday mention at all: "tonight"/"today" only for a
   // same-day slot, "tomorrow" only for a next-day slot (codex #4919 r1 P1).
+  // A weekday name AND a relative-day word both stated ("tomorrow Sunday at
+  // 6 pm"), or more than one relative-day word stated ("today and tomorrow
+  // at 6 pm"), is CONFLICTING evidence — fails closed rather than picking
+  // one (codex #4919 review round P1).
   (said, slot) => {
-    if (said.weekdays.size === 1 && said.weekdays.has(slot.weekday)) return slot.dayDiff >= 1;
-    if (said.weekdays.size === 0) {
+    if (said.weekdays.size && said.relativeDays.size) return false;
+    if (said.relativeDays.size > 1) return false;
+    if (said.weekdays.size === 1) return said.weekdays.has(slot.weekday) && slot.dayDiff >= 1;
+    if (said.weekdays.size > 1) return false;
+    if (said.relativeDays.size === 1) {
       if (slot.dayDiff === 0) return said.relativeDays.has('today') || said.relativeDays.has('tonight');
       if (slot.dayDiff === 1) return said.relativeDays.has('tomorrow');
+      return false;
     }
     return false;
   },
