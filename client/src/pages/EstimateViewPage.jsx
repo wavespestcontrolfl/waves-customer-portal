@@ -3954,6 +3954,14 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
     );
   }
 
+  if (nextStep === 'offer_closed') {
+    // Slice 3b: the customer never signed the annual agreement within the
+    // 45-day window, so the offer closed automatically — nothing was
+    // billed or booked. Never re-show the sign-your-agreement copy; the
+    // signing link is dead.
+    return <AnnualOfferClosedCard />;
+  }
+
   if (nextStep === 'site_confirmation') {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.
@@ -5357,6 +5365,23 @@ export function estimateHasRegulatedCertificateSurface(serviceCategory, services
   return regulatedCategories.has(serviceCategory)
     || services.some((service) => regulatedCategories.has(glassServiceSlug(service?.key || service?.name)))
     || oneTimeItems.some((item) => regulatedCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)));
+}
+
+// Slice 3b: a termite annual offer that closed unsigned — shown both after
+// an accept retry (nextStep 'offer_closed') and on a normal reload
+// (/data estimate.annualPlanOfferClosed).
+function AnnualOfferClosedCard() {
+  return (
+    <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${ESTIMATE_MUTED}` }}>
+      <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+        This plan offer has closed.
+      </div>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+        The signing window closed before a signature came in. Nothing was charged or booked. Contact Waves
+        if you'd still like the annual plan — we're happy to send a new quote.
+      </div>
+    </div>
+  );
 }
 
 export default function EstimateViewPage() {
@@ -8423,6 +8448,26 @@ function EstimateViewPageInner({ websiteMode = false }) {
     const stateHero = cta.terminalState === 'quote_required' && isCommercialProposal
       ? { h1: 'Hello {first}, your formal proposal is ready.', eyebrow: 'Your commercial proposal' }
       : TERMINAL_HERO[cta.terminalState] || null;
+    if (cta.terminalState === 'accepted' && estimate.annualPlanOfferClosed) {
+      // Slice 3b: accepted, but the termite annual offer closed unsigned —
+      // nothing was booked or billed, so never the booked page (Codex #4922
+      // r3 P1). No host stage: "booked" would tell an embedding website the
+      // flow converted (Codex #4922 r4) — like the other non-booked
+      // terminal pages, it sends none.
+      return (
+        <Page website={websiteMode}>
+          {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
+          {estimateActionBar}
+          <Header
+            customerFirstName={estimate.customerFirstName}
+            serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, estimate.acceptedServiceMode || null)}
+            headline="This plan offer has closed."
+            eyebrowOverride={null}
+          />
+          <AnnualOfferClosedCard />
+        </Page>
+      );
+    }
     if (cta.terminalState === 'accepted') {
       // Accepted = concise onboarding page (owner ask 2026-07-09): booked
       // hero, the booked-visit card, the Waves app invite, and the

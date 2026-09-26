@@ -1715,7 +1715,20 @@ export default function ScheduleFlowPage({ flow }) {
         <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
         <SchedulePicker
           availability={data?.availability}
-          rankedSlots={aiFiltered ? null : data?.availability?.slots}
+          // Every other flow hides "Our best times for you" once an AI
+          // search narrows the calendar. Re-service (GATE_RESERVICE_RANK_AFTER_NEW,
+          // Codex r2 P2 on #4926) keeps its ranked strip visible for search
+          // results too — find-slots' response carries the SAME rankProfile-
+          // ranked `availability.slots` GET does, over the searched window,
+          // so hiding it here was throwing away the whole point of the
+          // profile for the one search a customer is most likely to run.
+          // Keyed on `availability.rank_profile` (stamped by
+          // reservice-public.js's reserviceAvailabilityPayload ONLY while
+          // the gate is actually live — never on flow==='reservice' alone),
+          // so the kill switch genuinely restores the old post-search UI
+          // instead of leaving this exception permanently on for the route
+          // (pre-push audit r3 P1 on #4926).
+          rankedSlots={(aiFiltered && data?.availability?.rank_profile !== 'reservice') ? null : data?.availability?.slots}
           selectedDate={selectedDay?.date || null}
           onSelectDay={(date) => {
             setSelectedDate(date);

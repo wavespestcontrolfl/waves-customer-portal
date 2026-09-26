@@ -57,14 +57,23 @@ function gratitudeCoordinationActive() {
   return require('../sms-gratitude-context').gratitudeClaimsPossible();
 }
 
+// The reservation holds a phone-keyed SMS thread. An explicit App notice
+// with no phone has no thread and sends no text, so there is nothing for a
+// gratitude reply to collide with (Codex pre-push P1 on #4843).
+function phoneFreeAppDelivery(to, explicitApp) {
+  return explicitApp === true && !threadLast10(normalizeRecipient(to));
+}
+
 function canonicalCoordinationApplies(input, callbacks = {}) {
   if (!gratitudeCoordinationActive()) return false;
   if (!input || input.audience !== 'customer' || !['sms', 'push'].includes(input.channel)) return false;
+  if (phoneFreeAppDelivery(input.to, input.metadata?.billingDeliveryLeg === 'push')) return false;
   return !trustedGratitudeOwnsReservation(input, callbacks);
 }
 
-function directCoordinationApplies({ messageType, reservationOwner = null } = {}) {
+function directCoordinationApplies({ messageType, reservationOwner = null, to, explicitPushOnly = false } = {}) {
   if (!gratitudeCoordinationActive()) return false;
+  if (phoneFreeAppDelivery(to, explicitPushOnly)) return false;
   if (messageType === 'ai_gratitude' && reservationOwner === GRATITUDE_RESERVATION_OWNER) return false;
   return !['internal_alert', 'admin_alert'].includes(String(messageType || ''));
 }
