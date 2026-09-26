@@ -75,12 +75,12 @@ function reminderVersion(row) {
     row.snoozed_until || null, row.reviewed_at || null, row.assigned_to || null]);
 }
 
-async function runCallCommitmentsWatchdog({ now = new Date(), scope = null } = {}) {
+async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callCommitments')) return { skipped: true, reason: 'gated_off' };
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('call-commitments-watchdog', async () => {
-    const result = await runInner({ now, scope });
+    const result = await runInner({ now });
     // Reconciliation already committed verified work. Report partial proof
     // failures to job health without rolling those notifications back.
     if (result.unverified) throw new Error(`Fulfillment verification incomplete for ${result.unverified} call(s)`);
@@ -88,26 +88,9 @@ async function runCallCommitmentsWatchdog({ now = new Date(), scope = null } = {
   });
 }
 
-async function runInner({ now = new Date(), scope = null } = {}) {
+async function runInner({ now = new Date() } = {}) {
   const today = require('../utils/datetime-et').etDateString(now);
   let rows = await listAllOpenWaves(now);
-  // The follow-up pager's 15-minute takeover sweep: only the promises that
-  // just aged off its list — never a refresh of the whole backlog.
-  const takeoverScope = async (list) => {
-    const ids = await require('./followup-sla-watcher').takeoverIds(db, list, now);
-    return list.filter((r) => ids.has(r.id));
-  };
-  // The narrow scope holds only while the pager is healthy. If it is
-  // failing (or its health cannot be read), this sweep IS the failover and
-  // runs as the full watchdog, paging current misses too.
-  let takeover = scope === 'sla_takeover';
-  if (takeover) {
-    takeover = await require('./followup-sla-watcher').pagerHealthy(db, now).catch((err) => {
-      logger.warn(`[call-commitments-watchdog] pager health unreadable — running the full sweep: ${err.message}`);
-      return false;
-    });
-  }
-  if (takeover) rows = await takeoverScope(rows);
   // A promise a later record already kept must not ring: nothing stamps
   // fulfillment unless someone opens the queue or the panel, so refresh the
   // candidate calls here — the same cheap indexed lookups the queue route
@@ -130,18 +113,13 @@ async function runInner({ now = new Date(), scope = null } = {}) {
     }
     refreshed += r.fulfilled || 0;
   }
-  if (refreshed > 0) {
-    rows = await listAllOpenWaves(now);
-    if (takeover) rows = await takeoverScope(rows);
-  }
+  if (refreshed > 0) rows = await listAllOpenWaves(now);
   let candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
-  // While the one-hour follow-up pager is live it owns the callback / quote
-  // / scheduling promises still inside its 24-hour list; this watchdog takes
-  // each over only once it ages off that list (followup-sla-watcher).
-  // Only while the pager is healthy: one that keeps failing hands its
-  // promises straight back. Isolated: any failure in the pager lookups means
-  // "not deferring" — this watchdog then pages everything as it did before
-  // the pager existed, and never fails its own tick over the pager.
+  // While the one-hour follow-up pager is live AND healthy it owns the
+  // callback / quote / scheduling promises still inside its 24-hour list;
+  // this watchdog takes each over once it ages off that list. Isolated: any
+  // failure in the pager lookups means "not deferring" — this watchdog then
+  // pages everything as it did before the pager existed.
   if (require('../config/feature-gates').isEnabled('followupSlaAlerts')) {
     try {
       const sla = require('./followup-sla-watcher');
@@ -200,10 +178,6 @@ async function runInner({ now = new Date(), scope = null } = {}) {
         .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`)
         .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} < ?`, [now]))
       .update({ read_at: now, metadata: trx.raw("metadata || '{\"dedupeVersion\":\"retired\"}'::jsonb") });
-    // A takeover-scoped sweep sees only a sliver of the backlog: it never
-    // retires or re-mints the day's aggregate bell, which speaks for all of it.
-    const scoped = takeover;
-    if (!overdue.length && scoped) return result;
     if (!overdue.length) {
       await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
         .whereRaw("metadata->>'dedupeVersion' IS DISTINCT FROM 'empty'")
@@ -212,20 +186,7 @@ async function runInner({ now = new Date(), scope = null } = {}) {
     }
     const openSince = (r) => r.source === 'human' ? r.created_at : (r.call_started_at || r.created_at);
     const describe = (r) => `${whoFor(r)} — ${r.description}${r.due_at ? ` (due ${etWhen(r.due_at)} ET)` : ` (open since ${etWhen(openSince(r))} ET)`}`;
-    // A takeover burst (e.g. a closure run ageing many promises off the
-    // pager's list at once) still collapses into one bell — its own key, so
-    // it never retires or rewrites the day's full-sweep aggregate.
-    if (scoped && overdue.length > AGGREGATE_THRESHOLD) {
-      const notif = await NotificationService.notifyAdmin('alert', `${overdue.length} promises to callers are overdue`,
-        `${overdue.length} promises aged off the one-hour follow-up list without being kept. Oldest: ${describe(overdue[0])}. Open the Owed tab and work them oldest-first.`, {
-          link: '/admin/communications#tab=owed', dedupeKey: `call-commitments-takeover:${today}`,
-          dedupeVersion: require('node:crypto').createHash('sha256').update(JSON.stringify(overdue.map((r) => versions[r.id]).sort())).digest('hex'),
-          refreshOnDedupe: true, bell: true, trx,
-          metadata: { triggerKey: TRIGGER_KEY, overdue_count: overdue.length, overdue_commitment_ids: overdue.map((r) => r.id).sort() },
-        });
-      return { ...result, alerted: persisted(notif) ? 1 : 0, aggregate: true, ...(persisted(notif) ? {} : { unannounced: overdue.length }) };
-    }
-    if (!scoped && overdue.length > AGGREGATE_THRESHOLD) {
+    if (overdue.length > AGGREGATE_THRESHOLD) {
       const ids = overdue.map((r) => r.id).sort();
       const notif = await NotificationService.notifyAdmin('alert', `${overdue.length} promises to callers are overdue`,
         `${overdue.length} things Waves told callers it would do have not happened. Oldest: ${describe(overdue[0])}. Open the Owed tab and work them oldest-first.`, {
@@ -266,7 +227,7 @@ async function runInner({ now = new Date(), scope = null } = {}) {
         .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
         .whereRaw("metadata->>'commitment_id' = ?", [r.id]).update({ read_at: now });
     }
-    if (!unannounced && !scoped) await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
+    if (!unannounced) await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
       .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true,\"dedupeVersion\":\"individuals\"}'::jsonb") });
     return { ...result, unannounced };
   });

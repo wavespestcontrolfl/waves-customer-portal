@@ -1654,27 +1654,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // While the follow-up pager is live, the overdue watchdog takes each
-  // promise over the moment it ages off the pager's 24-hour list; with
-  // callback cards off its own cadence is daily, which would leave a gap of
-  // up to a day, so it also sweeps every 15 minutes (its bells dedupe per
-  // promise per ET day). With cards on, the 5-minute tick already covers it.
-  cron.schedule('0 10,25,40,55 * * * *', async () => {
+  // promise over once it ages off the pager's 24-hour list. With callback
+  // cards on it already runs every 5 minutes; with cards off its cadence is
+  // daily, so it also runs — unmodified — once an hour, keeping that handoff
+  // gap under an hour (its bells dedupe per promise per ET day).
+  cron.schedule('0 25 * * * *', async () => {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('followupSlaAlerts') || require('./callback-cards').enabled()) return;
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
-      // Takeover scope only: the promises that just aged off the pager's
-      // list, not a refresh of the whole backlog every 15 minutes.
-      const result = await runCallCommitmentsWatchdog({ scope: 'sla_takeover' });
+      const result = await runCallCommitmentsWatchdog();
       if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
         const t0 = Date.now();
         await recordJobStart('call-commitments-watchdog').catch(() => {});
         await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
-        throw new Error(`Overdue-promise takeover tick skipped: ${result.reason || 'no_connection'}`);
+        throw new Error(`Hourly overdue-promise tick skipped: ${result.reason || 'no_connection'}`);
       }
     } catch (err) {
-      logger.error(`[followup-sla] watchdog takeover tick failed: ${err.message}`);
+      logger.error(`[followup-sla] hourly watchdog tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -307,32 +307,15 @@ function lastScheduledTick(now) {
 // watchdog defers to the pager only while this holds — a pager that keeps
 // failing hands its promises straight back.
 async function pagerHealthy(conn, now = new Date()) {
-  const row = await conn('job_health').where({ job_name: 'followup-sla-watcher' }).first('last_success_at');
+  const row = await conn('job_health').where({ job_name: 'followup-sla-watcher' }).first('last_success_at', 'last_status');
+  // A failed latest tick is unhealthy however recent the success before it.
+  if (row?.last_status === 'failed') return false;
   const last = row?.last_success_at ? new Date(row.last_success_at).getTime() : NaN;
   // Judged against the last tick that has had time to FINISH: at 8:00 AM the
   // opening tick is still running (the watchdog fires at the same minute),
   // so it is measured against last night's 8:45 PM tick, not today's.
   const settled = lastScheduledTick(new Date(now.getTime() - 10 * 60 * 1000));
   return Number.isFinite(last) && last >= settled.getTime() - 20 * 60 * 1000;
-}
-
-// The takeover sweep's scope: promises that aged off the pager's list within
-// the last hour — the only rows the 15-minute takeover needs to look at
-// (everything older is the daily sweep's, as before).
-async function takeoverIds(conn, rows, now = new Date()) {
-  const eligible = (rows || []).filter(isPagerScope);
-  if (!eligible.length) return new Set();
-  const callIds = [...new Set(eligible.filter((r) => r.call_log_id).map((r) => r.call_log_id))];
-  const calls = callIds.length
-    ? await conn('call_log').whereIn('id', callIds).select('id', 'created_at', 'duration_seconds', 'bridged_at', 'direction')
-    : [];
-  const endedById = new Map(calls.map((c) => [c.id, commitments.callEndedAt(c)]));
-  const calendar = await loadSlaCalendar(conn, new Date(now.getTime() - LOOKBACK_MS));
-  const edge = now.getTime() - WINDOW_MS;
-  return new Set(eligible.filter((r) => {
-    const due = slaDueAt({ ...r, call_ended_at: endedById.get(r.call_log_id) || null }, calendar);
-    return due && due.getTime() <= edge && due.getTime() > edge - 60 * 60 * 1000;
-  }).map((r) => r.id));
 }
 
 async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
@@ -471,7 +454,6 @@ module.exports = {
   isPagerScope,
   pagerHealthy,
   lastScheduledTick,
-  takeoverIds,
   followedUpIds,
   SLA_KINDS,
   ROLLING_KEY,

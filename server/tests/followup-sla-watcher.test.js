@@ -429,8 +429,10 @@ describe('pagerHealthy — judged against the pager schedule', () => {
     expect(lastScheduledTick(now).toISOString()).toBe(tick.toISOString());
   });
 
-  const healthAt = (lastSuccess) => {
-    db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => (lastSuccess ? { last_success_at: lastSuccess } : null); return q; });
+  let status = 'success';
+  const healthAt = (lastSuccess, lastStatus = 'success') => {
+    status = lastStatus;
+    db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => (lastSuccess ? { last_success_at: lastSuccess, last_status: status } : null); return q; });
   };
   test('a success at or after the latest tick (minus slack) is healthy; an older one, or none, is not', async () => {
     healthAt(et('20:46').toISOString());
@@ -439,6 +441,9 @@ describe('pagerHealthy — judged against the pager schedule', () => {
     expect(await pagerHealthy(db, et('06:00', '2026-09-27'))).toBe(false);
     healthAt(null);
     expect(await pagerHealthy(db, NOW)).toBe(false);
+    // A failed latest tick is unhealthy however recent the success before it.
+    healthAt(et('20:31').toISOString(), 'failed');
+    expect(await pagerHealthy(db, et('23:00'))).toBe(false);
   });
 });
 
@@ -455,16 +460,6 @@ test('an unlinked lead matches follow-up however its number was written', async 
   await runFollowUpSlaWatcher({ now: NOW });
   const raw = argsOf('sms_log', 'orWhereRaw').find(([sql]) => /regexp_replace\(COALESCE/.test(sql));
   expect(raw[1]).toEqual(['9415550123', '19415550123']);
-});
-
-test('takeoverIds: only promises that aged off the list within the last hour', async () => {
-  mockDb();
-  const owned = await require('../services/followup-sla-watcher').takeoverIds(db, [
-    row('justAged', { call_started_at: et('14:30', '2026-09-25').toISOString() }), // due 15:30 yesterday — aged off 30 min ago
-    row('stillListed', { call_started_at: et('16:00', '2026-09-25').toISOString() }), // due 17:00 yesterday
-    row('longGone', { call_started_at: et('09:00', '2026-09-25').toISOString() }), // due 10:00 yesterday
-  ], NOW);
-  expect([...owned]).toEqual(['justAged']);
 });
 
 test('a quote delivered to the customer (the proof\'s association hint) counts as follow-up', async () => {
