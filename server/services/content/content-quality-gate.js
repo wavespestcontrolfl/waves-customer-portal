@@ -163,6 +163,18 @@ const PAGE_TYPE_CHECKS = {
     { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
     { name: 'blog_meta_soft_cta', weight: 0, evaluate: checkBlogMetaSoftCta },
     { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
+    // Citability nudges (2026-09-25): the traits AI answer engines cite —
+    // a named source behind the claims, supported facts stated as numbers
+    // with units, a ComparisonTable wherever the reader faces a choice, and a
+    // "How to choose" section beside it. Weight 0 like blog_meta_soft_cta:
+    // signal-only BY DESIGN — the writer prompt forbids a stat quota and
+    // invented products/sources, so a weighted check would pressure the
+    // writer toward fabrication. They ride the redraft feedback and the
+    // review queue (soft_failures) without moving the pass threshold.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
@@ -1065,6 +1077,94 @@ function checkVoiceMatch(draft) {
   return { ok: true };
 }
 
+// ── citability nudges (supporting-blog, weight 0) ────────────────────
+//
+// Mirrors the writer prompt's CITABILITY section (same bracket codes). All
+// four are heuristics over the raw body: they detect the SHAPE of a citable
+// post, never the truth of a claim — truth stays with the guardrails and the
+// evidence rules. Failing any of them only adds a nudge.
+
+// Post types whose contract is a choice (packages/blog-schema
+// postTypeRequirements: decision + comparison + cost all require a
+// ComparisonTable). Read from the writer's frontmatter; unset or unknown
+// post types are treated as non-choice (the astro publisher's own
+// normalization decides the final type — this gate only nudges).
+const CHOICE_POST_TYPES = new Set(['decision', 'comparison', 'cost']);
+
+function draftPostType(draft) {
+  return String(draft?.frontmatter?.post_type ?? draft?.post_type ?? '').trim().toLowerCase();
+}
+
+// Named authorities the evidence rules already point the writer at (UF/IFAS,
+// FDACS, EPA, CDC, county mosquito programs, product labels). Deliberately a
+// SOURCE-attribution list, not a brand list: PRO_PRODUCT_TERMS stay banned in
+// recommendation context and competitor names live only inside the
+// ComparisonTable, so neither may count toward this nudge.
+const NAMED_SOURCE_RE = /\b(?:UF\s*\/\s*IFAS|IFAS|University of Florida|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|(?:[A-Z][a-z]+ County )?Mosquito (?:Control|Management)|(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label)\b/;
+
+function checkCitabilityNamedSources(draft) {
+  const body = String(draft.body || '');
+  if (NAMED_SOURCE_RE.test(body)) return { ok: true };
+  return { ok: false, reason: 'no_named_source_attribution' };
+}
+
+// A "concrete specific" is a number bound to a unit of measure, time, or
+// rate. Dollar amounts are excluded on purpose (HARDCODED_PRICE bans them),
+// as are bare years and bare counts ("3 ways", "2024") — those are not the
+// extractable measurements the nudge is after. Ranges ("3.5–4 inches",
+// "10-14 days") count once.
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?\s?(?:%|percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b/gi;
+const CONCRETE_SPECIFICS_MIN = 3;
+
+function countConcreteSpecifics(body) {
+  return (String(body || '').match(CONCRETE_SPECIFIC_RE) || []).length;
+}
+
+function checkCitabilityConcreteSpecifics(draft) {
+  const n = countConcreteSpecifics(draft.body);
+  if (n >= CONCRETE_SPECIFICS_MIN) return { ok: true };
+  return { ok: false, reason: `only_${n}_concrete_measurements_need_${CONCRETE_SPECIFICS_MIN}+` };
+}
+
+const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
+// A choice the post itself frames: the title or a heading pits options
+// against each other, or the post type's contract is a choice. Body prose
+// is NOT scanned ("DIY" appears in most posts) — the nudge must not push a
+// generic DIY-vs-pro table onto every post (the no-filler visual rule).
+// Deliberately narrow: "X vs Y", "X or Y?" as a whole heading/title, and
+// "which option/approach…". A bare "Should you…?" or a yes/no question is
+// NOT a two-path comparison (it fired on 73% of the live corpus in the
+// 2026-09-25 calibration run — most were single-answer questions).
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}\?\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
+
+function headingLines(body) {
+  return String(body || '').split(/\r?\n/).filter((l) => /^#{1,3}\s+\S/.test(l));
+}
+
+function postFramesAChoice(draft) {
+  if (CHOICE_POST_TYPES.has(draftPostType(draft))) return true;
+  const title = String(draft.title || draft.frontmatter?.title || '');
+  if (CHOICE_FRAMING_RE.test(title)) return true;
+  return headingLines(draft.body).some((h) => CHOICE_FRAMING_RE.test(h));
+}
+
+function checkCitabilityComparison(draft) {
+  const hasTable = COMPARISON_TABLE_RE.test(String(draft.body || ''));
+  if (hasTable) return { ok: true };
+  if (!postFramesAChoice(draft)) return { ok: true, reason: 'no_choice_framed' };
+  return { ok: false, reason: 'choice_framed_without_ComparisonTable' };
+}
+
+const HOW_TO_CHOOSE_HEADING_RE = /\b(?:how to (?:choose|pick|decide)|choosing (?:between|the right|a|your)|which (?:one|option|approach|method|plan|treatment|service)[^\n]{0,40}\b(?:right|fits?|for you|for your)|what to (?:weigh|look for|consider)|decision (?:guide|checklist)|fits your situation)\b/i;
+
+function checkCitabilityHowToChoose(draft) {
+  const body = String(draft.body || '');
+  const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body);
+  if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
+  if (headingLines(body).some((h) => HOW_TO_CHOOSE_HEADING_RE.test(h))) return { ok: true };
+  return { ok: false, reason: 'no_how_to_choose_section' };
+}
+
 // ── metadata checks ─────────────────────────────────────────────────
 
 function checkTitleLengthBounds(draft, brief, context) {
@@ -1239,6 +1339,8 @@ module.exports._internals = {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
+  countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
