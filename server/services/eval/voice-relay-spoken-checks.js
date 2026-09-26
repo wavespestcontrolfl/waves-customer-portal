@@ -334,7 +334,16 @@ const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
 // tres y media de la tarde" strips down to just "de la una a las tres",
 // silently dropping the invented ":30" for TIME_ANYWHERE_RES to never see.
 // A real ":00" still passes (the lookbehind excludes it from the ":XX" arm).
-const NOT_A_BARE_HOUR = '(?!\\s*(?::[0-5]\\d(?<!:00)\\b|y\\s+(?:media|cuarto|un[oa]?|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|quince|veinte|treinta|cuarenta|cincuenta)\\b|thirty\\b|fifteen\\b|forty[- ]five\\b|quarter\\b|half\\b))';
+// Deliberately NOT a bare Spanish number ("y dos", "y tres" …) here — that
+// collides with RANGE's own "y" connector: h1's own trailing "y ${h2}" in a
+// genuine range ("entre una y tres") looks identical to "hour Y MINUTES" at
+// this position (both h2's hour words and minute counts 1-12 are the same
+// strings), and a lookahead can't tell them apart without the rest of the
+// pattern it sits inside — blocking bare numbers here false-failed a
+// correct "entre una y tres de la tarde" (Codex round-2 P1, pre-push).
+// "media"/"cuarto" are unambiguous minute words (never valid hour forms),
+// so they stay.
+const NOT_A_BARE_HOUR = '(?!\\s*(?::[0-5]\\d(?<!:00)\\b|y\\s+(?:media|cuarto)\\b|thirty\\b|fifteen\\b|forty[- ]five\\b|quarter\\b|half\\b))';
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the

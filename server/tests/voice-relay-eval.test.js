@@ -4795,6 +4795,13 @@ describe('voice relay eval — named spoken checks', () => {
     const bareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de una a tres de la tarde.' }] }));
     expect(bareWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: bareWindow })).toBe('pass');
+    // Codex round-2 P1 (pre-push): the minute-modifier guard (NOT_A_BARE_HOUR)
+    // must not treat the RANGE connector "y" + h2's own bare hour word as a
+    // minute modifier — "entre una y tres" is the compliant window via
+    // "entre", not "una y tres" read as "one-oh-three".
+    const entreBareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es entre una y tres de la tarde.' }] }));
+    expect(entreBareWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: entreBareWindow })).toBe('pass');
     const bareWrongWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de dos a cuatro de la tarde.' }] }));
     expect(bareWrongWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: bareWrongWindow })).toBe('fail');
