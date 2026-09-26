@@ -170,14 +170,16 @@ class CoveredVisitCloseout {
 
   // The one office alert for add-ons nothing here billed; it keeps the
   // completion text off "all paid". One bell per visit, kept CURRENT: a
-  // later pass rewrites it and surfaces it unread.
+  // later pass rewrites it and surfaces it unread. It never asserts that no
+  // invoice exists — another writer can commit one at any moment — so it
+  // always sends staff to the visit's invoices before they bill.
   async alert(reason, extra = {}) {
     const { svc } = this;
     this.owedUnbilled = true;
     try {
       const NotificationService = require('./notification-service');
-      const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay add-ons need billing — bill by hand',
-        `Completing ${svc.service_type} for customer ${svc.customer_id}: the visit is covered by the annual prepay, but its add-ons were not billed automatically — ${reason}.`,
+      const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay add-ons need billing — check the visit\'s invoices first',
+        `Completing ${svc.service_type} for customer ${svc.customer_id}: the visit is covered by the annual prepay, but its add-ons were not billed automatically — ${reason}. Check the visit's invoices first and bill only what none of them already charges.`,
         { link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`, bell: true, dedupeKey: `annual_prepay_addons_unbilled:${svc.id}`,
           refreshOnDedupe: true,
           metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, reason, ...extra } });
@@ -277,6 +279,10 @@ class CoveredVisitCloseout {
         return;
       } catch (err) {
         if (err.code === 'ADDON_LINES_MOVED' && attempt === 0) continue;
+        if (err.code === 'ADDON_RECHECK_READ_FAILED') {
+          this.hold(err, 'add-on re-check');
+          return;
+        }
         logger.error(`[dispatch] annual-prepay add-ons invoice FAILED for visit ${this.svc.id}: ${err.message}`);
         await this.alert('the add-ons invoice could not be created', { addonTotal: read.extras.total, error: String(err.message).slice(0, 200) });
         return;
@@ -308,7 +314,10 @@ class CoveredVisitCloseout {
           const lockedExtras = await annualPrepayExtrasForVisit(current, lockedAddons, trx);
           moved = lockedAddons.fingerprint !== addons.fingerprint || JSON.stringify(lockedExtras) !== JSON.stringify(extras);
         } catch (err) {
-          throw Object.assign(err, { status: err.status || 409 });
+          if (['INVOICE_HISTORY_APPEARED', 'ADDON_LINES_NOT_BUILT'].includes(err.code)) throw Object.assign(err, { status: 409 });
+          // A read that failed under the lock is an outage, not a conflict:
+          // bill() holds for the retry.
+          throw Object.assign(new Error(`the add-ons could not be re-checked under the lock: ${err.message}`), { code: 'ADDON_RECHECK_READ_FAILED', status: 409 });
         }
         if (moved) throw Object.assign(new Error('the visit\'s add-ons changed while billing'), { code: 'ADDON_LINES_MOVED', status: 409 });
       },
@@ -498,11 +507,15 @@ class CoveredVisitCloseout {
       hold = { code: 'annual_prepay_addons_alert_failed', error: this.alertError,
         summary: 'This visit\'s add-ons need the office\'s attention and the office alert could not be recorded' };
     }
+    // Routed to the office with nothing collectible: the completion presents
+    // no invoice — no pay link, no with-invoice text, no payer AP delivery
+    // (the handler also keeps it out of account credit and Auto Pay).
+    const officeReview = this.owedUnbilled && !this.extrasCollectible;
     return {
       invoice: this.invoice,
-      payUrl: this.payUrl,
+      payUrl: officeReview ? null : this.payUrl,
       alreadyPaid: this.alreadyPaid,
-      invoiceCreated: this.invoiceCreated,
+      invoiceCreated: officeReview ? false : this.invoiceCreated,
       extrasCollectible: this.extrasCollectible,
       owedUnbilled: this.owedUnbilled,
       hold,

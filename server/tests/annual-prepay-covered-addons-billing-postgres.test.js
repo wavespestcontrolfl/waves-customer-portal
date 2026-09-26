@@ -411,7 +411,8 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       } finally {
         mint.mockRestore();
       }
-      expect((await addonsAlert(f)).body).toMatch(/could not be created/);
+      // Never "no invoice exists": staff check the visit's invoices first (GitHub r9 P1).
+      expect((await addonsAlert(f)).body).toMatch(/could not be created[\s\S]*Check the visit's invoices first/);
       await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON - 9,
         discount_dollars: 9, discount_name: 'Synthetic visit discount', discount_type: 'fixed_amount', discount_amount: 9 });
       await releaseForResume(f);
@@ -513,6 +514,23 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(retry).toMatchObject({ status: 200 });
       expect(await liveInvoices(f)).toHaveLength(0);
       expect((await addonsAlert(f)).body).toMatch(/no price yet/);
+    });
+
+    test('a read that fails under the mint lock holds the closeout for the retry — never a permanent office alert (GitHub r9 P2)', async () => {
+      const f = await coveredVisit();
+      const InvoiceService = require('../services/invoice');
+      const realBuild = InvoiceService.buildLineItemsForScheduledService.bind(InvoiceService);
+      const build = jest.spyOn(InvoiceService, 'buildLineItemsForScheduledService').mockImplementation(async (id, opts = {}) => {
+        if (opts.database) throw new Error('synthetic in-lock read failure');
+        return realBuild(id, opts);
+      });
+      const idempotencyKey = randomUUID();
+      const held = await withFailure(() => build.mockRestore(), () => complete(f, {}, { idempotencyKey }));
+      expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_lookup_failed' } });
+      expect(await liveInvoices(f)).toHaveLength(0);
+      expect(await addonsAlert(f)).toBeUndefined();
+      expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+      expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
     });
 
     test('a gate freeze that cannot be saved holds the closeout before any billing', async () => {
@@ -763,6 +781,19 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
         apply.mockRestore();
         gates.autoApplyAccountCredit = prior;
       }
+    });
+
+    test('an invoice left for the office is never delivered to a payer\'s AP inbox — the completion presents no invoice (GitHub r9 P1)', async () => {
+      const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
+      const [payer] = await trx('payers').insert({ display_name: 'Synthetic payer', ap_email: 'ap@example.invalid' }).returning('id');
+      await trx('invoices').where({ id: f.invoiceId }).update({ payer_id: payer.id ?? payer });
+      const InvoiceEmail = require('../services/invoice-email');
+      const send = jest.spyOn(InvoiceEmail, 'sendInvoiceEmail').mockResolvedValue({ ok: true });
+      const out = await withFailure(() => send.mockRestore(), () => complete(f, { sendCompletionSms: true }));
+      expect(out).toMatchObject({ status: 200 });
+      expect(send).not.toHaveBeenCalled();
+      expect(await settledCovered(f)).toBe('draft');
+      expect((await addonsAlert(f)).body).toMatch(/collected none/);
     });
 
     test('an add-on read that fails while checking an existing invoice holds the closeout with the invoice untouched', async () => {
