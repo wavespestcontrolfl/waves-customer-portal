@@ -166,15 +166,15 @@ it('prunes an out-of-line tip restored after the current lawn library has loaded
 });
 
 // Non-typed Tree & Shrub loads the appointment month's own protocol list.
-const shrubsOn = (scheduledDate) => ({ ...service, serviceType: 'Tree & Shrub Care', completionProfile: { serviceKey: 'tree_shrub' }, scheduledDate, waveguardTier: null });
-const monthList = (visit, month, label) => ({ programKey: 'tree_shrub', visit: { visit, month }, actions: [{ id: `visit-${visit}`, label, note: label, raw: label }] });
+const shrubsOn = (scheduledDate, serviceType = 'Tree & Shrub Care') => ({ ...service, serviceType, completionProfile: { serviceKey: 'tree_shrub' }, scheduledDate, waveguardTier: null });
+const monthList = (visit, month, label, programKey = 'tree_shrub') => ({ programKey, visit: { visit, month }, actions: [{ id: `visit-${visit}`, label, note: label, raw: label }] });
 const saveDraft = (visit, draft) => localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
   serviceId: visit.id, savedAt: Date.now(), visitOutcome: 'incomplete', ...draft,
 }));
 async function restoreAndSubmit(visit, listLabel) {
   render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   await screen.findByRole('option', { name: new RegExp(listLabel) });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
 }
 async function submittedBody() {
   fireEvent.click(screen.getByRole('button', { name: /mark visit incomplete/i }));
@@ -201,10 +201,11 @@ it('drops a restored tree & shrub protocol action the month\'s current list no l
 });
 
 it.each([
-  ['a recorded April visit', { protocolVisitMonth: 'Apr' }],
-  ['an unrecorded month (drafts before the fix listed January)', {}],
-])('a draft saved under another month (%s) restores without its protocol actions and clears the report written from them', async (_, month) => {
-  const visit = shrubsOn('2026-05-12');
+  ['a recorded April visit', 'Tree & Shrub Care', { protocolVisitMonth: 'Apr' }],
+  ['an unrecorded month (drafts before the fix listed January)', 'Tree & Shrub Care', {}],
+  ['an unrecorded month on palm care, which runs the tree & shrub program', 'Palm Care', {}],
+])('a draft saved under another month (%s) restores without its protocol actions and clears the report written from them', async (_, serviceType, month) => {
+  const visit = shrubsOn('2026-05-12', serviceType);
   completionActions = monthList(5, 'May', 'May palm fertilizer');
   // Saved after Generate: the notes are the untouched AI report, the
   // pre-generation notes still carry the earlier visit's chip marker.
@@ -234,6 +235,19 @@ it('a draft with no recorded month keeps its protocol action on a January visit'
   const body = await submittedBody();
   expect(body.protocolActionsCompleted).toEqual(['January palm fertilizer']);
   expect(body.technicianNotes).toBe('[Protocol] January palm fertilizer');
+});
+
+it('a palm injection draft with no recorded month keeps its protocol action: its visits are not month-keyed', async () => {
+  const visit = shrubsOn('2026-05-12', 'Palm Injection');
+  completionActions = monthList(1, 'Any', 'Injected palm trunk', 'palm_injection');
+  saveDraft(visit, {
+    notes: '[Protocol] Injected palm trunk',
+    selectedProtocolActionLabels: ['Injected palm trunk'],
+  });
+  await restoreAndSubmit(visit, 'Injected palm trunk');
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual(['Injected palm trunk']);
+  expect(body.technicianNotes).toBe('[Protocol] Injected palm trunk');
 });
 
 

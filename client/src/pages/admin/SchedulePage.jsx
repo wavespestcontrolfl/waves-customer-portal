@@ -14953,10 +14953,16 @@ export function CompletionPanel({
       ? savedDraft.selectedProtocolActionLabels
       : [];
     // A draft saved before the month was recorded carries the list every
-    // tree & shrub completion showed until then: visit 1 (January).
+    // tree & shrub completion showed until then: visit 1 (January). The
+    // loaded list says whether this visit's program is month-keyed (palm care
+    // is tree & shrub, palm injection is "Any"); until it loads, the tree &
+    // shrub service line stands in.
+    const monthKeyedVisitList = protocolActionMeta?.visit?.month
+      ? protocolActionMeta.visit.month !== "Any"
+      : serviceLineForCloseout === "tree_shrub";
     const draftProtocolVisitMonth = Object.hasOwn(savedDraft, "protocolVisitMonth")
       ? savedDraft.protocolVisitMonth
-      : !isTypedFindings && serviceLineForCloseout === "tree_shrub" ? "Jan" : null;
+      : !isTypedFindings && monthKeyedVisitList ? "Jan" : null;
     const protocolVisitMoved = !isLawn
       && typeof draftProtocolVisitMonth === "string"
       && draftProtocolVisitMonth !== "Any"
