@@ -120,7 +120,7 @@
     "safety_line": "Its defensive secretion can mildly irritate skin or eyes if handled roughly; sweep it up rather than picking it up bare-handed.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "millipede",
@@ -230,7 +230,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "pillbug",

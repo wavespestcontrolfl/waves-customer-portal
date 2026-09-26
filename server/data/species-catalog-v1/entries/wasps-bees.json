@@ -15,7 +15,7 @@
     "safety_line": "Stings hurt and can trigger allergic reactions. See a doctor if swelling spreads beyond the sting site, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "paper-wasp",
@@ -127,7 +127,7 @@
     "safety_line": "Can sting repeatedly and become aggressive as a colony once disturbed. See a doctor if swelling spreads, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "yellowjacket",
@@ -233,7 +233,7 @@
     "safety_line": "Almost never stings; venom lacks the pain compounds of social wasps. See a doctor if you have an unusual allergic reaction, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": "Verdict changed from harmless to ally: it actively preys on spiders (including widows), which is a beneficial service, not just a neutral visitor."
     },
     "slug": "mud-dauber",
@@ -335,7 +335,7 @@
     "safety_line": "A resting swarm is calm and temporary — don’t spray it. See a doctor for signs of a serious allergic reaction to a sting, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "honey-bee-swarm",
@@ -441,7 +441,7 @@
     "safety_line": "Never seal the entrance while bees are active — that traps them and can leak honey into the wall. See a doctor for a serious allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": "role set to stinging_pest rather than beneficial even though honey bees are ecologically beneficial: verdict here is call (specialist removal, not leave-alone), and the validator ties role beneficial to verdict ally."
     },
     "slug": "honey-bee-wall-colony",

@@ -10,7 +10,7 @@
     "safety_line": "Toxic enough to make a pet vomit or act ill if eaten; call your vet if that happens. Its defensive foam can also irritate skin and eyes — wear gloves if you handle it.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "lubber-grasshopper",
@@ -111,7 +111,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": ""
     },
     "slug": "mole-cricket",
