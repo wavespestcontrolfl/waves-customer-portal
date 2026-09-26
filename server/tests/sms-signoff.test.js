@@ -64,6 +64,9 @@ describe('stripTrailingSignature', () => {
     ['See you Tuesday.\nWaves Pest Control', 'See you Tuesday.'],
     ['See you Tuesday \u{1F60A}\nAdam', 'See you Tuesday \u{1F60A}'],
     ['"See you Tuesday."\nAdam', 'See you Tuesday.'],
+    // A bare full signature block is a sign-off even as the whole text.
+    ['Adam, Waves Pest Control', ''],
+    ['Adam from Waves', ''],
   ])('strips the trailing sign-off from %j', (input, expected) => {
     expect(stripTrailingSignature(input)).toBe(expected);
   });
@@ -101,6 +104,15 @@ describe('stripTrailingSignature', () => {
     'The charge will appear as\nWaves Pest Control',
     // A smiley in content is content.
     'Your visit is Tuesday :)',
+    // Thanking a customer named Adam is the message, not a sign-off.
+    'Thanks, Adam!',
+    'Thank you, Adam!',
+    // Valediction words never reach into the line above.
+    'Your contacts are\nAdam,\nVirginia',
+    // A dash after "is"/"as" introduces the answer.
+    'The charge appears as - Waves Pest Control',
+    'Your technician is - Adam',
+    'Your contact is \u2014 Virginia',
   ])('keeps text that is not a sign-off: %j', (input) => {
     expect(stripTrailingSignature(input)).toBe(input);
   });

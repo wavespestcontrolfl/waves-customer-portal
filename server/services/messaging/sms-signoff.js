@@ -9,13 +9,14 @@
 //     ("All the best,\nAdam", "Sincerely yours,\nAdam") — the two-line block shape,
 //     so a sentence addressed to a customer named Adam ("See you Tuesday, Adam.")
 //     is never mistaken for one
-//   - a signer set off by a dash: "— Adam"
+//   - a signer set off by a dash: "— Adam" (not after "is"/"as" and the like:
+//     "Your technician is - Adam" is an answer)
 //   - a signer on its own line under a FINISHED sentence (ends in . or ! or an
 //     emoji): "Talk soon!\nAdam". After a question, a colon or an unfinished
 //     sentence the name is the answer ("Who will be coming?\nAdam",
 //     "Your technician will be\nAdam", "Your technician is:\nAdam").
 //   - a full name-and-company block that is its own final sentence:
-//     "Talk soon. Adam, Waves Pest Control" (a lone name or company there may
+//     "Talk soon. Adam, Waves Pest Control", or the whole text (a lone name or company there may
 //     answer the sentence before it: "Who will be coming? Adam.")
 // even when the whole text is wrapped in quotes or emoji or a keyboard
 // emoticon (":)") trail the name.
@@ -27,7 +28,8 @@
 const DASH = '[-\\u2013\\u2014]{1,2}';
 const CLOSER = '(?:thanks(?:\\s+again)?|many\\s+thanks|thank\\s+you|all\\s+the\\s+best|best(?:\\s+wishes)?|warm(?:est)?\\s+wishes|(?:(?:best|warm|kind(?:est)?)\\s+)?regards|cheers|sincerely(?:\\s+yours)?|yours\\s+(?:truly|sincerely)|warmly|respectfully|with\\s+(?:gratitude|thanks|appreciation)|talk\\s+soon|see\\s+you\\s+soon|take\\s+care)';
 // Any 1–4 word phrase ending in a comma — only ever matched as its own line.
-const VALEDICTION = "\\p{L}[\\p{L}'\\u2019]*(?:\\s+\\p{L}[\\p{L}'\\u2019]*){0,3},";
+// Words are joined by spaces only, so it can never reach up into the line above.
+const VALEDICTION = "\\p{L}[\\p{L}'\\u2019]*(?:[ \\t]+\\p{L}[\\p{L}'\\u2019]*){0,3},";
 const COMPANY = '(?:the\\s+)?waves(?:\\s+pest\\s+control)?(?:\\s+team)?';
 const PERSON = '(?:adam(?:\\s+(?:benetti|b\\b\\.?))?|virginia)';
 const SIGNATURE_BLOCK = `${PERSON}\\s*,?\\s*(?:(?:from|at|with)\\s+)?${COMPANY}`;
@@ -46,13 +48,18 @@ const TAIL = `\\s*[.!]?(?:[\\s"'\\u201C\\u201D\\u2018\\u2019]|${EMOJI_PART}|${EM
 // answers that line instead of signing it.
 const AFTER_SENTENCE_LINE = `(?<=(?:[.!]["'\\u201D\\u2019]?|${EMOJI_PART}))[ \\t]*\\n\\s*`;
 
+// A dash right after a word that introduces a value ("Your technician is -
+// Adam", "The charge appears as - Waves Pest Control") sets off the answer.
+const DASH_SIGNOFF = `(?<!\\b(?:is|are|was|were|be|as|named|called|by)\\s*)\\s*${DASH}\\s*`;
+
 // Closer + signer first, so "Best,\nAdam" goes as one unit instead of
 // leaving a dangling "Best,".
 const SIGNATURE_TAIL_RES = [
-  new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE}|\\s*${DASH}\\s*)${CLOSER},?\\s+${SIGNER}${TAIL}`, 'iu'),
-  new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${VALEDICTION}[ \\t]*\\n\\s*${SIGNER}${TAIL}`, 'iu'),
-  new RegExp(`(?:\\s*${DASH}\\s*|${AFTER_SENTENCE_LINE})${SIGNER}${TAIL}`, 'iu'),
-  new RegExp(`(?<=[.!?])\\s+${SIGNATURE_BLOCK}${TAIL}`, 'iu'),
+  new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE}|${DASH_SIGNOFF})${CLOSER},?\\s+${SIGNER}${TAIL}`, 'iu'),
+  // A signer's own name is never the valediction ("Adam,\nVirginia" lists names).
+  new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})(?!${SIGNER}\\s*,)${VALEDICTION}[ \\t]*\\n\\s*${SIGNER}${TAIL}`, 'iu'),
+  new RegExp(`(?:${DASH_SIGNOFF}|${AFTER_SENTENCE_LINE})${SIGNER}${TAIL}`, 'iu'),
+  new RegExp(`(?:^|(?<=[.!?])\\s+)${SIGNATURE_BLOCK}${TAIL}`, 'iu'),
 ];
 
 const DOUBLE_QUOTES = '"“”';
@@ -81,10 +88,15 @@ function dropOrphanOpener(text, removed) {
   return unpaired ? text.slice(1).trim() : text;
 }
 
+// A whole text that only thanks someone by name ("Thanks, Adam!") is talking
+// to a customer with that name, not signing off.
+const THANKS_BY_NAME_RE = new RegExp(`^(?:thanks(?:\\s+again)?|many\\s+thanks|thank\\s+you),?\\s+${PERSON}${TAIL}`, 'iu');
+
 // Returns the text without its trailing sign-off. A text with no sign-off
 // comes back exactly as given (quotes and all).
 function stripTrailingSignature(message) {
   const original = String(message || '').trim();
+  if (THANKS_BY_NAME_RE.test(original)) return original;
   let text = original;
   for (let i = 0; i < 3; i += 1) {
     const next = stripOnce(text);
