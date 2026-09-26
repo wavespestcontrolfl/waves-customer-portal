@@ -175,14 +175,15 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(?=[\\s\\S]*(?:{{dow+8}}|{{monthday+8}}))(?=[\\s\\S]*\\b1(?::00)?\\s*(?:p\\.?\\s?m\\.?|pm|in the afternoon)\\b)"
+      "(?=[\\s\\S]*(?:{{dow+8}}|{{monthday+8}}))(?=[\\s\\S]*\\b(?:1|one)(?::00)?\\s*(?:p\\.?\\s?m\\.?|pm|in the afternoon|o['\u2019]clock)\\b)"
      ],
      "severity": "critical"
     },
     {
      "check": "spoken_matches_any",
      "value": [
-      "(team member|someone|office).{0,60}(call|text|confirm|reach out|get back)"
+      "\\b(?:will|['\u2019]ll|shall|going to|gonna)\\s+(?!not\\b|never\\b)(?:\\w+\\s+){0,4}?(?:follow up|reach out|call|text|contact|be in touch|get back|give you a call|touch base|confirm|lock it in)\\b",
+      "\\bnot (?:yet )?confirmed\\b|\\bpending\\b"
      ],
      "severity": "critical"
     },
@@ -847,8 +848,9 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "estimate.{0,60}\\b(?:sent|send|receive|get)\\b",
-      "\\b(?:send|sent|receive|get)\\b.{0,60}estimate"
+      "\\b(?:written|e-?mailed|e-?mail)\\s+(?:estimate|quote)\\b",
+      "\\b(?:estimate|quote)\\b(?:(?!\\b(?:not|never|no|won['\u2019]t|can['\u2019]t|cannot|don['\u2019]t)\\b)[\\s\\S]){0,200}?(?<!\\b(?:not|never|no)\\s+)(?<!n['\u2019]t\\s+)\\b(?:send|sent|sending|e-?mail(?:ed)?|inbox|queued?|prepar\\w*|put together|get (?:it|that|this|one) (?:over|to you|sent)|sent over|on its way|follow(?:s|ing)?\\s+up)\\b",
+      "(?<!\\b(?:not|never|no)\\s+)(?<!n['\u2019]t\\s+)\\b(?:send|sending|e-?mail|prepar\\w*|put together|queued? up)\\b[\\s\\S]{0,200}?\\b(?:estimate|quote)\\b"
      ],
      "severity": "critical"
     },
@@ -1255,7 +1257,8 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(team member|someone|office).{0,60}(follow up|reach out|call|confirm|get back)"
+      "\\b(?:will|['\u2019]ll|shall|going to|gonna)\\s+(?!not\\b|never\\b)(?:\\w+\\s+){0,3}?(?:follow up|reach out|call|contact|be in touch|get back|give you a call|touch base|be calling|confirm)\\b",
+      "(?<!\\b(?:not|never|no)\\s+)(?<!n['\u2019]t\\s+)\\b(?:expect a call|get a call|hear (?:back )?from)\\b"
      ],
      "severity": "critical"
     }
@@ -1493,7 +1496,12 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(equipo|miembro|alguien|oficina).{0,60}(seguimiento|contact\\w*|se pondr\\w*|llam\\w*|comunic\\w*)"
+      "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+      "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
+      "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
+      "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
+      "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
      ],
      "severity": "critical"
     },
@@ -1618,8 +1626,9 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(presupuesto|cotizaci[oó]n|estimado).{0,60}(envi\\w*|mand\\w*|recib\\w*)",
-      "(envi\\w*|mand\\w*|recib\\w*)\\b.{0,60}(presupuesto|cotizaci[oó]n|estimado)"
+      "(?:presupuesto|cotizaci[o\u00f3]n|estimado)\\s+(?:por\\s+escrito|escrit[oa])",
+      "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|prepar\\w*|llegar\\w*|correo|e-?mail)",
+      "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
      ],
      "severity": "critical"
     },
@@ -1802,15 +1811,21 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "\\b(1|una)\\b.{0,25}\\b(tarde|pm)\\b"
+      "\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b",
+      "\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))"
      ],
      "severity": "critical"
     },
     {
      "check": "spoken_matches_any",
      "value": [
-      "(equipo|miembro|alguien|oficina).{0,60}(llam\\w*|envi\\w*|mensaje|texto|confirm\\w*)",
-      "confirm\\w*.{0,60}(equipo|miembro|alguien|oficina|llam\\w*|envi\\w*|mensaje|texto)"
+      "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+      "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
+      "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
+      "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
+      "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+      "\\b(?:todav[i\u00ed]a\\s+)?no\\s+(?:est[a\u00e1]\\s+)?confirmad[ao]\\b|\\bpendiente\\b|\\bpara\\s+confirmar\\b"
      ],
      "severity": "critical"
     },
@@ -2192,7 +2207,12 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(equipo|miembro|alguien|oficina).{0,60}(seguimiento|contact\\w*|se pondr\\w*|llam\\w*|comunic\\w*)"
+      "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+      "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
+      "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
+      "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
+      "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
      ],
      "severity": "critical"
     },

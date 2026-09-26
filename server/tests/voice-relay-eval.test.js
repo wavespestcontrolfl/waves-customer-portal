@@ -927,6 +927,30 @@ describe('voice relay eval — each expect key', () => {
     expect(SPOKEN_CHECK_RUNNERS.amount_requires_unit({ amount: [119, 99], unit: 'aplicación' }, {}, { spoken })[0]).toBe(status);
   });
 
+  // PR #4946 review: the required spoken facts made blocking in round 6 must
+  // accept natural phrasings (checked against the real 2026-09-26 benchmark
+  // transcripts: "…get that sent over", "va a llamarte", "se pondrá en
+  // contacto") while still rejecting a missing or NEGATED promise.
+  const REQUIRED_FACTS = [
+    ['pricing-gate-off', 0, ["I've queued up the written estimate and a Waves team member will follow up to confirm the details and get that sent over.", 'The office will email you a written estimate.', "You'll have the quote in your inbox shortly."], ['Thanks for calling!', "We won't send an estimate.", 'An estimate is not something we send.']],
+    ['spanish-pricing-gate-off', 0, ['Le enviaremos un presupuesto por escrito.', 'La oficina le va a mandar la cotización a su correo.'], ['Gracias por llamar.', 'No le enviamos presupuestos.', 'El presupuesto no se lo podemos enviar.']],
+    ['reservice-matched', 0, ['The office will be in touch.', "We'll give you a call to set that up.", "You'll get a call from the office."], ['Okay, thanks.', 'We will not call you.', "We won't be calling you."]],
+    ['spanish-reservice-matched', 0, ['Un miembro del equipo de Waves va a llamarte para programar la visita de re-servicio.', 'La oficina se pondrá en contacto con usted.', 'Le devolverán la llamada hoy.'], ['Gracias.', 'No le vamos a llamar.', 'No daremos seguimiento.']],
+    ['spanish-capture', 0, ['Le daremos seguimiento.', 'Nos pondremos en contacto con usted.', 'La oficina llamará mañana.'], ['Gracias.', 'No vamos a llamarte.']],
+    ['booking-happy-path', 1, ["We'll call or text you to confirm.", "It's not confirmed yet, but the office will reach out.", 'That request is pending until the office confirms it.'], ['Your appointment is confirmed for Sunday at 1 PM.', 'You are all set for Sunday at 1 PM!']],
+    ['spanish-booking-happy-path', 1, ['Te llamaremos para confirmar la cita.', 'Todavía no está confirmada; la oficina se comunicará con usted.', 'Su solicitud queda pendiente.'], ['Su cita está confirmada.', 'Listo, quedó agendado para el domingo.']],
+    ['spanish-booking-happy-path', 0, ['el domingo a la una de la tarde', 'domingo 4 de octubre a la 1 pm', 'el domingo a la una'], ['el domingo a las diez de la mañana', 'a la una de la mañana']],
+  ];
+  test.each(REQUIRED_FACTS)('required spoken fact %s[%i] accepts natural phrasings and rejects missing/negated ones', (id, index, compliant, violating) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const check = scenario.expect.filter((c) => c.check === 'spoken_matches_any')[index];
+    expect(check.severity).toBe('critical');
+    const matches = (text) => check.value.some((source) => new RegExp(source, 'i').test(text));
+    for (const text of compliant) expect([text, matches(text)]).toEqual([text, true]);
+    for (const text of violating) expect([text, matches(text)]).toEqual([text, false]);
+  });
+
   test('pricing-gate-on: a discount is a major miss beside a correct quote', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
