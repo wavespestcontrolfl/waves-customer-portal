@@ -22,6 +22,7 @@ const pinAtScale = (value, places) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? roundDecimal(numeric, places) : NaN;
 };
+const isProtected = row => Boolean(row.auto_dispatch_locked || row.auto_dispatch_excluded);
 
 function retry(message = 'Appointments changed while saving. Reload and review them.') {
   return Object.assign(new Error(message), {
@@ -72,16 +73,13 @@ function visitPinIsSafeToReplace(row, customer) {
     && pinAtScale(rowLng, 6) === pinAtScale(priorLng, 6));
 }
 
-function candidateVisits(conn, customerId, { lock = false, includeProtected = false } = {}) {
+function candidateVisits(conn, customerId, { lock = false } = {}) {
   let query = conn('scheduled_services')
     .where({ customer_id: customerId })
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString())
     .orderBy('id')
     .select(VISIT_FIELDS);
-  if (!includeProtected) {
-    query = query.whereRaw('NOT COALESCE(auto_dispatch_locked, false) AND NOT COALESCE(auto_dispatch_excluded, false)');
-  }
   if (lock) query = query.forUpdate();
   return query;
 }
@@ -100,8 +98,8 @@ function seriesParentId(row) {
   return row.recurring_parent_id || (row.is_recurring ? row.id : null);
 }
 
-async function prelockVisitContext(trx, customerId, { includeProtected = false } = {}) {
-  const visits = await candidateVisits(trx, customerId, { includeProtected });
+async function prelockVisitContext(trx, customerId) {
+  const visits = await candidateVisits(trx, customerId);
   const roots = await recurringRoots(trx, customerId);
   await lockTechDays(trx, visits.map(row => ({
     techId: row.technician_id,
@@ -146,7 +144,7 @@ async function groupedPlans(trx, prelocked, { customer, primary, verifyPin }) {
     const plan = await planAppointmentAddress(trx, anchor.id, primary.id, 'visit');
     const memberIds = plan.rows.map(row => String(row.id));
     if (memberIds.some(id => !candidates.has(id))
-      || plan.rows.some(row => !rowIsEligible(row, customer, primary, true))) {
+      || plan.rows.some(row => isProtected(row) || !rowIsEligible(row, customer, primary, true))) {
       throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
     }
     groups.push({ visitId, memberIds, plan });
@@ -160,7 +158,7 @@ async function lockVisitContext(trx, customerId, prelocked, {
   const groups = await groupedPlans(trx, prelocked, { customer, primary, verifyPin });
   for (const group of groups) await lockAppointmentAddress(trx, group.plan);
 
-  const visits = await candidateVisits(trx, customerId, { lock: true, includeProtected });
+  const visits = await candidateVisits(trx, customerId, { lock: true });
   const roots = await recurringRoots(trx, customerId, { lock: true });
   const changed = visits.length !== prelocked.visits.length
     || visits.some((row, index) => !sameVisitFence(prelocked.visits[index], row))
@@ -170,7 +168,8 @@ async function lockVisitContext(trx, customerId, prelocked, {
 
   if (groups.length) {
     const lockedById = new Map(visits.map(row => [String(row.id), row]));
-    if (groups.some(group => group.memberIds.some(id => !rowIsEligible(lockedById.get(id), customer, primary, true)))) {
+    if (groups.some(group => group.memberIds.some(id => isProtected(lockedById.get(id))
+      || !rowIsEligible(lockedById.get(id), customer, primary, true)))) {
       throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
     }
   }
@@ -196,7 +195,10 @@ async function lockVisitContext(trx, customerId, prelocked, {
     }
     for (const row of parents) rootsById.set(String(row.id), row);
   }
-  return { visits, parents: prelocked.seriesIds.map(id => rootsById.get(id)), groups };
+  return {
+    visits: includeProtected ? visits : visits.filter(row => !isProtected(row)),
+    parents: prelocked.seriesIds.map(id => rootsById.get(id)), groups,
+  };
 }
 
 async function updatePrimaryVisits(trx, customer, primary, after, latitude, longitude, visitContext, actorId) {

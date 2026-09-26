@@ -63,9 +63,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
   afterEach(async () => trx?.rollback());
 
   async function context(options = { verifyPin: true }) {
-    const prelocked = await prelockVisitContext(trx, CUSTOMER_ID, {
-      includeProtected: options.includeProtected,
-    });
+    const prelocked = await prelockVisitContext(trx, CUSTOMER_ID);
     return lockVisitContext(trx, CUSTOMER_ID, prelocked, {
       ...options, customer, primary,
     });
@@ -102,7 +100,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       .toMatchObject({ count: '1' });
   });
 
-  test('rejects an incomplete live group and a frozen group before address state can diverge', async () => {
+  test('rejects partial, fully dispatch-protected and frozen groups before address state can diverge', async () => {
     const visitId = randomUUID();
     const eligible = randomUUID();
     const ineligible = randomUUID();
@@ -118,6 +116,11 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     expect((await trx('scheduled_services').where({ id: eligible }).first()).property_id).toBeNull();
 
     await trx('scheduled_services').where({ id: ineligible }).update({ status: 'confirmed' });
+    for (const flag of ['auto_dispatch_locked', 'auto_dispatch_excluded']) {
+      await trx('scheduled_services').where({ visit_id: visitId }).update({ [flag]: true });
+      await expect(context()).rejects.toMatchObject({ statusCode: 409, code: 'visit_changed' });
+      await trx('scheduled_services').where({ visit_id: visitId }).update({ [flag]: false });
+    }
     frozenVisitVerdict.mockResolvedValue({ frozen: true, reason: 'issued_link' });
     const locked = await context();
     await expect(updatePrimaryVisits(
@@ -132,6 +135,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     const parentId = randomUUID();
     const childId = randomUUID();
     const independentId = randomUUID();
+    const protectedId = randomUUID();
     await trx('scheduled_services').insert([
       visitRow(parentId, {
         status: 'completed', is_recurring: true, recurring_ongoing: true,
@@ -144,6 +148,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       }),
       visitRow(childId, { recurring_parent_id: parentId, lat: 27.498124, lng: -82.574813 }),
       visitRow(independentId, { lat: 27.4, lng: -82.4, route_order: 8 }),
+      visitRow(protectedId, { auto_dispatch_locked: true, route_order: 9 }),
     ]);
 
     const locked = await context();
@@ -157,6 +162,9 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     });
     expect(await trx('scheduled_services').where({ id: independentId }).first()).toMatchObject({
       property_id: null, lat: '27.400000', lng: '-82.400000', route_order: 8,
+    });
+    expect(await trx('scheduled_services').where({ id: protectedId }).first()).toMatchObject({
+      property_id: null, lat: null, lng: null, route_order: 9,
     });
     const parent = await trx('scheduled_services').where({ id: parentId }).first();
     expect(parent.recurring_template_overrides.visit_count).toBe(3);
