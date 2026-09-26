@@ -220,6 +220,14 @@ function mapResponseToMessage(response, requestedModel) {
   if (incompleteReason && incompleteReason !== 'max_output_tokens') {
     throw new Error(`OpenAI Responses API returned an incomplete response (${incompleteReason}).`);
   }
+  // Reasoning can spend the whole output budget before any visible text or
+  // tool call exists. Accepting that as a max_tokens stop would speak nothing
+  // while resetting the failure streak (and count a clean benchmark round), so
+  // a token-exhausted response with no usable output takes the failure path.
+  if (incompleteReason === 'max_output_tokens' && !hasFunctionCall
+    && !content.some((b) => b.type === 'text' && b.text.trim())) {
+    throw new Error('OpenAI Responses API exhausted max_output_tokens before any usable output.');
+  }
   const stop_reason = hasFunctionCall ? 'tool_use' : (incompleteReason === 'max_output_tokens' ? 'max_tokens' : 'end_turn');
   return {
     id: response.id || null,

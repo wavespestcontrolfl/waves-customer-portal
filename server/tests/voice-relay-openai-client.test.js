@@ -233,6 +233,17 @@ describe('mapResponseToMessage — Responses response -> Anthropic Message shape
     expect(msg.stop_reason).toBe('max_tokens');
   });
 
+  test('a max_output_tokens response with only reasoning (no text, no tool call) rejects', () => {
+    expect(() => mapResponseToMessage({
+      status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'reasoning', summary: [] }],
+    }, 'gpt-6-sol')).toThrow(/exhausted max_output_tokens before any usable output/);
+    expect(() => mapResponseToMessage({
+      status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'message', content: [{ type: 'output_text', text: '  ' }] }],
+    }, 'gpt-6-sol')).toThrow(/exhausted max_output_tokens/);
+  });
+
   // Codex r2 P1: an incomplete response for any reason OTHER than
   // max_output_tokens (content_filter, or anything else) is a genuine
   // failure, not a silent end_turn — see mapResponseToMessage's own comment.
