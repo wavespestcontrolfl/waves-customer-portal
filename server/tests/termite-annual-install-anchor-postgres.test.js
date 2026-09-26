@@ -42,7 +42,10 @@ async function createScratchDb() {
   const schema = `termite_anchor_${randomUUID().replace(/-/g, '')}`;
   const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 6 } });
   await db.raw('CREATE SCHEMA ??', [schema]);
-  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid)');
+  // accepted_at: slice 3b's parkedAt fallback (parkedAtForEstimate) — reads
+  // this real column even though this suite never exercises the abandoned-
+  // signature passes themselves.
+  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid, accepted_at timestamptz)');
   await db.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL)');
   await db.raw(`CREATE TABLE invoices (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -71,14 +74,24 @@ async function createScratchDb() {
   await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz)');
   // 20260925030001's countersigned_by FK target.
   await db.raw('CREATE TABLE technicians (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
+  // share_token_hash/expires_at + cancelled_at/reason + created_at/updated_at:
+  // slice 3b's nudge + hard-expiry passes read/write these real columns
+  // (predate the slice-3a migrations — 20260511000002_contract_signing_workflow)
+  // even though this suite never exercises those passes itself.
   await db.raw(`CREATE TABLE customer_contracts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
     document_template_key text,
     status text,
+    share_token_hash text,
+    share_token_expires_at timestamptz,
     signed_at timestamptz,
     signed_name text,
-    document_variables_snapshot jsonb
+    cancelled_at timestamptz,
+    cancelled_reason text,
+    document_variables_snapshot jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
   )`);
   // Countersign reminder rotation marker (customer FK omitted in this fixture).
   await db.raw(`CREATE TABLE customer_contract_events (
