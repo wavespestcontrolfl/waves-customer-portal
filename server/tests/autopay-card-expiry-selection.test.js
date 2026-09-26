@@ -78,7 +78,10 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       hasEmailLeg: false,
-      metadata: expect.objectContaining({ notificationEventKey: 'payment-expiry:pm-cur:9:2026:60_day' }),
+      metadata: expect.objectContaining({
+        notificationEventKey: 'payment-expiry:pm-cur:9:2026:60_day',
+        payment_method_id: 'pm-cur', expiry_month: '9', expiry_year: '2026', expiry_stage: '60_day',
+      }),
     }));
   });
 
@@ -130,7 +133,10 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(shouldSend ? 1 : 0);
       if (shouldSend) expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
         to: null, hasEmailLeg: false,
-        metadata: expect.objectContaining({ notificationEventKey: 'payment-expiry:pm-cur:9:2026:60_day' }),
+        metadata: expect.objectContaining({
+          notificationEventKey: 'payment-expiry:pm-cur:9:2026:60_day',
+          payment_method_id: 'pm-cur', expiry_month: '9', expiry_year: '2026', expiry_stage: '60_day',
+        }),
       }));
       expect(require('../services/payment-lifecycle-email').sendPaymentMethodExpiring).not.toHaveBeenCalled();
     });

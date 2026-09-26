@@ -15,6 +15,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -413,7 +414,7 @@ Address: ${customer.address_line1 || ''}, ${customer.city || ''}`;
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const msg = await anthropic.messages.create({
+    const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 800),
@@ -439,9 +440,14 @@ RULES:
 
 Return ONLY the email body text, no subject line, no metadata.`
       }],
-    });
+    }), { laneId: 'ib_tools' });
 
     const draft = anthropicText(msg);
+    // An empty/refusal answer (a thinking-only or refused reply has no
+    // .text) renders as a blank draft the human silently never sends —
+    // recorded a success with nothing usable produced, the same gap this
+    // call ledger exists to catch on every other draft lane.
+    if (!draft.trim()) ledgerCallRejected(msg, 'invalid_output');
 
     return {
       draft: true,

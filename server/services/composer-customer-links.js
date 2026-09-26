@@ -213,8 +213,8 @@ async function findLatestOpenEstimate(customerIds) {
   // one yields NO link (never an older estimate's stale pricing) and tells
   // the operator to re-save it through the engine first.
   {
-    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
-    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+    const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
+    if (!(await estimateDeliverableUnderGate(db, estimate))) {
       return { estimate: null, reason: 'The latest open estimate has no engine-verified price — re-save it from the estimate tool before linking it' };
     }
   }

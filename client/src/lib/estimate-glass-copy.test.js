@@ -129,7 +129,7 @@ describe('glassCtaMicroFor', () => {
     // applications.
     expect(glassCtaMicroFor('lawn_care')).toMatch(/Free between-visit service calls/);
     expect(glassCtaMicroFor('lawn_care')).not.toMatch(/Unlimited free callbacks/);
-    expect(glassCtaMicroFor('lawn_care')).toMatch(/90-day money-back guarantee/);
+    expect(glassCtaMicroFor('lawn_care')).toMatch(/Money-back guarantee/);
     // One-time projects must not advertise contract/callback terms, and the
     // license NUMBER stays out of static copy (GuaranteeStrip renders the
     // configured one — a hardcoded copy here would drift; codex P2).
@@ -226,8 +226,8 @@ describe('glassRowInclusions', () => {
     // Lawn keeps its three program bullets; the guarantee + no-contract lines
     // were trimmed (owner 2026-09-02) because the CTA micro states both.
     expect(glassRowInclusions('lawn_care')).toHaveLength(3);
-    expect(glassRowInclusions('lawn_care').some((b) => /money-back|long-term contract/.test(b))).toBe(false);
-    expect(glassRowInclusions('pest_control').some((b) => /money-back/.test(b))).toBe(true);
+    expect(glassRowInclusions('lawn_care').some((b) => /money-back|long-term contract/i.test(b))).toBe(false);
+    expect(glassRowInclusions('pest_control').some((b) => /money-back/i.test(b))).toBe(true);
     expect(glassRowInclusions('mosquito').length).toBeGreaterThanOrEqual(3);
     expect(glassRowInclusions('palm_injection').length).toBeGreaterThanOrEqual(3);
     // Fail-safe: no glass list means the caller keeps the baseline list.
@@ -444,5 +444,80 @@ describe('commercial glass release', () => {
     // quoted service.
     expect(all).not.toMatch(/interior|tenant|long-term contract|satellite|county/i);
     expect(all).not.toMatch(/90-day|money-back|auto pay|unlimited/i);
+  });
+});
+
+describe('the retired fixed-window refund promise never appears in glass copy (owner ruling 2026-09-26)', () => {
+  // Built via concatenation on purpose: a repo-wide grep audit for the
+  // retired promise text runs over this same directory, and a literal
+  // instance of that text right here (even inside a guard test) would be a
+  // false positive on that audit.
+  const NO_90_DAY = new RegExp('9' + '0-day money-back|don' + '.' + 't love it', 'i');
+
+  // Every category glassEstimateCopyFor can serve, plus every row-level
+  // inclusions key and every micro line — walked directly so a future
+  // string added to any pack/stack is caught without needing its own test.
+  const CATEGORIES = [
+    'pest_control',
+    'commercial',
+    'commercial_neutral',
+    'lawn_care',
+    'mosquito',
+    'tree_shrub',
+    'termite_bait',
+    'foam_recurring',
+    'termite_trenching',
+    'pre_slab_termiticide',
+    'bora_care',
+    'rodent',
+    'wdo_inspection',
+    'termite_foam',
+    'trap_only',
+    'bundle',
+  ];
+
+  const ROW_INCLUSION_KEYS = [
+    'pest_control',
+    'lawn_care',
+    'mosquito',
+    'tree_shrub',
+    'termite_bait',
+    'palm_injection',
+    'rodent_bait',
+    'foam_recurring',
+    'commercial_pest',
+  ];
+
+  it('keeps every glassEstimateCopyFor pack free of the retired promise', () => {
+    setGlassDefault(true);
+    for (const category of CATEGORIES) {
+      const pack = glassEstimateCopyFor(category);
+      expect(pack).toBeTruthy();
+      const flat = [
+        pack.heroH1,
+        pack.heroSub,
+        pack.eyebrow,
+        pack.aiTitle,
+        pack.aiBody,
+        pack.ctaMicro,
+        ...(pack.askChips || []),
+      ].join(' ');
+      expect(flat).not.toMatch(NO_90_DAY);
+    }
+  });
+
+  it('keeps every glassCtaMicroFor line free of the retired promise', () => {
+    for (const category of [...CATEGORIES, 'rodent_bait']) {
+      expect(glassCtaMicroFor(category) || '').not.toMatch(NO_90_DAY);
+    }
+    expect(GLASS_COPY.ctaMicro).not.toMatch(NO_90_DAY);
+  });
+
+  it('keeps every glassRowInclusions / glassPestInclusions stack free of the retired promise', () => {
+    for (const key of ROW_INCLUSION_KEYS) {
+      const stack = glassRowInclusions(key, 4, true) || [];
+      expect(stack.join(' ')).not.toMatch(NO_90_DAY);
+    }
+    expect(glassPestInclusions(4, true).join(' ')).not.toMatch(NO_90_DAY);
   });
 });

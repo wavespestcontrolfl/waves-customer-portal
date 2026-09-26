@@ -173,10 +173,58 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // (the invoice receipt path) opt in.
   // The visit's saved property owns the appointment toggles when it decided
   // them (app property scope, PR 3); everything else stays the customer row.
+  const { billingDeliveryCategory, usesBillingDeliveryPreferences, preferenceChangeHold } = require('../billing-channel-routing');
+  const { explicitBillingChannels } = require('../../billing-delivery-channels');
+  const usesExplicitBilling = usesBillingDeliveryPreferences(input, contactState);
+  // Only a Text leg still carries a phone, so this is the customer's phone
+  // changing between the fan-out's recipient check and this fresh read. It
+  // is the same mid-dispatch race as a preference change, so it returns the
+  // same schedulable hold: the producer's replay re-fans-out against the
+  // customer's current phone instead of losing a one-shot notice (Codex r6
+  // P1 on #4843).
+  if (input.metadata?.billingDeliveryLeg && !usesExplicitBilling) {
+    return { ok: false, ...preferenceChangeHold({ reason: 'Billing recipient changed before delivery' }) };
+  }
+  const explicitChannels = usesExplicitBilling
+    ? explicitBillingChannels(prefs, billingDeliveryCategory(input)) : null;
+  // Both refusals below can fire only because selectedLegs() snapshotted the
+  // customer's explicit channels before this per-leg check re-reads them
+  // fresh — the customer changed their billing channel choice mid-dispatch,
+  // not a permanent block. On an explicit leg (billingDeliveryLeg set) this
+  // is a SCHEDULABLE hold, not just a retryable-this-pass refusal: the one
+  // shared preferenceChangeHold() shape (deferred + nextAllowedAt, ONE code
+  // BILLING_PREFERENCES_CHANGED for both refusals below) lets a one-shot
+  // producer (billing-cron.js, stripe-webhook.js, complete-scheduled-
+  // service.js) persist a retry row instead of losing the notice on an
+  // Email-only -> Text-only race (Codex r3 P1 on PR #4843). Off a leg —
+  // a direct, non-fanned-out call that still happens to be a billing-
+  // delivery candidate — CHANNEL_NOT_SELECTED keeps its original
+  // retryable-only, non-deferred shape; nothing calls dispatchBillingChannels
+  // for it, so there is no replay pass to schedule against.
+  if (explicitChannels === null) {
+    if (input.metadata?.billingDeliveryLeg) {
+      return { ok: false, ...preferenceChangeHold() };
+    }
+  } else if (!explicitChannels.includes(input.channel)) {
+    if (input.metadata?.billingDeliveryLeg) {
+      return {
+        ok: false,
+        ...preferenceChangeHold({ reason: 'Recipient has not selected this billing delivery channel' }),
+      };
+    }
+    return {
+      ok: false, code: 'CHANNEL_NOT_SELECTED', reason: 'Recipient has not selected this billing delivery channel',
+      retryable: true, deliveryOutcome: 'not_sent',
+    };
+  }
+  if (input.channel === 'email' && prefs.email_enabled === false) {
+    return { ok: false, code: 'EMAIL_OPTED_OUT', reason: 'Recipient has disabled email notifications' };
+  }
   const toggles = contactState?.propertyToggles || prefs;
   const purposeToggledOff = [].concat(policy.prefsColumn || [])
     .some((prefsColumn) => toggles[prefsColumn] === false);
   const channelGateApplies = policy.channelColumn
+    && explicitChannels === null
     && input.channel === 'sms'
     && !purposeToggledOff
     && (policy.channelGate !== 'opt_in' || input.hasEmailLeg === true);
@@ -200,7 +248,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
 
   // Master kill-switch. Set to false on STOP keyword (existing twilio-webhook
   // logic) and on any opt-out detection by detectOptOut().
-  if (input.channel !== 'push' && prefs.sms_enabled === false) {
+  if (!['push', 'email'].includes(input.channel) && prefs.sms_enabled === false) {
     return {
       ok: false,
       code: 'SMS_OPTED_OUT',
@@ -215,7 +263,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // A policy may name several (payment_receipt honors both the legacy
   // receipt kill switch and the portal texts toggle) — ALL must be non-false.
   for (const prefsColumn of [].concat(policy.prefsColumn || [])) {
-    if (input.channel === 'push' && prefsColumn === 'payment_confirmation_sms') continue;
+    if (['push', 'email'].includes(input.channel) && prefsColumn === 'payment_confirmation_sms') continue;
     if (toggles[prefsColumn] === false) {
       return {
         ok: false,

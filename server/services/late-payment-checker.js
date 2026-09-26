@@ -227,6 +227,7 @@ async function dispatchSelectedNonEmail({ ContactLedger, customer, invoice, body
         original_message_type: originalMessageType,
         billingDeliveryCategory: category,
         notificationEventKey: eventKey,
+        collections_ledger_id: ledger.id,
         ...(explicitChannels !== null ? { billingDeliveryLeg: channel } : {}),
         ...(channel === 'push' ? { appOnly: true } : {}),
       },
@@ -354,7 +355,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
 
   const body = await renderSmsTemplate('bank_verification_incomplete', {
     first_name: customer.first_name || 'there',
-    billing_url: `${domain}/billing`,
+    billing_url: `${domain}/?tab=billing`,
   }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: inv.id });
   // No fallback to the generic late-payment notice — sending "you're overdue" to a
   // customer mid-verification is exactly the message this diversion exists to stop.

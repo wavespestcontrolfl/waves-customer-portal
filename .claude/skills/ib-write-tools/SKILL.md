@@ -5,8 +5,9 @@ description: Use when adding or changing an Intelligence Bar tool that writes an
 
 # Intelligence Bar write tools — the trust boundary
 
-With `GATE_IB_UI_CONFIRM=true` (prod default), an IB write tool never
-executes from the model loop. The flow is:
+The trust boundary is unconditional (`GATE_IB_UI_CONFIRM` is retired and
+ignored); the emergency stop is `IB_WRITES_DISABLED=true`. An IB write tool
+never executes from the model loop. The flow is:
 
 1. The tool call returns a **preview** (no side effects).
 2. The route persists a pending action in `ib_pending_actions`

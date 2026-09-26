@@ -208,6 +208,11 @@ const websiteEstimateHelmet = helmet({
 // raw body. Dark until GATE_POSTHOG_INGEST_PROXY=true (404 otherwise).
 app.use('/ingest', require('./routes/posthog-ingest'));
 
+// Report ask privacy headers (no-store / noindex) before ANY response-producing
+// middleware — CORS preflights, the global /api limiter, body-parser errors —
+// so every response on those token routes carries them.
+app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders);
+
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened
   // (query string is not part of req.path; handle trailing slash too)
@@ -918,6 +923,7 @@ app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
 app.use('/api/admin/pest-pressure', require('./routes/admin-pest-pressure'));
 app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
 app.use('/api/admin/pricing-reality-check', require('./routes/admin-pricing-reality-check'));
+app.use('/api/admin/route-scorecard', require('./routes/admin-route-scorecard'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
 app.use('/api/tech/lawn-diagnostic', require('./routes/tech-lawn-diagnostic'));
 app.use('/api/tech/social', require('./routes/tech-social'));
@@ -1617,10 +1623,21 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
 // error), then close the HTTP listener so in-flight requests finish.
 function shutdown(signal) {
   logger.info(`[shutdown] ${signal} received, draining sockets + closing server`);
+  // New website leads waiting on the Lead Response agent get their standard
+  // reply now rather than never (the fallback lives only in this process).
+  // Flushed at once, and again after in-flight requests drain (a lead
+  // webhook still running now registers its fallback later). Both finish
+  // before the DB pool closes: the send needs its claim row.
+  const flushLeadFallbacks = () => require('./routes/lead-webhook').flushPendingLeadFallbacks(8000)
+    .then((count) => { if (count) logger.info(`[shutdown] sent ${count} pending lead fallback reply(ies)`); })
+    .catch(err => logger.warn(`[shutdown] lead fallback flush failed: ${err.message}`));
+  const leadFallbacksFlushed = flushLeadFallbacks();
   io.close(() => {
     logger.info('[shutdown] Socket.io closed');
     httpServer.close(async () => {
       logger.info('[shutdown] HTTP server closed, exiting');
+      await leadFallbacksFlushed;
+      await flushLeadFallbacks();
       try {
         const db = require('./models/db');
         await Promise.race([

@@ -126,33 +126,87 @@ function answerRecommendations({ project }) {
   return 'No extra steps were flagged for you on this report.';
 }
 
-function answerProjectReportQuestion({ question, project, payload }) {
+// Explicit intents the client's shipped prompt chips can send (AW-06: bind
+// each chip to its own answer instead of relying only on free-text routing
+// of its label — a rewritten chip label can never silently reroute an
+// answer function it no longer matches). Server-validated whitelist; an
+// unrecognized or missing intent falls through to the free-text router
+// below so older/unknown clients keep working.
+const PROMPT_INTENTS = {
+  findings: ({ project, typeCfg }) => answerFindings({ project, typeCfg }),
+  treatment: ({ project, typeCfg }) => answerTreatment({ project, typeCfg }),
+  recommendations: ({ project }) => answerRecommendations({ project }),
+  next_visit: ({ project, payload }) => answerNextVisit({ project, payload }),
+};
+
+// AW-06 r1: "use" is restored as a treatment cue below ("What did you
+// use?"), but "When can I use my yard again?" must still reach the
+// next-visit answer, not treatment — checked in the explicit-schedule
+// branch (which already runs first), ahead of the treatment check.
+const WHEN_USE_AGAIN_RE = /\bwhen\b[\s\S]*\buse\b[\s\S]*\bagain\b/;
+// AW-06 r1: "see" is restored as a findings cue below ("What did you
+// see?"), but "When can I see you again?" must still reach the next-visit
+// answer, not findings — same guard shape, same branch.
+const WHEN_SEE_AGAIN_RE = /\bwhen\b[\s\S]*\bsee\b[\s\S]*(?:\byou\b|\bus\b|\bagain\b)/;
+
+// Free-text routing, in precedence order; first match wins (AW-06). Only
+// explicit scheduling phrases outrank treatment/recommendations — a bare
+// "next" ("What should I do next?") or "when" is weak and checked last — and
+// "treated" (an inflection of "treat") is recognized as a treatment word.
+function answerProjectReportQuestion({ question, project, payload, intent }) {
   const q = String(question || '').toLowerCase();
   const typeCfg = getProjectType(project.project_type);
 
-  if (/\b(next|follow|when|appointment|visit|schedule|come back)\b/.test(q)) {
+  if (intent && Object.prototype.hasOwnProperty.call(PROMPT_INTENTS, intent)) {
+    return PROMPT_INTENTS[intent]({ project, payload, typeCfg });
+  }
+
+  // Explicit scheduling phrases first — "Do I need to be home for the next
+  // visit?" is a visit question even though it also says "do I need".
+  if (/\b(appointment|schedule|scheduled|come back|coming back|next visit|follow[- ]?up visit)\b/.test(q)
+    || WHEN_USE_AGAIN_RE.test(q)
+    || WHEN_SEE_AGAIN_RE.test(q)) {
     return answerNextVisit({ project, payload });
   }
-  if (/\b(treat|product|use|used|appl|chemical|spray|bait|gallon)\b/.test(q)) {
-    return answerTreatment({ project, typeCfg });
-  }
-  if (/\b(recommend|next step|advice|prep|do now|should i)\b/.test(q)) {
+  // Intent verbs outrank topic nouns (codex #4839): explicit recommendation
+  // wording first ("What should I do about the results?"), then future
+  // treatment timing ("When will you treat again?"), then observation verbs
+  // ("What did you find in the treated areas?"), then treatment nouns.
+  if (/\b(recommend(?:ation|ations)?|next step|advice|prep|do now|should i|do i need|need to do|do next|do about)\b/.test(q)) {
     return answerRecommendations({ project });
   }
-  if (/\b(find|found|finding|see|saw|observe|activity|evidence|result)\b/.test(q)) {
+  // Future cue on either side of the treatment verb ("When will you treat?",
+  // "Will you treat next week?", "Are you applying next week?").
+  // Past tense only vetoes when it governs the treatment ("was it treated",
+  // "did you spray") — not an introductory "I was wondering when…".
+  if (!/\b(?:was|were|did|have\s+you|has)\s+(?:you\s+|it\s+|they\s+|the\s+\w+\s+)?(?:treat|spray|appl)\w*|\b(?:treated|sprayed|applied)\b/.test(q)
+    && /\b(treat\w*|spray\w*|appl\w*)\b/.test(q)
+    && /\b(when|next|again|upcoming|will\s+you|going\s+to)\b/.test(q)) {
+    return answerNextVisit({ project, payload });
+  }
+  // Only an observational "see" ("What did you see?") is a findings cue — a
+  // lookup "Can I see what products were used?" falls through to treatment.
+  if (/\b(find|found|finding|findings|saw|observe|observed|activity|evidence|result|results)\b|\b(?:did|do)\s+you\s+see\b/.test(q)) {
     return answerFindings({ project, typeCfg });
+  }
+  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|use|used|appl(?:y|ies|ied|ying|ication|ications)|chemical|chemicals|spray|sprays|sprayed|spraying|bait|baits|baited|gallon|gallons)\b/.test(q)) {
+    return answerTreatment({ project, typeCfg });
+  }
+  if (/\b(follow|when|visit|next)\b/.test(q)) {
+    return answerNextVisit({ project, payload });
   }
   return `The full details of this project are on the report above. For anything it doesn't cover, call or text ${WAVES_PHONE_DISPLAY} and we'll walk through it with you.`;
 }
 
-// Suggested prompt chips, mirrored client-side. Kept here so the answer
+// Suggested prompt chips, mirrored client-side, each paired with the
+// explicit intent the chip click sends (AW-06). Kept here so the answer
 // router and the suggestions never drift apart.
 function projectReportAskPrompts(project = {}) {
   return [
-    'What did you find?',
-    'What was treated?',
-    'What should I do next?',
-    'When is my next visit?',
+    { text: 'What did you find?', intent: 'findings' },
+    { text: 'What was treated?', intent: 'treatment' },
+    { text: 'What should I do next?', intent: 'recommendations' },
+    { text: 'When is my next visit?', intent: 'next_visit' },
   ];
 }
 
@@ -160,4 +214,5 @@ module.exports = {
   answerProjectReportQuestion,
   projectReportAskPrompts,
   cleanFindings,
+  PROMPT_INTENTS,
 };

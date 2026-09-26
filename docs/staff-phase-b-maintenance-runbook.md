@@ -1,5 +1,8 @@
 # Staff Phase-B maintenance gate
 
+**Completed.** Phase B shipped via PR #2726 and #2727. This doc is kept as
+the maintenance-window runbook record.
+
 `STAFF_MAINTENANCE_MODE` is the deployment interlock for the Staff Phase-B
 authentication migration. Only the exact lowercase value `true` enables it.
 While enabled, Staff API routes, valid Staff bearer tokens on other routes, and

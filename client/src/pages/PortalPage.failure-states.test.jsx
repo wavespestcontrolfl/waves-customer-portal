@@ -17,6 +17,7 @@ vi.mock('../utils/api', () => ({
     getServices: vi.fn(),
     getStationMap: vi.fn(),
     getTermiteBond: vi.fn(),
+    getTermiteAnnualPlan: vi.fn(),
     getLawnHealth: vi.fn(),
     getRequests: vi.fn(),
     updateAccountCreditPreference: vi.fn(),
@@ -40,6 +41,7 @@ beforeEach(() => {
   api.getAutopay.mockResolvedValue({ state: 'disabled' });
   api.getStationMap.mockResolvedValue({ available: false });
   api.getTermiteBond.mockResolvedValue({ available: false });
+  api.getTermiteAnnualPlan.mockResolvedValue({ available: false });
 });
 
 afterEach(() => {

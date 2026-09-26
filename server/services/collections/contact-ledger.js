@@ -78,17 +78,39 @@ async function recordContact({
  * throws — an unstamped reserved row only ever over-suppresses, which is
  * the safe direction (same doctrine as markSendFailed).
  */
-async function markDelivered(target) {
+function applyReservationMatch(query, match = {}) {
+  const equality = {};
+  if (match.customerId) equality.customer_id = match.customerId;
+  if (match.channel) equality.channel = match.channel;
+  if (match.source) equality.source = match.source;
+  if (Object.keys(equality).length) query.where(equality);
+  if (match.notificationEventKey) {
+    query.whereRaw("metadata->>'notificationEventKey' = ?", [match.notificationEventKey]);
+  }
+  if (match.invoiceId) {
+    query.whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([match.invoiceId])]);
+  }
+  return query;
+}
+
+async function markDelivered(target, { database = db, match = {} } = {}) {
   if (!target) return false;
   try {
-    const query = db('collections_contact_ledger');
-    if (typeof target === 'string') query.where({ idempotency_key: target });
-    else if (target.id) query.where({ id: target.id });
-    else return false;
-    await query.update({
-      metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
-    });
-    return true;
+    const stamp = async (conn) => {
+      const query = conn('collections_contact_ledger');
+      if (typeof target === 'string') query.where({ idempotency_key: target });
+      else if (target.id) query.where({ id: target.id });
+      else return false;
+      applyReservationMatch(query, match);
+      const changed = await query.update({
+        metadata: conn.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
+      });
+      return Number(changed) === 1;
+    };
+    // A failed best-effort stamp on a caller's transaction must roll back to
+    // a savepoint; catching a failed statement directly leaves PostgreSQL's
+    // whole transaction aborted.
+    return database.isTransaction ? await database.transaction(stamp) : await stamp(database);
   } catch (err) {
     logger.warn(`[collections-ledger] delivered stamp failed: ${err.message}`);
     return false;
@@ -119,7 +141,7 @@ async function claimAttempt(entry) {
  * the row standing un-stamped only ever over-suppresses, which is safe.
  * `entry` is the return value of recordContact (id + original metadata).
  */
-async function markSendFailed(entry, extra = {}) {
+async function markSendFailed(entry, extra = {}, { database = db, match = {} } = {}) {
   if (!entry || !entry.id) return false;
   try {
     // Atomic jsonb MERGE, never a whole-object replace from the caller's
@@ -128,15 +150,18 @@ async function markSendFailed(entry, extra = {}) {
     // outcome onto this row — a replace built from the pre-dial entry
     // would erase them (losing voicemail_left re-permits a voicemail
     // inside the 30-day cap).
-    await db('collections_contact_ledger')
-      .where({ id: entry.id })
-      .update({
-        metadata: db.raw(
+    const stamp = async (conn) => {
+      const query = conn('collections_contact_ledger').where({ id: entry.id });
+      applyReservationMatch(query, match);
+      const changed = await query.update({
+        metadata: conn.raw(
           "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
           [JSON.stringify({ send_failed: true, ...extra })],
         ),
       });
-    return true;
+      return Number(changed) === 1;
+    };
+    return database.isTransaction ? await database.transaction(stamp) : await stamp(database);
   } catch (err) {
     logger.warn(`[collections-ledger] send-failed stamp failed for ledger row ${entry.id}: ${err.message}`);
     return false;
