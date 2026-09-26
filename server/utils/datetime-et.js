@@ -98,6 +98,25 @@ function addETDays(date, days) {
   return new Date(Date.UTC(et.year, et.month - 1, et.day + days, 12, 0, 0));
 }
 
+// Advances `from` by `businessDays` ET weekdays (Mon-Fri), skipping Saturday
+// and Sunday entirely — the shared "N business days out" primitive for
+// every caller needing a business-day horizon or deadline (routes/booking.js's
+// re-service latency guard, routes/stripe-webhook.js's ACH "expected to
+// clear" date). One implementation so a weekday/ET-shift bug gets fixed
+// once. Counts from the NEXT calendar day, never `from` itself. Returns a
+// Date; a caller that needs a calendar-date string wraps it in
+// etDateString.
+function addETBusinessDays(from, businessDays) {
+  let cursor = from;
+  let added = 0;
+  while (added < businessDays) {
+    cursor = addETDays(cursor, 1);
+    const dow = etParts(cursor).dayOfWeek; // 0=Sun..6=Sat
+    if (dow !== 0 && dow !== 6) added += 1;
+  }
+  return cursor;
+}
+
 // Resolve only explicit, unambiguous quoted day + clock expressions. This
 // does not assign business defaults to "tomorrow morning" or bare times.
 // Unknown wording, past yearless dates and DST gaps/folds require review.
@@ -378,7 +397,7 @@ module.exports = {
   dateOnlyString,
   lastCompletedWeekEndingET,
   TZ, parseETDateTime, parseQuotedETDeadline, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
-  etParts, etDateString, addETDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
+  etParts, etDateString, addETDays, addETBusinessDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

@@ -44,7 +44,7 @@ function recordedPartOfComposite(text) {
   const m = t.match(/\n\n\[(?:Staff|Voicemail) segment\]\n([\s\S]*)$/);
   return m && m[1].trim() ? m[1] : null;
 }
-const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
+const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts, sameDayWindowElapsed } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
 const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
@@ -100,7 +100,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -1030,6 +1030,21 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
     return firstExternalPhone(extracted, call.from_phone, call.to_phone);
   }
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
+}
+
+// True when an arranger-authorized WDO booking's agreed ET slot has already
+// started on the ET wall clock: its date (YYYY-MM-DD, the wall date the visit
+// row gets) is before today's ET date, or it is today and its window start
+// (HH:MM) has passed (codex #4890 r5/r6/r7). Uses the shared
+// sameDayWindowElapsed so the cutoff matches every other mover.
+function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null }) {
+  if (!authorized || !scheduledDate) return false;
+  // One clock for both halves: sameDayWindowElapsed reads the real ET "today".
+  if (String(scheduledDate) < etDateString(new Date())) return true;
+  // Node's h24 hour cycle renders midnight as "24:00"; the start of the day
+  // is "00:00" for the elapsed comparison (codex #4890 r8 P2).
+  const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
+  return sameDayWindowElapsed(scheduledDate, start);
 }
 
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
@@ -9201,6 +9216,13 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    // An earlier pass's caller_not_authorized card on THIS call is settled by
+    // this pass when the owner ruling (2026-09-26) authorizes the caller — a
+    // lender/realtor arranging a confirmed WDO inspection (codex #4890 r1
+    // P1). Call-scoped only: the lead's needs_confirmation list is a standing
+    // union of read-back reminders the office clears, never edited across
+    // calls (no per-reason provenance). Schema-valid V2 only.
+    const wdoArrangerAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedWdoArrangerBooking(v2Result.extraction);
     let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
@@ -9567,7 +9589,12 @@ const CallRecordingProcessor = {
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
-          const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
+          // The same model-flag suppression canAutoRoute applies (codex #4890
+          // r1 P1): a model-emitted caller_not_authorized that the routing
+          // verdict dropped (unsupported relationship, or an authorized
+          // lender/realtor WDO arranger) must not survive into the persisted
+          // flags, cards and route_decisions audit either.
+          const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(v2Extraction.triage_flags, v2Extraction), addressValidation);
           // Address flags the routing verdict found satisfied by the linked
           // customer's on-file address file no card either — the verdict
           // (persisted in ai_validation.routing) is the audit trail.
@@ -9932,6 +9959,11 @@ const CallRecordingProcessor = {
           extracted,
           v2TriageFlags: bridgeTriageFlags,
           callerRelationship: v2Ext?.caller?.relationship_to_property,
+          // Only a schema-VALID extraction may clear an authorization card
+          // (codex #4890 r1 P1): schema_failed / normalization_failed keep the
+          // untrusted parsed object on v2Result, and the enforce gate rejects
+          // every non-valid extraction too.
+          v2Extraction: v2Result?.status === 'valid' ? v2Ext : null,
           addressRecovery,
         });
         // Decoder-only email evidence: when the primary extraction captured
@@ -15119,7 +15151,10 @@ const CallRecordingProcessor = {
               const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(parsedDt);
               scheduledDate = etDate; // YYYY-MM-DD in Eastern
               const etTime = new Intl.DateTimeFormat('en-US', etOptions).format(parsedDt);
-              windowStart = etTime;
+              // Node's h24 hour cycle renders midnight as "24:00"; the window
+              // start (and every end/display/insert derived from it) is
+              // "00:00" (codex #4890 r9 P2, same quirk etParts corrects).
+              windowStart = etTime.replace(/^24:/, '00:');
             } else {
               // Fallback: extract date + time from the raw string. Pin parsing
               // to noon so a UTC server's `new Date('April 30 2026')` (which
@@ -15224,6 +15259,32 @@ const CallRecordingProcessor = {
             }
 
             const callDateET = etDateString(call.created_at || new Date());
+            // An arranger-authorized WDO booking (owner ruling 2026-09-26) is
+            // refused once its agreed ET slot has started — checked HERE, when
+            // the visit is written, on the ET wall clock the row gets (codex
+            // #4890 r5 P1, r6, r7 P1: time-of-use, wall clock, same-day start
+            // time). A force-reprocess of an old blocked call must not create
+            // a backdated visit; routing itself stays clock-free.
+            // A reprocess of a call whose visit already exists keeps the
+            // existing-booking reuse below (codex #4890 r7 P2) — only a
+            // not-yet-booked elapsed slot is refused.
+            // Enforce mode only: that is the only mode where the arranger
+            // ruling authorizes a booking at all (shadow/legacy books on V1's
+            // own verdict), and enforce mode files the
+            // auto_booking_skipped_after_approval card for this skip, so a
+            // refused slot never vanishes silently (pre-push audit P1).
+            if (scheduledDate && arrangerSlotElapsed({ authorized: CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
+              && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))) {
+              logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} has already passed; skipping schedule + SMS for ${maskSid(callSid)}`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'past_extracted_date',
+              };
+              scheduledDate = null;
+            }
             if (scheduledDate && scheduledDate < callDateET) {
               logger.warn(
                 `[call-proc] Extracted appointment date ${scheduledDate} is before call date ${callDateET}; skipping schedule + SMS`
@@ -16291,6 +16352,22 @@ const CallRecordingProcessor = {
                         .trim();
                     }
                   }
+                }
+                // Recheck the arranger slot elapsed guard INSIDE this
+                // transaction, immediately before the fresh insert (codex
+                // #4890 P2): the check above ran BEFORE this transaction
+                // opened, and the payer lookup + advisory locks + comms-fence
+                // revalidation above can hold long enough for the agreed slot
+                // to elapse in the gap — the original check alone can't catch
+                // that. Same authorization gate as the early check (enforce
+                // mode only) and the same call-linked-visit exemption, now
+                // read through this transaction's own connection (`trx`) so
+                // it sees the state under the locks already taken, not a
+                // stale pre-transaction snapshot.
+                if (arrangerSlotElapsed({ authorized: CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
+                  && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx }))) {
+                  logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} elapsed while the scheduling transaction was in flight; refusing the insert for ${maskSid(callSid)}`);
+                  return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };
                 }
                 const [created] = await trx('scheduled_services')
                   .insert(insertData)
@@ -17903,7 +17980,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert']);
       // The house-number hold has its own card only when that card actually
       // landed (a thrown insert or a lost claim holds the booking without
       // one) — otherwise the fallback card below is the call's only
@@ -18629,7 +18706,8 @@ const CallRecordingProcessor = {
       let finalFlags = [];
 
       if (v2ExtractionForAudit) {
-        const modelFlags = suppressAddressFlagsForAV(v2ExtractionForAudit.triage_flags, v2AddressValidation);
+        // Same suppression as canAutoRoute and the enforce lane (codex #4890 r1 P1).
+        const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(v2ExtractionForAudit.triage_flags, v2ExtractionForAudit), v2AddressValidation);
         const deterministicFlags = computeDeterministicTriageFlags(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
@@ -18742,6 +18820,15 @@ const CallRecordingProcessor = {
       call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription,
     });
     const finalized = await db.transaction(async (trx) => {
+      // Advisory lock FIRST (same rule as every other triage_items writer —
+      // see triage-locks.js): this transaction transitions cards
+      // (customer_creation_failed / lead_creation_failed / caller_not_authorized
+      // / additional_recording) and recomputes call_log.review_status below.
+      // Without the lock, a concurrent writer resolving a DIFFERENT card on
+      // this same call can interleave with the whereNotExists recompute here
+      // — each transaction sees the other's card as still open and both skip
+      // clearing review_status, stranding it 'open' on a fully-terminal call.
+      await lockTriageCall(trx, call.id);
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -18859,6 +18946,29 @@ const CallRecordingProcessor = {
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', resolved_at: new Date(), resolution_note: 'Lead landed on a later pass' });
         if (repaired > 0) {
+          await trx('call_log')
+            .where({ id: call.id })
+            .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
+            .update({ review_status: null });
+        }
+      }
+      // Owner ruling 2026-09-26 (codex #4890 r1 P1): a lender/realtor
+      // arranging a confirmed WDO inspection is an authorized caller. A
+      // force-reprocess of a call an earlier pass carded caller_not_authorized
+      // must retire that card here — the finalizer only ever OPENS review
+      // state — or the visit books while the office still sees a "confirm the
+      // account holder" task. Same transaction and fence as the repairs above.
+      if (written > 0 && finalStatus === 'processed' && wdoArrangerAuthorizedThisPass) {
+        const retired = await trx('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'caller_not_authorized' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({
+            status: 'resolved',
+            resolved_at: new Date(),
+            resolution_source: 'system',
+            resolution_note: 'Superseded — a lender or realtor arranging a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).',
+          });
+        if (retired > 0) {
           await trx('call_log')
             .where({ id: call.id })
             .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
@@ -20012,6 +20122,7 @@ CallRecordingProcessor._test = {
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
   resolveCallContactPhone,
+  arrangerSlotElapsed,
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
