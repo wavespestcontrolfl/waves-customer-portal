@@ -356,6 +356,15 @@ function adminFetch(path, options = {}) {
 // densities/complexity (turf-factor score), and propertyType (hardscape
 // brackets). Service-specific fields (palms, trenching, Bora-Care, slab,
 // commercial) stay in doGenerate — they don't feed turf.
+// Turf DERIVED from the lookup's lot — the county-prior seed, or a vision
+// read clamped to that parcel — is only as good as that lot. Once the Lot
+// box no longer holds it (cleared or corrected), it neither prices nor
+// displays (codex r1 P1 #4871); a measured turf entry is separate.
+function lotDerivedTurfIsStale(lookupProfile, currentLotSqFt) {
+  return (lookupProfile?.turfSource === "county_prior" || lookupProfile?.turfCappedToParcel === true)
+    && currentLotSqFt !== (Number(lookupProfile?.lotSqFt) || 0);
+}
+
 function buildTurfRequestProfile(baseProfile, form) {
   const manualNumber = (value, fallback = 0) => {
     const n = parseInt(value, 10);
@@ -385,10 +394,7 @@ function buildTurfRequestProfile(baseProfile, form) {
   // read clamped to that parcel — is only as good as that lot. Once the Lot
   // box no longer holds it (cleared or corrected), it must not price
   // (codex r1 P1 #4871); a measured turf entry is separate and unaffected.
-  if (
-    profile.lotSqFt !== (Number(baseProfile.lotSqFt) || 0) &&
-    (profile.turfSource === "county_prior" || profile.turfCappedToParcel === true)
-  ) {
+  if (lotDerivedTurfIsStale(baseProfile, profile.lotSqFt)) {
     delete profile.estimatedTurfSf;
     delete profile.turfSource;
     delete profile.turfCappedToParcel;
@@ -2607,9 +2613,10 @@ export default function EstimateToolViewV2({
       return { area: measured, source: "MEASURED_TURF" };
     }
 
-    const ai =
-      parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
-      parseNonNegativeInteger(satelliteData?.estimatedTurfSf);
+    const ai = lotDerivedTurfIsStale(enrichedProfile, parseNonNegativeInteger(currentForm.lotSqFt) ?? 0)
+      ? null
+      : parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
+        parseNonNegativeInteger(satelliteData?.estimatedTurfSf);
     if (ai !== null && ai > 0) {
       return { area: ai, source: "AI_ESTIMATE" };
     }
@@ -4200,12 +4207,15 @@ export default function EstimateToolViewV2({
   const E = estimate;
   const commercialDetected = isCommercialEstimateInput(form);
   const R = E?.results || {};
-  const aiTurfSqFt =
-    parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
-    parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
-    null;
-  const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
   const lotSqFtForTurf = parseNonNegativeInteger(form.lotSqFt) ?? 0;
+  // Same staleness rule as the priced profile — the panel never shows a
+  // turf number pricing has dropped.
+  const aiTurfSqFt = lotDerivedTurfIsStale(enrichedProfile, lotSqFtForTurf)
+    ? null
+    : parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
+      parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
+      null;
+  const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
   const lotEstimateTurfSqFt = (() => {
     // Show the number the pricing engine will ACTUALLY use — footprint,
     // hardscape and plausible-max cap included — not the local 20%/15%

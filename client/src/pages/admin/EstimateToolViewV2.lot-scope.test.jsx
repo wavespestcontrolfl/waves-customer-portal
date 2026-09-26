@@ -114,10 +114,15 @@ describe('estimate dimension boxes govern pricing', () => {
     enriched = { ...HOUSE, estimatedTurfSf: 6000, turfSource: 'county_prior', countyTurfPriorSf: 6000 };
     render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
     selectService('Pest Control');
+    selectService('Lawn Care');
     await lookUp();
-    // Unchanged lot: the county-prior turf still prices.
+    // Unchanged lot: the county-prior turf still shows and prices.
+    expect(screen.getByText(/Using AI/)).toBeInTheDocument();
     expect((await generate()).estimatedTurfSf).toBe(6000);
     change('Lot Sq Ft', '12000');
+    // The turf panel stops offering it the moment the lot changes…
+    expect(screen.queryByText(/Using AI/)).not.toBeInTheDocument();
+    // …and pricing drops it.
     const corrected = await generate();
     expect(corrected.lotSqFt).toBe(12000);
     for (const key of ['estimatedTurfSf', 'turfSource', 'countyTurfPriorSf']) expect(corrected[key]).toBeUndefined();
