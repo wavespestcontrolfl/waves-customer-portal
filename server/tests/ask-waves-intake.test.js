@@ -795,6 +795,12 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out.source).toBe('fallback');
   });
 
+  test('chain miss on a human emergency that merely mentions a dog keeps the human script', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
+    const out = await processIntakeMessage({ message: 'My leg is swelling after a dog bite' });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
   test('chain miss on a Spanish emergency → emergency-safe fallback', async () => {
     dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'mi hijo fue picado por una avispa y no puede respirar' });

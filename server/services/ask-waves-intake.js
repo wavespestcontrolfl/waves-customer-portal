@@ -408,6 +408,7 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '') {
 const HUMAN_EMERGENCY_DIRECTION_RE = /(?:\+?1[-.\s]?)?\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:(?:call|contact|see|consult|reach|phone|ask)\s+(?:a\s+|your\s+|the\s+)?(?:doctor|physician|pediatrician|nurse|medical\s+(?:provider|professional)|health\s*care\s+provider)|(?:llame|consulte|contacte|vea|acuda)\s+(?:a|al)\s+(?:su\s+)?(?:m[eé]dico|doctor|pediatra)|(?:go|get|head|rush|drive|take\s+\S+)\s+(?:straight\s+|right\s+)?to\s+(?:the\s+|a\s+|an\s+)?(?:nearest\s+|closest\s+|local\s+)?(?:hospital|emergency\s+room)|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
 const VET_DIRECTION_RE = /\b(?:vets?|veterinarian|veterinary|animal\s+(?:hospital|poison|emergency|er)|veterinari[oa]s?|cl[ií]nica\s+veterinaria|hospital\s+veterinario)\b/i;
 const PET_SUBJECT_RE = /\b(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
+const PET_PATIENT_RE = /\b(?:my|our|the|his|her|their)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b[^.?!]{0,25}?\b(?:swallow\w*|ingest\w*|ate|eaten|lick\w*|got\s+into|(?:was|got|is|has\s+been)\s+(?:stung|bit|bitten)|vomit\w*|throw\w*\s+up|seiz\w*|drool\w*|(?:is|seems|got)\s+sick)\b|\b(?:swallow|ingest)(?:ed)?\s+by\s+(?:my|our|the)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b|\bmi\s+(?:perr|gat|mascota|cachorr)\w*\s+[^.?!]{0,25}?(?:trag|comi|vomit|ingiri)\w*/i;
 const PERSON_SUBJECT_RE = /\b(?:i|me|myself|we|someone|somebody|kids?|child|children|son|daughter|baby|toddler|infant|husband|wife|mom|dad|grand\w+|hij[oa]s?|beb[eé]|ni[ñn][oa]s?|esposo|esposa|alguien|yo)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
@@ -434,7 +435,11 @@ function emergencyGuidance(result, contextText = '') {
   const visitorEmergency = looksLikeEmergency(context);
   const petSubject = PET_SUBJECT_RE.test(context);
   const personSubject = PERSON_SUBJECT_RE.test(context);
-  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || (visitorEmergency && (personSubject || !petSubject));
+  // Human guidance is dropped only when the animal is plainly the patient
+  // ("My dog swallowed bait") — a pet mention alone ("My leg is swelling after
+  // a dog bite") keeps it, and an ambiguous message gets both scripts.
+  const petIsPatient = PET_PATIENT_RE.test(context) && !personSubject;
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || (visitorEmergency && !petIsPatient);
   const vet = VET_DIRECTION_RE.test(folded) || (visitorEmergency && petSubject);
   if (!(result.intent === 'emergency' || human || vet)) return null;
   const ingestion = POISON_MENTION_RE.test(folded) || INGESTION_RE.test(context);
