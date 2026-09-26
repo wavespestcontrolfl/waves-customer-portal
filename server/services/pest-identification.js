@@ -671,11 +671,13 @@ function aggregateIdentification(perPhoto) {
     const group = groups.length === 1
       && perPhoto.every((r) => r.group === groups[0] || (r.category === 'other' && r.agreement !== 'conflict'))
       ? groups[0] : null;
-    const groupPhotos = group ? perPhoto.filter((r) => r.group === group) : [];
+    // No agreed species anywhere: every species the photos put forward (both
+    // sides of a split or a cross-group conflict) still decides the facts,
+    // so an ant/termite conflict keeps inspection-first (Codex #4865 r5).
     return {
       entry: null,
       group,
-      shared: groupPhotos.length ? disputedFacts(groupPhotos) : null,
+      shared: candidateEntries(perPhoto).length ? disputedFacts(perPhoto) : null,
       confidence: 'low',
       category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
       contested: false,

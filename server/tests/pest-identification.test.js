@@ -143,6 +143,17 @@ describe('mergeModelResults', () => {
     expect(contract.service).toMatchObject({ label: 'Pest Consultation', key: null, inspection_required: true });
   });
 
+  test('a lone cross-group conflict keeps the facts its candidates share (Codex #4865 r5)', () => {
+    const antVsTermite = mergeModelResults(claude({ best_match: 'subterranean termite' }), claude());
+    const identification = _test.aggregateIdentification([antVsTermite]);
+    expect(identification).toMatchObject({ entry: null, group: null });
+    const contract = buildPestReportContract({ ...antVsTermite, identification });
+    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
+    expect(contract.urgency).toBe('moderate');
+    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
+    expect(report.next_step).not.toMatch(/No emergency/);
+  });
+
   test('a split that includes the winner stays an inconclusive photo, not a dispute', () => {
     const ghost = mergeModelResults(null, claude());
     const ghostFire = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
