@@ -381,6 +381,16 @@ function adminFetch(path, options = {}) {
 // densities/complexity (turf-factor score), and propertyType (hardscape
 // brackets). Service-specific fields (palms, trenching, Bora-Care, slab,
 // commercial) stay in doGenerate — they don't feed turf.
+// Bait-station footprint prefill from the home sqft. A suite-sized lookup's
+// homeSqFt is the suite's own single-story area while the stories box still
+// reads the BUILDING, so it is never divided by the building's floors.
+export function termiteFootprintFromHome(homeSqFt, stories, suiteSized) {
+  const sqft = Number(homeSqFt) || 0;
+  if (sqft <= 0) return 0;
+  const st = suiteSized ? 1 : Math.max(1, Number(stories) || 1);
+  return Math.round(sqft / st);
+}
+
 function buildTurfRequestProfile(baseProfile, form) {
   const manualNumber = (value, fallback = 0) => {
     const n = parseInt(value, 10);
@@ -587,7 +597,7 @@ const PROPERTY_FORM_FIELDS = [
   "boracareSurfaceHeightFt", "preslabSqft", "preslabLabelConfirmed", "plugArea",
   "topDressArea", "fleaExteriorAreaSqFt", "fleaExteriorAreaSource", "fleaExteriorZones",
   "palmDiagnosisConfirmed", "palmLicensedApplicator", "palmHighDose", "palmLargeDiameter",
-  "palmNonstandardProduct", "_termiteFootprintAuto", "_trenchingPerimeterAuto",
+  "palmNonstandardProduct", "_termiteFootprintAuto", "_suiteSizedLookup", "_trenchingPerimeterAuto",
   "_boracareSqftAuto", "_preslabSqftAuto", "_palmCountAuto",
   "stingSpecies", "stingTier", "stingRemoval", "stingAggressive", "stingHeight", "stingConfined",
 ];
@@ -2182,9 +2192,8 @@ export default function EstimateToolViewV2({
     // edits clear savedId before this effect runs.
     if (!form.svcTermiteBait || savedId) return;
     const sqft = Number(form.homeSqFt) || 0;
-    const st = Math.max(1, Number(form.stories) || 1);
     if (sqft > 0) {
-      const fp = Math.round(sqft / st);
+      const fp = termiteFootprintFromHome(sqft, form.stories, form._suiteSizedLookup);
       setForm((f) => {
         // footprintUnknown lookup (association aggregate, story count
         // unknown): homeSqFt is the summed living area and stories a
@@ -2206,7 +2215,7 @@ export default function EstimateToolViewV2({
         return { ...f, ...upd, _termiteFootprintAuto: true };
       });
     }
-  }, [form.homeSqFt, form.stories, form.svcTermiteBait]);
+  }, [form.homeSqFt, form.stories, form.svcTermiteBait, form._suiteSizedLookup]);
 
   useEffect(() => {
     const q = customerSearch.trim();
@@ -3097,6 +3106,7 @@ export default function EstimateToolViewV2({
           // Rides the form so the homeSqFt/stories effect can't re-derive a
           // footprint the lookup refused to claim (codex P1 #2721).
           _footprintUnknownLookup: ep.footprintUnknown === true,
+          _suiteSizedLookup: Boolean(ep.suiteSize),
           _poolCageSizeEdited: false,
           _storiesEdited: !!f._storiesEdited,
           _unitCountEdited: false,
@@ -4126,6 +4136,7 @@ export default function EstimateToolViewV2({
       serviceSpecificDiscountKeys: [],
       _termiteFootprintAuto: false,
       _footprintUnknownLookup: false,
+      _suiteSizedLookup: false,
       _trenchingPerimeterAuto: false,
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
@@ -4730,6 +4741,7 @@ export default function EstimateToolViewV2({
                       trenchingEstimateFromFootprint: false,
                       _termiteFootprintAuto: false,
                       _footprintUnknownLookup: false,
+                      _suiteSizedLookup: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,
                       _preslabSqftAuto: false,

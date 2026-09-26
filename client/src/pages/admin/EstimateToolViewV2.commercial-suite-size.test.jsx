@@ -8,7 +8,7 @@
  * has no story count of its own — the suite IS the footprint.
  */
 import { describe, expect, it } from "vitest";
-import { buildTurfRequestProfile } from "./EstimateToolViewV2";
+import { buildTurfRequestProfile, termiteFootprintFromHome } from "./EstimateToolViewV2";
 
 const baseForm = {
   homeSqFt: "",
@@ -52,5 +52,15 @@ describe("buildTurfRequestProfile — suite-sized commercial profile", () => {
   it("a suite profile with footprintUnknown never derives a footprint anyway (suite branch is checked first)", () => {
     const profile = buildTurfRequestProfile(suiteProfile({ footprintUnknown: true }), baseForm);
     expect(profile.footprint).toBe(1400);
+  });
+});
+
+describe("termiteFootprintFromHome", () => {
+  it("a suite-sized lookup never divides by the building's story count", () => {
+    expect(termiteFootprintFromHome(1400, "2", true)).toBe(1400);
+  });
+  it("an ordinary home still derives footprint from stories", () => {
+    expect(termiteFootprintFromHome(2400, "2", false)).toBe(1200);
+    expect(termiteFootprintFromHome(2400, "", false)).toBe(2400);
   });
 });

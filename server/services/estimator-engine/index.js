@@ -2664,8 +2664,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // type — so re-resolve with those instead (no web leg: the
             // lookup already ran it, and it sizes nothing).
             const lookupSuiteSize = effectiveSignals.enriched?.suiteSize || null;
+            // A tech-verified suite size from the lookup is a field
+            // measurement and is adopted as-is (never re-resolved over).
             let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
-              && lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS) ? lookupSuiteSize : null;
+              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === 'verified'))
+              ? lookupSuiteSize : null;
             if (!suiteSize) {
               const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
               const { suiteAddressParts } = require('../commercial-suite-size/address-parts');

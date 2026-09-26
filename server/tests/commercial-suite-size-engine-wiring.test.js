@@ -160,7 +160,7 @@ describe('engine adoption of the lookup suite size', () => {
   test('adopts only a license-sourced lookup size; a lookup type default is re-resolved with the call context', () => {
     const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
     expect(i).toBeGreaterThan(-1);
-    const block = src.slice(i, i + 1400);
+    const block = src.slice(i, i + 2400);
     expect(block).toMatch(/lookupSuiteSize\.source === SQFT_SOURCES\.LICENSE_SEATS/);
     expect(block).toMatch(/phone: context\?\.phone/);
     expect(block).toMatch(/skipWebSearch: Boolean\(lookupSuiteSize\)/);
@@ -189,5 +189,15 @@ describe('engine suite sizing depends on unit-scope guardrails (declared)', () =
     expect(guard).toBeGreaterThan(-1);
     expect(suite).toBeGreaterThan(apply);
     expect(src.slice(guard - 600, guard)).toMatch(/GATE_UNIT_SCOPE_GUARDRAILS is off/);
+  });
+});
+
+describe('engine adopts a tech-verified lookup suite size', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('verified is adopted alongside license seats, never re-resolved over', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
+    expect(src.slice(i, i + 900)).toMatch(/lookupSuiteSize\.source === 'verified'/);
   });
 });
