@@ -2688,6 +2688,23 @@ function coveredTermsAsOf(conn, coverageDate = null) {
     );
 }
 
+// Codex pre-push P1 (follows from the round-1 "decline before install"
+// reversal): a decided-lapse term (status 'cancelled', renewal_decision
+// 'cancel') that anchors to a LATER-completed installation must still get
+// its coverage year seeded/attached/prepaid-stamped — the decline only
+// refuses the FUTURE renewal, the coverage year already paid for is
+// untouched. This is the SAME "is this decided-lapse term's coverage still
+// live" test coveredTermsAsOf uses (paid invoice, not cancelled/refunded) —
+// scoped to one row, reused rather than re-derived, so the anchor path can
+// never disagree with the completion-billing gate about whether this term
+// is covered. A void/refund 'cancelled' term (renewal_decision NULL) is
+// never this shape and always returns false.
+async function isPaidDecidedLapseTerm(term, conn = db) {
+  if (!term?.id || term.status !== 'cancelled' || term.renewal_decision !== 'cancel') return false;
+  const row = await coveredTermsAsOf(conn).where('t.id', term.id).first('t.id');
+  return !!row;
+}
+
 // Fail-closed coverage test for completion billing. An annual-prepay-stamped
 // visit is COVERED when its explicit stamp (prepaid_method === annual_prepay_invoice)
 // is backed by a term whose paid coverage is STILL LIVE on the visit date
@@ -2776,7 +2793,7 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   }
 }
 
-async function refreshTermSnapshot(termOrId, conn = db) {
+async function refreshTermSnapshot(termOrId, conn = db, { anchorInstallation = false } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
     ? termOrId
@@ -2803,7 +2820,18 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (term.status !== PAYMENT_PENDING_STATUS) {
     await detachCallbacksFromTerm(term, conn);
   }
-  if (ACTIVE_STATUSES.includes(term.status)) {
+  // Codex pre-push P1: the installation-anchor caller (anchorTermToInstallation)
+  // opts in with anchorInstallation:true so a decided-lapse term (declined
+  // online BEFORE its installation, then anchored once it completes) still
+  // gets its paid coverage year seeded/attached/stamped here — gated on the
+  // SAME paid/not-refunded test coveredTermsAsOf uses (isPaidDecidedLapseTerm),
+  // never on status alone. Every other caller leaves this false, so an
+  // ordinary decided-lapse term elsewhere (declined AFTER its coverage had
+  // already seeded while active) is untouched — this only adds a path that
+  // was otherwise unreachable, it narrows nothing.
+  const coverageEligible = ACTIVE_STATUSES.includes(term.status)
+    || (anchorInstallation && await isPaidDecidedLapseTerm(term, conn));
+  if (coverageEligible) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
     // Attach + prepaid stamping run even on a palm-identity DEFERRAL
@@ -4737,6 +4765,13 @@ async function createTermForAnnualPrepay({
   // stamped after this returns, the first refresh would seed a signature-day
   // coverage visit before the installation ever anchors the term.
   annualPlanVersion = undefined,
+  // Codex pre-push P1: set only by anchorTermToInstallation's window-move
+  // call — lets a decided-lapse (declined-before-install) term's paid
+  // coverage year seed/attach/stamp through THIS refresh the same as an
+  // active term's, and reconcile/re-stamp exactly like a normal anchored
+  // term does. Forwarded to refreshTermSnapshot below; every other caller
+  // leaves it false (byte-identical to before this option existed).
+  anchorInstallation = false,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -4938,23 +4973,34 @@ async function createTermForAnnualPrepay({
       }
     }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
-    const refreshed = await refreshTermSnapshot(existing.id, conn);
-    if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
+    const refreshed = await refreshTermSnapshot(existing.id, conn, { anchorInstallation });
+    // Codex pre-push P1: a decided-lapse term (declined before its
+    // installation, anchorInstallation:true) that is still PAID gets the
+    // SAME reconcile/stamp treatment below as an ACTIVE one — its coverage
+    // year is untouched by the decline. isPaidDecidedLapseTerm short-circuits
+    // on status alone for every other caller (anchorInstallation defaults
+    // false), so this adds a path rather than widening the existing one.
+    const coverageEligible = refreshed && (
+      ACTIVE_STATUSES.includes(refreshed.status)
+      || (anchorInstallation && await isPaidDecidedLapseTerm(refreshed, conn))
+    );
+    if (coverageEligible) {
       await syncCustomerRenewalDate(customerId, dateOnly(refreshed.term_end), conn);
-      // A term that is ACTIVE here was born (or re-anchored) already paid —
-      // the Customer 360 flow records the invoice payment BEFORE creating the
-      // term, so syncTermForInvoicePayment never fires for it and its
-      // pending-window completed visits would stay double-billed. Run the
-      // same reconcile the payment sync runs (post-commit when inside a
-      // caller trx); idempotent, so terms that DID arrive through the
-      // payment sync are unaffected.
+      // A term that is ACTIVE (or a paid decided-lapse) here was born (or
+      // re-anchored) already paid — the Customer 360 flow records the
+      // invoice payment BEFORE creating the term, so syncTermForInvoicePayment
+      // never fires for it and its pending-window completed visits would
+      // stay double-billed. Run the same reconcile the payment sync runs
+      // (post-commit when inside a caller trx); idempotent, so terms that
+      // DID arrive through the payment sync are unaffected.
       await reconcileBornPaidTerm(refreshed, conn);
-      // Stamp only once the term is genuinely ACTIVE (paid). A
-      // payment_pending term must leave the customer 'per_application':
-      // pending-window completions bill per application until the annual
-      // invoice is paid, and the annual_prepay stamp would divert them to
-      // the monthly-membership dispatch path (Codex round-2). The payment
-      // sync (syncTermForInvoicePayment) stamps on pending→active.
+      // Stamp only once the term is genuinely paid (ACTIVE, or a paid
+      // decided-lapse anchoring its coverage year). A payment_pending term
+      // must leave the customer 'per_application': pending-window
+      // completions bill per application until the annual invoice is paid,
+      // and the annual_prepay stamp would divert them to the
+      // monthly-membership dispatch path (Codex round-2). The payment sync
+      // (syncTermForInvoicePayment) stamps on pending→active.
       await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
     }
     return refreshed;
@@ -4993,8 +5039,15 @@ async function createTermForAnnualPrepay({
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
 
   await syncInvoiceTerm(prepayInvoiceId, term.id, conn);
-  const refreshed = await refreshTermSnapshot(term.id, conn);
-  if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
+  const refreshed = await refreshTermSnapshot(term.id, conn, { anchorInstallation });
+  // A brand-new insert never carries a renewal_decision, so
+  // isPaidDecidedLapseTerm is inert here (kept only for symmetry with the
+  // "existing" branch above) — this stays ACTIVE-only in practice.
+  const coverageEligible = refreshed && (
+    ACTIVE_STATUSES.includes(refreshed.status)
+    || (anchorInstallation && await isPaidDecidedLapseTerm(refreshed, conn))
+  );
+  if (coverageEligible) {
     await syncCustomerRenewalDate(customerId, normalizedEnd, conn);
     // Born already paid (Customer 360 records the payment before creating the
     // term), so the payment sync's reconcile never fires for this term — run

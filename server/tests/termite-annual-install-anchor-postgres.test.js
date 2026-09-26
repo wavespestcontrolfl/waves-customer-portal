@@ -488,7 +488,9 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     await addVisit(db, { scheduled_date: SIGNED_ON });
     expect((await sweep()).anchored).toBe(1);
     expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
-    expect(refreshTermSnapshot).toHaveBeenCalledWith(ids.termId, expect.anything());
+    // Codex pre-push P1: anchorInstallation:true is what lets a decided-lapse
+    // term's paid coverage seed/attach/stamp through this same refresh.
+    expect(refreshTermSnapshot).toHaveBeenCalledWith(ids.termId, expect.anything(), { anchorInstallation: true });
     expect(anchoredWhenRefreshed).toEqual([true]);
   });
 
