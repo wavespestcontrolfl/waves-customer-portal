@@ -665,7 +665,7 @@ router.get('/termite-bond', async (req, res, next) => {
 // isPaidDecidedLapseTerm (the same live-coverage test coveredTermsAsOf
 // uses) before it is ever shown as covered (codex pre-push P1).
 const { etDateString } = require('../utils/datetime-et');
-const { dateOnlyString } = require('../utils/date-only');
+const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
 const { validate: isUuid } = require('uuid');
 const {
   declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm, isCoveredTerm, termPropertyLabelsForCustomer,
@@ -681,12 +681,6 @@ const {
 // unlabeled or still colliding after that maps to null, and the caller
 // withholds its decline control (fail closed). A single term keeps
 // whatever label it has — there is nothing to confuse it with.
-function renewalDateText(ymd) {
-  return new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
-    timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric',
-  });
-}
-
 function distinctTermLabels(rows, labels) {
   // Codex #4940 r7 P1: on a multi-term account only a TERM-TIED label (the
   // estimate's quoted address, or its linked property) can tell cards apart
@@ -707,7 +701,7 @@ function distinctTermLabels(rows, labels) {
     const termEnd = dateOnlyString(term.term_end);
     if (!label || !(first.get(label) > 1)) continue;
     if (coverageAwaitsInstallation(term)) out.set(term.id, `${label} (awaiting installation)`);
-    else if (termEnd) out.set(term.id, `${label} (renews ${renewalDateText(termEnd)})`);
+    else if (termEnd) out.set(term.id, `${label} (renews ${formatDateOnly(termEnd)})`);
   }
   const second = tally();
   for (const term of rows) {
