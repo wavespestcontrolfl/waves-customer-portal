@@ -702,6 +702,16 @@ function isAnnualPlanEstimate(estData) {
 // after activation), or the sign-before-pay deferral stamp on the estimate
 // (exists from the accept transaction on; column-guarded because it ships in
 // a later slice). true / false / 'error' like isAnnualPrepayAccept.
+// Slice 3b: only these two deferral-stamp values are DURABLE evidence of a
+// live (or completed) sign-before-pay park. 'signature_expired' is a
+// PERSISTED annual_plan_activation_status too, but it means the offer
+// closed unsigned — it must never license issuing or reissuing an annual
+// agreement, or prepaid auto-renewal wording, for this estimate again. A
+// bare truthy check here would treat 'signature_expired' the same as
+// 'awaiting_signature', which would let the reconciliation sweeps keep
+// drafting v3 agreements for an estimate whose plan already closed.
+const DURABLE_ANNUAL_PLAN_STAMPS = ['awaiting_signature', 'activated'];
+
 async function annualPlanDurableEvidence(estimate, conn = db) {
   if (!estimate?.id) return false;
   try {
@@ -714,10 +724,10 @@ async function annualPlanDurableEvidence(estimate, conn = db) {
       .whereNotIn('status', TERMINAL_PREPAY_TERM_STATUSES)
       .first('id');
     if (term) return true;
-    if (estimate.annual_plan_activation_status) return true;
+    if (DURABLE_ANNUAL_PLAN_STAMPS.includes(estimate.annual_plan_activation_status)) return true;
     if (await conn.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
       const row = await conn('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
-      return !!row?.annual_plan_activation_status;
+      return DURABLE_ANNUAL_PLAN_STAMPS.includes(row?.annual_plan_activation_status);
     }
     return false;
   } catch (err) {
@@ -811,6 +821,11 @@ async function retireSamePropertyOpenAgreements(customerId, estimate) {
   let keptReplacement = false;
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+    // Customer row before any contract row: the event inserts below take a
+    // key lock on the customer, so contract-first cycled with the paths that
+    // lock customer → contract (/:token/sign, /:id/cancel, createShareLink,
+    // expireDocumentRequests, the annual close-out).
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
     // Active-version truth is read UNDER the lock (both template rows
     // FOR UPDATE) — a v3 published after the caller's snapshot can't get a
     // freshly issued current request branded stale and cancelled here.
@@ -1241,6 +1256,11 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // duplicate drafts — the advisory xact lock + in-transaction re-check
       // make the dedupe atomic (pre-push P1).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
+      // Customer row before any contract row: the event inserts below take a
+      // key lock on the customer, so contract-first cycled with the paths that
+      // lock customer → contract (/:token/sign, /:id/cancel, createShareLink,
+      // expireDocumentRequests, the annual close-out).
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
       // Revalidate the template's active version under the lock: an admin
       // publish/reactivation between the pre-transaction reads and here
       // must not let us insert (and autosend) an agreement rendered from a
@@ -1259,6 +1279,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // not have us insert (and autosend) from a just-disabled template —
       // the version pointer alone doesn't move on pause/archive.
       if (!liveTemplate || liveTemplate.status !== 'active' || liveTemplate.active_version_id !== version.id) return 'version_changed';
+      // Slice 3b: never draft an ANNUAL agreement for an estimate whose
+      // offer closed unsigned. Re-read under the lock above, which the
+      // close-out (termite-annual-activation.js expireAbandonedSignature)
+      // also takes: an evidence check done before this transaction can be
+      // stale by the time a close-out commits.
+      if (prepared.templateKey === ANNUAL_TEMPLATE_KEY && estimate?.id
+        && await trx.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
+        const current = await trx('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
+        if (current?.annual_plan_activation_status === 'signature_expired') return 'offer_closed';
+      }
       // FOR UPDATE: the status re-read must be current when we cancel — a
       // customer signing the older agreement concurrently would otherwise
       // commit 'signed' between our unlocked read and an unconditional
@@ -1371,6 +1401,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // Retryable: the next sweep re-reads the fresh active version.
       return { ok: false, skipped: 'version_changed' };
     }
+    if (contract === 'offer_closed') {
+      // Terminal: the plan offer closed unsigned (slice 3b) — re-quote.
+      return { ok: false, skipped: 'annual_plan_offer_closed' };
+    }
     if (!contract) {
       const winner = await existingBlockingProgramAgreement(customerId, estimate);
       return { ok: true, skipped: 'already_exists', contractId: winner?.id || null };
@@ -1432,6 +1466,15 @@ async function cancelStaleSource(row, conn = db) {
   // our transaction commits (the cancel already applied to a genuinely
   // stale request). No MVCC-snapshot window remains.
   return conn.transaction(async (trx) => {
+    // The same order every program-agreement writer holds: the per-customer
+    // advisory lock, then the customer row, then templates, then contracts
+    // (issuance, the manual admin issue, the annual close-out); the cancel
+    // event below takes the customer FK key lock (Codex #4922 r4). Callers
+    // never hold this advisory lock across the call.
+    if (row.customer_id) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${row.customer_id}`]);
+      await trx('customers').where({ id: row.customer_id }).forUpdate().first('id');
+    }
     if (row.document_template_version_id && row.document_template_key) {
       const template = await trx('document_templates')
         .where({ template_key: row.document_template_key })
