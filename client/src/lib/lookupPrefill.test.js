@@ -181,6 +181,10 @@ describe("reopened estimate scrub (legacy-reopen follow-up to #4862 / #4871)", (
     expect(cleared).toEqual([]);
     expect(scrubReopenedEstimateForm({}, { ...UNIT_PARCEL, estimatedBedAreaSf: 6000, bedAreaSource: "estimated" }).cleared)
       .toEqual(["lawn and bed areas from the development's parcel"]);
+    // The parcel's hardscape / bed percentages size the lot-fallback turf (codex r2 P1).
+    expect(scrubReopenedEstimateForm({ lotSqFt: "1500", _lotSqFtEdited: true },
+      { ...UNIT_PARCEL, imperviousSurfacePercent: 35 }).cleared)
+      .toEqual(["lawn and bed areas from the development's parcel"]);
   });
 
   it("leaves a whole-home estimate alone", () => {

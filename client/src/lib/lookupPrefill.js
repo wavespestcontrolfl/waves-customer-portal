@@ -88,12 +88,13 @@ const UNIT_PARCEL_AREA_READS = [
   "estimatedBedAreaSf", "estimatedBedAreaPercent", "bedAreaSource",
 ];
 
-// A priced profile still carrying the development parcel's turf or bed read.
-// The request builder writes a TYPED bed area into estimatedBedAreaSf too,
+// A priced profile still carrying the development parcel's turf, bed, or
+// hardscape read — the percentages size the lot-fallback turf too (codex r2
+// P1). The request builder writes a TYPED bed area into estimatedBedAreaSf,
 // marked bedAreaSource 'manual' — that one is the operator's (pre-push P1).
 function pricedFromParcelAreaReads(profile) {
-  return Number(profile.estimatedTurfSf) > 0
-    || Number(profile.turfFallbackPreviewSf) > 0
+  return ["estimatedTurfSf", "turfFallbackPreviewSf", "imperviousSurfacePercent",
+    "imperviosSurfacePercent", "estimatedBedAreaPercent"].some((key) => Number(profile[key]) > 0)
     || (Number(profile.estimatedBedAreaSf) > 0 && profile.bedAreaSource !== "manual");
 }
 
