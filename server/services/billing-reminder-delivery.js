@@ -121,8 +121,11 @@ function ledgerInvoiceIds(invoiceId, invoiceIds) {
 // offLedgerBalanceCents (rail-guard defaults it to 0): debt the ledger does not hold (e.g. late monthly dues
 // on the previsit reminder) that the producer's own policy check counted; the
 // per-leg recheck must count it too or a dues-only reminder reads as no debt.
+// policyInvoiceIds pins a frozen collectible aggregate. It is separate from
+// ledger invoiceIds: annual-prepay can record a draft invoice while the policy
+// deliberately evaluates its amount as off-ledger debt.
 async function sendReminderChannels({
-  customerId, invoiceId, invoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents,
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents,
 }) {
   const progress = await reminderProgress(customerId, source, channels);
   const existing = progress.find((event) => event.metadata.notificationEventKey === eventKey);
@@ -135,6 +138,7 @@ async function sendReminderChannels({
     && !delivered.has(channel) && !resolved.has(channel));
   const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
     customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), logTag: 'billing-reminder',
+    invoiceIds: policyInvoiceIds,
     detail: true,
   })));
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');

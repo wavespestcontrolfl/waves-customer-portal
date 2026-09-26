@@ -18,15 +18,18 @@ const postgres = SKIP ? describe.skip : describe;
 const schema = `billing_email_reservation_${randomUUID().replaceAll('-', '')}`;
 let admin;
 
-function context({ customerId, invoiceId, eventKey, ledgerId }) {
+function context({ customerId, invoiceId, eventKey, ledgerId, source = 'late_payment_checker' }) {
   return {
     schema_version: 1,
     customer_id: customerId,
     invoice_id: invoiceId,
     category: 'billing',
-    source_entry_point: 'late_payment_checker',
+    source_entry_point: source,
     notificationEventKey: eventKey,
     collections_ledger_id: ledgerId,
+    ...(source === 'invoice_followup_sequence'
+      ? { followup_sequence_id: 'sequence-1', rendered_amount: '89.00' }
+      : {}),
   };
 }
 
@@ -157,6 +160,25 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     expect(rows.find((row) => row.id === email.id).metadata.delivered).toBe(true);
     expect(rows.find((row) => row.id === sibling.id).metadata.delivered).toBeUndefined();
     expect(rows.find((row) => row.id === wrongSource.id).metadata.delivered).toBeUndefined();
+  });
+
+  test('persisted invoice-followup replay repairs its invoice_followups reservation', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const eventKey = 'invoice-followup:sequence-1:day-3';
+    const email = ledger({ customerId, invoiceId, eventKey, source: 'invoice_followups' });
+    const stored = message(context({ customerId, invoiceId, eventKey, ledgerId: email.id,
+      source: 'invoice_followup_sequence' }), { status: 'sent', sent_at: new Date() });
+    await mockDatabase('collections_contact_ledger').insert(email);
+    await mockDatabase('email_messages').insert(stored);
+
+    const progress = await require('../services/billing-reminder-delivery')
+      .reminderProgress(customerId, 'invoice_followups', ['email']);
+    expect(progress).toHaveLength(1);
+    expect(progress[0]).toMatchObject({ complete: true });
+    expect(progress[0].delivered).toEqual(new Set(['email']));
+    await expect(mockDatabase('collections_contact_ledger').where({ id: email.id }).first())
+      .resolves.toMatchObject({ metadata: expect.objectContaining({ delivered: true }) });
   });
 
   test('terminal refusal resolves only Email and never claims delivery', async () => {
