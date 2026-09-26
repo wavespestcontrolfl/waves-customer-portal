@@ -82,9 +82,16 @@ jest.mock('../services/voicemail-lead-sms', () => ({ _deferredClaims: mockVmClai
 jest.mock('../services/account-membership-email', () => ({
   sendCancellationReceived: jest.fn(async () => ({ ok: true })),
 }));
+const mockReplayBillingRetryEmail = jest.fn(async () => ({
+  sent: true, channel: 'email', deliveryOutcome: 'accepted',
+}));
+jest.mock('../services/billing-retry-email-obligation', () => ({
+  replayPaymentRetryNotice: (...args) => mockReplayBillingRetryEmail(...args),
+}));
 
 const db = require('../models/db');
 const {
+  invoiceStillCollectible,
   recheckDeferredReplay,
   dispatchDeferredReplay,
   finalizeDeferredReplay,
@@ -114,6 +121,31 @@ describe('deferred-replay registry', () => {
     delete _registry.test_dispatch_deferred;
   });
 
+  test('invoice collectibility uses the injected database for the invoice and sequence reads', async () => {
+    const heldDatabase = jest.fn((table) => {
+      if (table === 'invoices') return firstChain({
+        id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null,
+      });
+      if (table === 'invoice_followup_sequences') return firstChain({ status: 'stopped' });
+      throw new Error(`Unexpected table ${table}`);
+    });
+    await expect(invoiceStillCollectible({
+      invoice_id: 'inv-1', followup_sequence_id: 'seq-1',
+    }, heldDatabase)).resolves.toEqual({ eligible: false, reason: 'sequence-stopped' });
+    expect(heldDatabase.mock.calls.map(([table]) => table))
+      .toEqual(['invoices', 'invoice_followup_sequences']);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('exports the canonical collectibility check for billing Email eligibility', async () => {
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'paid' }));
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
+    db.mockReturnValueOnce(throwChain());
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, retryable: true });
+  });
+
   test('registered dispatch owns the replay and receives its trusted claim metadata', async () => {
     const outcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'fixture-provider-id' };
     const dispatch = jest.fn(async () => outcome);
@@ -123,6 +155,23 @@ describe('deferred-replay registry', () => {
 
     await expect(dispatchDeferredReplay('test_dispatch_deferred', meta, fallback)).resolves.toBe(outcome);
     expect(dispatch).toHaveBeenCalledWith(meta);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  test('only the Email-only replay is allowed to run without a recipient phone', () => {
+    const { replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
+    expect(replaysWithoutPhone('billing_retry_email_deferred')).toBe(true);
+    expect(replaysWithoutPhone('invoice_followup_deferred')).toBe(false);
+    expect(replaysWithoutPhone(undefined)).toBe(false);
+  });
+
+  test('billing retry Email obligations use their registered Email-only dispatcher', async () => {
+    const fallback = jest.fn(async () => ({ sent: true, channel: 'sms' }));
+    const meta = { customer_id: 'cust-1', payment_id: 'pay-1', retry_date: '2026-09-29' };
+    await expect(dispatchDeferredReplay('billing_retry_email_deferred', meta, fallback)).resolves.toMatchObject({
+      sent: true, channel: 'email', deliveryOutcome: 'accepted',
+    });
+    expect(mockReplayBillingRetryEmail).toHaveBeenCalledWith(meta);
     expect(fallback).not.toHaveBeenCalled();
   });
 

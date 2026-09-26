@@ -848,6 +848,7 @@ const TwilioService = {
 
       const providerSmsMetadata = () => ({
         pre_handoff_stamp: true,
+        ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
         // Durable provenance: the operator typed (or edited) this body in the
         // Comms composer. message_type 'manual' alone is overloaded across
         // automated senders, so readers that need "a human wrote this"
@@ -1327,6 +1328,7 @@ const TwilioService = {
           // the carrier verdict).
           metadata: JSON.stringify({
             pre_handoff_stamp: true,
+            ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
             ...(options.humanAuthored === true ? { human_authored: true } : {}),
             ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
             ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),

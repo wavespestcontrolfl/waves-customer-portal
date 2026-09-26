@@ -6,19 +6,19 @@ function readRepoFile(relativePath) {
 }
 
 describe('admin estimate roach UI copy', () => {
-  const files = [
-    'client/src/pages/admin/EstimatePage.jsx',
-    'client/src/pages/admin/EstimateToolViewV2.jsx',
-  ];
-
-  test.each(files)('%s separates recurring roach activity from standalone cleanouts', (relativePath) => {
-    const source = readRepoFile(relativePath);
+  test('the live admin estimator explains recurring roach activity without a per-visit multiplier', () => {
+    const source = readRepoFile('client/src/pages/admin/EstimateToolViewV2.jsx');
 
     expect(source).toContain('label="Roach Activity"');
     expect(source).toContain('Native / Palmetto / American roaches');
     expect(source).toContain('German roaches');
     expect(source).toContain('Adds a one-time Cockroach Treatment line to recurring pest.');
     expect(source).toContain('This is not a recurring per-visit multiplier.');
+    expect(source).toContain('recurringRoachType');
+  });
+
+  test('the live admin estimator keeps standalone native and German cleanouts explicit', () => {
+    const source = readRepoFile('client/src/pages/admin/EstimateToolViewV2.jsx');
 
     expect(source).toContain('Standalone Native Cockroach Treatment');
     expect(source).toContain('German Roach Cleanout');
@@ -34,7 +34,6 @@ describe('admin estimate roach UI copy', () => {
     expect(source).toContain('Medium \u2014 3 Visits ($450)');
     expect(source).toContain('Heavy \u2014 4 Visits ($550)');
 
-    expect(source).toContain('recurringRoachType');
     expect(source).toContain('standaloneRoachTreatment');
     expect(source).toContain('germanRoachCleanoutSelected');
     // Renamed 2026-07: the box now carries all hoisted pricing review
@@ -57,15 +56,12 @@ describe('admin estimate roach UI copy', () => {
 
   test('admin estimator exposes separate palm property and treatment counts', () => {
     const v2 = readRepoFile('client/src/pages/admin/EstimateToolViewV2.jsx');
-    const legacy = readRepoFile('client/src/pages/admin/EstimatePage.jsx');
     const fallback = readRepoFile('client/src/lib/estimateEngine.js');
 
-    for (const source of [v2, legacy]) {
-      expect(source).toContain('Palms on property');
-      expect(source).toContain('Palms to treat');
-      expect(source).toContain('palmTreatmentCount');
-      expect(source).toContain('Palm count is required for palm injection pricing.');
-    }
+    expect(v2).toContain('Palms on property');
+    expect(v2).toContain('Palms to treat');
+    expect(v2).toContain('palmTreatmentCount');
+    expect(v2).toContain('Palm count is required for palm injection pricing.');
 
     expect(v2).toContain('palmInjection');
     expect(v2).toContain('measurements: { palmCount: palmTreatmentCount }');

@@ -596,7 +596,10 @@ async function lockedPairAutoEligibility(trx, winner, loser) {
 // constraint). The loser's rows are explicitly deleted instead.
 // Field credit allocations retain the account that supplied the accepted
 // value. Their append-only guard must not abort an unrelated account merge.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations']);
+// Geocode reviews describe one customer's primary-address snapshot. Keep the
+// retired account's evidence attached to it: inheriting it would assert a new
+// verification, and two singleton rows must not abort an ordinary merge.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert

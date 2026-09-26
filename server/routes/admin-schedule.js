@@ -67,6 +67,8 @@ const {
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
+const { detectServiceLine } = require('../services/service-report/service-line-configs');
+const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -11817,6 +11819,108 @@ function addonLineRecurrence(line) {
 // that already recurs, a retained add-on reposted with a DIFFERENT pattern
 // than its stored one (one_time promoted to the plan, or a plan pattern
 // changed) — gated by id and by name with the new cadence.
+// Pairs a visit edit's posted add-on lines to the stored rows ONE-TO-ONE
+// (codex r26/r27 on #4786): first by the stored row's own id when a posted
+// line carries it (and the same identity), then by identity — catalog id,
+// else id-less name — in posted order. EVERY read of "which stored row is
+// this posted line" (storedLine) and "which posted line keeps this stored
+// row" (postedFor) goes through the pairing, so two stored copies of one
+// service (one one_time, one riding the parent) each resolve to their own
+// posted line, and a posted line left unpaired is an added line — a second
+// copy of an add-on already on the visit is gated like any new line. The
+// primary line's own catalog id is one occurrence too: a same-id posted
+// primary takes it first, else a posted primary that matches a stored
+// add-on's service moves that row to the primary.
+function pairVisitEditAddonLines({ current, currentAddons, postedServiceId, lines }) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const pairs = (l, a) => (l.serviceId
+    ? String(a?.service_id || '') === String(l.serviceId)
+    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
+  const pairedLine = new Map(); // stored row index -> posted line
+  const pairedStored = new Map(); // posted line -> stored row
+  const pairUp = (l, idx) => { pairedLine.set(idx, l); pairedStored.set(l, currentAddons[idx]); };
+  const firstFree = (match) => currentAddons.findIndex((a, i) => !pairedLine.has(i) && match(a));
+  // The PUT path hands the gate normalizeUpdateDetailsAddons' rows, which
+  // carry the stored row id as `submittedAddonId` (codex r28 on #4786).
+  const rowIdOf = (l) => (l.submittedAddonId != null ? l.submittedAddonId : l.id);
+  const sameRow = (l, a) => rowIdOf(l) != null && a?.id != null && String(rowIdOf(l)) === String(a.id);
+  for (const l of lines) {
+    const idx = firstFree((a) => sameRow(l, a) && pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
+  let primaryIdFree = !!current.service_id;
+  const takePrimaryId = (id) => {
+    if (!primaryIdFree || !id || String(id) !== String(current.service_id)) return false;
+    primaryIdFree = false;
+    return true;
+  };
+  const primaryAddedIds = [];
+  if (postedServiceId && !takePrimaryId(postedServiceId)) {
+    const idx = firstFree((a) => String(a?.service_id || '') === String(postedServiceId));
+    // The moved row stays on the visit as the primary, riding the parent.
+    if (idx >= 0) pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
+    // A row that ran on its own cadence (one_time, custom) now takes the
+    // parent's, so promoting it is a new plan line (codex r32 on #4786).
+    if (idx < 0 || currentAddons[idx]?.recurring_pattern) primaryAddedIds.push(String(postedServiceId));
+  }
+  for (const l of lines) {
+    if (pairedStored.has(l)) continue;
+    const idx = firstFree((a) => pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
+  return {
+    storedLine: (l) => pairedStored.get(l) || null,
+    postedFor: (a) => pairedLine.get(currentAddons.indexOf(a)) || null,
+    addedLines: lines.filter((l) => !pairedStored.has(l) && !takePrimaryId(l.serviceId)),
+    primaryAddedIds,
+  };
+}
+
+// The cadence a retained add-on will actually run at: the reposted line's
+// own, else the stored one (null rides the parent).
+function storedAddonRecurrence(a) {
+  return addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
+}
+
+// When the edit sells the visit's retained lines as a PLAN
+// (`plansRetainedLines`), every line that remains after the save is gated as
+// if newly added. A stored add-on survives an explicit replacement only when
+// reposted, and a one_time add-on never rides the parent's cadence (codex
+// r24); the primary line survives unless a different service id is posted
+// (the new one is gated as added). Every retained add-on name goes through,
+// catalog-backed or not (codex r23: a live 6x T&S add-on riding a parent that
+// just turned quarterly is the retired plan by name + cadence).
+function retainedPlanLinesForVisitEdit({ current, currentAddons, postedServiceId, addonsReplaced, renamed, pairing }) {
+  const effectiveRecurrence = (a) => {
+    const posted = pairing.postedFor(a);
+    return posted ? addonLineRecurrence(posted) : storedAddonRecurrence(a);
+  };
+  const ridesPlan = (a) => (effectiveRecurrence(a)?.pattern || null) !== 'one_time';
+  const retainedAddons = currentAddons.filter((a) => ridesPlan(a) && (!addonsReplaced || pairing.postedFor(a)));
+  const primaryRetained = !postedServiceId || String(postedServiceId) === String(current.service_id || '');
+  const keepsPrimaryLabel = primaryRetained && !renamed && typeof current.service_type === 'string' && !!current.service_type.trim();
+  return {
+    ids: [primaryRetained ? current.service_id : null, ...retainedAddons.map((a) => a?.service_id)].filter(Boolean).map(String),
+    names: [
+      ...(keepsPrimaryLabel ? [current.service_type] : []),
+      ...retainedAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
+        .map((a) => ({ label: a.service_name, recurrence: effectiveRecurrence(a) })),
+    ],
+  };
+}
+
+// On a visit that already recurs, a retained add-on reposted with a different
+// cadence than its stored one — pattern OR interval (codex r24: custom every
+// 60 days → every 90 days) — joins the plan at the new cadence.
+function repatternedAddonLinesForVisitEdit({ lines, pairing }) {
+  const cadenceKey = (r) => (r ? `${r.pattern || ''}|${r.intervalDays || ''}` : '');
+  return lines.filter((l) => {
+    const stored = pairing.storedLine(l);
+    return stored && (l.recurringPattern || null) !== 'one_time'
+      && cadenceKey(storedAddonRecurrence(stored)) !== cadenceKey(addonLineRecurrence(l));
+  });
+}
+
 function retiredGateInputsForVisitEdit({
   current, currentAddons = [], postedServiceId = null, postedAddons = null, serviceType, plansRetainedLines = false,
 }) {
@@ -11830,98 +11934,17 @@ function retiredGateInputsForVisitEdit({
   const labelOf = (l) => ({ label: l.serviceName.trim(), recurrence: addonLineRecurrence(l) });
   const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
   const primaryLabel = typeof serviceType === 'string' && serviceType.trim() ? serviceType : (current.service_type || null);
-  const pairs = (l, a) => (l.serviceId
-    ? String(a?.service_id || '') === String(l.serviceId)
-    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
-  // Posted lines are paired to stored rows ONE-TO-ONE (codex r26/r27 on
-  // #4786): first by the stored row's own id when a posted line carries it
-  // (and the same identity), then by identity — catalog id, else id-less
-  // name — in posted order. EVERY read of "which stored row is this posted
-  // line" (storedLine) and "which posted line keeps this stored row"
-  // (postedFor) goes through the pairing, so two stored copies of one
-  // service (one one_time, one riding the parent) each resolve to their own
-  // posted line, and a posted line left unpaired is an added line — a second
-  // copy of an add-on already on the visit is gated like any new line. The
-  // primary line's own catalog id is one occurrence too: a same-id posted
-  // primary takes it first, else a posted primary that matches a stored
-  // add-on's service moves that row to the primary.
-  const pairedLine = new Map(); // stored row index -> posted line
-  const pairedStored = new Map(); // posted line -> stored row
-  const pairUp = (l, idx) => { pairedLine.set(idx, l); pairedStored.set(l, currentAddons[idx]); };
-  // The PUT path hands the gate normalizeUpdateDetailsAddons' rows, which
-  // carry the stored row id as `submittedAddonId` (codex r28 on #4786).
-  const rowIdOf = (l) => (l.submittedAddonId != null ? l.submittedAddonId : l.id);
-  const sameRow = (l, a) => rowIdOf(l) != null && a?.id != null && String(rowIdOf(l)) === String(a.id);
-  for (const l of lines) {
-    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && sameRow(l, a) && pairs(l, a));
-    if (idx >= 0) pairUp(l, idx);
-  }
-  let primaryIdFree = !!current.service_id;
-  const takePrimaryId = (id) => {
-    if (!primaryIdFree || !id || String(id) !== String(current.service_id)) return false;
-    primaryIdFree = false;
-    return true;
-  };
-  const primaryAddedIds = [];
-  if (postedServiceId && !takePrimaryId(postedServiceId)) {
-    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && String(a?.service_id || '') === String(postedServiceId));
-    // The moved row stays on the visit as the primary, riding the parent.
-    if (idx >= 0) {
-      pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
-      // A row that ran on its own cadence (one_time, custom) now takes the
-      // parent's, so promoting it is a new plan line (codex r32 on #4786).
-      const moved = currentAddons[idx];
-      if (moved?.recurring_pattern) primaryAddedIds.push(String(postedServiceId));
-    } else primaryAddedIds.push(String(postedServiceId));
-  }
-  for (const l of lines) {
-    if (pairedStored.has(l)) continue;
-    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && pairs(l, a));
-    if (idx >= 0) pairUp(l, idx);
-  }
-  const storedLine = (l) => pairedStored.get(l) || null;
-  const postedFor = (a) => pairedLine.get(currentAddons.indexOf(a)) || null;
-  const addedLines = lines.filter((l) => !pairedStored.has(l) && !takePrimaryId(l.serviceId));
-  // The cadence a retained add-on will actually run at: the reposted line's
-  // own, else the stored one (null rides the parent).
-  const storedRecurrence = (a) => addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
-  const effectiveRecurrence = (a) => { const posted = postedFor(a); return posted ? addonLineRecurrence(posted) : storedRecurrence(a); };
-  // A one_time add-on line never rides the parent's cadence, so a parent
-  // cadence change does not sell it as a plan (codex r24).
-  const ridesPlan = (a) => (effectiveRecurrence(a)?.pattern || null) !== 'one_time';
-  // Every retained add-on name — catalog-backed or not (codex r23: a live
-  // 6x T&S add-on riding a parent that just turned quarterly is the retired
-  // plan by name + cadence, while its id stays live).
-  // Lines that remain after this save: a stored add-on survives an explicit
-  // replacement only when reposted; the primary line survives unless a
-  // different service id is posted (the new one is gated as added).
-  const retainedAddons = currentAddons.filter((a) => ridesPlan(a) && (!addonsReplaced || postedFor(a)));
-  const primaryRetained = !postedServiceId || String(postedServiceId) === String(current.service_id || '');
-  const retainedIds = plansRetainedLines
-    ? [primaryRetained ? current.service_id : null, ...retainedAddons.map((a) => a?.service_id)].filter(Boolean).map(String)
-    : [];
-  const retainedNames = plansRetainedLines
-    ? [
-      ...(primaryRetained && !renamed && typeof current.service_type === 'string' && current.service_type.trim() ? [current.service_type] : []),
-      ...retainedAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
-        .map((a) => ({ label: a.service_name, recurrence: effectiveRecurrence(a) })),
-    ]
-    : [];
-  // A retained add-on reposted with a different cadence than its stored one
-  // — pattern OR interval (codex r24: custom every 60 days → every 90 days)
-  // — joins the plan at the new cadence.
-  const cadenceKey = (r) => (r ? `${r.pattern || ''}|${r.intervalDays || ''}` : '');
-  const repatterned = current.is_recurring && !plansRetainedLines
-    ? lines.filter((l) => {
-      const stored = storedLine(l);
-      return stored && (l.recurringPattern || null) !== 'one_time' && cadenceKey(storedRecurrence(stored)) !== cadenceKey(addonLineRecurrence(l));
-    })
-    : [];
+  const pairing = pairVisitEditAddonLines({ current, currentAddons, postedServiceId, lines });
+  const { addedLines, primaryAddedIds } = pairing;
+  const retained = plansRetainedLines
+    ? retainedPlanLinesForVisitEdit({ current, currentAddons, postedServiceId, addonsReplaced, renamed, pairing })
+    : { ids: [], names: [] };
+  const repatterned = current.is_recurring && !plansRetainedLines ? repatternedAddonLinesForVisitEdit({ lines, pairing }) : [];
   return {
     serviceIds: [...new Set([
       ...primaryAddedIds,
       ...addedLines.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
-      ...retainedIds,
+      ...retained.ids,
       ...repatterned.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
     ])],
     serviceTypes: [
@@ -11935,7 +11958,7 @@ function retiredGateInputsForVisitEdit({
       // pattern is the retired plan by name + cadence while its id is live —
       // the same shape POST / hands the gate for every add-on.
       ...addedLines.filter(named).map(labelOf),
-      ...retainedNames,
+      ...retained.names,
       ...repatterned.filter(named).map(labelOf),
     ],
   };
@@ -21726,6 +21749,7 @@ router.post('/generate-report', async (req, res) => {
       customerInteraction, customerConcern, pestActivityRating, photoCount,
       includeCustomerComms,
       structuredFindings, nextStepChips, companionFindings, typedActivityScore,
+      treeShrubReview,
     } = req.body;
 
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
@@ -21740,6 +21764,7 @@ router.post('/generate-report', async (req, res) => {
     const concernText = typeof customerConcern === 'string' ? customerConcern.trim() : '';
     const productsText = typeof productsApplied === 'string' ? productsApplied.trim() : '';
     const ratingNum = Number.isInteger(pestActivityRating) ? pestActivityRating : null;
+    const suppliedTreeShrubReview = treeShrubReview !== undefined && treeShrubReview !== null;
     // Same "is there enough to generate?" rule as the client (buildAiReportPayload).
     // photoCount is intentionally NOT sufficient on its own — the model can't see photos.
     // A confirmed photo-scored lawn assessment is substantive input on its
@@ -21841,7 +21866,8 @@ router.post('/generate-report', async (req, res) => {
       || concernText.length > 0
       || ratingNum !== null
       || typedHasFindingInput
-      || hasValidLawnAssessment;
+      || hasValidLawnAssessment
+      || suppliedTreeShrubReview;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     // Typed findings ground ONLY through the visit's completion profile —
     // without a scheduledServiceId the entire grounding block is skipped,
@@ -21852,6 +21878,13 @@ router.post('/generate-report', async (req, res) => {
       return res.status(400).json({
         error: 'Typed findings require the scheduled service — reopen the visit and try again.',
         code: 'typed_findings_require_service',
+      });
+    }
+    if (!scheduledServiceId && suppliedTreeShrubReview) {
+      return res.status(400).json({
+        error: 'Tree & shrub photo review requires the scheduled service. Reopen the visit, analyze the photos again, and retry Generate.',
+        code: 'tree_shrub_review_requires_service',
+        retryable: true,
       });
     }
 
@@ -21892,7 +21925,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, write generally. Do not fabricate sightings. ONE exception: tech-confirmed LAWN ASSESSMENT scores supplied in GROUNDING CONTEXT are verified findings for this visit — you may (and should) reference them and their deltas even when the notes do not repeat them.
+3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, write generally. Do not fabricate sightings. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
@@ -22078,7 +22111,7 @@ Customer concern (as reported, not a verified finding): ${promptConcern || 'None
 [FUTURE ADVICE — not completed work]
 Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
-Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you cannot see them; do not describe their contents)`;
+Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS with their limited provenance, never infer unseen photo contents)`;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -22105,6 +22138,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let typedFallbackObservations = [];
     let typedFallbackActions = [];
     let typedFallbackNextSteps = [];
+    let treeShrubReviewGrounding = null;
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -22124,6 +22158,39 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // panel sends one) must not break the route's fail-soft behavior for
       // a notes/products-grounded report (codex r12).
       const substantiveTypedFacts = primaryTypedInput || companionEntries.some(companionEntryHasInput);
+      if (svc === 'lookup_failed' && suppliedTreeShrubReview) {
+        return res.status(503).json({
+          error: 'Tree & shrub photo review could not be verified right now — try Generate again in a moment.',
+          code: 'tree_shrub_review_verification_unavailable',
+          retryable: true,
+        });
+      }
+      if (!svc && suppliedTreeShrubReview) {
+        return res.status(404).json({ error: 'Scheduled service not found' });
+      }
+      if (svc && suppliedTreeShrubReview) {
+        if (detectServiceLine(svc.service_type) !== 'tree_shrub') {
+          return res.status(400).json({
+            error: 'This photo review does not belong to a tree & shrub visit. Reopen the correct visit, analyze the photos again, and retry Generate.',
+            code: 'tree_shrub_review_service_mismatch',
+            retryable: true,
+          });
+        }
+        const reviewValidation = validateTreeShrubReviewForReport(treeShrubReview, {
+          serviceId: svc.id,
+        });
+        if (!reviewValidation.ok) {
+          return res.status(400).json({
+            error: 'The tree & shrub photo review is invalid or stale. Analyze the current photos again, confirm the review, and retry Generate.',
+            code: 'tree_shrub_review_invalid',
+            reason: reviewValidation.reason,
+            retryable: true,
+          });
+        }
+        treeShrubReviewGrounding = reviewValidation.grounding;
+        groundingServiceType = svc.service_type;
+        groundingServiceDate = svc.scheduled_date || serviceDate;
+      }
       if (svc === 'lookup_failed') {
         if (substantiveTypedFacts) {
           return res.status(503).json({
@@ -22302,7 +22369,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // gate open for callers the ownership branch refused, generating a
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
-      || hasValidLawnAssessment;
+      || hasValidLawnAssessment
+      || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0;
     if (!baseHasReportInput && !companionCustomerInput) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
@@ -22323,6 +22391,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         // confirmed row is superseded — no today section); absent (legacy
         // caller) falls back to the visit-linked lookup.
         lawnAssessmentId: groundingCustomerId ? lawnAssessmentId : undefined,
+        treeShrubReviewGrounding,
         serviceType: groundingServiceType,
         serviceLine: null, // derived from the server-side service type, not the body
         suppressPressureTrend: groundingSuppressPressure,
@@ -22334,6 +22403,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       contextSignals = ctx.signals || {};
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    if (Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
+      && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
+      return res.status(503).json({
+        error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
+        code: 'tree_shrub_review_grounding_unavailable',
+        retryable: true,
+      });
     }
 
     // Scores-only requests live or die by the assessment grounding: when the

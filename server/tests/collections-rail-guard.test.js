@@ -45,6 +45,16 @@ describe('gate on', () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1', 'inv-2'], denialReasons: [] });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
     expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'sms', purpose: 'late_payment' }));
+    expect(ContactPolicy.evaluate.mock.calls[0][1]).not.toHaveProperty('database');
+  });
+
+  test('forwards an explicitly held database without changing the default call', async () => {
+    const heldDatabase = jest.fn();
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({
+      ...BASE, invoiceId: 'inv-1', database: heldDatabase,
+    })).resolves.toBe(true);
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ database: heldDatabase }));
   });
 
   test('denied verdict blocks even for an eligible invoice', async () => {
@@ -91,9 +101,13 @@ describe('collectionsChannelVerdict', () => {
 
   test('gate on: allowed and denied verdicts both surface the eligible set', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const heldDatabase = jest.fn();
     ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
-    expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
+    expect(await collectionsChannelVerdict({
+      customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder', database: heldDatabase,
+    }))
       .toEqual({ permitted: true, eligibleInvoiceIds: ['inv-1'] });
+    expect(ContactPolicy.evaluate.mock.calls[0][1]).toEqual(expect.objectContaining({ database: heldDatabase }));
     ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, eligibleInvoiceIds: ['inv-1'], denialReasons: ['contact_within_24h'] });
     expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
       .toEqual({ permitted: false, eligibleInvoiceIds: ['inv-1'] });
@@ -104,5 +118,36 @@ describe('collectionsChannelVerdict', () => {
     ContactPolicy.evaluate.mockRejectedValueOnce(new Error('db down'));
     expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
       .toEqual({ permitted: false, eligibleInvoiceIds: [] });
+  });
+});
+
+describe('detail verdict', () => {
+  test('gate off permits with no durable denial', async () => {
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: true, durable: false });
+  });
+
+  test.each([
+    [['flag_do_not_email'], true],
+    [['suppression_unsubscribe'], true],
+    [['commercial_customer'], true],
+    [['contact_within_24h'], false],
+    [['balance_read_incomplete'], false],
+    [['contact_within_24h', 'flag_do_not_email'], true],
+  ])('denial %j is durable: %p', async (denialReasons, durable) => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons, eligibleInvoiceIds: ['inv-1'] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: false, durable });
+  });
+
+  test('an ineligible invoice and a failed consult are transient denials', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-2'] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: false, durable: false });
+    ContactPolicy.evaluate.mockRejectedValueOnce(new Error('db down'));
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: false, durable: false });
   });
 });
