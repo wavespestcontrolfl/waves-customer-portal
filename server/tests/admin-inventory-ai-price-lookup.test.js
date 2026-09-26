@@ -150,12 +150,22 @@ test('approvalsCreated reflects actual inserts, not the usable-entry count — a
   });
 });
 
-test('a non-numeric or zero price is not usable (matches the loop\'s own "!vendor || !result.price" gate)', async () => {
-  wireDb();
-  respondWith([{ vendor: 'Acme Supply', price: '42.50' }, { vendor: 'Acme Supply', price: 0 }]);
+test('a strictly numeric price string is usable and inserted as a number (Codex r12 on #4884)', async () => {
+  const inserts = wireDb();
+  respondWith([{ vendor: 'Acme Supply', price: ' 42.50 ' }]);
   await withServer(async (baseUrl) => {
-    const res = await lookup(baseUrl);
-    const body = await res.json();
+    const body = await (await lookup(baseUrl)).json();
+    expect(body.approvalsCreated).toBe(1);
+    expect(inserts[0]).toMatchObject({ new_price: 42.5 });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+});
+
+test('a non-numeric, zero or negative price is not usable', async () => {
+  wireDb();
+  respondWith([{ vendor: 'Acme Supply', price: 'about $40' }, { vendor: 'Acme Supply', price: 0 }, { vendor: 'Acme Supply', price: '-3' }, { vendor: 'Acme Supply', price: '0' }]);
+  await withServer(async (baseUrl) => {
+    const body = await (await lookup(baseUrl)).json();
     expect(body.approvalsCreated).toBe(0);
     expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
   });

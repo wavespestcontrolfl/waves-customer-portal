@@ -74,3 +74,14 @@ test('a normal text reply is not flagged', async () => {
   expect(result.generated).toBe(true);
   expect(ledgerCallRejected).not.toHaveBeenCalled();
 });
+
+// Codex r12 on #4884: five tool_use turns and no reply used to leave every row
+// successful; the turn that ended the loop is now failed.
+test('an exhausted tool loop fails the last round and returns the canned reply', async () => {
+  mockCreate.mockResolvedValue({ content: [{ type: 'tool_use', id: 't1', name: 'no_such_tool', input: {} }] });
+  const result = await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1' });
+  expect(result.reply).toMatch(/having trouble/i);
+  expect(mockCreate).toHaveBeenCalledTimes(5);
+  expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'tool_loop_exhausted');
+});

@@ -2352,6 +2352,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const toolActivity = [];
 
     // Tool-use loop
+    let lastToolResponse = null;
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
@@ -2393,6 +2394,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         if (!finalResponse.trim()) ledgerCallRejected(response, 'invalid_output');
         break;
       }
+      lastToolResponse = response;
 
       // Execute all tool calls using context-aware router
       const results = [];
@@ -2563,6 +2565,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
 
+    // finalResponse is still null only when every round was tool_use and the
+    // loop ran out — fail the round that ended it (Codex r12 on #4884).
+    if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }

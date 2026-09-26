@@ -190,6 +190,8 @@ class WavesAssistant {
       }
 
       // Tool-use loop — Claude may call multiple tools before responding
+      let lastResponse = null;
+      let loopExhausted = true;
       for (let turn = 0; turn < 5; turn++) {
         const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
           model: MODEL,
@@ -223,8 +225,10 @@ class WavesAssistant {
           // own row apart from one where every earlier turn correctly used
           // a tool; flag it here on the response that actually produced it.
           if (!finalReply.trim()) ledgerCallRejected(response, 'invalid_output');
+          loopExhausted = false;
           break;
         }
+        lastResponse = response;
 
         // Execute tool calls
         const toolResults = [];
@@ -260,6 +264,10 @@ class WavesAssistant {
       // model kept retrying it), finalReply is still empty — degrade to the
       // canned reply instead of persisting a blank customer-visible message.
       if (!finalReply.trim()) {
+        // Every turn was a (valid-looking) tool_use round, so no row was
+        // failed above; the call that ended the loop without a reply is the
+        // one that answered nothing (Codex r12 on #4884).
+        if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
         logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
         return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false };
       }

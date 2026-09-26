@@ -3555,10 +3555,21 @@ router.put('/:id', async (req, res, next) => {
 // loop, but a batch of nothing-but-those must not read as a successful
 // ledger call, and approvalsCreated must count real inserts, not raw
 // entries (Codex r8 on #4884).
+// A price may arrive as a number or a strictly numeric string ("42.50" —
+// the old loop accepted it and Postgres coerced it); anything else is null.
+function priceResultNumber(price) {
+  if (typeof price === 'number') return Number.isFinite(price) && price > 0 ? price : null;
+  if (typeof price === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(price)) {
+    const n = Number(price);
+    return n > 0 ? n : null;
+  }
+  return null;
+}
+
 function isUsablePriceResult(r) {
   return !!r && typeof r === 'object'
     && typeof r.vendor === 'string' && r.vendor.trim() !== ''
-    && typeof r.price === 'number' && Number.isFinite(r.price) && r.price > 0;
+    && priceResultNumber(r.price) !== null;
 }
 
 // =========================================================================
@@ -3689,17 +3700,18 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
         const existing = await db('vendor_pricing')
           .where({ product_id: productId, vendor_id: vendor.id }).first();
 
+        const newPrice = priceResultNumber(result.price);
         // Create approval entry
         try {
           await db('price_approvals').insert({
             product_id: productId,
             vendor_id: vendor.id,
             old_price: existing?.price || null,
-            new_price: result.price,
+            new_price: newPrice,
             new_quantity: result.quantity || null,
             source_url: result.url || null,
             price_change_pct: existing?.price
-              ? Math.round(((result.price - existing.price) / existing.price) * 10000) / 100
+              ? Math.round(((newPrice - existing.price) / existing.price) * 10000) / 100
               : null,
             status: 'pending',
             notes: `AI agent lookup — ${result.notes || ''}`,
@@ -3781,5 +3793,6 @@ router.quantityToOz = quantityToOz;
 // Shared web-search-result usability check (Codex r8 on #4884) —
 // procurement-tools.js's own price lookup applies the same validation.
 router.isUsablePriceResult = isUsablePriceResult;
+router.priceResultNumber = priceResultNumber;
 
 module.exports = router;

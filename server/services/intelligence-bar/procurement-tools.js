@@ -597,7 +597,7 @@ Search vendor websites for exact prices. Return JSON only:
     // isUsablePriceResult is admin-inventory.js's ai-price-lookup route's
     // own check on the identical response shape; shared rather than
     // duplicated a third time.
-    const { isUsablePriceResult } = require('../../routes/admin-inventory');
+    const { isUsablePriceResult, priceResultNumber } = require('../../routes/admin-inventory');
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)
       || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))
       || (parsed.results.length > 0 && !parsed.results.some(isUsablePriceResult))) {
@@ -614,7 +614,7 @@ Search vendor websites for exact prices. Return JSON only:
         try {
           await db('price_approvals').insert({
             product_id: product.id, vendor_id: vendor.id,
-            new_price: result.price, new_quantity: result.quantity || product.container_size,
+            new_price: priceResultNumber(result.price), new_quantity: result.quantity || product.container_size,
             source_url: result.url || null, status: 'pending',
           });
           approvalsCreated++;

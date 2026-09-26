@@ -111,3 +111,16 @@ test('a normal text reply is not flagged', async () => {
     expect(ledgerCallRejected).not.toHaveBeenCalled();
   });
 });
+
+// Codex r12 on #4884 (same class as the portal assistant): every round a
+// tool_use and the loop runs out — the round that ended it is failed.
+test('an exhausted tool loop fails the last round and still returns the fallback message', async () => {
+  mockMessagesCreate.mockResolvedValue({ content: [{ type: 'tool_use', id: 't1', name: 'no_such_tool', input: {} }] });
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).toMatch(/complex query that needed too many steps/i);
+    expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'tool_loop_exhausted');
+  });
+});
