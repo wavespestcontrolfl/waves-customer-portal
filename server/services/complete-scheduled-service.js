@@ -8178,8 +8178,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // A packet's effects phase replays the saved form, which strips photo
       // bytes (#4011's upload rule) — the committed 'after' rows are then the
       // submitted set and the vision input loads from S3 by key. A signed
-      // preview review cannot be re-verified without the bytes, so that
-      // replay re-scores the durable set instead of skipping the assessment.
+      // preview review uses the packet's server-verified original photo hash;
+      // older packets without that verification still re-score the durable set.
       const durableReplay = packetEffects && completionPhotos.every((p) => !(p && p.data));
       const submitted = completionPhotos.filter((p) => p && (p.data || durableReplay));
       const scorable = submitted
@@ -8197,8 +8197,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // /assess-preview — a tampered/stale client (or one that swapped photos at the
       // same count, or edited the observation copy) can't forge the HMAC, so it falls
       // back to re-scoring rather than persisting arbitrary client-supplied content.
-      const reviewPhotosHash = treeShrubPhotosHash(submitted.map((p) => p.data));
-      const reviewSigned = !durableReplay && review && review.signature
+      const reviewPhotosHash = durableReplay
+        ? packetContext.verifiedTreeShrubPhotosHash
+        : treeShrubPhotosHash(submitted.map((p) => p.data));
+      const reviewSigned = reviewPhotosHash && review && review.signature
         && review.signature === treeShrubReviewSignature(review.scores, review.scoredCount, svc.id, reviewPhotosHash, review.observations);
       let scoringPromise = null;
       if (review && review.scores && typeof review.scores === 'object' && allUploaded && previewCoveredAll && reviewSigned) {
@@ -11662,7 +11664,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // confirmed 'sent' drops it) — a morning double-link is coherent
             // copy; a night with no link is not.
             let paymentFailedNoticeDeferred = false;
-            if (!failResult.sent && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
+            if (!failResult.sent && require('./messaging/billing-channel-routing').REPLAY_HOLD_CODES.includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
               try {
                 const TWILIO_NUMBERS = require('../config/twilio-numbers');
                 await db('sms_log').insert({

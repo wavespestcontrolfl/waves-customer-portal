@@ -351,12 +351,26 @@ async function createShareLink(contractId, req) {
   let expiresAt = null;
   let error = null;
   await db.transaction(async (trx) => {
+    // Lock order (Codex #4922 r2 P2): unlocked peek → CUSTOMER row FOR
+    // UPDATE → contract, the order /:id/cancel, /:token/sign and the
+    // termite annual close-out hold — the event insert below takes a key
+    // lock on customers, so contract-first cycled with them.
+    const peek = await trx('customer_contracts').where({ id: contractId }).first('id', 'customer_id');
+    if (!peek) {
+      error = { status: 404, message: 'Contract not found' };
+      return;
+    }
+    if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
     const contract = await trx('customer_contracts')
       .where({ id: contractId })
       .forUpdate()
       .first();
     if (!contract) {
       error = { status: 404, message: 'Contract not found' };
+      return;
+    }
+    if (String(contract.customer_id || '') !== String(peek.customer_id || '')) {
+      error = { status: 409, message: 'Contract status changed. Refresh and try again.' };
       return;
     }
     if (SHARE_LINK_TERMINAL_STATUSES.includes(contract.status)) {
@@ -669,6 +683,182 @@ router.post('/:id/cancel', async (req, res, next) => {
 
     const updated = await loadContract(req.params.id);
     res.json({ contract: serializeContract(updated), updated: true, autopayRevoked });
+  } catch (err) { next(err); }
+});
+
+// Certified-operator countersignature on a signed termite annual protection
+// agreement (owner ruling 2026-09-25, A-14): a RECORD step after the
+// customer signs. It never gates activation, charging, or visit creation —
+// those stay entirely on the customer's own e-signature (the sign-before-pay
+// activation slice is #4819 and is untouched here). Restricted to the
+// annual key, only after the customer has signed, idempotent under the row
+// lock (a second attempt 409s rather than silently no-opping, so the admin
+// UI can tell the difference between "just countersigned" and "already
+// was"). Admin-only via this router's router.use(adminAuthenticate,
+// requireAdmin) — and, on top of that, only the DESIGNATED certified
+// operator in charge (codex #4842 r1 P1): any other admin gets a 403.
+//
+// The designation is TERMITE_CERTIFIED_OPERATOR_TECHNICIAN_IDS (comma list of
+// technicians.id; unset = nobody can countersign — fail closed). The
+// designated account must also hold an unexpired FL applicator license on
+// file, and the name recorded on the agreement and PDF is that verified
+// account's printed name. The operator still types it as evidence of intent,
+// but the typed text is only checked against it, never stored in its place.
+// An EXECUTED agreement: the customer signed it (signed_at stamped) and it
+// is signed, or was cancelled afterwards. Cancelling preserves signed_at
+// and the signature evidence, so the countersignature record step and the
+// executed copy stay available (codex #4842 r4). A contract cancelled
+// before anyone signed has no signed_at and never qualifies.
+const EXECUTED_STATUSES = ['signed', 'cancelled'];
+function isExecutedAgreement(contract) {
+  return !!contract?.signed_at && EXECUTED_STATUSES.includes(contract.status);
+}
+
+function designatedCertifiedOperatorIds() {
+  return String(process.env.TERMITE_CERTIFIED_OPERATOR_TECHNICIAN_IDS || '')
+    .split(',').map((id) => id.trim()).filter(Boolean);
+}
+
+function normalizedPersonName(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function applicatorLicenseCurrent(operator, now) {
+  if (!String(operator?.fl_applicator_license || '').trim()) return false;
+  // Repo convention (compliance picker): a missing expiry reads as active.
+  if (!operator.license_expiry) return true;
+  // Calendar dates, compared in ET: the license is valid THROUGH its expiry
+  // day (a UTC-midnight Date compare read the last valid day as expired).
+  const { dateOnlyString } = require('../utils/date-only');
+  const { etDateString } = require('../utils/datetime-et');
+  const expiry = dateOnlyString(operator.license_expiry);
+  return !!expiry && expiry >= etDateString(now);
+}
+
+router.post('/:id/countersign', async (req, res, next) => {
+  try {
+    const now = new Date();
+    const { ANNUAL_TEMPLATE_KEY } = require('../services/termite-program-agreement');
+    let response;
+    let countersignedId = null;
+
+    if (!req.technicianId || !designatedCertifiedOperatorIds().includes(String(req.technicianId))) {
+      return res.status(403).json({ error: 'Only the designated certified operator in charge can countersign this agreement.' });
+    }
+
+    await db.transaction(async (trx) => {
+      // Shared lock order (codex #4842 r2 P2): CUSTOMER row FOR UPDATE
+      // first, then the contract — the event insert below takes the
+      // customer FK lock, and customer merge / merge-undo lock customer
+      // before contract, so contract-first could deadlock with them. Same
+      // peek → customer lock → re-verify shape as /:id/cancel and
+      // /:token/sign.
+      const peek = await trx('customer_contracts')
+        .where({ id: req.params.id })
+        .first('id', 'customer_id');
+      if (!peek) {
+        response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (peek.customer_id) {
+        await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
+      }
+      const contract = await trx('customer_contracts')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!contract) {
+        response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (String(contract.customer_id || '') !== String(peek.customer_id || '')) {
+        // Repointed while we waited (a merge-undo) — retry under the right lock.
+        response = { status: 409, body: { error: 'This contract was just updated — reload and try again.' } };
+        return;
+      }
+      if (contract.contract_type !== 'document_template' || contract.document_template_key !== ANNUAL_TEMPLATE_KEY) {
+        response = { status: 400, body: { error: 'Only the Waves Subterranean Termite Protection annual agreement can be countersigned.' } };
+        return;
+      }
+      if (!isExecutedAgreement(contract)) {
+        response = { status: 409, body: { error: 'This agreement has not been signed by the customer yet.' } };
+        return;
+      }
+      if (contract.countersigned_at) {
+        response = { status: 409, body: { error: 'This agreement has already been countersigned.', countersignedAt: contract.countersigned_at } };
+        return;
+      }
+
+      // Typed-name evidence, validated like the customer's typed signature
+      // (contracts-public.js /:token/sign). The operator types their own
+      // name; it is never filled in for them.
+      const typedName = String(req.body?.name || '').trim();
+      if (typedName.length < 2 || typedName.length > 180) {
+        response = { status: 400, body: { error: 'Type your full name (2–180 characters) to countersign.' } };
+        return;
+      }
+
+      const operator = await trx('technicians')
+        .where({ id: req.technicianId })
+        .first('id', 'name', 'applicator_printed_name', 'fl_applicator_license', 'license_expiry');
+      if (!operator || !applicatorLicenseCurrent(operator, now)) {
+        response = { status: 403, body: { error: 'Your account has no current Florida applicator license on file, so it cannot countersign as the certified operator.' } };
+        return;
+      }
+      const countersignerName = String(operator.applicator_printed_name || operator.name || '').trim();
+      if (!countersignerName || normalizedPersonName(typedName) !== normalizedPersonName(countersignerName)) {
+        response = { status: 400, body: { error: `Type your name exactly as it appears on your applicator record (${countersignerName || 'no printed name on file'}) to countersign.` } };
+        return;
+      }
+
+      const updated = await trx('customer_contracts')
+        .where({ id: contract.id })
+        .whereIn('status', EXECUTED_STATUSES)
+        .whereNotNull('signed_at')
+        .whereNull('countersigned_at')
+        .update({
+          countersigned_at: now,
+          countersigned_by: req.technicianId || null,
+          countersigner_name: countersignerName,
+          countersigner_ip: req.ip || null,
+          countersigner_user_agent: req.get('user-agent') || null,
+          updated_at: now,
+        });
+      if (updated !== 1) {
+        response = { status: 409, body: { error: 'This agreement was just countersigned or changed — refresh and try again.' } };
+        return;
+      }
+      countersignedId = contract.id;
+      await insertEvent(trx, contract.id, contract.customer_id, 'countersigned', req, {
+        countersignerName,
+        applicatorLicense: String(operator.fl_applicator_license).trim(),
+      });
+    });
+
+    if (response) return res.status(response.status).json(response.body);
+    const updated = await loadContract(countersignedId);
+    res.json({ contract: serializeContract(updated), updated: true });
+  } catch (err) { next(err); }
+});
+
+// Executed copy for staff (codex #4842 r1 P2): the customer's public token
+// is burned at signing and the signed-copy email goes out before any
+// countersignature, so without this the "Certified Operator: <name>, <date>"
+// stamp (contract-pdf.js) would be reachable nowhere. Renders the CURRENT
+// row, so a countersigned agreement prints its countersignature. Signed
+// document-template contracts only; admin-only via router.use.
+router.get('/:id/pdf', async (req, res, next) => {
+  try {
+    const contract = await loadContract(req.params.id);
+    if (!contract) return res.status(404).json({ error: 'Contract not found' });
+    if (contract.contract_type !== 'document_template' || !isExecutedAgreement(contract)) {
+      return res.status(409).json({ error: 'Only a signed agreement has an executed copy to download.' });
+    }
+    const customer = await db('customers')
+      .where({ id: contract.customer_id })
+      .first('first_name', 'last_name', 'company_name');
+    const { generateContractPDF } = require('../services/pdf/contract-pdf');
+    return generateContractPDF(contract, customer || {}, res, { signed: true });
   } catch (err) { next(err); }
 });
 

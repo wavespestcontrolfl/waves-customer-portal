@@ -1,8 +1,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 let mockFrozenRodentSetup = 0;
+let mockTermiteSignBeforePay = false;
 jest.mock('../services/estimate-converter', () => ({
   convertEstimate: jest.fn(),
+  // Sign-before-pay predicate (codex #4819 r7) — tests flip it to exercise
+  // the termite annual Station Setup exemption.
+  isTermiteAnnualSignBeforePayAccept: jest.fn(() => mockTermiteSignBeforePay),
   // Frozen rodent bait-station setup the prepay invoice bills as its own
   // line (codex #3591 r24) — tests set mockFrozenRodentSetup to exercise it.
   frozenRodentBaitSetupAmount: jest.fn(() => mockFrozenRodentSetup),
@@ -26,6 +30,9 @@ jest.mock('../services/estimate-converter', () => ({
       ?? estData?.summary?.manualDiscount)?.floorBreach?.acknowledged === true
   ),
   resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
+  // Real cadence reader: manual acceptance now runs the retired-T&S-cadence
+  // gate (codex P1 r9), which reads each row's cadence through it.
+  explicitServiceCadence: (...args) => jest.requireActual('../services/estimate-converter').explicitServiceCadence(...args),
   // Real-enough commercial helpers for the taxed invoiceTotal path: key from
   // the row's service field, flat base rate, and a blended rate equal to the
   // base (single-line commercial quotes in these tests are fully taxable).
@@ -433,6 +440,56 @@ describe('estimate manual acceptance', () => {
     expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
   });
 
+  test('codex P1: a termite annual-plan manual accept with a DEFERRED invoice (sign-before-pay) does not throw — annualPlanActivationStatus stands in for draftInvoiceId', async () => {
+    const estimate = {
+      id: 'estimate-annual-plan-deferred',
+      status: 'viewed',
+      customer_id: 'customer-annual-plan',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      declined_at: null,
+      decline_reason: null,
+      monthly_total: '0.00',
+      annual_total: '300.00',
+      onetime_total: '0.00',
+      waveguard_tier: 'none',
+      estimate_data: {
+        recurring: {
+          services: [{ service: 'termite_bait', name: 'Termite Bait', frequency: 'annual', visitsPerYear: 1 }],
+        },
+        oneTime: { total: 0, items: [] },
+      },
+    };
+    const { database, updates } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = {
+      // Sign-before-pay (slice 3a): the converter defers — no invoice yet,
+      // annualPlanActivationStatus is the valid substitute signal.
+      convertEstimate: jest.fn().mockResolvedValue({
+        customerId: 'customer-annual-plan',
+        billingTerm: 'prepay_annual',
+        draftInvoiceId: null,
+        annualPlanActivationStatus: 'awaiting_signature',
+      }),
+    };
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-annual-plan',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService,
+      estimateConverter,
+    });
+
+    expect(updates[0].patch).toMatchObject({ status: 'accepted' });
+    expect(result.conversion).toEqual(expect.objectContaining({
+      draftInvoiceId: null,
+      annualPlanActivationStatus: 'awaiting_signature',
+    }));
+  });
+
   test('manual annual prepay rejects estimates without recurring value before marking accepted', async () => {
     const estimate = {
       id: 'estimate-no-recurring-prepay',
@@ -501,7 +558,9 @@ describe('estimate manual acceptance', () => {
       waveguard_tier: 'Bronze',
       estimate_data: {
         recurring: {
-          services: [{ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'monthly' }],
+          // Live 6x cadence: monthly (12x Premium) T&S is a retired cadence the
+          // manual-accept gate refuses (codex P1 r9); this test is about prepay.
+          services: [{ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'bimonthly' }],
         },
       },
     };
@@ -702,6 +761,36 @@ describe('estimate manual acceptance', () => {
       if (prev === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
       else process.env.GATE_BERMUDA_SUPPRESSION = prev;
     }
+  });
+
+  test('refuses manual acceptance of a not-yet-accepted 4x/quarterly tree & shrub estimate (retired 2026-09-24, codex P1 r9)', async () => {
+    const estimate = {
+      id: 'estimate-ts-quarterly',
+      status: 'sent',
+      estimate_data: JSON.stringify({ recurring: { services: [{
+        name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 4, price: 55,
+      }] } }),
+    };
+    const { database, updates } = makeDb(estimate);
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 1,
+      database,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/retired schedule/) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('an estimate accepted before the T&S quarterly retirement is untouched by the gate', async () => {
+    const estimate = {
+      id: 'estimate-ts-quarterly-accepted',
+      status: 'accepted',
+      estimate_data: JSON.stringify({ recurring: { services: [{
+        name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 4, price: 55,
+      }] } }),
+    };
+    const { database } = makeDb(estimate);
+    const result = await markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 1, database });
+    expect(result.alreadyAccepted).toBe(true);
   });
 
   test('gate on: a suppression estimate passes the gate (fails later on the missing customer link instead)', async () => {
@@ -1333,7 +1422,7 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
     // anchored to the booked date) before conversion.
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
     expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
-      database, 'customer-onbook', '2026-07-30', false, expect.any(String),
+      database, 'customer-onbook', '2026-07-30', false, expect.any(String), 'estimate-prepay-onbook',
     );
   });
 
@@ -1637,6 +1726,45 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     } finally {
       mockFrozenRodentSetup = 0;
     }
+  });
+
+  describe('termite annual plan Station Setup (codex #4819 r7 P1)', () => {
+    const { _private: { manualPrepayBlockingOneTimeCharge } } = require('../services/estimate-manual-acceptance');
+    const annualPlanEstimate = () => ({
+      status: 'sent',
+      annual_total: '300.00',
+      onetime_total: '199.00',
+      estimate_data: {
+        result: {
+          // Mapped-envelope shape (the current production shape).
+          results: { tmBait: { plan: 'annual_protection', annual: 300 } },
+          oneTime: {
+            total: 199,
+            items: [{ service: 'termite_bait_installation', kind: 'setup', name: 'Station Setup', price: 199 }],
+          },
+        },
+      },
+    });
+    afterEach(() => { mockTermiteSignBeforePay = false; });
+
+    test('a sign-before-pay accept does not block on the setup the plan invoice bills', () => {
+      mockTermiteSignBeforePay = true;
+      expect(manualPrepayBlockingOneTimeCharge(annualPlanEstimate())).toBe(false);
+    });
+
+    test('outside sign-before-pay (gate off, never delivered) the setup still blocks', () => {
+      mockTermiteSignBeforePay = false;
+      expect(manualPrepayBlockingOneTimeCharge(annualPlanEstimate())).toBe(true);
+    });
+
+    test('another billable one-time line beside the setup still blocks', () => {
+      mockTermiteSignBeforePay = true;
+      const estimate = annualPlanEstimate();
+      estimate.onetime_total = '349.00';
+      estimate.estimate_data.result.oneTime.total = 349;
+      estimate.estimate_data.result.oneTime.items.push({ service: 'german_roach_cleanout', name: 'German Roach Cleanout', price: 150 });
+      expect(manualPrepayBlockingOneTimeCharge(estimate)).toBe(true);
+    });
   });
 
   test('a POSITIVE one_time_adjustment row blocks (residual charge, not a discount)', async () => {

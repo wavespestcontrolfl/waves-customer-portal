@@ -84,9 +84,10 @@ Re-run whenever project.yml changes.
 4. Under the same tab, confirm the `com.apple.developer.proximity-reader.
    payment.acceptance` entitlement is listed — it comes from
    `Resources/WavesPay.entitlements`.
-5. Paste the Stripe Terminal Location ID into Info.plist's
-   `STRIPE_TERMINAL_LOCATION_ID` key (or set it via a per-scheme
-   environment variable if you want it out of the committed plist).
+5. Set `STRIPE_TERMINAL_LOCATION_ID` in `project.yml`, then run the repository's
+   bootstrap/XcodeGen flow to regenerate the Xcode project and Info.plist value.
+   The app reads the Info.plist key; it does not read a per-scheme process
+   environment override.
 
 ### 5. Install on a real iPhone
 

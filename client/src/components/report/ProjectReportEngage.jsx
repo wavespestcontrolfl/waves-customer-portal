@@ -12,11 +12,15 @@ import Icon from '../Icon';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // Mirrors server/services/project-report-assistant.js projectReportAskPrompts.
+// Each chip carries its own explicit answer intent (AW-06) so its click
+// always reaches the right answer function even if its label is later
+// reworded — the server whitelists `intent` and falls back to free-text
+// routing when it's missing or unrecognized.
 const PROMPTS = [
-  'What did you find?',
-  'What was treated?',
-  'What should I do next?',
-  'When is my next visit?',
+  { text: 'What did you find?', intent: 'findings' },
+  { text: 'What was treated?', intent: 'treatment' },
+  { text: 'What should I do next?', intent: 'recommendations' },
+  { text: 'When is my next visit?', intent: 'next_visit' },
 ];
 
 // Same office → review-link resolution as the service report (REVIEW_LOCATIONS
@@ -41,7 +45,7 @@ export function ProjectAskWaves({ token }) {
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
 
-  const ask = async (text) => {
+  const ask = async (text, chipIntent) => {
     const q = String((text ?? question) || '').trim();
     if (!q || asking) return;
     setAsking(true);
@@ -50,7 +54,7 @@ export function ProjectAskWaves({ token }) {
       const response = await fetch(`${API_BASE}/reports/project/${token}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q }),
+        body: JSON.stringify(chipIntent ? { question: q, intent: chipIntent } : { question: q }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'question_failed');
@@ -90,15 +94,15 @@ export function ProjectAskWaves({ token }) {
       </form>
       <div className="waves-ask-list" data-glass="soft" role="list">
         {PROMPTS.map((prompt, i) => (
-          <div role="listitem" key={prompt}>
+          <div role="listitem" key={prompt.text}>
             <button
               type="button"
               className="waves-ask-row"
               data-first={i === 0 ? '' : undefined}
-              onClick={() => ask(prompt)}
+              onClick={() => ask(prompt.text, prompt.intent)}
               disabled={asking}
             >
-              <span>{prompt}</span>
+              <span>{prompt.text}</span>
               <span aria-hidden="true" className="waves-ask-go">Ask ›</span>
             </button>
           </div>
@@ -128,18 +132,21 @@ export function ProjectReviewAsk({ data }) {
     : reviewLocationForProject(data);
   return (
     <section
+      className="project-review-ask"
+      data-section="review-request-project"
       data-glass="card"
       aria-label="Share feedback"
       style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        gap: 14, flexWrap: 'wrap', background: '#fff',
+        display: 'grid', gridTemplateColumns: '1fr', alignItems: 'center', justifyItems: 'center',
+        gap: 16, background: '#fff',
         border: '1px solid var(--line, #E2E8F0)', borderRadius: 16,
         padding: '18px 22px', margin: '18px 0 0',
       }}
     >
-      <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: 'var(--text, #04395E)' }}>
+      {/* Match the service-report review card's h3 type step. */}
+      <h3 style={{ margin: '0 0 4px', textAlign: 'center', color: 'var(--text, #04395E)' }}>
         How did today&apos;s visit go?
-      </h2>
+      </h3>
       <a
         data-glass-accent=""
         href={location.reviewUrl}

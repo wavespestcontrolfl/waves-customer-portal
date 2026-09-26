@@ -84,6 +84,7 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -2074,7 +2075,7 @@ const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language
 BUSINESS CONTEXT:
 - Waves Pest Control & Lawn Care serves Southwest Florida (Manatee, Sarasota, Charlotte counties)
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
-- Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (quarterly), Termite (annual), Rodent Control, WDO Inspections
+- Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (6x/yr bi-monthly default; 9x every-6-weeks upsell — quarterly is retired for new sales, existing quarterly plans only), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
 - Resolve active technicians from live tool results; never assume a historic roster is current.
 - Scheduling zones by city: Parrish, Palmetto, Lakewood Ranch, Bradenton, Sarasota, Venice/North Port
@@ -2353,7 +2354,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await anthropic.messages.create({
         model: model,
-        max_tokens: context === 'tech' ? 1024 : 4096,
+        ...anthropicEffortConfig(model),
+        max_tokens: anthropicMaxTokens(model, context === 'tech' ? 1024 : 4096),
         // 1h TTL on the tools+system prefix: operator queries routinely arrive
         // more than 5 minutes apart, so the default TTL expired between them
         // and every query paid the cache-write premium with no read. The

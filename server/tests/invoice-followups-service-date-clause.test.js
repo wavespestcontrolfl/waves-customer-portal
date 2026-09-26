@@ -26,7 +26,7 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(() => 'INV'),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, providerMessageId: 'sms-1' })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'sms-1' })),
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-09-29T14:00:00.000Z' } })),
@@ -96,7 +96,7 @@ describe('audit r1-timezone-2: follow-up touch service date', () => {
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan', email: 'taylor@example.com', phone: '+19415550101' } })],
       invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
-      notification_prefs: [chain({ first: { email_enabled: true } })],
+      notification_prefs: [chain({ first: { email_enabled: true } }), chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain()],
       invoice_followup_sequences: [
         chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-09-29T13:00:00.000Z', anchor_at: null } }),

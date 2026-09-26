@@ -17,7 +17,9 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
-const { recordContact, markDelivered } = require('../services/collections/contact-ledger');
+const {
+  recordContact, markDelivered, markSendFailed, claimAttempt,
+} = require('../services/collections/contact-ledger');
 
 function insertChain({ returned = [{ id: 'led-1' }] } = {}) {
   const q = {};
@@ -26,6 +28,7 @@ function insertChain({ returned = [{ id: 'led-1' }] } = {}) {
   q.ignore = jest.fn(() => q);
   q.returning = jest.fn(async () => returned);
   q.where = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
   q.first = jest.fn(async () => undefined);
   q.update = jest.fn(async () => 1);
   return q;
@@ -87,6 +90,36 @@ test('markDelivered stamps by key and never throws on failure', async () => {
   await expect(markDelivered(null)).resolves.toBe(false);
 });
 
+test('reservation stamps require one fully bound row and use a savepoint in caller transactions', async () => {
+  const q = insertChain();
+  q.update.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+  const savepoint = jest.fn(() => q);
+  savepoint.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  const transaction = jest.fn(async (callback) => callback(savepoint));
+  transaction.isTransaction = true;
+  transaction.transaction = transaction;
+
+  const options = {
+    database: transaction,
+    match: {
+      customerId: 'cust-1', channel: 'email', source: 'late_payment_checker',
+      notificationEventKey: 'late-payment:inv-1:14', invoiceId: 'inv-1',
+    },
+  };
+  await expect(markDelivered({ id: 'led-1' }, options)).resolves.toBe(false);
+  await expect(markDelivered({ id: 'led-1' }, options)).resolves.toBe(true);
+
+  expect(transaction).toHaveBeenCalledTimes(2);
+  expect(q.where).toHaveBeenCalledWith({ id: 'led-1' });
+  expect(q.where).toHaveBeenCalledWith({
+    customer_id: 'cust-1', channel: 'email', source: 'late_payment_checker',
+  });
+  expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'notificationEventKey' = ?", [
+    'late-payment:inv-1:14',
+  ]);
+  expect(q.whereRaw).toHaveBeenCalledWith('invoice_ids @> ?::jsonb', [JSON.stringify(['inv-1'])]);
+});
+
 test('a reused reservation refreshes occurred_at to the current attempt (codex r5)', async () => {
   const q = insertChain({ returned: [] });
   q.first = jest.fn(async () => ({ id: 'led-9', metadata: null }));
@@ -102,7 +135,6 @@ test('a reused reservation refreshes occurred_at to the current attempt (codex r
 // ambiguous dial failure racing a live call must not erase voicemail_left
 // or an outcome already stamped on the row.
 test('markSendFailed merges via jsonb, never replaces from the stale entry snapshot', async () => {
-  const { markSendFailed } = require('../services/collections/contact-ledger');
   const q = insertChain();
   db.mockImplementation(() => q);
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -114,4 +146,39 @@ test('markSendFailed merges via jsonb, never replaces from the stale entry snaps
   expect(merged).toEqual({ send_failed: true, stage: 'calls_create', ambiguous_provider_failure: true });
   // The stale snapshot's keys are NOT in the payload — the DB's live value wins.
   expect(merged).not.toHaveProperty('pre_dial');
+});
+
+
+test('keyed delivery attempts distinguish fresh, accepted and ambiguous reservations', async () => {
+  await expect(claimAttempt({ id: 'led-1', metadata: {} })).resolves.toEqual({ allowed: true });
+  await expect(claimAttempt({ id: 'led-1', reused: true, metadata: { delivered: true } }))
+    .resolves.toEqual({ allowed: false, delivered: true });
+  await expect(claimAttempt({ id: 'led-1', reused: true, metadata: {} }))
+    .resolves.toEqual({ allowed: false, held: true });
+  expect(db).not.toHaveBeenCalled();
+});
+
+test('a confirmed failure is cleared atomically before retry and only one retry wins', async () => {
+  const q = insertChain();
+  q.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+  db.mockReturnValue(q);
+  const entry = { id: 'led-1', reused: true, metadata: { send_failed: true } };
+  await expect(claimAttempt(entry)).resolves.toEqual({ allowed: true });
+  await expect(claimAttempt(entry)).resolves.toEqual({ allowed: false, held: true });
+  expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('AND NOT'), [
+    JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }),
+  ]);
+  expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('||'), [JSON.stringify({ send_failed: false })]);
+  // If the accepted retry cannot stamp delivery, its cleared reservation is
+  // ambiguous on the next sweep, not a confirmed failure to repeat.
+  await expect(claimAttempt({ ...entry, metadata: { send_failed: false } }))
+    .resolves.toEqual({ allowed: false, held: true });
+});
+
+test('retry claim write failures propagate before any provider is authorized', async () => {
+  const q = insertChain();
+  q.update.mockRejectedValue(new Error('db unavailable'));
+  db.mockReturnValue(q);
+  await expect(claimAttempt({ id: 'led-1', reused: true, metadata: { send_failed: true } }))
+    .rejects.toThrow('db unavailable');
 });

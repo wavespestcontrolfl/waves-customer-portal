@@ -526,6 +526,18 @@ describe('reserve / release', () => {
     expect(purchase.scheduled_service_id).toBe('ss-1');
   });
 
+  test('a purchase whose option was retired between init and reserve is voided, never reserved (codex P1 pre-push 2026-09-24)', async () => {
+    // initPurchase already refuses to OPEN a purchase for a retired option
+    // (e.g. tree-light/4x-quarterly T&S) — this pins that reserve() closes
+    // the same gap for one opened just before the tier's retirement.
+    db.__state.tables.one_tap_purchases[0].service_key = 'tree_shrub';
+    db.__state.tables.one_tap_purchases[0].option_id = 'tree-light';
+    await expect(oneTap.reserve({ customerId: 'cust-1', purchaseId: 'p-1', slotId: SLOT.slotId }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+  });
+
   test('a taken slot maps to 409 SLOT_UNAVAILABLE (client re-picks)', async () => {
     const err = new Error('slot no longer available');
     err.code = 'SLOT_UNAVAILABLE';
@@ -909,6 +921,16 @@ describe('confirm', () => {
   // and manual acceptance paths run; non-termite skips entirely.
   test('a termite purchase preps the program agreement from the ACCEPTED row', async () => {
     db.__state.tables.one_tap_purchases[0].service_key = 'termite';
+    // The base fixture's option_id (lawn-enhanced) belongs to a different
+    // service — a real termite one-tap purchase is always initiated with
+    // its own option id (variantsForService('termite') only ever offers
+    // 'termite-basic'), so the retired-variant guard needs the matching
+    // one, and the frozen snapshot's optionId must agree with it too
+    // (snapshotIntact's own pre-existing cross-check).
+    db.__state.tables.one_tap_purchases[0].option_id = 'termite-basic';
+    const estData = JSON.parse(db.__state.tables.estimates[0].estimate_data);
+    estData.oneTapPurchase.optionId = 'termite-basic';
+    db.__state.tables.estimates[0].estimate_data = JSON.stringify(estData);
     await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
     expect(maybeCreateTermiteProgramAgreement).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1',
@@ -920,6 +942,21 @@ describe('confirm', () => {
   test('non-termite purchases never touch the agreement service', async () => {
     await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
     expect(maybeCreateTermiteProgramAgreement).not.toHaveBeenCalled();
+  });
+
+  test('a reserved purchase whose option was retired before confirm is voided, never converted (codex P1 pre-push 2026-09-24)', async () => {
+    // Mirrors the reserve() case: an open tree-light (4x/quarterly T&S)
+    // purchase must not silently convert a NEW plan at a retired tier just
+    // because it was initiated before the retirement shipped.
+    db.__state.tables.one_tap_purchases[0].service_key = 'tree_shrub';
+    db.__state.tables.one_tap_purchases[0].option_id = 'tree-light';
+    const estData = JSON.parse(db.__state.tables.estimates[0].estimate_data);
+    estData.oneTapPurchase.optionId = 'tree-light';
+    db.__state.tables.estimates[0].estimate_data = JSON.stringify(estData);
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
   });
 
   // ── Concurrent-confirm idempotency (GH r7 P2): a confirm that started

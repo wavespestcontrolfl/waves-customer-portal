@@ -703,6 +703,7 @@ export default function MobileCheckoutSheet({
       {showServicePicker && (
         <MobileServicePickerSheet
           desktopVisible={desktopVisible}
+          customerId={service?.customerId || service?.customer_id || null}
           onClose={() => setShowServicePicker(false)}
           onSelect={handleAddService}
         />

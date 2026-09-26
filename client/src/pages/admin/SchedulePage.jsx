@@ -310,6 +310,20 @@ export function labelsPresentInMarkerNotes(notes, labels) {
     markerValues.has(String(label || "").trim().toLowerCase())
   ));
 }
+// The completion route reads [Protocol] / [Protocol optional] / [Action]
+// marker lines back out of the technician notes as completed actions, so a
+// dropped label must leave the notes too. Only the markers for `labels` go;
+// every other line (a free-typed action included) stays.
+function withoutProtocolMarkerLines(notes, labels) {
+  const drop = new Set(labels.map((label) => String(label || "").trim().toLowerCase()));
+  return String(notes || "")
+    .split("\n")
+    .filter((line) => {
+      const match = line.trim().match(/^\[(?:protocol|protocol optional|action)\]\s*(.+)$/i);
+      return !match || !drop.has(match[1].trim().toLowerCase());
+    })
+    .join("\n");
+}
 // Specialty preset actions carry a default scope, but the treated areas say
 // where the work actually happened: when every classified area sits on one
 // side (shared/treatment-area-scopes.json), the action follows it, so an
@@ -1933,6 +1947,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // the server recomputes the same exclusion on save.
         excludedFromPercentDiscount: a.excludedFromPercentDiscount === true,
         serviceKey: a.serviceKey || null,
+        // The STORED identity of this line, untouched by picks made in this
+        // session: the retired-row picker filter reads it so the line's own
+        // retired service stays selectable after trying another option.
+        _storedServiceKey: a.serviceKey || null,
+        _storedServiceType: a.serviceName || "",
         serviceCategory: a.serviceCategory || null,
         estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
         recurringPattern: a.recurringPattern || null,
@@ -4136,8 +4155,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // disabled, with the reason, instead of a confirmed-looking removal
     // that only fails at the PUT.
     removeLocked = false,
+    // The STORED catalog key and label of THIS line (codex r26/r27 on
+    // #4786): a retired-for-sale row stays listed only for the line that is
+    // on it — the primary's key must not unlock the retired row on every
+    // add-on line's picker, nor hide it from the add-on line that actually
+    // is on it. A legacy row with no key snapshot is matched by its label
+    // against the row's name or short name, the way the server's holder
+    // lookup recognizes it.
+    lineServiceKey = null,
+    lineStoredLabel = null,
   }) => {
     const picking = pickerKey === pickerId;
+    const normLabel = (v) => String(v || "").trim().toLowerCase();
+    const ownRetiredRow = (svc) => (lineServiceKey
+      ? svc.serviceKey === lineServiceKey
+      : !!normLabel(lineStoredLabel)
+        && [svc.name, svc.shortName].some((n) => normLabel(n) === normLabel(lineStoredLabel)));
     return (
       <div
         style={{
@@ -4237,7 +4270,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#fff",
                 }}
               >
-                {serviceGroups.map((group) => {
+                {serviceGroups.map((rawGroup) => {
+                  // Retired-for-sale rows (quarterly T&S) stay listed only as
+                  // this line's own current service; the server refuses a
+                  // switch to one for a customer not on that plan.
+                  const group = {
+                    ...rawGroup,
+                    items: rawGroup.items.filter(
+                      (svc) => !svc.retiredForSale || ownRetiredRow(svc),
+                    ),
+                  };
+                  if (!group.items.length) return null;
                   const isOpen = expandedCategory === group.category;
                   return (
                     <div key={group.category} style={{ marginBottom: 4 }}>
@@ -5095,6 +5138,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 // carries a legacy discount neither this control nor any
                 // other in this modal can touch.
                 lineDiscountLocked: primaryGrossUnknown,
+                lineServiceKey: service.serviceKey || null,
+                lineStoredLabel: service.serviceType || null,
                 label: serviceLines.length > 0 ? "Primary service" : null,
               })}
               {serviceLines.map((line, idx) =>
@@ -5102,6 +5147,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   {renderServiceLine({
                     pickerId: line._key,
                     serviceType: line.serviceType,
+                    lineServiceKey: line._storedServiceKey || null,
+                    lineStoredLabel: line._storedServiceType || null,
                     estimatedDuration: line.estimatedDuration,
                     price: line.price,
                     onField: (k, v) => updateLine(line._key, k, v),
@@ -7012,6 +7059,16 @@ function JobCardTab({ card, loading, error, D }) {
   );
 }
 
+// The appointment's month ("Jan".."Dec", ET; "" when unknown) for protocol
+// visit lookup — month-keyed protocols (lawn tracks, tree & shrub) show that
+// month's visit.
+function protocolMonthForService(service) {
+  return formatETDateOnly(
+    service?.scheduledDate || service?.scheduled_date || service?.date,
+    { month: "short" },
+  );
+}
+
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
@@ -7192,6 +7249,7 @@ export function ProtocolPanel({ service, onClose }) {
           })
         : null;
 
+      const visitMonth = protocolMonthForService(service);
       const results = await Promise.allSettled([
         adminFetch(
           // The photos endpoint derives its line from literal tokens
@@ -7224,7 +7282,9 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         !isLawn && protocolProgram
           ? adminFetch(
-              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}`,
+              // An unknown date sends an empty month, which the route reads
+              // as none (the rule visit).
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}&month=${visitMonth}`,
             )
           : Promise.resolve(null),
       ]);
@@ -14273,22 +14333,11 @@ export function CompletionPanel({
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
       if (service.lawnType) params.set("lawnType", service.lawnType);
-      const serviceDate =
-        service.scheduledDate || service.scheduled_date || service.date;
-      if (serviceDate) {
-        const dateOnly = String(serviceDate).split("T")[0];
-        const monthDate = new Date(`${dateOnly}T12:00:00`);
-        if (!Number.isNaN(monthDate.getTime())) {
-          params.set(
-            "month",
-            monthDate.toLocaleString("en-US", {
-              month: "short",
-              timeZone: "America/New_York",
-            }),
-          );
-        }
-      }
     }
+    // Lawn and month-keyed programs (tree & shrub) pick the visit for the
+    // appointment's month; the server ignores it for 'Any'-month programs.
+    const serviceMonth = protocolMonthForService(service);
+    if (serviceMonth) params.set("month", serviceMonth);
     setProtocolActionsLoading(true);
     setProtocolActionsLoaded(false);
     adminFetch(`/admin/protocols/completion-actions?${params.toString()}`)
@@ -14332,6 +14381,31 @@ export function CompletionPanel({
     treatmentPlanMixItems,
     lawnCompletionDefaults,
   ]);
+  // A month-keyed program (tree & shrub) serves the appointment month's own
+  // action list. Once it has loaded, a selected action it doesn't offer came
+  // from another list (a draft saved before the visit moved months or the
+  // protocol changed): drop it with its marker lines, and invalidate a
+  // report written from it (untouched → the pre-generation notes; edited →
+  // kept as the technician's text). An empty or unloaded list leaves the
+  // fallback chips as the selector, and "Any" programs never change by month.
+  useEffect(() => {
+    const listMonth = protocolActionMeta?.visit?.month;
+    if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length || !listMonth || listMonth === "Any") return;
+    const offered = new Set(protocolActions.map((action) => (action.label || action.note || action.raw || "").trim()));
+    const stale = selectedProtocolActionLabels.filter((label) => !offered.has(String(label).trim()));
+    if (!stale.length) return;
+    if (typeof preGenerationNotesRef.current === "string") {
+      preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, stale);
+    }
+    invalidateGeneratedReportOnTypedEdit();
+    setNotes((current) => withoutProtocolMarkerLines(current, stale));
+    setSelectedProtocolActionLabels((current) => current.filter((label) => !stale.includes(label)));
+    setActionScopeByLabel((current) => {
+      const next = { ...current };
+      stale.forEach((label) => { delete next[label]; });
+      return next;
+    });
+  }, [isLawn, generating, protocolActionsLoaded, protocolActions, protocolActionMeta, selectedProtocolActionLabels]);
 
   useEffect(() => {
     // The flag decides whether this request carries completion defaults; a

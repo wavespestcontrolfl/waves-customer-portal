@@ -40,13 +40,15 @@ function auditFromReq(req) {
 // GET / — paginated list with filters
 router.get('/', async (req, res, next) => {
   try {
-    const { category, billing_type, is_active, is_archived, include_archived, search, limit, offset } = req.query;
+    const { category, billing_type, is_active, is_archived, include_archived, sellable, sellable_customer_id: sellableCustomerId, search, limit, offset } = req.query;
     const result = await serviceLibrary.getServices({
       category,
       billingType: billing_type,
       isActive: is_active,
       isArchived: is_archived,
       includeArchived: include_archived,
+      sellable,
+      sellableCustomerId,
       search,
       limit: limit ? parseInt(limit) : undefined,
       offset: offset ? parseInt(offset) : undefined,
@@ -58,7 +60,8 @@ router.get('/', async (req, res, next) => {
 // GET /dropdown — lightweight for selects / dropdowns
 router.get('/dropdown', async (req, res, next) => {
   try {
-    const rows = await serviceLibrary.getDropdown();
+    const { sellable, sellable_customer_id: sellableCustomerId } = req.query;
+    const rows = await serviceLibrary.getDropdown({ sellable, sellableCustomerId });
     res.json(rows);
   } catch (err) { next(err); }
 });
@@ -171,6 +174,12 @@ router.post('/:id/cancel', async (req, res, next) => {
       } catch (seamErr) {
         require('../services/logger').error(`[admin-services] cancel void/reversal seam failed for ${req.params.id}: ${seamErr.message}`);
       }
+      // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
+      // inside a 9-application plan adds one back at the end of the series.
+      // Gated, failure-isolated, post-commit.
+      await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db: require('../models/db'), serviceId: req.params.id, source: 'admin-services-v1-cancel',
+      });
     }
 
     res.json({

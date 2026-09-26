@@ -193,7 +193,8 @@ function buildTreeShrubInsightCards({
   }
 
   // ── Reassurance when nothing needs attention ───────────────────────────────────
-  if (!cards.length) {
+  // A hidden/unscored category cannot support whole-landscape reassurance.
+  if (!cards.length && categories.length && categories.every((category) => category && category.status !== 'tracking')) {
     cards.push({
       category: 'overall',
       status: 'good',

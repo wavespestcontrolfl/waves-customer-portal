@@ -14,8 +14,13 @@ const MODELS = require('../config/models'); // adjust path
 // MODELS.DEEP / MODELS.FLAGSHIP / MODELS.WORKHORSE / MODELS.FAST / MODELS.VOICE / MODELS.VISION
 ```
 
-These are **quality tiers, not cost tiers** (owner directive: best model
-regardless of cost). Every tier is env-overridable (`MODEL_FLAGSHIP`, etc.)
+Tiers are **workload tiers** (registry header, directive 2026-07-16 and the
+2026-09-25 cost audit): the least-expensive model that is reliably strong for
+the lane, Opus reserved for work a human or a customer reads, Fable explicit
+only. The test for a lane: if nobody reads the output (a classifier, an
+extractor, a verifier whose verdict is consumed by code), it belongs on
+`fastStructured` / FAST / WORKHORSE, not `highStakes` / FLAGSHIP. Every tier
+is env-overridable (`MODEL_FLAGSHIP`, etc.)
 so a model swap is a Railway var flip, never a code hunt. A per-feature pin
 that can't use a tier still lives in `models.js` under the `MODEL_<NAME>`
 registry convention (see `LAWN_CHALLENGE`) — never in the service file.
@@ -31,12 +36,45 @@ never from docs, which go stale.
 
 | Tier | Use for |
 |---|---|
-| `DEEP` | Deepest reasoning, latency-tolerant, low-volume (fable line: always-on thinking, minutes-long turns possible): agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate |
+| `DEEP` | Deepest reasoning, latency-tolerant, low-volume: agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate. Defaults to the same Opus model as FLAGSHIP, with an OpenAI backup on refusal or API failure (`llm/deep.js`) |
+| `EXTREME` | Explicit, latency-tolerant Fable opt-in only — no automatic live workflow routes here; callers must deliberately select it |
 | `FLAGSHIP` | Best general reasoning: Intelligence Bar, advisors, analysis, agents |
 | `WORKHORSE` | Drafting + content generation |
 | `FAST` | High-volume classification, tagging, signals |
 | `VOICE` | Customer-facing copy where warm/natural beats raw reasoning: SMS replies, service recaps, social posts. High-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site |
 | `VISION` | Image scoring, called with the SDK directly. No Anthropic call sends `temperature` (current models 400 on sampling controls); the Gemini scorer keeps its own |
+
+## 2b. Reading a Message — never `content[0]`
+
+Always-thinking models (Opus 5.5, Fable) put a `thinking` block ahead of the
+text block. Read the answer with `anthropicText(response)` from
+`services/llm/call.js` (first TEXT block) or `stripThinkingBlocks` from
+`deep.js` — never `content[0].text`. Tool loops push `response.content` back
+whole (thinking blocks included) so the next turn stays valid.
+
+Opus 5.5 readiness (2026-09-25): request sizing lives in
+`server/services/llm/anthropic-wire.js`. `anthropicMaxTokens(model, cap)` raises
+a cap to a thinking floor on models that think by default (Opus 5+, Fable,
+Mythos — thinking spends from `max_tokens` ahead of the text block) and leaves
+it alone everywhere else; `anthropicEffortConfig(model)` spreads the
+`MODEL_ANTHROPIC_EFFORT` pin (5.5 defaults to `medium`, 4.8 to `high`) onto
+models that accept every effort level (Opus 4.7+, Sonnet 5+, Fable, Mythos).
+The adapter and the DEEP helper apply both; **a new direct SDK call on an Opus
+tier must too** (`max_tokens: anthropicMaxTokens(MODELS.X, n)` plus
+`...anthropicEffortConfig(MODELS.X)`). `thinking: { type: 'disabled' }` and
+forced `tool_choice` any/tool are 400s on 5.5 — only the two VOICE lanes send
+the former (VOICE is Sonnet) and nothing sends the latter. Flip order in the
+registry header.
+
+## 2c. Caching
+
+The adapter and the DEEP helper both put an ephemeral breakpoint on the
+system prompt, so repeat calls inside five minutes read it back at ~0.1x.
+Minimum cacheable prefix: 512 tokens on Opus 5 / 5.5 / Fable, 1024 on Opus 4.8
+and Sonnet 5, 2048 on Opus 4.7, 4096 on Opus 4.5 / 4.6 and Haiku 4.5 — a
+shorter prompt never caches, whatever the TTL (the previsit brief's ~450-token
+prompt is below all of them). Check `cached_input_tokens` in `llm_dispatch_log`
+before and after any caching change.
 
 ## 3. DEEP call sites — the helper is mandatory
 
@@ -48,20 +86,22 @@ const response = await createDeepMessage(anthropicClient, { ...params });
 ```
 
 Why (both have caused real parsing bugs):
-- **Thinking blocks.** fable-5 always thinks; `thinking` blocks precede the
-  `text` block, so `content[0].text` reads the wrong block. The helper strips
-  them.
-- **Refusals.** fable-5's safety classifiers can refuse benign
+- **Thinking blocks.** Always-thinking models (Fable, and Opus 5.5 once the
+  tiers flip) put `thinking` blocks ahead of the `text` block, so
+  `content[0].text` reads the wrong block. The helper strips them.
+- **Refusals.** The model's safety classifiers can refuse benign
   pesticide/termiticide-adjacent content (HTTP 200, `stop_reason: 'refusal'`).
-  The helper retries the identical request once on FLAGSHIP — the lane
-  degrades to Opus, it never gaps.
+  The helper retries on OpenAI (`TEXT_POLICIES.deepAnalysis.fallback`), and
+  API failures get the same backup. On the raw-message path the backup is
+  skipped when less than `FALLBACK_MIN_MS` of the caller's time budget
+  remains; structured calls (`options.jsonSchema`) go through
+  `dispatchWithFallback`, where both legs share one deadline and the OpenAI
+  leg runs whenever any budget is left.
 
 Also required at DEEP sites:
 - `max_tokens` **≥ 4096** — thinking spends from the same budget.
 - Pass your own Anthropic client (per-site timeout/retry config and test
   mocks keep working).
-- Kill switch: setting `MODEL_DEEP` to the current FLAGSHIP Opus ID (see
-  `models.js`) reverts every DEEP lane to Opus with no deploy.
 
 Enforced mechanically: `check:domain-rules` fails on a file referencing
 `MODELS.DEEP` without the helper.
@@ -109,17 +149,23 @@ a provider issue never causes a gap:
   The generated-image SCREEN is the ruled exception (owner 2026-09-25):
   `TEXT_POLICIES.imageScreen` is GPT-5.6 Sol first with Claude VISION as the
   backup; hero alt text stays on `visionAnalysis`.
-  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
-  `pest-identification.js#analyzePhoto`/`identifyPest`, and
-  `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
+  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day)
+  and `tree-shrub-assessment.js#analyzePhoto` call Gemini only; Claude runs
   ONLY when Gemini returns nothing (HTTP/parse/empty/schema-invalid miss). A
   single-model result still goes through each file's own single-model path
-  (pest-identification downgrades confidence a notch via `mergeModelResults`;
-  lawn/tree-shrub's `averageScores` passes the lone result through unchanged)
-  — a one-model read can never surface as the two-model "agreed" case.
-  `averageScores`/`mergeModelResults` still exist and still work with two
-  results handed to them directly (tests, or any future caller), but live
-  scoring never calls either with two live results anymore.
+  (lawn/tree-shrub's `averageScores` passes the lone result through
+  unchanged) — a one-model read can never surface as the two-model "agreed"
+  case.
+  **Photo ID ruling 2026-09-26:** `pest-identification.js#analyzePhoto` /
+  `identifyPest` (website funnel, SMS photo triage, admin assessments, the
+  customer app) use `TEXT_POLICIES.photoIdVision`: Gemini 3.8 Flash first;
+  the same photo goes to ChatGPT's best vision model (`OPENAI_FRONTIER`)
+  when Gemini misses, scores itself under `PHOTO_ID_ESCALATE_BELOW` (default
+  0.80), or lists a runner-up of different risk. Sequential per photo, no
+  Claude leg. The second look's answer decides (`resolvePhoto`): an agreement
+  on the same species keeps the lower confidence, otherwise it is the lone
+  answer (downgraded a notch); a risky runner-up whose second look never
+  came back makes the upload an inspection-first consultation.
   **Estimate-image ruling 2026-09-25:** `satellite-analyzer.js` and
   `property-lookup-v2.js` use `TEXT_POLICIES.estimateVision`: Gemini 3.8 Flash
   first, GPT-6 Sol only when Gemini fails or its output is invalid. No Claude,

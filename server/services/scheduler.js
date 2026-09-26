@@ -96,6 +96,19 @@ async function resolveScheduledRecipient(msg, claimMeta) {
   }
 }
 
+// Only a registered Email-only replay proceeds without a phone: its row was
+// queued blank on purpose. Every other billing row that reaches the executor
+// without a resolved phone is a failed or empty lookup and stays on the
+// bounded recipient-refresh rail above (codex #4803 r5).
+function canReplayBillingWithoutPhone(msg, claimMeta) {
+  return Boolean(msg.customer_id
+    && claimMeta?.requires_registered_dispatch === true
+    && require('./messaging/deferred-replay-registry').replaysWithoutPhone(claimMeta.entry_point)
+    && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true
+    && ['invoice', 'payment_issue', 'billing', 'payment_receipt']
+      .includes(claimMeta.billingDeliveryCategory));
+}
+
 // Deposit-receipt replays re-check payment_receipt_channel at send time —
 // the immediate send honors the channel choice, and a customer who switches
 // to email-only between the hold and scheduled_for must not be texted by the
@@ -106,7 +119,12 @@ async function scheduledDepositReceiptAllowed(msg) {
   try {
     const prefs = await db('notification_prefs')
       .where({ customer_id: msg.customer_id })
-      .first('payment_receipt_channel');
+      .first('payment_receipt_channel', 'payment_receipt_channels');
+    if (require('./billing-delivery-channels').explicitBillingChannels(prefs, 'payment_receipt') !== null) {
+      // The central router will fan out the current explicit combination.
+      // The legacy scalar must not intercept a queued App/Email selection.
+      return true;
+    }
     const channel = prefs?.payment_receipt_channel || 'sms';
     return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
@@ -813,6 +831,23 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[seo-pipeline] stale-run reaper failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 5 MIN — retry committed route-quality refreshes, including dates
+  // outside the nightly optimizer's six-day band. The durable row claim
+  // fences overlapping ticks/deploys; no second cron lease is needed.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const result = await require('./scheduling/quality-after-change').retryScheduleQualityRefreshes();
+      if (result.processed > 0) {
+        logger.info(`[schedule-quality] retry sweep: processed=${result.processed} succeeded=${result.succeeded} failed=${result.failed}`);
+      }
+      if (result.status === 'failed' || result.failed > 0) {
+        logger.error('[schedule-quality] retry sweep has pending failures');
+      }
+    } catch (err) {
+      logger.error(`[schedule-quality] retry sweep failed (${err.code || 'retry_sweep_error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2385,6 +2420,35 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — purchase receipts → stock (Amazon Delivered emails and
+  // SiteOne invoices). For Amazon the
+  // post-email-sync hook (email-sync.js) handles the common case right when
+  // the email lands; this sweep scans `emails` directly (from_address +
+  // subject, never LLM classification) for anything it missed — a process
+  // restart mid-sync, a swallowed hook error, a backfill. Gate
+  // GATE_PURCHASE_RECEIPT_RESTOCK is read INSIDE the sweep at call time
+  // (also requires PURCHASE_RECEIPT_SINCE); kill = unset either one.
+  // runExclusive: an overlapping tick must not double-claim the same line
+  // (purchase_receipt_lines' own UNIQUE constraint is the hard backstop).
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    if (!gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK')) return;
+    try {
+      await runExclusive('purchase-receipt-restock', async () => {
+        const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
+        const result = await runPurchaseReceiptRestockSweep();
+        if (result.skipped) return;
+        const { logged, held, errors } = summarize(result);
+        if (logged || held || errors) {
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Purchase receipt restock sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:20AM ET — Prune the inbound-webhook idempotency ledger. Twilio
   // never redelivers a webhook days later, so a 7-day horizon is ample; this
   // keeps inbound_webhook_events from growing unbounded.
@@ -3886,7 +3950,7 @@ function initScheduledJobs() {
           }
 
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
-          if (!toPhone) {
+          if (!toPhone && !canReplayBillingWithoutPhone(msg, claimMeta)) {
             // Refresh-required row whose current customer phone can't be
             // verified right now — retry on the bounded attempt rail rather
             // than sending to the frozen snapshot under customer trust.
@@ -4014,6 +4078,7 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
@@ -4029,10 +4094,19 @@ function initScheduledJobs() {
               || ((claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
                 ? claimMeta.consent_basis
                 : undefined),
+            // A deferred billing notice re-enters the same channel routing
+            // its immediate attempt used: the persisted delivery category
+            // and the branded-Email sidecar marker ride along (codex #4833
+            // r3), so an explicit Email / App choice is neither texted nor
+            // double-emailed on the morning replay.
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.billingDeliveryCategory
+                ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory }
+                : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,
@@ -5898,6 +5972,27 @@ function initScheduledJobs() {
         } catch (err) {
           logger.error(`Termite agreement reconciliation failed: ${err.message}`);
         }
+        // Termite ANNUAL PLAN activation reconciliation (slice 3a, codex
+        // P1-B): the sign-before-pay activation runs once, right after
+        // signature — signing burns the share token, so a failed
+        // activation (bell + estimate left 'awaiting_signature') has no
+        // "sign again" retry path without this sweep. Same slot, right
+        // after the (unrelated) termite program agreement reconciliation
+        // above. Deliberately NOT gated on GATE_TERMITE_ANNUAL_PLAN: the
+        // gate controls whether NEW annual accepts defer, but a customer
+        // who already signed must still be activated and billed if the
+        // gate is later turned off (pre-push P1). Cheap when nothing is
+        // awaiting: both scans are indexed lookups on stamped rows.
+        try {
+          const { reconcileTermiteAnnualActivations } = require('./termite-annual-activation');
+          const annualRecon = await reconcileTermiteAnnualActivations();
+          if (annualRecon.activated || annualRecon.failed || annualRecon.delivered || annualRecon.deliveryFailed || annualRecon.charged || annualRecon.collectionHeld
+            || annualRecon.anchored || annualRecon.anchorFailed || annualRecon.handedOff || annualRecon.handoffFailed) {
+            logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed, ${annualRecon.delivered || 0} delivered, ${annualRecon.deliveryFailed || 0} delivery failed, ${annualRecon.charged || 0} charged, ${annualRecon.collectionHeld || 0} held, ${annualRecon.anchored || 0} anchored to installation, ${annualRecon.anchorFailed || 0} anchor failed, ${annualRecon.handedOff || 0} install handoffs, ${annualRecon.handoffFailed || 0} handoff failed`);
+          }
+        } catch (err) {
+          logger.error(`Termite annual plan activation reconciliation failed: ${err.message}`);
+        }
         // Reminders run INSIDE the same exclusive section, strictly after
         // reconciliation: on a skipped tick (another dyno holds the lock)
         // a non-holder must not nudge customers to sign requests the
@@ -6401,6 +6496,19 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Payment retry failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Payment retry timing stays on the billing cron. This bounded sweep only
+  // materializes Email decisions that were committed with that retry state
+  // but could not be queued during the originating process.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('billing-retry-email-reconcile', async () => {
+        await require('./billing-retry-email-obligation').reconcilePendingNotices({ limit: 50 });
+      });
+    } catch (err) {
+      logger.error(`Billing retry Email reconciliation failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -7113,6 +7221,7 @@ module.exports = {
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,
+  canReplayBillingWithoutPhone,
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,

@@ -593,9 +593,9 @@ const SHADE_RULES = {
 //     instead of silently pricing zero trees.
 //   - The 6-visit Standard program is the MANDATED default (matches the
 //     "10/10 SWFL Tree & Shrub Protocol" six_x cadence in
-//     server/config/protocols.json). Light (4x) maps to the protocol four_x
-//     cadence and is an available downsell for clean, low-pest-history
-//     landscapes — it is never auto-recommended. The 9x Enhanced tier was
+//     server/config/protocols.json). Light (4x, protocol four_x) was
+//     RETIRED for new sales 2026-09-24 (hidden: true below) and is priced
+//     only to replay the grandfathered quarterly plan. The 9x Enhanced tier was
 //     retired in v4.5 and UN-RETIRED as an UPSELL (owner directive
 //     2026-07-23): every-6-weeks coverage for heavy-pressure/high-value
 //     landscapes, never auto-recommended — Standard stays the default and
@@ -610,7 +610,26 @@ const TREE_SHRUB = {
   tiers: {
     // Tier names are application counts (owner directive 2026-08-04: no
     // Standard/Enhanced/Premium marketing names anywhere) — keys stay.
-    light:     { label: 'Light', frequency: 4, monthlyFloor: r(22) },
+    //
+    // light(4x/quarterly) is hidden:true (owner directive 2026-09-24:
+    // "remove quarterly tree and shrub care from the estimates and
+    // services") — mirrors LAWN_TIERS.standard.hidden exactly: the tier
+    // stays IN TREE_SHRUB.tiers (never removed) because the one existing
+    // quarterly customer's booked visits, and any admin/converter recompute
+    // of their existing plan, still resolve through priceTreeShrub with
+    // tier:'light' explicitly. hidden:true only drops it from the
+    // customer-facing offering surfaces (estimate builder tier pickers,
+    // intent schema, customer-pricing-ai, voice relay, property-lookup-v2,
+    // public-services-menu) and from priceTreeShrub's default
+    // `availableTiers` list — estimate-public.js's retired-cadence requote
+    // gate (recurringTreeShrubRowAtRetiredCadence / isRetiredTreeShrubTierKey)
+    // 409s a stored/open estimate that still carries a 4-visit T&S row,
+    // exactly like the 12x Premium tier it already covered. Unlike lawn's
+    // 6x anchor, Light's price is NOT read by standard/enhanced pricing
+    // (each tier's material factor is independent — see
+    // normalizeTreeShrubTier / priceTreeShrub's tierMaterialFactor), so no
+    // includeHiddenTiers anchor call is needed anywhere.
+    light:     { label: 'Light', frequency: 4, monthlyFloor: r(22), hidden: true },
     standard:  { label: '6x applications/yr', frequency: 6, monthlyFloor: r(35) },
     enhanced:  { label: '9x applications/yr', frequency: 9, monthlyFloor: r(48) },
   },

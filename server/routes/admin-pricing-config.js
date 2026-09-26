@@ -682,7 +682,13 @@ async function ensureTable() {
       { config_key: 'global_conditional_ceiling', name: 'Conditional Material Ceiling', category: 'global', sort_order: 6, data: JSON.stringify({ value: 60, unit: '$/property/yr', description: 'Max conditional material spend before reprice flag' }) },
 
       // Tree & Shrub
-      { config_key: 'ts_material_rates', name: 'T&S Material Model (annual)', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ fixed: 15, per_tree: 4, per_sqft: 0.055, light_factor: 0.75, note: 'v4.6 protocol-derived annual material model: fixed foliar/micros load + 8-2-12 per tree/palm + Snapshot/13-0-13/spray per bed sqft. Light 4x runs light_factor of the spend. 6-visit Standard is the mandated default; Light 4x is a downsell. Enhanced 9x / Premium 12x retired.' }) },
+      // note text kept in sync with migration 20260924020020's NEW_NOTE — a
+      // fresh install must seed the CURRENT ladder description, not the
+      // pre-2026-09-24 "Light is a downsell / Enhanced retired" text an
+      // existing production row needed that read-modify-write migration to
+      // correct (ensureTable's onConflict('config_key').ignore() never
+      // updates an existing row's note).
+      { config_key: 'ts_material_rates', name: 'T&S Material Model (annual)', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ fixed: 15, per_tree: 4, per_sqft: 0.055, light_factor: 0.75, note: 'v4.6 protocol-derived annual material model: fixed foliar/micros load + 8-2-12 per tree/palm + Snapshot/13-0-13/spray per bed sqft. Light 4x runs light_factor of the spend. 6-visit Standard is the mandated default. Light 4x is RETIRED for new sales (owner directive 2026-09-24) — grandfathered/legacy pricing only, never offered or auto-recommended. Enhanced 9x is a live, customer-selectable upsell (owner directive 2026-07-23), never auto-recommended. Premium 12x stays retired.' }) },
       { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ light: 22, standard: 35, note: 'Backstops, not expected prices — the v4.6 formula prices nearly all real properties above these. Keep light <= 2/3 of standard so a floored Light never exceeds Standard per month.' }) },
 
       // Palm
@@ -1487,6 +1493,27 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
 async function resolvePricingQuoteInput(body) {
   const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
   const input = sanitizeClientIdentityFields({ ...(body || {}) });
+  // These calculators mint NEW quotes: only a currently-sold T&S program is
+  // accepted (4x Light retired 2026-09-24). Absent means the engine default.
+  const tsTier = input.services?.treeShrub?.tier;
+  const tsTierAbsent = tsTier === undefined || tsTier === null || (typeof tsTier === 'string' && tsTier.trim() === '');
+  if (!tsTierAbsent) {
+    const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
+    if (!isSellableTreeShrubTier(tsTier)) {
+      const err = new Error('Tree & Shrub program must be standard or enhanced.');
+      err.status = 400;
+      err.statusCode = 400;
+      err.isOperational = true;
+      throw err;
+    }
+  } else if (tsTier !== undefined) {
+    // Absent here must be absent for the engine too: normalizeTreeShrubTier
+    // trims a whitespace-only tier to an empty key and throws instead of
+    // pricing Standard (codex r17 P2). Copied, never mutated in place — the
+    // nested services object is still the caller's request body.
+    input.services = { ...input.services, treeShrub: { ...input.services.treeShrub } };
+    delete input.services.treeShrub.tier;
+  }
   const customerId = input.existingCustomerId || input.customerId;
   if (!customerId) return input;
   const { resolveCustomerQualifyingEvidence, isActivePlanCustomer } = require('../services/waveguard-existing-services');
@@ -1547,6 +1574,7 @@ router.post('/quick-quote', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.resolvePricingQuoteInput = resolvePricingQuoteInput;
 // The proposal-approval queue (admin-pricing-proposals) applies leaf edits
 // to the same billing-authoritative rows — it must run the SAME key-specific
 // validation on the prospective row before writing.

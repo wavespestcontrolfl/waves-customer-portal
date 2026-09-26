@@ -292,8 +292,14 @@ async function loadBookableCallServices(conn) {
     // catalog block AND feed extractionPromptVersion's order-sensitive hash,
     // so planner-dependent row order would stamp identical catalogs as
     // different prompt versions and fragment shadow cohorts.
+    // A retired-for-sale row (still active for the grandfathered plan) is
+    // never offered to the call pipelines, even if booking_enabled is
+    // re-selected later (codex r22 on #4786) — the same authority the public
+    // menu reads.
+    const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
     const rows = await conn('services')
       .where({ is_active: true, booking_enabled: true })
+      .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
       .orderBy('name', 'asc')
       .orderBy('id', 'asc')
       .select(BOOKABLE_SERVICE_COLUMNS);

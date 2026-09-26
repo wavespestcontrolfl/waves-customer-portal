@@ -968,7 +968,10 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, appointmentId,
       notificationEventKey: `qa:${invoiceId}:visit` })).toMatchObject({ delivered: true });
     const proof = await mockPg('sms_log').where({ from_phone: 'push' }).first();
-    expect(proof.metadata).toMatchObject({ channel: 'push', providerAccepted: true, scheduled_service_id: appointmentId });
+    // The notification-id back-fill merges: the visit and the event key both survive it.
+    expect(proof.metadata).toMatchObject({ channel: 'push', providerAccepted: true, scheduled_service_id: appointmentId,
+      notificationEventKey: `qa:${invoiceId}:visit` });
+    expect(proof.metadata.push_notification_id).toBeTruthy();
   });
 
   test('payment problems preserves charged-profile ownership and legacy companion vetoes', async () => {
@@ -1048,6 +1051,23 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       expect(await mockPg('notifications')).toHaveLength(0);
     } finally {
       await mockPg.schema.alterTable(table, t => t.renameColumn(`qa_${column}`, column));
+    }
+  });
+
+  test('a failed notification ledger write is a retry, never an App miss (Codex r6 P1 on #4843)', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-LEDGER', status: 'sent' });
+    await mockPg.schema.alterTable('notifications', t => t.renameColumn('title', 'qa_title'));
+    try {
+      expect(await require('../services/messaging/push-channel-routing').attemptPushFirst({
+        customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice',
+        explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}`,
+      })).toEqual({ delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' });
+      expect(apns.send).not.toHaveBeenCalled();
+    } finally {
+      await mockPg.schema.alterTable('notifications', t => t.renameColumn('qa_title', 'title'));
     }
   });
 

@@ -55,7 +55,15 @@ function isConfigured() {
 
 function authHeaders() {
   const key = process.env.SENDGRID_API_KEY;
-  if (!key) throw new Error('SENDGRID_API_KEY not configured');
+  if (!key) {
+    const err = new Error('SENDGRID_API_KEY not configured');
+    // Thrown before any provider request (no fetch has happened yet), so a
+    // caller classifying delivery outcome by handoff state can tell this
+    // apart from a failure that occurred mid-request — see billing-channel
+    // -email.js's providerFailure.
+    err.code = 'SENDGRID_NOT_CONFIGURED';
+    throw err;
+  }
   return { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
 }
 
@@ -133,9 +141,9 @@ function asmBlockFor(groupId) {
 // require sendgrid-mail.js back today, but a top-level require here would
 // make this module's own load order hostage to that chain's — same
 // precedent as every other guard install site in this slice.
-async function runAnnualOfferGuard({ estimateIds, html, text }) {
+async function runAnnualOfferGuard({ estimateIds, html, text, database }) {
   const { annualHandoffGuard } = require('./estimate-annual-guard');
-  const db = require('../models/db');
+  const db = database || require('../models/db');
   let verdict;
   try {
     verdict = await annualHandoffGuard({
@@ -180,12 +188,12 @@ async function runAnnualOfferGuard({ estimateIds, html, text }) {
 // sendTemplate, the retry sweep, bounce recovery) maps it to the same
 // definite pre-dispatch abort without needing to know this rewrite step
 // exists.
-async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey, withheldLinkPolicy }) {
+async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey, withheldLinkPolicy, database }) {
   const { withheldLinkPolicyForTemplate, rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
   const resolvedPolicy = withheldLinkPolicy || withheldLinkPolicyForTemplate(templateKey);
   if (resolvedPolicy !== 'rewrite') return { sendHtml: html, sendText: text, sendEstimateIds: estimateIds };
 
-  const db = require('../models/db');
+  const db = database || require('../models/db');
   let rewritten;
   try {
     rewritten = await rewriteWithheldEstimateLinks({ db, html, text });
@@ -216,14 +224,14 @@ async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey
  * { messageId } where messageId is read from the X-Message-Id response header
  * (plus withheldLinksRewritten: [ids] when the rewrite policy above fired).
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy, database }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const { sendHtml, sendText, sendEstimateIds, withheldLinksRewritten } = await resolveWithheldLinkRewrite({
-    html, text, estimateIds, templateKey, withheldLinkPolicy,
+    html, text, estimateIds, templateKey, withheldLinkPolicy, database,
   });
 
-  await runAnnualOfferGuard({ estimateIds: sendEstimateIds, html: sendHtml, text: sendText });
+  await runAnnualOfferGuard({ estimateIds: sendEstimateIds, html: sendHtml, text: sendText, database });
 
   const payload = {
     personalizations: [{

@@ -28,6 +28,8 @@ import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import BillingLaneCard from './BillingLaneCard';
+import ConsultationOutcomeSheet from '../ConsultationOutcomeSheet';
+import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import PrepaySwitchSheet from './PrepaySwitchSheet';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
@@ -48,7 +50,10 @@ function adminFetch(path, options = {}) {
       // Keep the server's message: the cancel refusals (prepaid series,
       // terminal state) carry the operator's only recovery path.
       const json = await r.json().catch(() => ({}));
-      throw new Error(json?.error || `HTTP ${r.status}`);
+      const err = new Error(json?.error || `HTTP ${r.status}`);
+      // The consultation sheet reads a 404 as "nothing recorded yet".
+      err.status = r.status;
+      throw err;
     }
     return r.json();
   });
@@ -138,6 +143,7 @@ export default function MobileAppointmentDetailSheet({
   onBillingChanged,
 }) {
   const [note, setNote] = useState(service?.notes || '');
+  const [showOutcome, setShowOutcome] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
   const [noteSavedAt, setNoteSavedAt] = useState(null);
   const [actionBusy, setActionBusy] = useState('');
@@ -504,6 +510,16 @@ export default function MobileAppointmentDetailSheet({
             Prepaid ${prepaidAmt.toFixed(2)}
             {service.prepaidMethod ? ` via ${service.prepaidMethod.replace(/_/g, ' ')}` : ''} — no charge needed
           </div>
+        )}
+        {canRecordConsultationOutcome(service) && (
+          <button
+            type="button"
+            onClick={() => setShowOutcome(true)}
+            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 font-medium u-focus-ring mt-3"
+            style={{ padding: '13px 20px', fontSize: 15 }}
+          >
+            Consultation outcome
+          </button>
         )}
         {isLawn && (
           <button
@@ -930,6 +946,17 @@ export default function MobileAppointmentDetailSheet({
           customerId={service.customerId}
           focusServiceId={service.id}
           onClose={() => setShowCustomer(false)}
+        />
+      )}
+
+      {showOutcome && service.id && (
+        <ConsultationOutcomeSheet
+          serviceId={service.id}
+          customerName={service.customerName}
+          request={adminFetch}
+          theme="light"
+          onClose={() => setShowOutcome(false)}
+          onSaved={() => setShowOutcome(false)}
         />
       )}
 

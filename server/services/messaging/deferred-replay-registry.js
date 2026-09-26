@@ -176,6 +176,15 @@ function checkRecruitingBookingVersion(meta, app, stage) {
 }
 
 const REGISTRY = {
+  billing_retry_email_deferred: {
+    // Email-only replay: the row is queued without a phone on purpose, so
+    // the executor's recipient gate must not read its blank phone as a
+    // failed lookup (codex #4803 r5).
+    replayWithoutPhone: true,
+    async dispatch(meta) {
+      return require('../billing-retry-email-obligation').replayPaymentRetryNotice(meta);
+    },
+  },
   lawn_assessment_notification_deferred: {
     async recheck(meta) {
       // The durable descriptor carries the customer identity. Reuse
@@ -1407,11 +1416,11 @@ async function contactSlotStillAuthorized(meta, label) {
 
 // Shared: deferred invoice pay-link/dunning replays must confirm the
 // invoice is still collectible and (for dunning) the sequence not stopped.
-async function invoiceStillCollectible(meta) {
+async function invoiceStillCollectible(meta, database = db) {
   try {
     if (!meta.invoice_id) return { eligible: true };
     const { isTerminalInvoice } = require('../invoice-followups');
-    const inv = await db('invoices').where({ id: meta.invoice_id }).first();
+    const inv = await database('invoices').where({ id: meta.invoice_id }).first();
     if (!inv) return { eligible: false, reason: 'invoice-missing' };
     if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
     // Third-party Bill-To adopted overnight: payer-billed invoices route
@@ -1427,7 +1436,7 @@ async function invoiceStillCollectible(meta) {
       return { eligible: false, reason: 'payer-billed-withdrawn' };
     }
     if (meta.followup_sequence_id) {
-      const seq = await db('invoice_followup_sequences')
+      const seq = await database('invoice_followup_sequences')
         .where({ id: meta.followup_sequence_id })
         .first('status');
       if (seq && String(seq.status || '') === 'stopped') {
@@ -1481,6 +1490,11 @@ async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatc
     };
   }
   return defaultDispatch();
+}
+
+// True only for a registered dispatch that never needs a recipient phone.
+function replaysWithoutPhone(entryPoint) {
+  return entryFor(entryPoint)?.replayWithoutPhone === true;
 }
 
 // undefined = no locked handoff registered: the sender dispatches normally.
@@ -1658,8 +1672,10 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .map(([key]) => key);
 
 module.exports = {
+  invoiceStillCollectible,
   recheckDeferredReplay,
   dispatchDeferredReplay,
+  replaysWithoutPhone,
   deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,

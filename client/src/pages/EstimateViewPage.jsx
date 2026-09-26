@@ -3919,6 +3919,49 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
     );
   }
 
+  if (nextStep === 'sign_agreement') {
+    // Sign-before-pay (termite annual-plan restructure, P2): the accept
+    // parked — no invoice, no schedule, no charge — until the customer
+    // signs the annual agreement. Plain wording, no dollar amount (none is
+    // final until signature). Codex #4819 r6: signing starts the plan and
+    // its billing, but the coverage year runs from the installation date —
+    // never imply coverage is active at signature.
+    return (
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          Next step: sign your plan agreement.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.
+        </div>
+      </div>
+    );
+  }
+
+  if (nextStep === 'activation_pending') {
+    // Signed, but the plan is still being set up (activation running, or
+    // with the office) — the signing link is already used, so never ask
+    // for a signature again.
+    return (
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          We received your signature.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          We're setting up your plan now and will follow up with the next steps.
+        </div>
+      </div>
+    );
+  }
+
+  if (nextStep === 'offer_closed') {
+    // Slice 3b: the customer never signed the annual agreement within the
+    // 45-day window, so the offer closed automatically — nothing was
+    // billed or booked. Never re-show the sign-your-agreement copy; the
+    // signing link is dead.
+    return <AnnualOfferClosedCard />;
+  }
+
   if (nextStep === 'site_confirmation') {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.
@@ -4284,6 +4327,63 @@ function ReviewBeforeBookingCard({ reason }) {
         Prefer we reach out? We’ll follow up to confirm and schedule your visit. You pay on service day; no card or deposit now.
       </div>
     </div>
+  );
+}
+
+// "Want us to come look first?" (consultation-first lane, owner ruling
+// 2026-09-23): renders ONLY from the server-composed `consultationOffer`
+// field (`/data`'s `{ url }`, dark behind GATE_ESTIMATE_CONSULTATION_OFFER +
+// GATE_LEAD_INSPECTION_LINK) — every eligibility decision (open lead,
+// recurring intent, strong lead linkage, an open/customer-actionable
+// estimate, the /inspection page's own availability) is server-side; this
+// component makes none of its own. Absent field → renders nothing, so a
+// gate-off or ineligible response is byte-identical. Opens the same
+// /inspection/:token self-booking page the recurring-lead email offers in a
+// new tab, so a customer mid-configuration here never loses their
+// in-progress choices. Placed near the accept/decision area but never
+// disables or replaces the estimate's own accept CTA.
+// A /data refresh keeps what the first load showed for the two projections
+// the server composes on a fresh open only — returnVisit (withheld on a
+// refresh it cannot place in a recorded sitting, GH codex r6 P2) and
+// consultationOffer (composed on the first load only, GH codex #4853 r2 P2)
+// — unless the refreshed payload turned terminal, where the server's
+// active-only eligibility wins (GH codex r8 P2).
+export function carryRefreshProjections(prev, body, isRefresh) {
+  if (!isRefresh || body?.cta?.terminalState != null) return body;
+  const carried = {};
+  if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
+  // The offer is bound to the property it was matched against (GH codex
+  // #4853 r3 P0): a staff revision to another address drops it.
+  if (prev?.consultationOffer && !body.consultationOffer
+    && prev?.estimate?.address === body?.estimate?.address) carried.consultationOffer = prev.consultationOffer;
+  return Object.keys(carried).length ? { ...body, ...carried } : body;
+}
+
+export function ConsultationOfferSection({ consultationOffer }) {
+  if (!consultationOffer?.url) return null;
+  return (
+    <section aria-label="Want us to come look first?" style={{
+      background: COLORS.white,
+      borderRadius: 16,
+      padding: 24,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+        Want us to come look first?
+      </div>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+        A Waves technician can stop by for a free consultation, look at the property with you, and walk through the plan — no commitment.
+      </div>
+      <a
+        href={consultationOffer.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={estimateCallCtaStyle}
+      >
+        Pick a time
+      </a>
+    </section>
   );
 }
 
@@ -4961,7 +5061,7 @@ export function ServiceSection({
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             // Guarantee line off under glass (owner 2026-07-23) — the approve
-            // CTA's glass micro line states the same 90-day guarantee
+            // CTA's glass micro line states the same money-back guarantee
             // immediately below, so the in-card line read twice. Non-glass
             // single-service cards keep it: the CTA micro is glass-gated, so
             // removing it there would drop the page's only guarantee claim
@@ -5265,6 +5365,23 @@ export function estimateHasRegulatedCertificateSurface(serviceCategory, services
   return regulatedCategories.has(serviceCategory)
     || services.some((service) => regulatedCategories.has(glassServiceSlug(service?.key || service?.name)))
     || oneTimeItems.some((item) => regulatedCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)));
+}
+
+// Slice 3b: a termite annual offer that closed unsigned — shown both after
+// an accept retry (nextStep 'offer_closed') and on a normal reload
+// (/data estimate.annualPlanOfferClosed).
+function AnnualOfferClosedCard() {
+  return (
+    <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${ESTIMATE_MUTED}` }}>
+      <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+        This plan offer has closed.
+      </div>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+        The signing window closed before a signature came in. Nothing was charged or booked. Contact Waves
+        if you'd still like the annual plan — we're happy to send a new quote.
+      </div>
+    </div>
+  );
 }
 
 export default function EstimateViewPage() {
@@ -5782,16 +5899,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
     // same ordering rule — before setData) so the commercial copy pack and
     // the residential fallback can never render torn on one paint.
     setCommercialGlass(body?.cta?.commercialGlass === true);
-    // A refresh belongs to the sitting already on screen: the server withholds
-    // returnVisit on a refresh it cannot prove is inside a recorded sitting
-    // (a tab left open past the session gap), and the strip must not vanish
-    // mid-session for that — carry the loaded projection forward (GH codex
-    // r6 P2). A fresh open always takes the server's word.
-    // Never on a payload that turned terminal (declined via the sheet, accepted,
-    // expired): the server's active-only eligibility wins there (GH codex r8 P2).
-    setData((prev) => (isRefresh && prev?.returnVisit && !body.returnVisit && body?.cta?.terminalState == null
-      ? { ...body, returnVisit: prev.returnVisit }
-      : body));
+    // A refresh keeps the first load's returnVisit / consultationOffer
+    // unless the payload turned terminal (carryRefreshProjections).
+    setData((prev) => carryRefreshProjections(prev, body, isRefresh));
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
     const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';
@@ -7728,7 +7838,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // when glass is off. `glassContent` alone gates the service-agnostic swaps.
   const glassContent = glassCopyActive();
   // One-time-only estimates overlay a terms-neutral hero on the category
-  // pack — the packs' recurring promises (unlimited callbacks, 90-day
+  // pack — the packs' recurring promises (unlimited callbacks, money-back
   // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
   // Review-gated quotes get the confirm-with-you variant instead of
   // "approve online and pick a day" (codex P2 r3).
@@ -8215,7 +8325,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
             />
           ) : null}
 
-          {/* The standalone "Try us risk-free — 90-day money-back guarantee."
+          {/* The standalone "Try us risk-free — money-back guarantee."
               line is fully retired (owner 2026-07-24, extending the 2026-07-23
               glass dedupe): the approve CTA's micro line is the one sanctioned
               plan-level guarantee claim. The non-glass fallback rendered dead
@@ -8338,6 +8448,26 @@ function EstimateViewPageInner({ websiteMode = false }) {
     const stateHero = cta.terminalState === 'quote_required' && isCommercialProposal
       ? { h1: 'Hello {first}, your formal proposal is ready.', eyebrow: 'Your commercial proposal' }
       : TERMINAL_HERO[cta.terminalState] || null;
+    if (cta.terminalState === 'accepted' && estimate.annualPlanOfferClosed) {
+      // Slice 3b: accepted, but the termite annual offer closed unsigned —
+      // nothing was booked or billed, so never the booked page (Codex #4922
+      // r3 P1). No host stage: "booked" would tell an embedding website the
+      // flow converted (Codex #4922 r4) — like the other non-booked
+      // terminal pages, it sends none.
+      return (
+        <Page website={websiteMode}>
+          {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
+          {estimateActionBar}
+          <Header
+            customerFirstName={estimate.customerFirstName}
+            serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, estimate.acceptedServiceMode || null)}
+            headline="This plan offer has closed."
+            eyebrowOverride={null}
+          />
+          <AnnualOfferClosedCard />
+        </Page>
+      );
+    }
     if (cta.terminalState === 'accepted') {
       // Accepted = concise onboarding page (owner ask 2026-07-09): booked
       // hero, the booked-visit card, the Waves app invite, and the
@@ -8394,6 +8524,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
         {data.returnVisit
           ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
           : null}
+        {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
         {/* Commercial proposal: the what-happens-next card sits directly under
             the hero identity block (owner 2026-08-08) — at the bottom it
             repeated the hero's "your formal proposal is ready" and read as a
@@ -8543,6 +8674,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
         {/* aiPanelBlock below renders the Ask bar on this branch (regulated
             certificate surfaces excepted), so the action follows that. */}
         {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
+        {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -9049,6 +9181,8 @@ function EstimateViewPageInner({ websiteMode = false }) {
               price → slot picker → approve, with the member discount
               itemized in the price block itself). */}
           {glassContent ? null : aiPanelBlock}
+
+          {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
 
           {bookingContent}
 

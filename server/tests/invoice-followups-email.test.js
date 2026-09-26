@@ -22,7 +22,7 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(() => 'INV'),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, providerMessageId: 'sms-1' })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'sms-1' })),
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({
@@ -69,6 +69,8 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    if ((!queue || !queue.length) && table === 'notification_prefs') return chain({ first: undefined });
+    if ((!queue || !queue.length) && table === 'collections_contact_ledger') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -200,7 +202,13 @@ describe('invoice follow-up email sidecar', () => {
       to: '+19415550101',
       body: 'invoice follow-up sms',
       entryPoint: 'invoice_followup_sequence',
-      metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
+      metadata: expect.objectContaining({
+        original_message_type: 'invoice_followup',
+        notificationEventKey: 'invoice-followup:seq-1:d3_friendly',
+        followup_sequence_id: 'seq-1',
+        rendered_amount: '129.00',
+        collections_ledger_id: 'led-1',
+      }),
     }));
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       step_index: 1,
@@ -359,7 +367,8 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test('advances the sequence when email sends but the customer has no phone', async () => {
+  test.each([false, true])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+    const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
     const sequenceUpdate = chain();
@@ -371,7 +380,7 @@ describe('invoice follow-up email sidecar', () => {
       // bails at its payment_plans probe in this harness) + the pre-dun
       // refresh + the email-eligibility read.
       invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
-      notification_prefs: [chain({ first: { email_enabled: true } })],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
       invoice_followup_sequences: [
@@ -384,10 +393,13 @@ describe('invoice follow-up email sidecar', () => {
 
     await InvoiceFollowUps.runPending();
 
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      templateKey: 'invoice.followup_3_day',
-    }));
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    if (appSelected) {
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', to: null }));
+    } else {
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'invoice.followup_3_day' }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    }
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       step_index: 1,
       status: 'active',
@@ -428,6 +440,11 @@ describe('invoice follow-up email sidecar', () => {
     await InvoiceFollowUps.runPending();
 
     expect(failingSmsLog.insert).toHaveBeenCalled();
+    expect(JSON.parse(failingSmsLog.insert.mock.calls[0][0].metadata)).toMatchObject({
+      billingDeliveryCategory: 'invoice',
+      hasEmailLeg: true,
+      notificationEventKey: 'invoice-followup:seq-1:d3_friendly',
+    });
     const patch = sequenceUpdate.update.mock.calls[0][0];
     expect(patch.next_touch_at).toEqual(new Date('2026-05-27T12:00:00.000Z'));
     expect(patch).not.toHaveProperty('step_index');

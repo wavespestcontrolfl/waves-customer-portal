@@ -590,3 +590,33 @@ describe('VisitBriefPanel', () => {
     expect(onProject).toHaveBeenCalledWith(traceless);
   });
 });
+
+describe('VisitBriefPanel consultation outcome action', () => {
+  const assessment = { ...BASE_SERVICE, id: 'svc-a', serviceType: 'Waves Assessment', status: 'on_site', billingLane: null };
+
+  it('shows Outcome only on a Waves Assessment and hands it the service', () => {
+    const onOutcome = vi.fn();
+    render(<VisitBriefPanel stop={stopOf(assessment)} detail={detailFor({})} onProject={vi.fn()} onOutcome={onOutcome} />);
+    fireEvent.click(screen.getByRole('button', { name: '📝 Outcome' }));
+    expect(onOutcome).toHaveBeenCalledWith(assessment);
+  });
+
+  it('recognizes the catalog key when the display name differs', () => {
+    const keyed = { ...assessment, serviceType: 'Free Consultation', completionProfile: { serviceKey: 'lawn_inspection' } };
+    render(<VisitBriefPanel stop={stopOf(keyed)} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
+    expect(screen.getByRole('button', { name: '📝 Outcome' })).toBeInTheDocument();
+  });
+
+  it('hides Outcome on other services and on visits that never happened', () => {
+    const { unmount } = render(<VisitBriefPanel stop={stopOf(BASE_SERVICE)} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: '📝 Outcome' })).toBeNull();
+    unmount();
+    render(<VisitBriefPanel stop={stopOf({ ...assessment, status: 'no_show' })} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: '📝 Outcome' })).toBeNull();
+  });
+
+  it('keeps Outcome on a completed assessment (editable until won)', () => {
+    render(<VisitBriefPanel stop={stopOf({ ...assessment, status: 'completed' })} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
+    expect(screen.getByRole('button', { name: '📝 Outcome' })).toBeInTheDocument();
+  });
+});

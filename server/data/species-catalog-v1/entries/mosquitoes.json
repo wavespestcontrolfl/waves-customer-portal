@@ -1,0 +1,224 @@
+[
+  {
+    "kind": "organism",
+    "aka": [
+      "Container Mosquito"
+    ],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Can spread dengue, Zika, and chikungunya locally. See a doctor if you develop fever, rash, or joint pain after being bitten.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "aedes-mosquito",
+    "common_name": "Yellow Fever Mosquito",
+    "aliases": [
+      "yellow fever mosquito",
+      "container mosquito",
+      "aedes aegypti"
+    ],
+    "scientific_name": "Aedes aegypti",
+    "rank": "species",
+    "group": "mosquitoes",
+    "subgroup": "aedes",
+    "site_category": "Mosquitoes & biters",
+    "traits": [
+      "Bites in daytime, especially ankles and elbows",
+      "Black with white scales forming a lyre (violin) shape on top of the thorax",
+      "White banding on the legs",
+      "Breeds in bottle-cap amounts of standing water around the home"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asian-tiger-mosquito",
+        "difference": "Yellow fever mosquito has a lyre-shaped mark on the thorax; Asian tiger mosquito has a single straight white stripe down the center of the back.",
+        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "mosquito",
+      "key": "mosquito",
+      "label": "Mosquito Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "It doesn't need a pond — a plant saucer after one afternoon storm can raise a generation in about a week. Day-biting around the patio suggests container breeding somewhere within a few hundred feet; tipping out standing water is the first, highest-value step, and a technician can evaluate what else is needed.",
+      "fact": "It doesn't need a pond — a plant saucer after one afternoon storm raises a generation in about a week.",
+      "blurb": "Southwest Florida mosquitoes breed in as little as a bottle-cap of standing water. Tipping out standing water around the property is the first, highest-value step; a technician can evaluate the rest."
+    },
+    "tech_notes": "Barrier/larvicide program per protocol. Walk property for container breeding, bromeliads, drains, plant saucers.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN792"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/aedes-mosquito/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Capable of spreading dengue, chikungunya, and other viruses. See a doctor if you develop fever, rash, or joint pain after being bitten.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "asian-tiger-mosquito",
+    "common_name": "Asian Tiger Mosquito",
+    "aliases": [
+      "asian tiger mosquito",
+      "tiger mosquito",
+      "aedes albopictus"
+    ],
+    "scientific_name": "Aedes albopictus",
+    "rank": "species",
+    "group": "mosquitoes",
+    "subgroup": "aedes",
+    "site_category": "Mosquitoes & biters",
+    "traits": [
+      "A single bold white stripe down the center of the back",
+      "Black legs with white banding on each segment",
+      "Aggressive daytime biter, peaking early morning and late afternoon",
+      "Same container-breeding habit as the yellow fever mosquito"
+    ],
+    "look_alikes": [
+      {
+        "slug": "aedes-mosquito",
+        "difference": "Asian tiger mosquito has one straight white stripe down the back; yellow fever mosquito has a lyre-shaped mark instead.",
+        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "mosquito",
+      "key": "mosquito",
+      "label": "Mosquito Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This species arrived in the US in used tire shipments in the 1980s and is now established statewide. Same starting point as its cousin: eliminate standing water around the home first; a technician can then treat resting areas for the adults that remain.",
+      "fact": "It arrived in the US in the 1980s in shipments of used tires — one of the world’s most-traveled mosquitoes.",
+      "blurb": "Same starting point: eliminate standing water, then a technician can treat resting areas."
+    },
+    "tech_notes": "Barrier program per protocol. Walk property for tires, containers, bromeliads, tarps holding water.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN594"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/asian-tiger-mosquito/",
+      "guides": []
+    }
+  }
+]

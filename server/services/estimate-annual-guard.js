@@ -340,6 +340,7 @@ async function rewriteWithheldEstimateLinks({ db, html, text }) {
 const RECEIPT_LINK_POLICY_TEMPLATE_KEYS = new Set([
   'deposit.receipt',
   'invoice.receipt',
+  'billing.receipt_notice', // billing-channel-email's payment_receipt-category template
 ]);
 
 function withheldLinkPolicyForTemplate(templateKey) {

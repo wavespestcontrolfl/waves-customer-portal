@@ -36,6 +36,24 @@ const { visitsPerYearForCadence } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+// Termite annual-plan sign-before-pay (slice 3a, owner ruling 2026-09-24):
+// termiteAnnualPlanSelectionEnabled combines GATE_TERMITE_ANNUAL_PLAN with
+// GATE_CANCEL_FLOW_V2 (the same single reader pricing-engine/estimate-engine
+// and estimate-offer-version use to decide whether a FRESH quote can even
+// price the plan), and selectedTermiteAnnualPlanRows reads the accepted
+// program off the estimate's own stored data. Both dark by default, so this
+// import is inert everywhere the plan is not live.
+const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
+// Codex P0: the LIVE gate alone is wrong for an already-DELIVERED annual
+// offer — estimate-offer-version.js's own annualPlanPublicReplayBlocked
+// treats a delivered offer as acceptable even after the gate flips off, so
+// the converter must honor that same persisted evidence rather than
+// re-deciding from the live gate alone (which would let a stale offer skip
+// straight to money+term with no signature the moment the gate is
+// disabled). annualPlanHasDeliveredOffer reads a stamp already written at
+// send time (estimate_data.deliveryState + its fingerprint) — no new state.
+const { annualPlanHasDeliveredOffer } = require('./estimate-offer-version');
 
 // Find the first grassType/grass_type string anywhere in the estimate data
 // (confirmed primary path is inputs.grassType, but estimate shapes vary).
@@ -4266,6 +4284,301 @@ async function acquireConverterInvoiceDepositLocks(trx, {
   }
 }
 
+// Termite annual-plan sign-before-pay: the ONE rule for "is this accept a
+// Subterranean Termite Protection annual plan that must sign before it
+// pays" — shared by convertEstimate (below) and estimate-public.js (the
+// 402 in-lane-charge quote bypass and the accept-payload nextStep
+// derivation), so the rule can never drift between where money is decided
+// and where the customer-facing flow reacts to that decision.
+// annual_prepay_terms.plan_label is varchar(120) and the term label is
+// "<plan label> Annual Prepay" (14 more characters).
+const TERMITE_ANNUAL_PLAN_LABEL_MAX = 120 - ' Annual Prepay'.length;
+
+function annualPlanRowsFor(estimateData, billingTerm) {
+  return billingTerm === 'prepay_annual' ? selectedTermiteAnnualPlanRows(estimateData) : [];
+}
+
+// The live gate alone governs a FRESH selection, but an offer already
+// delivered to the customer before the gate flipped off must still honor
+// sign-before-pay — annualPlanHasDeliveredOffer reads the persisted
+// delivery/fingerprint stamp estimate-offer-version.js already writes at
+// send time, the same evidence annualPlanPublicReplayBlocked uses to keep
+// such an offer viewable and acceptable.
+const PERSISTED_SIGN_BEFORE_PAY_STAMPS = ['awaiting_signature', 'activated', 'signature_expired'];
+
+function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm) {
+  // A persisted stamp is checked BEFORE the billing-term row filter: it
+  // proves this estimate already entered sign-before-pay, whatever
+  // billingTerm a later caller passes. A retry that omits billingTerm
+  // (default 'standard' selects no annual-plan rows) must still reach
+  // parkTermiteAnnualPlanAccept's no-op for a parked / activated / closed
+  // estimate — never an ordinary conversion that mints services or an
+  // invoice beside it.
+  if (PERSISTED_SIGN_BEFORE_PAY_STAMPS.includes(estimate?.annual_plan_activation_status)) return true;
+  const rows = annualPlanRowsFor(estimateData, billingTerm);
+  if (rows.length === 0) return false;
+  // Codex round-3 P0: once an estimate has actually parked, the PERSISTED
+  // stamp is authoritative over re-evaluating the live gate/delivered-offer
+  // rule — a gate disabled between accept and signature must never un-park
+  // an in-flight signed agreement. Without this, activationRun's own read of
+  // this same estimate (annual_plan_activation_status === 'awaiting_signature'
+  // by construction, since termite-annual-activation.js only ever calls in
+  // under that exact status) could resolve isTermiteAnnualPlanAccept=false
+  // with the gate off, running the ordinary conversion WITHOUT ever setting
+  // annualPlanActivationStatus='activated' — and
+  // termite-annual-activation.js's own defense-in-depth check then throws
+  // and rolls back a signed contract's conversion forever.
+  // Slice 3b: 'signature_expired' is ALSO a persisted, authoritative stamp
+  // (the customer never signed within the abandon window) — it must route
+  // here exactly like 'awaiting_signature' / 'activated' rather than fall
+  // through to the live-gate/delivered-offer check below. Without this, a
+  // gate disabled after the plan expired (or an estimate with no delivered-
+  // offer stamp) would let a re-run of convertEstimate treat the row as an
+  // ORDINARY accept and run the full standard conversion against a plan
+  // that already closed — never the intended outcome. parkTermiteAnnualPlanAccept
+  // (below) is what actually decides what a re-run of a 'signature_expired'
+  // estimate does; this only ensures every re-run reaches that decision.
+  // (All three stamps are checked at the top of this function.)
+  return termiteAnnualPlanSelectionEnabled() || annualPlanHasDeliveredOffer(estimate);
+}
+
+// Codex round-3 P1: "never reprice" a signed agreement. Everything the
+// customer accepted is frozen at park time — the annual fee NET of the
+// prepay discount, every one-time setup line, the tax rate AND tax dollars,
+// and the pre-credit invoice total — and activation bills exactly these
+// figures instead of re-deriving them (ANNUAL_PREPAY_DISCOUNT_PCT is an env
+// value and a commercial tax rate is a live county/exemption lookup; either
+// can move between accept and signature). Mirrors the ordinary
+// prepay_annual branch's own math call-for-call (same resolvers, same
+// cents rounding InvoiceService.create applies), so a frozen bill is
+// byte-identical to what an immediate prepay accept would have minted.
+async function computeTermiteAnnualFrozenFinancials({
+  database, estimate, estimateData, opts,
+}) {
+  const monthlyRate = parseFloat(estimate.monthly_total || 0);
+  const recurringServices = recurringServicesFromEstimateData(estimateData);
+  const suppressRecurringConversion = shouldSuppressRecurringConversion({
+    billingTerm: 'prepay_annual',
+    monthlyRate,
+    annualTotal: estimate.annual_total,
+    oneTimeTotal: estimate.onetime_total,
+    recurringServices,
+    estimateData,
+  });
+  const isLegacyRodentRow = legacyRodentRowPredicateFor(estimateData);
+  const recurringServicesForConversion = suppressRecurringConversion
+    ? []
+    : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isLegacyRodentRow(svc));
+  const hasCommercialRecurring = recurringServicesForConversion.some(
+    (svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_'),
+  );
+  const annualPrepayBase = resolveAnnualPrepayDraftAmount({
+    prepayInvoiceAmount: opts.prepayInvoiceAmount,
+    annualTotal: estimate.annual_total,
+    monthlyRate,
+  });
+  const prepayResolved = resolveAnnualPrepayInvoiceTotal({
+    baseAnnual: annualPrepayBase,
+    recurringServices: recurringServicesForConversion,
+    estimateData,
+  });
+  const prepayDiscountApplied = prepayResolved.discount > 0;
+  const rodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
+  const setupRow = annualPlanRowsFor(estimateData, 'prepay_annual').find(
+    (row) => row && (row.kind === 'setup' || row.service === 'termite_bait_installation'),
+  );
+  const annualPlanSetup = Number(setupRow?.price) > 0
+    ? { description: setupRow.name || 'Station Setup', amount: roundCents(Number(setupRow.price)) }
+    : null;
+  // Commercial-only, exactly like the ordinary branch: residential prepay
+  // is untaxed. Codex round-4 P1: the residential zero is frozen as an
+  // EXPLICIT 0 and replayed as 0 — a null here became `undefined` at
+  // InvoiceService.create, which then recomputed tax from the customer's
+  // CURRENT classification, so an account reclassified commercial between
+  // accept and signature minted tax above the frozen zero and the snapshot
+  // guard wedged the signed agreement in awaiting_signature forever.
+  let taxRate = 0;
+  if (hasCommercialRecurring) {
+    const baseRate = await resolveCommercialPrepayBaseRate(estimate.customer_id, { database });
+    taxRate = resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
+      prepayDiscountApplied,
+      baseRate,
+      taxableOneTimeAmount: rodentSetupAmount,
+    });
+  }
+  const subtotal = roundCents(prepayResolved.amount + rodentSetupAmount + (annualPlanSetup?.amount || 0));
+  const taxAmount = taxRate ? roundCents(subtotal * taxRate) : 0;
+  return {
+    version: 1,
+    annualPrepayAmount: prepayResolved.amount,
+    prepayDiscountApplied,
+    prepayDiscountRate: prepayResolved.rate,
+    rodentSetupAmount,
+    annualPlanSetup,
+    taxRate,
+    subtotal,
+    taxAmount,
+    total: roundCents(subtotal + taxAmount),
+  };
+}
+
+function roundCents(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+// Activation reads the frozen snapshot back and FAILS CLOSED on anything
+// missing or malformed (the caller bells and the estimate stays
+// awaiting_signature) — never a silent fallback to live repricing.
+const isFiniteNonNegative = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+const toCents = (v) => Math.round(v * 100);
+
+function isValidFrozenTermiteAnnualFinancials(frozen) {
+  if (!frozen || frozen.version !== 1 || typeof frozen.prepayDiscountApplied !== 'boolean') return false;
+  const setup = frozen.annualPlanSetup;
+  if (setup != null && !(isFiniteNonNegative(setup.amount) && typeof setup.description === 'string')) return false;
+  if (frozen.taxRate != null && !isFiniteNonNegative(frozen.taxRate)) return false;
+  const money = [frozen.annualPrepayAmount, frozen.rodentSetupAmount, frozen.subtotal, frozen.taxAmount, frozen.total];
+  if (!money.every(isFiniteNonNegative) || !(frozen.annualPrepayAmount > 0)) return false;
+  const lineSum = frozen.annualPrepayAmount + frozen.rodentSetupAmount + (setup?.amount || 0);
+  return toCents(frozen.subtotal) === toCents(lineSum)
+    && toCents(frozen.total) === toCents(frozen.subtotal + frozen.taxAmount);
+}
+
+function frozenTermiteAnnualFinancialsFor(estimate) {
+  let context = estimate?.annual_plan_deferred_invoice;
+  if (typeof context === 'string') {
+    try { context = JSON.parse(context); } catch { context = null; }
+  }
+  const frozen = context && typeof context === 'object' ? context.frozenFinancials : null;
+  const valid = isValidFrozenTermiteAnnualFinancials(frozen);
+  if (!valid) {
+    const err = new Error(`Termite annual plan for estimate ${estimate?.id} has no valid frozen accepted-price snapshot — refusing to reprice at signature`);
+    err.code = 'TERMITE_ANNUAL_FROZEN_FINANCIALS_INVALID';
+    throw err;
+  }
+  return frozen;
+}
+
+// Termite annual-plan sign-before-pay (slice 3a restructure): parks the
+// accept. Stamps awaiting_signature and persists exactly the whitelisted
+// opts a later activation call needs to re-run the FULL conversion — no
+// tier, pipeline, scheduling, invoice, or term work happens here or
+// anywhere above this call in convertEstimate for this product; every one
+// of those happens only once the customer signs, via
+// termite-annual-activation.js re-invoking convertEstimate with
+// activationRun:true and this same persisted context spread back in as
+// opts. Idempotent by construction: a retried accept while still
+// 'awaiting_signature' keeps the FIRST parked context (never re-parks at a
+// later/edited acceptance), and a retry once already 'activated' is a
+// no-op that reports the terminal status rather than overwriting it.
+// The accepted total the park FROZE (frozenFinancials.total — every line
+// incl. the annual-plan Station Setup, plus tax), reported with every park
+// outcome so the accept response and the acceptance notification quote the
+// same figure the signature-time invoice will bill (codex #4819 r6 P2) —
+// never a re-derived display amount. Null when no snapshot is readable.
+function parkedDeferredTotal(context) {
+  let parsed = context;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  const total = Number(parsed?.frozenFinancials?.total);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+async function parkTermiteAnnualPlanAccept({
+  database, estimateId, estimate, estimateData, opts,
+}) {
+  if (estimate.annual_plan_activation_status === 'activated') {
+    return { annualPlanActivationStatus: 'activated', annualPlanDeferredTotal: parkedDeferredTotal(estimate.annual_plan_deferred_invoice) };
+  }
+  if (estimate.annual_plan_activation_status === 'awaiting_signature' && estimate.annual_plan_deferred_invoice) {
+    return { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: parkedDeferredTotal(estimate.annual_plan_deferred_invoice) };
+  }
+  // Slice 3b, deliberate decision: a 'signature_expired' estimate NEVER
+  // silently re-parks or re-opens here, no matter how many times
+  // convertEstimate is re-run against it (a stray retry, a webhook replay,
+  // an operator re-triggering acceptance). The 45-day close is meant to be
+  // final — "re-quote if the customer still wants it" (a NEW estimate),
+  // never "re-accept the same one and the clock resets". Re-opening THIS
+  // exact estimate is not offered as a path in this slice; if the owner
+  // later wants a deliberate staff "reinstate" action, it should be an
+  // explicit endpoint that clears annual_plan_activation_status back to
+  // NULL (not routed through this accept-time park helper) so it can carry
+  // its own audit trail and can't be triggered by an ordinary retry.
+  if (estimate.annual_plan_activation_status === 'signature_expired') {
+    return { annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null };
+  }
+  // Codex round-3 P1: freeze the customer-accepted pricing NOW, before any
+  // tier/pipeline work runs — never park without it. A failure here fails
+  // the accept itself (retryable) rather than parking an agreement whose
+  // signature-time bill could silently drift from what was quoted.
+  const frozenFinancials = await computeTermiteAnnualFrozenFinancials({
+    database, estimate, estimateData, opts,
+  });
+  // Whitelisted accept-time opts only — never the whole `opts` object,
+  // which can carry a live `database`/transaction handle that must never
+  // be serialized. This is everything the ordinary prepay_annual branch
+  // reads from opts, reused unchanged when activation replays it.
+  const acceptContext = {
+    version: 1,
+    parkedAt: new Date().toISOString(),
+    frozenFinancials,
+    prepayInvoiceAmount: opts.prepayInvoiceAmount != null ? Number(opts.prepayInvoiceAmount) : null,
+    firstApplicationAmount: opts.firstApplicationAmount != null ? Number(opts.firstApplicationAmount) : null,
+    allowFirstApplicationFallback: opts.allowFirstApplicationFallback !== false,
+    manualDiscountItemization: opts.manualDiscountItemization || null,
+    adoptedExistingAppointmentId: opts.adoptedExistingAppointmentId || null,
+    // "Start date raw" — the caller's own booked-first-date override, if
+    // any (prepay-on-book / manual accept with a booked appointment). Never
+    // derived from a scheduled visit here, since none exists yet.
+    annualPrepayTermStart: opts.annualPrepayTermStart || null,
+    coverageServiceType: opts.coverageServiceType || null,
+    coverageVisitCount: Number.isInteger(opts.coverageVisitCount) ? opts.coverageVisitCount : null,
+    coverageCadence: opts.coverageCadence || null,
+    // The slot the customer picked at accept — a scheduling preference for
+    // staff only; nothing is booked before signature.
+    requestedFirstVisit: opts.requestedFirstVisit && typeof opts.requestedFirstVisit === 'object'
+      ? opts.requestedFirstVisit
+      : null,
+    deferFollowUpReminderRegistration: opts.deferFollowUpReminderRegistration === true,
+    deferCommercialScheduleNotification: opts.deferCommercialScheduleNotification === true,
+    skipMembershipEmail: opts.skipMembershipEmail === true,
+    skipWelcomeSms: opts.skipWelcomeSms === true,
+  };
+  try {
+    // Guarded UPDATE (belt + braces beside the in-memory checks above):
+    // never overwrite a row that reached 'activated', or that already
+    // parked a first context, between the read at the top of
+    // convertEstimate and this write.
+    const stampedCount = await database('estimates')
+      .where({ id: estimateId })
+      .where(function guardFirstParkOnly() {
+        this.whereNull('annual_plan_activation_status')
+          .orWhereNot('annual_plan_activation_status', 'activated');
+      })
+      .whereNull('annual_plan_deferred_invoice')
+      .update({
+        annual_plan_activation_status: 'awaiting_signature',
+        annual_plan_deferred_invoice: JSON.stringify(acceptContext),
+      });
+    if (stampedCount > 0) {
+      return { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: parkedDeferredTotal(acceptContext) };
+    }
+    // The guard matched ZERO rows — a concurrent write (another accept
+    // attempt, or activation) landed between the read at the top of
+    // convertEstimate and this UPDATE. Report what the row ACTUALLY holds
+    // now rather than a blind guess.
+    const freshRow = await database('estimates').where({ id: estimateId }).first('annual_plan_activation_status', 'annual_plan_deferred_invoice');
+    return {
+      annualPlanActivationStatus: freshRow?.annual_plan_activation_status || null,
+      annualPlanDeferredTotal: parkedDeferredTotal(freshRow?.annual_plan_deferred_invoice),
+    };
+  } catch (stampErr) {
+    logger.error(`[estimate-converter] annual-plan awaiting-signature stamp failed for estimate ${estimateId}: ${stampErr.message}`);
+    throw stampErr;
+  }
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -4360,6 +4673,73 @@ const EstimateConverter = {
       try { estimateData = JSON.parse(estimateData); } catch { estimateData = {}; }
     }
     estimateData = estimateData || {};
+
+    // Termite annual-plan sign-before-pay (slice 3a restructure, owner
+    // ruling 2026-09-24): detected as early as possible — right after
+    // estimateData is parsed, before ANY tier/pipeline/billing decision
+    // below runs — so a sign-before-pay accept does NONE of that work at
+    // accept time, only at signature. annualPlanRowsForDeferral /
+    // isTermiteAnnualPlanAccept are computed ONCE here and reused later in
+    // this same function (the ordinary prepay_annual invoice branch, only
+    // ever reached for this product when opts.activationRun is true, needs
+    // the same rows to bill the plan's own setup line).
+    const annualPlanRowsForDeferral = annualPlanRowsFor(estimateData, billingTerm);
+    const isTermiteAnnualPlanAccept = isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm);
+    // Prepay-only enforcement (slice 4, owner ruling 2026-09-24): the
+    // Subterranean Termite Protection annual plan has no per-visit/monthly
+    // billing shape at all (one inspection a year, a flat prepaid annual
+    // fee) — it is billed prepay_annual ONLY. The two lines above already
+    // detect "is THIS call a termite annual accept", but BOTH are gated on
+    // the CALLER'S OWN billingTerm (annualPlanRowsFor returns [] whenever
+    // billingTerm !== 'prepay_annual', by construction) — so a caller that
+    // reaches here with billingTerm 'standard' for a termite-annual estimate
+    // (a stray default, an old/buggy UI choice, a crafted request) sees
+    // isTermiteAnnualPlanAccept=false and falls straight through to the
+    // ordinary per-application conversion below, which this product cannot
+    // support. Probe with billingTerm FORCED to 'prepay_annual' — the same
+    // idiom estimate-manual-acceptance.js already uses
+    // (isTermiteAnnualSignBeforePayAccept(estimate, data, 'prepay_annual'))
+    // to ask "is this FUNDAMENTALLY a termite annual plan" independent of
+    // what this specific call's billingTerm is — so a mismatched call is
+    // refused outright (422) instead of silently mis-billing or under-
+    // billing the plan. A no-op for every other program: a quarterly
+    // termite line, or any non-termite estimate, always resolves
+    // selectedTermiteAnnualPlanRows to [] regardless of billingTerm.
+    //
+    // Detected from the estimate's own rows (selectedTermiteAnnualPlanRows),
+    // NOT the sign-before-pay eligibility helper: that helper also requires
+    // the live gate / a delivery witness / an activation stamp, so with
+    // GATE_TERMITE_ANNUAL_PLAN off an annual-plan draft marked won with
+    // standard billing slipped past (Codex #4937 r1 P1). The product has no
+    // per-application shape whatever the gate says.
+    if (billingTerm !== 'prepay_annual'
+      && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
+      const err = new Error(
+        'The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront") — pick that option to continue.',
+      );
+      err.code = 'TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY';
+      err.isOperational = true;
+      err.status = 422;
+      err.statusCode = 422;
+      throw err;
+    }
+    // Set true ONLY by termite-annual-activation.js, itself only ever after
+    // the customer's signature has committed, under the estimate row's own
+    // FOR UPDATE lock + awaiting_signature idempotency check. Every other
+    // caller (a fresh accept, or a retry of one) leaves this false.
+    const activationRun = opts.activationRun === true;
+    if (isTermiteAnnualPlanAccept && !activationRun) {
+      // Park: stamp awaiting_signature and persist exactly the opts this
+      // call would need to re-run the FULL conversion later — no tier,
+      // pipeline, scheduling, invoice, or term work happens for this
+      // product until the customer signs (round-2 P1: "defer service
+      // creation until signed"). termite-annual-activation.js re-invokes
+      // this same function with activationRun:true and these persisted
+      // opts spread back in once the signature commits.
+      return parkTermiteAnnualPlanAccept({
+        database, estimateId, estimate, estimateData, opts,
+      });
+    }
 
     // Count recurring services for scheduling, but only tier-qualifying rows
     // for WaveGuard tier activation. Palm Injection and Rodent Bait Stations
@@ -6714,6 +7094,11 @@ const EstimateConverter = {
     let draftInvoicePayUrl = null;
     let invoiceDelivery = null;
     let annualPrepayTermId = null;
+    // Set below when this accept is a termite-annual-plan sign-before-pay
+    // deferral — surfaced on the return value so callers (and the estimate
+    // detail API) can tell the accept succeeded but money is on hold for a
+    // signature, distinct from a normal prepay accept.
+    let annualPlanActivationStatus = null;
     try {
       // Base recurring annual (undiscounted): resolveAnnualPrepayInvoiceAmount never
       // applies the prepay discount, so this is always the pre-discount figure.
@@ -6731,10 +7116,21 @@ const EstimateConverter = {
         recurringServices: recurringServicesForConversion,
         estimateData,
       });
-      const annualPrepayAmount = billingTerm === 'prepay_annual'
-        ? prepayResolved.amount
-        : annualPrepayBase;
-      const prepayDiscountApplied = prepayResolved.discount > 0;
+      // Codex round-3 P1 (never reprice): a termite annual-plan activation
+      // bills EXACTLY the figures frozen when the customer accepted —
+      // fail-closed (throws → the activation bells, estimate stays
+      // awaiting_signature) when that snapshot is missing or malformed.
+      const frozenAnnualPlanFinancials = isTermiteAnnualPlanAccept && activationRun && billingTerm === 'prepay_annual'
+        ? frozenTermiteAnnualFinancialsFor(estimate)
+        : null;
+      const annualPrepayAmount = frozenAnnualPlanFinancials
+        ? frozenAnnualPlanFinancials.annualPrepayAmount
+        : billingTerm === 'prepay_annual'
+          ? prepayResolved.amount
+          : annualPrepayBase;
+      const prepayDiscountApplied = frozenAnnualPlanFinancials
+        ? frozenAnnualPlanFinancials.prepayDiscountApplied
+        : prepayResolved.discount > 0;
       const standardFirstApplicationAmount = billingTerm === 'standard'
         ? resolveFirstApplicationAmount({
           firstApplicationAmount: opts.firstApplicationAmount,
@@ -6765,6 +7161,19 @@ const EstimateConverter = {
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
         : setupFeeApplies || standardFirstApplicationAmount > 0;
+      // Sign-before-pay (slice 3a restructure, owner ruling 2026-09-24, dark
+      // behind GATE_TERMITE_ANNUAL_PLAN): an accepted Subterranean Termite
+      // Protection annual plan never reaches this point at accept time at
+      // all — the early park check above this function's tier/scheduling
+      // logic returns before we get here. The ONLY way isTermiteAnnualPlanAccept
+      // is true down here is opts.activationRun === true (termite-annual-
+      // activation.js, right after the customer's signature commits, under
+      // the estimate row's own lock) — so the branch below runs the SAME
+      // ordinary prepay_annual invoice+term creation every other program
+      // gets, just later, with the annual plan's own setup line added in.
+      // Every other program (lawn/rodent/pest/mosquito/quarterly-termite
+      // prepay) is unaffected — selectedTermiteAnnualPlanRows only matches
+      // an accepted plan==='annual_protection' termite line.
       if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
@@ -6776,21 +7185,61 @@ const EstimateConverter = {
           // program minimum's protected floor can cap the discount to a sliver
           // of the annual, and the invoice must claim the same rate the public
           // page showed at approval.
-          const prepayDiscountPctLabel = annualPrepayDiscountPctLabel(prepayResolved.rate);
+          const prepayDiscountPctLabel = annualPrepayDiscountPctLabel(
+            frozenAnnualPlanFinancials ? frozenAnnualPlanFinancials.prepayDiscountRate : prepayResolved.rate,
+          );
+          // Termite annual-plan naming (slice 4): this product is not a
+          // WaveGuard tier membership at all — it never waives a setup fee
+          // (its OWN Station Setup line, annualPlanSetupFeeAmount below,
+          // rides this very invoice), so it must never borrow WaveGuard's
+          // name or "setup fee waived" copy. Read the SAME label the estimate
+          // stamped at quote time (service-pricing.js TERMITE.annualPlan.label,
+          // carried onto the mapped/raw termite_bait row's planLabel field by
+          // resolveTermiteProgram's planFields / v1-legacy-mapper) — the
+          // catalog's own canonical name, never invented here — falling back
+          // to the catalog default only for a legacy/malformed row that
+          // predates the stamp.
+          // Capped so the persisted term label ("<label> Annual Prepay") fits
+          // annual_prepay_terms.plan_label varchar(120) — an over-long stamp
+          // falls back to the catalog name rather than failing the term
+          // insert after the customer has signed (Codex #4937 r1 P2).
+          const stampedTermiteLabel = isTermiteAnnualPlanAccept
+            ? annualPlanRowsForDeferral.find(
+              (row) => row && typeof row.planLabel === 'string' && row.planLabel.trim(),
+            )?.planLabel.trim()
+            : null;
+          const termiteAnnualPlanLabel = isTermiteAnnualPlanAccept
+            ? (stampedTermiteLabel && stampedTermiteLabel.length <= TERMITE_ANNUAL_PLAN_LABEL_MAX
+              ? stampedTermiteLabel
+              : 'Subterranean Termite Protection')
+            : null;
           // Commercial plans are not a WaveGuard membership and tier is the
           // non-member 'none'; label them 'Commercial' rather than letting the
           // truthy 'none' render as "WaveGuard none".
-          const prepayPlanPrefix = commercialOnlyRecurring
-            ? 'Commercial'
-            : `WaveGuard ${tier && tier !== 'none' ? tier : 'Bronze'}`;
-          const prepayLineDescription = commercialOnlyRecurring
-            ? `${prepayPlanPrefix} — 12 months prepaid`
-            : prepayDiscountApplied
+          const prepayPlanPrefix = isTermiteAnnualPlanAccept
+            ? termiteAnnualPlanLabel
+            : commercialOnlyRecurring
+              ? 'Commercial'
+              : `WaveGuard ${tier && tier !== 'none' ? tier : 'Bronze'}`;
+          // Never the WaveGuard "setup fee waived" wording for the termite
+          // annual plan — it carries no WaveGuard setup fee to waive (its
+          // OWN Station Setup line is charged, never waived); the
+          // commercial/WaveGuard branches below are UNCHANGED from before
+          // this lane (every other program stays byte-identical).
+          const prepayLineDescription = isTermiteAnnualPlanAccept
+            ? (prepayDiscountApplied
               ? `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
-              : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
+              : `${prepayPlanPrefix} — 12 months prepaid`)
+            : commercialOnlyRecurring
+              ? `${prepayPlanPrefix} — 12 months prepaid`
+              : prepayDiscountApplied
+                ? `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
+                : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${setupFeeAmount.toFixed(2)} setup fee waived per WaveGuard membership policy.`;
+            : isTermiteAnnualPlanAccept
+              ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" for the ${prepayPlanPrefix}.`
+              : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${setupFeeAmount.toFixed(2)} setup fee waived per WaveGuard membership policy.`;
           // Commercial prepay tax: pass an explicit BLENDED rate (see
           // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
           // mixed commercial plan is taxed. Non-commercial prepay passes no rate
@@ -6801,10 +7250,10 @@ const EstimateConverter = {
           // property_type='commercial' is visible — then blend by the taxable
           // pest share. Never hardcode 7%.
           const prepayRodentSetupForTax = frozenRodentBaitSetupAmount(estimateData);
-          const prepayCommercialBaseRate = hasCommercialRecurring
+          const prepayCommercialBaseRate = hasCommercialRecurring && !frozenAnnualPlanFinancials
             ? await resolveCommercialPrepayBaseRate(customerId, { database })
             : 0;
-          const prepayTaxRate = hasCommercialRecurring
+          const liveCommercialPrepayTaxRate = hasCommercialRecurring && !frozenAnnualPlanFinancials
             ? resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
               prepayDiscountApplied,
               baseRate: prepayCommercialBaseRate,
@@ -6813,6 +7262,14 @@ const EstimateConverter = {
               taxableOneTimeAmount: prepayRodentSetupForTax,
             })
             : undefined;
+          // A frozen snapshot always replays an explicit rate (codex
+          // round-4 P1): residential is frozen as 0, and a legacy snapshot
+          // parked with a null rate carried a frozen $0 tax, so it replays
+          // 0 too — never `undefined`, which would let InvoiceService.create
+          // recompute tax from the customer's current classification.
+          const prepayTaxRate = frozenAnnualPlanFinancials
+            ? (frozenAnnualPlanFinancials.taxRate ?? 0)
+            : liveCommercialPrepayTaxRate;
           // Acceptance deposit credits against this prepay invoice through
           // create()'s depositCredit param, exactly like the standard branch
           // below — prepay-annual accepts owe the $49 deposit (owner decision
@@ -6851,7 +7308,34 @@ const EstimateConverter = {
           // line; annual-prepay-renewals' seeded-visit fallback subtracts
           // setup lines before dividing by visits (setup is not per-visit
           // coverage money).
-          const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
+          const prepayRodentSetupAmount = frozenAnnualPlanFinancials
+            ? frozenAnnualPlanFinancials.rodentSetupAmount
+            : frozenRodentBaitSetupAmount(estimateData);
+          // Termite annual-plan's OWN one-time setup fee (service
+          // 'termite_bait_installation', name 'Station Setup', kind 'setup'
+          // — v1-legacy-mapper.js ~1173) rides as its own invoice line here,
+          // exactly as the sign-before-pay deferral this replaces resolved
+          // it (codex P1, slice 3a restructure): the rodent resolver above
+          // always reads 0 for a termite estimate, so without this the
+          // annual plan's disclosed setup fee would be silently dropped
+          // from the ONLY invoice this estimate ever mints. Only ever
+          // non-empty when isTermiteAnnualPlanAccept (i.e. this is an
+          // activation run for that product) — every other prepay_annual
+          // accept keeps prepayRodentSetupAmount as its one setup line,
+          // unaffected.
+          const annualPlanSetupRow = isTermiteAnnualPlanAccept
+            ? annualPlanRowsForDeferral.find(
+              (row) => row && (row.kind === 'setup' || row.service === 'termite_bait_installation'),
+            )
+            : null;
+          const annualPlanSetupFeeAmount = frozenAnnualPlanFinancials
+            ? (frozenAnnualPlanFinancials.annualPlanSetup?.amount || 0)
+            : Number(annualPlanSetupRow?.price) > 0
+              ? Math.round(Number(annualPlanSetupRow.price) * 100) / 100
+              : 0;
+          const annualPlanSetupDescription = frozenAnnualPlanFinancials?.annualPlanSetup?.description
+            || annualPlanSetupRow?.name || 'Station Setup';
+          {
           const inv = await database.transaction(async (invoiceTrx) => {
             await acquireConverterInvoiceDepositLocks(invoiceTrx, {
               estimateId, customerId, nonblocking: nonblockingInvoiceLocks,
@@ -6878,6 +7362,11 @@ const EstimateConverter = {
                 description: 'Bait Station Setup — one-time setup fee',
                 quantity: 1,
                 unit_price: prepayRodentSetupAmount,
+              }] : []),
+              ...(annualPlanSetupFeeAmount > 0 ? [{
+                description: annualPlanSetupDescription,
+                quantity: 1,
+                unit_price: annualPlanSetupFeeAmount,
               }] : [])],
               notes: prepayNotes,
               dueDate: etDateString(),
@@ -6887,6 +7376,18 @@ const EstimateConverter = {
                 : {}),
             });
             appliedPrepayDepositCredit = Number(created?.applied_deposit_credit) || 0;
+            // Frozen-price enforcement (codex round-3 P1): the minted bill
+            // must be the accepted one — the same subtotal to the cent, and
+            // never MORE tax than was accepted (a verified exemption may
+            // only lower it). Throwing rolls the invoice back.
+            if (frozenAnnualPlanFinancials && created?.id) {
+              const mintedSubtotalCents = Math.round(Number(created.subtotal) * 100);
+              const mintedTaxCents = Math.round(Number(created.tax_amount || 0) * 100);
+              if (mintedSubtotalCents !== Math.round(frozenAnnualPlanFinancials.subtotal * 100)
+                || mintedTaxCents > Math.round(frozenAnnualPlanFinancials.taxAmount * 100)) {
+                throw new Error(`termite annual invoice for estimate ${estimateId} does not match the accepted price snapshot (subtotal ${created.subtotal} vs ${frozenAnnualPlanFinancials.subtotal}, tax ${created.tax_amount} vs ${frozenAnnualPlanFinancials.taxAmount})`);
+              }
+            }
             if (created?.id && appliedPrepayDepositCredit > 0) {
               const allocated = await consumeDepositCredit({
                 estimateId,
@@ -7089,9 +7590,17 @@ const EstimateConverter = {
               // setup × baseRate of the invoice's tax — a blended-rate
               // subtraction left part of that tax inside the coverage
               // basis. Residential (no rate) stays byte-identical.
+              // The termite annual plan's OWN setup line (annualPlanSetupFeeAmount)
+              // is the SAME kind of one-time, non-coverage money as the
+              // rodent bait-station setup above — it rides the invoice but
+              // is excluded from the coverage-slicing basis the same way,
+              // at its own full effective tax rate (mutually exclusive with
+              // prepayRodentSetupAmount by construction — a termite annual
+              // estimate is never also a rodent bait estimate).
               prepayAmount: draftInvoiceAmount != null
                 ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit
-                  - prepayRodentSetupAmount * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
+                  - (prepayRodentSetupAmount + annualPlanSetupFeeAmount)
+                    * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get
@@ -7102,12 +7611,32 @@ const EstimateConverter = {
               coverageServiceType,
               coverageVisitCount,
               coverageCadence,
+              // Sign-before-pay activation: the plan marker lands WITH the
+              // term so its first refresh already defers coverage seeding
+              // until installation (codex #4819 r7 P1).
+              annualPlanVersion: isTermiteAnnualPlanAccept && activationRun
+                ? (opts.annualPlanVersion || undefined)
+                : undefined,
               conn: database,
             });
             if (!annualPrepayTerm?.id) {
               throw new Error('Annual prepay term was not created');
             }
             annualPrepayTermId = annualPrepayTerm.id;
+            if (isTermiteAnnualPlanAccept) {
+              // Activation (slice 3a restructure): the ordinary path just
+              // minted the real invoice + term for this signed agreement —
+              // stamp the terminal 'activated' status in the SAME
+              // transaction termite-annual-activation.js is holding the
+              // estimate row's lock in, so a concurrent re-drive of
+              // activation sees 'activated' the instant this commits and
+              // never mints a second invoice/term for the same signature.
+              await database('estimates').where({ id: estimateId }).update({
+                annual_plan_activation_status: 'activated',
+                annual_plan_activated_at: new Date(),
+              });
+              annualPlanActivationStatus = 'activated';
+            }
           } catch (termErr) {
             logger.error(`[estimate-converter] Annual prepay term creation failed for estimate ${estimateId}: ${termErr.message}`);
             if (draftInvoiceId && !usingCallerDatabase) {
@@ -7121,6 +7650,7 @@ const EstimateConverter = {
             draftInvoiceAmount = null;
             draftInvoicePayUrl = null;
             throw termErr;
+          }
           }
         } else {
           const firstApplicationAmount = standardFirstApplicationAmount;
@@ -7734,6 +8264,17 @@ const EstimateConverter = {
       draftInvoiceAmount,
       draftInvoicePayUrl,
       invoiceDelivery,
+      // The just-created (or, for a standard prepay_annual accept, the
+      // regular) annual_prepay_terms id — null whenever no term was
+      // created (standard billingTerm, or a termite annual-plan accept
+      // parked awaiting signature). termite-annual-activation.js reads
+      // this to stamp the signed agreement's consent onto the right term.
+      annualPrepayTermId,
+      // 'awaiting_signature' when this accept parked the termite annual
+      // plan pending e-signature (slice 3a); 'activated' once a later
+      // activation run has billed it; null for every other accept. Mirrors
+      // estimates.annual_plan_activation_status.
+      annualPlanActivationStatus,
       // A flat commercial-only plan is NOT a WaveGuard membership — don't hand
       // back a membership-started payload (callers like manual Mark Won fire the
       // returned email post-commit, which would send WaveGuard copy with a
@@ -7912,3 +8453,5 @@ module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
 module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;
 module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody;
 module.exports.acquireConverterInvoiceDepositLocks = acquireConverterInvoiceDepositLocks;
+module.exports.isTermiteAnnualSignBeforePayAccept = isTermiteAnnualSignBeforePayAccept;
+module.exports.frozenTermiteAnnualFinancialsFor = frozenTermiteAnnualFinancialsFor;

@@ -36,6 +36,34 @@
  * as dead air; tool-use + a tight system prompt carry the structure instead.
  * Streaming (.stream + .finalMessage) per the claude-api skill — avoids HTTP
  * timeouts and lets us abort cleanly on barge-in.
+ *
+ * Renderer (PR C): VOICE_RELAY_RENDERER=block|stream selects how agent text
+ * reaches Twilio, resolved once per session and pinned on `this.renderer` —
+ * same precedence/allowlist/pin pattern as the model override above.
+ * VOICE_RELAY_SANDBOX_RENDERER outranks it, sandbox sessions only. Unknown
+ * value → 'block' + one logged warning, never a silent substitution.
+ *   sandbox session:      VOICE_RELAY_SANDBOX_RENDERER → VOICE_RELAY_RENDERER → 'block'
+ *   production inbound:                                   VOICE_RELAY_RENDERER → 'block'
+ * 'block' (default) is byte-identical to the renderer this file has always
+ * run: one whole utterance per Twilio text frame, sent only after
+ * `finalMessage()` resolves. 'stream' sends sentence-complete chunks as
+ * `stream.on('text', …)` deltas arrive — but ONLY an ALLOWLISTED-SAFE
+ * sentence (an ack + one read-only clause, or a question — see
+ * relay-stream-renderer.js's `isStreamSafe`) flushes progressively; a
+ * commitment-phrase BLOCKLIST never converges (a new "I'll take care of
+ * that" phrasing always slips a finite hold-verb list), so an ordinary
+ * statement now holds by default too, same as an amount, a date/time, a
+ * negation, or a commitment-or-success claim (`needsHold`'s veto, unchanged
+ * — a hold-worthy sentence holds even if it would otherwise read as safe,
+ * e.g. inside a question). Once a sentence holds, everything after it in
+ * the round holds too. Belt-and-braces, the round loop also stops flushing
+ * the instant any tool_use content block starts streaming. EVERY
+ * progressive flush — not just the round's first — is also gated on the
+ * same late-supersession recheck the block path runs immediately before
+ * speaking, serialized in order (there is no synchronous cross-socket
+ * takeover signal to shortcut this with). See relay-stream-renderer.js for
+ * the chunking/hold/safe policy and docs/conversationrelay-booking-plan.md
+ * for the narrative.
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
@@ -52,6 +80,7 @@ const { syncVoiceMessageForCall } = require('../conversations');
 const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
+const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -184,9 +213,56 @@ function resolveSessionModel({ sandbox } = {}) {
 
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
+// Haiku 4.5 and pre-5 Sonnets 400 on the field, so a session pinned to one of
+// them (an inbound or sandbox override, or a benchmark candidate) sends no
+// effort at all and stamps null — otherwise every turn of that call errors
+// before a word is spoken. Models that accept `low` (incl. Opus 4.5/4.6, which
+// take only some levels) keep it.
+function voiceEffortFor(model) {
+  return MODELS.anthropicAcceptsEffort(model, VOICE_EFFORT) ? VOICE_EFFORT : null;
+}
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
 // into every call's version record so a renderer change is attributable.
 const RENDERER_VERSION = 'block-v1';
+// PR C's streaming renderer — see the file header. Stamped instead of
+// RENDERER_VERSION when `this.renderer === 'stream'`.
+const STREAM_RENDERER_VERSION = 'stream-v1';
+
+// ── PR C: renderer selector — see the file header for precedence/pinning.
+const RENDERER_ENV = 'VOICE_RELAY_RENDERER';
+const SANDBOX_RENDERER_ENV = 'VOICE_RELAY_SANDBOX_RENDERER';
+const ALLOWED_RENDERERS = new Set(['block', 'stream']);
+const warnedRendererOverrides = new Set();
+function warnRejectedRendererOnce(source, value) {
+  const key = `${source}=${value}`;
+  if (warnedRendererOverrides.has(key)) return;
+  warnedRendererOverrides.add(key);
+  logger.warn(`[voice-relay] ignoring unknown renderer override ${key} — falling back to block`);
+}
+/**
+ * Resolve the ONE renderer this session pins for its whole lifetime.
+ * UNLIKE resolveSessionModel above: the highest-precedence candidate
+ * PRESENT decides outright — allowlisted, it wins; not allowlisted, this
+ * resolves to 'block' (logged once, never silently substituted) WITHOUT
+ * falling through to try a lower-precedence candidate. A bad sandbox
+ * override must never quietly pick up the shared `VOICE_RELAY_RENDERER`
+ * value behind it — that would silently promote an operator's typo into a
+ * live rollout on a session it was never meant to reach at all.
+ */
+function resolveSessionRenderer({ sandbox } = {}) {
+  const candidates = [];
+  if (sandbox === true) {
+    const sandboxRaw = process.env.VOICE_RELAY_SANDBOX_RENDERER;
+    if (sandboxRaw) candidates.push({ source: SANDBOX_RENDERER_ENV, value: sandboxRaw });
+  }
+  const raw = process.env.VOICE_RELAY_RENDERER;
+  if (raw) candidates.push({ source: RENDERER_ENV, value: raw });
+  if (!candidates.length) return 'block';
+  const { source, value } = candidates[0];
+  if (ALLOWED_RENDERERS.has(value)) return value;
+  warnRejectedRendererOnce(source, value);
+  return 'block';
+}
 // A barge-in with no caller transcript inside this window is recorded as
 // `interrupt_without_followup_transcript` — a cough, a backchannel, or a
 // genuine interruption STT missed. Named for what it measures, not for a
@@ -637,6 +713,11 @@ class RelayConversation {
     const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
     this.model = modelResolution.model;
     this._modelFallbackReason = modelResolution.fallbackReason;
+    this._effort = voiceEffortFor(this.model);
+    // PR C: resolved once, pinned for the session — see resolveSessionRenderer
+    // and the file header. 'block' is byte-identical to this file's original
+    // behavior; only 'stream' runs the new sentence-chunked path below.
+    this.renderer = resolveSessionRenderer({ sandbox: this.sandbox });
     // The upgrade token's nonce — the per-session key the CallSid claim is
     // owned by, so a fresh-token reconnect can reclaim the live call — and
     // its expiry, the monotonic generation a takeover must beat.
@@ -1026,11 +1107,34 @@ class RelayConversation {
     target.played = extend(target);
     target.playedSource = 'twilio_event';
     this._syncPlayedEntry(target);
-    if (norm(target.played) === norm(target.planned)) {
-      target.done = true;
-      this._retiredPlanned = target.planned;
-      this._playing.shift();
-    }
+    this._retireIfPlayedCaughtUp(target);
+  }
+
+  /**
+   * Retire (mark done, drop from `_playing`) an utterance whose played text
+   * has caught up to its planned text — UNLESS it is a streaming entry still
+   * open for more chunks (`entry.streamOpen`, PR C): a played snapshot that
+   * matches the CURRENT planned text mid-stream does not mean the utterance
+   * is over, only that playback has caught up to what has been sent so far.
+   * Retiring it here would drop it from `_playing` while `_flushStreamChunk`
+   * keeps extending `planned` — later played events would then never find
+   * it, and a barge-in during the later portion couldn't truncate it either
+   * (P1-a). Called both from a live played event (`_appendPlayed`, above)
+   * and the moment a streaming entry closes (`_flushStreamChunk` /
+   * `_closeStreamEntry`), so a played event that arrived WHILE the entry was
+   * still open and already matched is retired the instant it finally closes.
+   * A no-op (never retires) for an entry with no played evidence at all —
+   * unchanged from the original behavior.
+   */
+  _retireIfPlayedCaughtUp(entry) {
+    if (!entry || entry.streamOpen) return false;
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (norm(entry.played) !== norm(entry.planned)) return false;
+    entry.done = true;
+    this._retiredPlanned = entry.planned;
+    const idx = this._playing.indexOf(entry);
+    if (idx >= 0) this._playing.splice(idx, 1);
+    return true;
   }
 
   /** Relay notifications the `events` attribute adds (speaker / tokens-played). */
@@ -1142,7 +1246,7 @@ class RelayConversation {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: this.model,
       model_fallback_reason: this._modelFallbackReason || null,
-      effort: VOICE_EFFORT,
+      effort: this._effort,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
       tool_schema_sha: this._toolSchemaSha,
@@ -1154,7 +1258,7 @@ class RelayConversation {
       voice_id: tts.voiceId,
       tts_model: tts.ttsModel,
       tts_settings: tts.ttsSettings,
-      renderer_version: RENDERER_VERSION,
+      renderer_version: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : RENDERER_VERSION,
       speech_format_version: null,
     };
   }
@@ -1268,6 +1372,7 @@ class RelayConversation {
     if (t) {
       const entry = this._recordTurn('agent', t);
       const stat = this._currentTurn;
+      const priorFirstSendAt = stat ? stat.firstSendAt : null;
       if (stat) {
         if (stat.firstSendAt == null) stat.firstSendAt = now();
         if (entry) {
@@ -1276,10 +1381,493 @@ class RelayConversation {
         }
       }
       if (entry) this._playing.push(entry);
-      this._send(t);
+      // P2-d (codex r3): on the stream renderer, a strict `false` means this
+      // line never reached Twilio — the transcript must never claim an
+      // undelivered line was heard. Distinct from the `[not played — caller
+      // interrupted]` copy `_syncPlayedEntry` renders (this is not an
+      // interruption). Scoped to `stream` so the default block renderer's
+      // transcript stays byte-identical to main. Nothing reached Twilio, so
+      // the line also leaves the latency/playback metrics (codex r5): no
+      // first-send stamp, no queued playback, no turn played-source vote.
+      const delivered = this._send(t);
+      if (delivered === false && entry && this.renderer === 'stream') {
+        entry.notPlayed = true;
+        entry.done = true;
+        entry.text = '[not played — send failed]';
+        this._playing = this._playing.filter((e) => e !== entry);
+        if (stat) {
+          stat.firstSendAt = priorFirstSendAt;
+          stat.agentEntries = stat.agentEntries.filter((e) => e !== entry);
+        }
+      }
       return entry;
     }
     return null;
+  }
+
+  /**
+   * PR C (VOICE_RELAY_RENDERER=stream) — one streaming utterance's live
+   * state, created fresh per model round and never referenced outside the
+   * round that created it (so an aborted/superseded round's state cannot
+   * "resurface" on a later round, reconnect, or transfer — see the file
+   * header). `signal` is that round's own AbortController.signal, captured
+   * once: the generation guard every send below checks.
+   *
+   * `flushChain` / `withheld` back the late-supersession recheck (P1-d, see
+   * `_queueOrFlush`): the block renderer re-proves the session's claim
+   * IMMEDIATELY BEFORE SPEAKING (a reconnect can take the CallSid claim
+   * mid-round), and streaming re-proves it before EVERY progressive send,
+   * not just the round's first — there is no synchronous cross-socket
+   * takeover signal to short-circuit this with (relay-server.js keeps no
+   * in-process registry of a call's owning socket; ownership lives only in
+   * the `call_log` claim row `_sessionSuperseded()` reads), so each check is
+   * a real await, serialized through `flushChain` to keep sends in order.
+   */
+  _newStreamState(signal) {
+    // The hold policy's date/negation/commitment regexes are English-only, so
+    // a Spanish session never flushes progressively: it starts holding, and
+    // the whole reply is released at finalize under the write-tool check —
+    // block timing, on the stream renderer's single-utterance bookkeeping.
+    const holding = require('./relay-language').isSpanish(this.language);
+    return {
+      signal, buffer: '', holding, entry: null, closed: false,
+      flushChain: Promise.resolve(), withheld: false,
+    };
+  }
+
+  /**
+   * THE ONE CHOKEPOINT for every stream-renderer send (P1-a class fix,
+   * codex r3). relay-server.js's real `send` returns true only when the
+   * frame was actually handed to `ws.send`: false when the socket is not
+   * OPEN, or `ws.send` itself threw and `send` swallowed it (logging, not
+   * re-throwing). A strict `false` means the frame never reached Twilio, so
+   * it is synthesized into a throw here — every caller (direct, or via
+   * `_flushStreamChunk` / `_closeStreamEntry`) must then treat delivery
+   * failure as failure, never as a success to build on. A test stub or the
+   * constructor's default `() => {}` returns `undefined`, which is NOT a
+   * delivery failure — only strict `false` counts.
+   */
+  _streamSend(piece, last) {
+    if (this._send(piece, last === true) === false) throw new Error('relay send not delivered');
+  }
+
+  /**
+   * Send one more piece of a streaming utterance. The FIRST piece is
+   * leading-trimmed once (mirroring block mode's single `.trim()` on the
+   * whole reply); the LAST piece (`isLast`) is trailing-trimmed once.
+   * Every interior piece is sent verbatim — no re-trimming between chunks,
+   * so whitespace and ordering across sentence boundaries are preserved
+   * exactly as the model produced them. A stale (aborted) or already-closed
+   * generation is a silent no-op: nothing already sent is ever replayed.
+   */
+  _flushStreamChunk(state, rawText, stat, isLast) {
+    if (!state || state.closed || state.signal.aborted) return;
+    let piece = String(rawText || '');
+    if (!state.entry) piece = piece.replace(/^\s+/, '');
+    if (isLast) piece = piece.replace(/\s+$/, '');
+    if (!piece && !isLast) return; // nothing new to anchor an entry on or to send
+    if (!state.entry && !piece) { state.closed = true; return; } // closing with nothing ever spoken this round
+    // Send FIRST — and check delivery. relay-server.js's real `send` returns
+    // true only when the frame was actually handed to `ws.send`: false when
+    // the socket is not OPEN, or `ws.send` itself threw and `send` swallowed
+    // it (logging, not re-throwing). A THROWING `_send` (a test double, or
+    // any future caller) is unchanged — it propagates on its own. Either way
+    // the transcript and history must never claim text that did not reach
+    // Twilio, so a strict `false` is synthesized into a throw BEFORE any
+    // entry mutation below — the flush chain's catch then ends the round as
+    // `failed` with only what really went out. Routed through `_streamSend`
+    // (P1-a class fix) so every stream-path send shares this one throw.
+    this._streamSend(piece, isLast === true);
+    if (!state.entry) {
+      const entry = {
+        role: 'agent', text: piece, planned: piece, played: null,
+        playedSource: 'assumed', interrupted: false, notPlayed: false, done: false, turn: stat.turn,
+        // ⭐ streamOpen: more chunks may still extend `planned` — _appendPlayed
+        // must never retire this entry early just because a played event
+        // caught up to the SNAPSHOT of `planned` at that instant (P1-a).
+        // False from creation when this very call IS the last piece
+        // (a single-shot send, e.g. the finalize-time tail).
+        streamOpen: !isLast,
+      };
+      this._transcript.push(entry);
+      stat.agentEntries.push(entry);
+      if (stat.firstSendAt == null) stat.firstSendAt = now();
+      this._playing.push(entry);
+      state.entry = entry;
+    } else if (piece) {
+      state.entry.planned += piece;
+      // P1 (played evidence): a played snapshot may already have arrived for
+      // this still-growing entry (P1-a keeps it open rather than retiring
+      // it). Re-deriving via `_syncPlayedEntry` — never a bare
+      // `text = planned` — keeps `entry.text` matching what was actually
+      // HEARD so far rather than overwriting it with the newly-grown planned
+      // text the caller hasn't heard yet.
+      this._syncPlayedEntry(state.entry);
+    }
+    if (isLast) {
+      // Closing: no more growth coming. Re-evaluate retirement now in case a
+      // played event arrived earlier and matched but was deferred by the
+      // streamOpen guard above (P1-a).
+      state.entry.streamOpen = false;
+      this._retireIfPlayedCaughtUp(state.entry);
+      state.closed = true;
+    }
+  }
+
+  /**
+   * Close out a streaming utterance without sending its held tail — the
+   * mid-stream failure/timeout path and the write-tool-suppression path both
+   * need Twilio to see the `last:true` that ends the token group it already
+   * has open, without repeating anything already sent. A no-op when nothing
+   * was ever flushed (nothing open to close) or the entry is already closed.
+   */
+  _closeStreamEntry(state) {
+    if (!state || state.closed) return;
+    if (!state.entry) { state.closed = true; return; }
+    // A barge-in already cut this utterance: Twilio stopped it and
+    // interrupt() recorded what was played. A trailing last:true or a
+    // planned/text rewrite here would clobber that record.
+    if (state.entry.interrupted) { state.closed = true; return; }
+    // Routed through `_streamSend` (P1-a class fix, codex r3) — a strict
+    // `false` here previously went unchecked, so finalize could report
+    // success (and a write-turn tool loop proceed) after the close frame
+    // itself failed to reach Twilio. Every caller of `_closeStreamEntry`
+    // now handles this throw.
+    this._streamSend('', true);
+    state.entry.planned = state.entry.planned.replace(/\s+$/, '');
+    // P1 (played evidence): same as the growth branch above — derive
+    // `entry.text` from played evidence when there is any, rather than
+    // unconditionally overwriting it with the (now-final) planned text.
+    this._syncPlayedEntry(state.entry);
+    state.entry.streamOpen = false; // P1-a — see _flushStreamChunk's isLast branch
+    this._retireIfPlayedCaughtUp(state.entry);
+    state.closed = true;
+  }
+
+  /**
+   * One `stream.on('text', …)` delta. Buffers until a complete sentence is
+   * available, and flushes it through `_queueOrFlush` (see below) ONLY when
+   * it is BOTH not vetoed (`sentenceNeedsHold`) AND allowlisted safe
+   * (`sentenceIsStreamSafe`, relay-stream-renderer.js's SAFE_FILLER grammar
+   * or a plain question) — an allowlist, not a blocklist: a phrase
+   * blocklist for commitments never converges (a new "I'll take care of
+   * that" / "consider it handled" phrasing always slips a finite hold-verb
+   * list), so an ordinary declarative statement now holds by DEFAULT unless
+   * it's a recognized safe filler or a question. The moment one sentence
+   * fails either check, streaming stops for the rest of the round: that
+   * sentence and everything after it accumulate in `state.buffer`
+   * untouched, released only at finalize (see the round loop) once
+   * finalMessage() and the write-tool check have cleared it.
+   */
+  _onStreamTextDelta(state, delta, stat) {
+    if (!state || state.closed || state.signal.aborted) return;
+    state.buffer += String(delta || '');
+    if (state.holding) return;
+    const { sentences, rest } = splitSentences(state.buffer);
+    state.buffer = rest;
+    for (const sentence of sentences) {
+      if (sentenceNeedsHold(sentence) || !sentenceIsStreamSafe(sentence)) {
+        state.buffer = sentence + state.buffer; // put it back — hold it, and everything after, to finalize
+        state.holding = true;
+        return;
+      }
+      this._queueOrFlush(state, sentence, stat, false);
+    }
+  }
+
+  /**
+   * Every progressive flush candidate passes through here — NEVER straight
+   * to `_flushStreamChunk` (P1-d). Each one re-runs the SAME
+   * late-supersession recheck the block renderer runs immediately before
+   * `say()`, serialized through `state.flushChain` so the checks (and the
+   * sends they gate) stay strictly in send order even though each is a real
+   * await: this step doesn't start until the previous one's check-and-send
+   * has fully settled. `.catch(() => false)` matches the block path's exact
+   * semantics — a check that itself errors is treated as NOT superseded.
+   * Once ANY check finds the session superseded, `state.withheld` makes
+   * every later step (already chained or still to come) a no-op — the rest
+   * of the round speaks nothing, not just the one sentence that caught it.
+   * A round that has since closed or aborted while a check was in flight is
+   * also a no-op: never flush a stale generation's late text.
+   *
+   * The trailing `.catch()` is load-bearing, not decoration: a throw inside
+   * the step (most plausibly `_flushStreamChunk` / `_send`) must never leave
+   * `state.flushChain` REJECTED. `.then(onFulfilled)` with no `onRejected`
+   * on a rejected promise just passes the rejection through — every LATER
+   * queued sentence's own step would then be skipped outright rather than
+   * running and correctly no-op'ing via the `withheld` guard, this call site
+   * never awaits its own return value (`_onStreamTextDelta` fires it and
+   * moves on), so an unhandled step would surface as a bare unhandled
+   * rejection, and `_finalizeStreamedRound`'s bare `await streamState.
+   * flushChain` would throw and abort the whole turn instead of finalizing
+   * cleanly. Catching here logs it, withholds the rest of the round (the
+   * same "something is wrong, stop speaking" response a superseded check
+   * gets), and — critically — returns normally, so `state.flushChain`
+   * itself stays a FULFILLED promise the whole way through and the next
+   * queued sentence's `.then()` still actually runs.
+   */
+  _queueOrFlush(state, sentence, stat, isLast) {
+    state.flushChain = state.flushChain.then(async () => {
+      if (state.withheld || state.failed || state.closed || state.signal.aborted) return;
+      const superseded = await this._sessionSuperseded().catch(() => false);
+      if (state.closed || state.signal.aborted) return; // stale by the time the check settled
+      if (superseded) {
+        logger.warn(`[voice-relay] stream renderer speech withheld — session superseded mid-round callSid=${this.callSid}`);
+        state.withheld = true;
+        return;
+      }
+      this._flushStreamChunk(state, sentence, stat, isLast);
+    }).catch((err) => {
+      logger.error(`[voice-relay] stream renderer flush failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      // NOT `withheld` — that means another socket owns the call. A failed
+      // send (most plausibly a dead socket) ends the round via its own path.
+      state.failed = true;
+    });
+    return state.flushChain;
+  }
+
+  /**
+   * PR C finalize — called once `stream.finalMessage()` has resolved for a
+   * round that pinned the stream renderer. `text` is the block renderer's
+   * own reconstruction of the whole reply (identical either way); what
+   * streaming already flushed to Twilio is `streamState.entry.planned`. The
+   * gap between the two is the held tail — an amount/date/negation/
+   * commitment sentence and whatever trailed it — released now under the
+   * EXACT SAME write-tool suppression check the block renderer runs on its
+   * whole turn (`hasPendingWrite`), just narrowed to only the unsent
+   * remainder: text already on the air before a write tool call stays
+   * spoken and stays in history; the rest is dropped from both. Returns
+   * `{ withheld: true }` when a late supersession must end the turn with no
+   * further speech (the round loop's own `return` path), else
+   * `{ assistantMessage }` — already pushed onto `this.messages` and, when
+   * something was said, wired as `entry.historyMessage` for the barge-in
+   * history rewrite (`_noteInterruptForModel`) to find. Or `{ aborted: true }`
+   * (P1-c) when a barge-in lands WHILE the tail's own supersession check
+   * below is in flight — the round loop returns with no further action,
+   * same as a barge-in caught earlier in the model stream itself. If the
+   * round's own progressive-flush chain (`_queueOrFlush`) is still settling
+   * when `finalMessage()` resolves, it is awaited here first — the chain's
+   * own steps are what flush any queued sentences, so finalize must never
+   * read `streamState.entry` before every one of them has had its chance to
+   * run.
+   */
+  /**
+   * End a streamed round early — a barge-in (`interrupted`) or a failed send
+   * (`failed`) — keeping history to what was actually SENT: the sent prefix
+   * plus the round's tool_use blocks, each paired with a "not run" result so
+   * the next model call sees a valid, honest transcript. No tool runs, no
+   * further frame is sent, and an entry interrupt() already cut is left as
+   * interrupt() recorded it. THE ONE CHOKEPOINT for every early exit of a
+   * streamed round — finalize-time abort, finalize-time failed send,
+   * mid-stream barge-in, mid-stream model failure/timeout, pre-tool abort —
+   * so history/transcript are built one way regardless of where the round
+   * stopped. `msg` may be `null` (the model call itself never resolved, e.g.
+   * a mid-stream barge-in or a model failure/timeout caught before
+   * `finalMessage()` settled) — there are no tool_use blocks to pair in that
+   * case, only whatever prefix was already sent.
+   */
+  _closeStreamedRoundEarly(streamState, msg, reason) {
+    if (reason === 'failed') {
+      // Best effort: end the token group Twilio has open (it has only seen
+      // last:false frames) so the next turn's speech can't attach to it. The
+      // socket may be the thing that failed, so a throw here is expected.
+      try {
+        this._closeStreamEntry(streamState);
+      } catch (err) {
+        logger.warn(`[voice-relay] stream renderer close after a failed send also failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        if (streamState.entry) streamState.entry.streamOpen = false;
+      }
+    }
+    streamState.closed = true;
+    const sentText = streamState.entry ? streamState.entry.planned.trim() : '';
+    const toolUseBlocks = msg ? msg.content.filter((b) => b.type === 'tool_use') : [];
+    const assistantMessage = {
+      role: 'assistant',
+      content: sentText ? [{ type: 'text', text: sentText }, ...toolUseBlocks] : toolUseBlocks,
+    };
+    if (assistantMessage.content.length) {
+      // Interrupt-context gate (PR 1B): on a normal barge-in caught earlier
+      // (finalize-time, or the pre-existing paths), `interrupt()` already ran
+      // and, when the cut entry already had a `historyMessage`, rewrote its
+      // text to the played record itself (`_noteInterruptForModel`). A
+      // MID-STREAM barge-in has no `historyMessage` yet at that point — this
+      // call is what creates the FIRST one for this entry — so apply the
+      // identical rewrite here. Gate off, or this entry was never
+      // interrupted (e.g. a failed send): the sent prefix (`sentText`,
+      // already `entry.planned`) stands as-is.
+      if (streamState.entry && streamState.entry.interrupted && isInterruptContextEnabled()) {
+        const kept = assistantMessage.content.filter((b) => b.type !== 'text');
+        assistantMessage.content = [{ type: 'text', text: streamState.entry.text }, ...kept];
+      }
+      this.messages.push(assistantMessage);
+      if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
+    }
+    if (toolUseBlocks.length) {
+      const why = reason === 'failed' ? 'speech to the caller failed' : 'the current turn was interrupted';
+      this.messages.push({
+        role: 'user',
+        content: toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${why}.` })),
+      });
+    }
+    return reason === 'failed' ? { failed: true } : { aborted: true };
+  }
+
+  /**
+   * Run a synchronous stream send (`_closeStreamEntry` or a tail
+   * `_flushStreamChunk`) and, on a delivery failure, log it and end the
+   * round through the ONE failed-send chokepoint (`_closeStreamedRoundEarly`,
+   * 'failed'). Collapses what were three near-identical try/catch blocks in
+   * `_finalizeStreamedRound` (P1-a class fix: a close/flush failure must
+   * never let a caller report success off an unchecked send) into one place
+   * — `_closeStreamedRoundEarly` already owns the failed/interrupted
+   * triage; this is just the "did the send itself throw" wrapper around it.
+   * Returns the early-exit result on failure, else `null` (proceed normally).
+   */
+  _runStreamSendOrFail(streamState, msg, label, fn) {
+    try {
+      fn();
+      return null;
+    } catch (err) {
+      logger.error(`[voice-relay] stream renderer ${label} callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return this._closeStreamedRoundEarly(streamState, msg, 'failed');
+    }
+  }
+
+  /**
+   * Phase 1 — reconcile what streaming already sent (`streamState.entry.planned`)
+   * against the model's RAW text (no separator — exactly what streaming
+   * deltas produced; see `_onStreamTextDelta`, never the outer join(' ')
+   * block-mode uses for spoken prosody). Returns `{ sent, tail, reconciled }`:
+   * `tail` is the unsent remainder to release, `reconciled` false only on a
+   * should-not-happen mismatch (deltas are a strict prefix of the final
+   * text) — logged and treated as "hold everything back" by the caller.
+   */
+  _reconcileStreamedText(streamState, msg) {
+    const sent = streamState.entry ? streamState.entry.planned : '';
+    const rawText = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    let reconciled = !sent || rawText.startsWith(sent);
+    let tail = reconciled ? rawText.slice(sent.length) : '';
+    if (!reconciled && sent.replace(/\s+$/, '') === rawText) {
+      // Not a real mismatch: a sentence flushed progressively (never as the
+      // round's `isLast` piece) keeps its own trailing boundary whitespace
+      // in `planned` until the entry actually closes — when that sentence
+      // is also the LAST thing the model said, `sent` ends up one space
+      // longer than the (already-trimmed) `rawText` it's compared against,
+      // even though every character of the reply was already sent. Nothing
+      // left to hold back.
+      reconciled = true;
+      tail = '';
+    }
+    if (!reconciled) {
+      logger.warn(`[voice-relay] stream renderer text mismatch callSid=${this.callSid} — closing without a replay`);
+    }
+    return { sent, tail, reconciled };
+  }
+
+  /**
+   * Phase 2 — write-turn close: history holds ONLY the sent prefix (never
+   * the model's full `msg.content`), on either of the two shapes that need
+   * exactly this — a write-tool turn (P2-c: suppress the held tail so a
+   * pending write is never spoken as already-said) or a genuine text
+   * mismatch (same sent-only shape; nothing to suppress, there IS no
+   * unspoken tail worth mentioning). The write-tool turn additionally logs
+   * a suppressed-tail note; a mismatch does not, since there was never a
+   * pending write to suppress.
+   */
+  _closeStreamedRoundSentOnly(streamState, msg, sent, tail, hasPendingWrite) {
+    const label = hasPendingWrite ? 'close failed on a write-tool turn' : 'close failed on a text mismatch';
+    const failure = this._runStreamSendOrFail(streamState, msg, label, () => this._closeStreamEntry(streamState));
+    if (failure) return failure;
+    const keep = msg.content.filter((b) => b.type !== 'text');
+    const assistantMessage = {
+      role: 'assistant',
+      content: sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep,
+    };
+    if (hasPendingWrite && tail.trim()) logger.info(`[voice-relay] suppressed unsent stream tail on a write-tool turn callSid=${this.callSid}`);
+    this.messages.push(assistantMessage);
+    if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
+    return { assistantMessage };
+  }
+
+  /**
+   * Phase 3 — deliver the held tail (releasing it under the same
+   * late-supersession recheck the block renderer runs before `say()`) and
+   * close out history with the model's full `msg.content`, now that every
+   * character of it has actually reached the air. A barge-in landing while
+   * the supersession check is in flight, or a delivery failure, ends the
+   * round through the early-exit chokepoint instead — falling through here
+   * would push the FULL reply into the model's own history even though only
+   * the sent prefix was ever heard.
+   */
+  async _deliverStreamedTail(streamState, msg, tail, stat) {
+    if (tail.trim() && await this._sessionSuperseded().catch(() => false)) return { withheld: true };
+    if (streamState.signal.aborted) return this._closeStreamedRoundEarly(streamState, msg, 'interrupted');
+    const failure = tail
+      ? this._runStreamSendOrFail(streamState, msg, 'tail flush failed', () => this._flushStreamChunk(streamState, tail, stat, true))
+      : this._runStreamSendOrFail(streamState, msg, 'close failed', () => this._closeStreamEntry(streamState));
+    if (failure) return failure;
+    const assistantMessage = { role: 'assistant', content: msg.content };
+    this.messages.push(assistantMessage);
+    if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
+    return { assistantMessage };
+  }
+
+  async _finalizeStreamedRound(streamState, msg, text, hasPendingWrite, stat) {
+    await streamState.flushChain;
+    if (streamState.withheld) return { withheld: true }; // the progressive chain already found this superseded
+    // A barge-in or a failed send during the chain await ends the round
+    // BEFORE any phase below touches the entry, the air, or history.
+    if (streamState.signal.aborted) return this._closeStreamedRoundEarly(streamState, msg, 'interrupted');
+    if (streamState.failed) return this._closeStreamedRoundEarly(streamState, msg, 'failed');
+    const { sent, tail, reconciled } = this._reconcileStreamedText(streamState, msg);
+    // A write-tool turn and a genuine text mismatch both need the SAME
+    // sent-only history shape (P2-c) — one merged branch, not two.
+    if (hasPendingWrite || !reconciled) {
+      // The same ownership recheck the block renderer runs for every turn
+      // with text, write turns included — a reconnect may have superseded
+      // this socket since the last progressive flush (or, with the whole
+      // reply held, no flush ever checked), and the write tool must not run
+      // from stale context.
+      if (text && await this._sessionSuperseded().catch(() => false)) return { withheld: true };
+      return this._closeStreamedRoundSentOnly(streamState, msg, sent, tail, hasPendingWrite);
+    }
+    return this._deliverStreamedTail(streamState, msg, tail, stat);
+  }
+
+  /**
+   * The original (block renderer) finalize — unchanged behavior, just moved
+   * out of `_runLoop` so it and `_finalizeStreamedRound` sit as siblings
+   * instead of an inline if/else. Same `{ withheld } | { assistantMessage }`
+   * shape as its streamed counterpart.
+   */
+  async _finalizeBlockRound(msg, text, hasPendingWrite) {
+    // ⭐ NO SPEECH BEFORE A WRITE'S RESULT IS KNOWN. A mixed text-plus-tool
+    // turn around a WRITE_TOOLS member (the same canonical set the timeout /
+    // in-flight-idempotency handling keys on — one list, never two) would
+    // speak its text ("that's submitted!") BEFORE the write ran — a false
+    // success when the tool then hits a stale slot, fails, or times out
+    // indeterminate. Text on a write-tool turn is suppressed; the model
+    // speaks after it has seen the tool result (and the MAX_TOOL_ROUNDS
+    // exhaustion fallback covers the never-speaks case). Read-only tool
+    // turns keep their filler text — there is nothing to falsely promise.
+    const assistantMessage = {
+      role: 'assistant',
+      content: hasPendingWrite
+        ? msg.content.filter((b) => b.type !== 'text')
+        : msg.content,
+    };
+    this.messages.push(assistantMessage);
+    // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING. The turn-entry check is
+    // check-then-act — a reconnect can take the claim during the model
+    // round, and this socket would then speak from cached account context.
+    // One more read right before emission closes that window.
+    if (text && await this._sessionSuperseded().catch(() => false)) return { withheld: true };
+    const spokenText = hasPendingWrite ? '' : text;
+    if (spokenText) {
+      const entry = this.say(spokenText);
+      if (entry) entry.historyMessage = assistantMessage;
+    } else if (text) logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
+    return { assistantMessage };
   }
 
   /** The turn-cap close: spoken directly, once. */
@@ -1344,8 +1932,8 @@ class RelayConversation {
       toolMs: 0,
       toolCount: 0,
       rounds: 0,
-      effort: VOICE_EFFORT,
-      renderer: 'block',
+      effort: this._effort,
+      renderer: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : 'block',
       interrupted: false,
       durationUntilInterruptMs: null,
       interruptWithoutFollowupTranscript: false,
@@ -2035,6 +2623,123 @@ class RelayConversation {
     return !(res && res.ok === true && res.owner === this.sessionKey);
   }
 
+  /**
+   * Stream-renderer-only tidy-up for a model-round catch block (the model
+   * call itself rejected/threw): await any still-settling progressive-flush
+   * chain — a text-delta event fires synchronously off the SDK stream, but
+   * its own flush step (`_queueOrFlush`) is chained async, so the LAST
+   * queued step may still be settling when the catch runs and could still
+   * append to `streamState.entry` — then close the round through the SAME
+   * early-exit chokepoint (`_closeStreamedRoundEarly`) every other early
+   * exit uses. `reason` is 'interrupted' (barge-in, no `msg`) or 'failed'
+   * (the model call errored). A no-op for a block-renderer round
+   * (`streamState` null) — this is PR C's own catch-block piece; the block
+   * path's error handling below is otherwise untouched.
+   */
+  async _closeStreamedRoundOnCatch(streamState, reason) {
+    if (!streamState) return;
+    await streamState.flushChain;
+    this._closeStreamedRoundEarly(streamState, null, reason);
+  }
+
+  /**
+   * The stream tool-loop's ONE abort decision — called at all three sites a
+   * barge-in must be caught between: before a tool call, right after one
+   * settles, and right before the next model round. A barge-in only aborts
+   * `this._controller` (interrupt()); it never by itself stops this loop
+   * from still running or queueing further write tools the caller's
+   * barge-in cut off before hearing any confirmation, so every site
+   * re-checks. Pairs every tool_use block in `msg.content` that has no
+   * result in `results` yet with a synthetic "not run" result (none remain
+   * by the third site — every block already has a real result there — so
+   * pairing is a no-op and the same call is still correct), pushes
+   * `results` as this round's tool turn, and returns whether the round was
+   * aborted. A block-renderer round (`roundSignal` null) never aborts here.
+   */
+  _abortStreamToolLoop(roundSignal, msg, results) {
+    if (!roundSignal || !roundSignal.aborted) return false;
+    const remaining = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
+    results.push(...remaining.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current turn was interrupted.' })));
+    this.messages.push({ role: 'user', content: results });
+    return true;
+  }
+
+  /**
+   * Run every tool_use block in this round's message, pairing each with its
+   * result — or a synthetic "not run" pairing when a barge-in, a failure
+   * handoff, or the session ending cuts the loop short (see
+   * `_abortStreamToolLoop` for the shared abort decision, checked before,
+   * after, and once more before the next round). Pushes the round's
+   * tool-result user turn itself. The caller (`_runLoop`) only needs to
+   * know whether to end the turn (`done: true` — abort, handoff, or
+   * ending) or continue to the next model round (`done: false`) for the
+   * model to see the results. Moved out of `_runLoop` as its own cohesive
+   * unit — deliver-the-round's-tool-calls — rather than nested inside it.
+   */
+  async _runToolUseRound(msg, toolCtx, stat, roundSignal) {
+    const results = [];
+    for (const block of msg.content) {
+      if (block.type !== 'tool_use') continue;
+      // Checked immediately before EACH tool call, not just the first — a
+      // barge-in can land between two tool calls in the same round. Stop
+      // here: every remaining tool_use block (this one included) gets a
+      // synthetic "not run" result, paired and pushed exactly like the
+      // failureHandoff/_ending stop below, and the round ends with no
+      // further model call.
+      if (this._abortStreamToolLoop(roundSignal, msg, results)) return { done: true };
+      // Part of the record: reviewing a call must show that Sandy looked
+      // something up rather than invented it. Name only — tool INPUT can
+      // carry the caller's contact details and belongs in the lead row.
+      this._recordTurn('tool', block.name);
+      const toolStartAt = now();
+      // Detached tools retain their own outcome flag; live context getters stay live.
+      const invocationCtx = Object.defineProperties({}, Object.getOwnPropertyDescriptors(toolCtx));
+      invocationCtx.toolFailed = false;
+      const outcome = { name: block.name, ok: false };
+      invocationCtx.toolOutcome = outcome;
+      const out = await this._executeToolBounded(block.name, block.input, invocationCtx);
+      stat.toolMs += now() - toolStartAt;
+      stat.toolCount += 1;
+      // ok = the tool answered without failing (a timeout / in-flight
+      // refusal / caught failure is not a success — the handoff card
+      // must not tell staff a failed lookup succeeded, codex r1 P2).
+      const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
+      const toolOk = !sentinel && invocationCtx.toolFailed !== true;
+      if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
+      this._toolOutcomes.push(outcome);
+      if (!sentinel) outcome.ok = toolOk; // a timeout must not overwrite a later confirmed result
+      this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
+      this._clearedFailures.tool ||= toolOk;
+      results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
+      const failureHandoff = require('./relay-recovery').providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) === 'handoff';
+      if (failureHandoff || this._ending || this.ended) {
+        const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
+        results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current tool round has stopped.' })));
+        this.messages.push({ role: 'user', content: results });
+        if (failureHandoff) await this._maybeHandoffForFailure(toolCtx);
+        return { done: true };
+      }
+      // P1-b (class fix, codex r3): the pre-tool check above only ever
+      // observes a barge-in landing BEFORE a tool call — a barge-in during
+      // the only (or last) tool's own await was never caught until the
+      // loop reached its NEXT tool_use block, which may not exist.
+      // Re-check right after this tool settles too: its real result is
+      // already recorded above, so only the REMAINING tool_use blocks
+      // (this one excluded — it has a result) need the synthetic "not run"
+      // pairing.
+      if (this._abortStreamToolLoop(roundSignal, msg, results)) return { done: true };
+    }
+    // P1-b chokepoint: re-check right before the loop proceeds to another
+    // model round with this round's queued tool results — every tool_use
+    // block already has a real result by this point (the per-tool checks
+    // above cover mid-loop), so there is nothing left to pair; the shared
+    // abort check's pairing is a no-op here, and the normal-path push below
+    // only runs when it didn't already push on an abort.
+    if (this._abortStreamToolLoop(roundSignal, msg, results)) return { done: true };
+    this.messages.push({ role: 'user', content: results });
+    return { done: false };
+  }
+
   async _runLoop(callerText = null) {
     if (this.ended || !anthropic) {
       if (!anthropic) this.say(require('./relay-language').copy('unavailable', this.language));
@@ -2195,6 +2900,8 @@ class RelayConversation {
       if (this.ended) return;
       this._controller = new AbortController();
       let msg;
+      // PR C: fresh per round, never read outside it — see _newStreamState.
+      const streamState = this.renderer === 'stream' ? this._newStreamState(this._controller.signal) : null;
       // Bound the model stream: without this a hung upstream call would pin the
       // serialized turn chain open with no recovery. On timeout we abort the
       // same controller barge-in uses, then surface a graceful reprompt.
@@ -2217,7 +2924,8 @@ class RelayConversation {
             // air on an open line, and the work here is short receptionist turns
             // driven by tools, not reasoning. `low` is the right end of the
             // ladder for that.
-            output_config: { effort: VOICE_EFFORT },
+            // Omitted entirely for models that reject it (voiceEffortFor).
+            ...(this._effort ? { output_config: { effort: this._effort } } : {}),
             tools: this._tools,
             messages: this.messages,
           },
@@ -2228,16 +2936,55 @@ class RelayConversation {
         // opens with tool_use has produced output, and stamping only text
         // would charge the tool's latency to the model (codex r9 P2). The
         // turn keeps its FIRST stamp, not the last round's.
-        stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
+        stream.on?.('streamEvent', (ev) => {
+          if (ev?.type !== 'content_block_start') return;
+          stat.firstTokenAt ??= now();
+          // PR C: the moment ANY tool call starts, stop flushing further
+          // progressive text this round — belt-and-braces alongside the
+          // widened commitment-or-success hold list (relay-stream-renderer.js):
+          // text already streamed before this point has already gone out as
+          // its own content block's deltas (this cannot un-send it), but any
+          // trailing text after a tool_use block waits for finalize, where
+          // the write-tool suppression check applies.
+          if (streamState && ev.content_block?.type === 'tool_use') streamState.holding = true;
+        });
+        // PR C: progressive sends — see _onStreamTextDelta for the chunk/hold
+        // policy. Only wired when this session pinned the stream renderer;
+        // the block path below is otherwise untouched.
+        if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
         msg = await stream.finalMessage();
         this._modelFailures = 0; // a completed round resets the streak
         this._clearedFailures.model = true;
       } catch (err) {
-        if (!streamTimedOut && this._controller.signal.aborted) return; // barge-in
+        // PR C stream-renderer piece (flushChain await + interrupted/failed
+        // close) lives in `_closeStreamedRoundOnCatch` — see its doc comment
+        // for why the flush chain must be awaited before either branch below
+        // touches `streamState.entry`. A no-op for a block-renderer round.
+        if (!streamTimedOut && this._controller.signal.aborted) {
+          // Barge-in caught here (mid-model-stream, before finalMessage()
+          // resolved): the same chokepoint every other early exit uses —
+          // there is no `msg` (the model call never resolved), so only the
+          // sent prefix (if any) is pushed, no tool_use blocks to pair.
+          await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+          return;
+        }
         stat.timedOut = streamTimedOut;
         const failure = streamTimedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
         logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${streamTimedOut}: ${err.message}`);
         this._modelFailures += 1;
+        // PR C: a partial streaming utterance is still "open" on Twilio's side
+        // (it has only ever seen last:false frames) — close it out with a
+        // last:true empty token so playback finalizes, WITHOUT resending
+        // anything already sent, and record exactly that sent prefix as its
+        // own assistant message (role alternation stays valid — the very
+        // next thing pushed is either the caller's next `user` turn or this
+        // same round's tool_result user turn, never another assistant
+        // message back to back) — same chokepoint as every other early
+        // exit; there is no `msg` here either (the model call itself is what
+        // failed), so no tool_use blocks to pair. The failure copy below is
+        // spoken but, like every `say()` call, never enters `this.messages`
+        // — unchanged, existing behavior for both renderers.
+        await this._closeStreamedRoundOnCatch(streamState, 'failed');
         if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
         return;
       } finally {
@@ -2268,67 +3015,49 @@ class RelayConversation {
       // empty end_turn, ending the exchange with no confirmation spoken at
       // all. Suppressed turns are stored tool-use-only, so the follow-up round
       // knows nothing has been said yet and states the outcome itself.
-      const assistantMessage = {
-        role: 'assistant',
-        content: hasPendingWrite
-          ? msg.content.filter((b) => b.type !== 'text')
-          : msg.content,
-      };
-      this.messages.push(assistantMessage);
-      // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING. The turn-entry check is
-      // check-then-act — a reconnect can take the claim during the model
-      // round, and this socket would then speak from cached account context.
-      // One more read right before emission closes that window.
-      if (text && await this._sessionSuperseded().catch(() => false)) {
+      const result = streamState
+        ? await this._finalizeStreamedRound(streamState, msg, text, hasPendingWrite, stat)
+        : await this._finalizeBlockRound(msg, text, hasPendingWrite);
+      if (result.withheld) {
         logger.warn(`[voice-relay] speech withheld — session superseded mid-turn callSid=${this.callSid}`);
         this._ending = true;
         try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
         return;
       }
-      const spokenText = hasPendingWrite ? '' : text;
-      if (spokenText) {
-        const entry = this.say(spokenText);
-        if (entry) entry.historyMessage = assistantMessage;
-      } else if (text) logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
+      // P1-c: a barge-in landed mid-finalize — _finalizeStreamedRound has
+      // already closed the round correctly (sent-prefix-only history, any
+      // tool_use paired with a synthetic result). Same bare `return` the
+      // model-stream catch block uses for an ordinary barge-in: no ending,
+      // no endSession — the session stays open for the caller's next turn.
+      if (result.aborted) return;
+      if (result.failed) {
+        // Same recovery the mid-stream model-failure path gives the caller —
+        // handoff if the failure policy says so, else the failure copy —
+        // instead of leaving them in dead air. Best effort: the send path
+        // itself just failed.
+        logger.error(`[voice-relay] stream renderer ended the round after a failed send callSid=${maskSid(this.callSid)}`);
+        try {
+          if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy('modelError', this.language));
+        } catch (err) {
+          logger.warn(`[voice-relay] failure copy after a failed send also failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
+        return;
+      }
 
       if (msg.stop_reason === 'tool_use') {
-        const results = [];
-        for (const block of msg.content) {
-          if (block.type !== 'tool_use') continue;
-          // Part of the record: reviewing a call must show that Sandy looked
-          // something up rather than invented it. Name only — tool INPUT can
-          // carry the caller's contact details and belongs in the lead row.
-          this._recordTurn('tool', block.name);
-          const toolStartAt = now();
-          // Detached tools retain their own outcome flag; live context getters stay live.
-          const invocationCtx = Object.defineProperties({}, Object.getOwnPropertyDescriptors(toolCtx));
-          invocationCtx.toolFailed = false;
-          const outcome = { name: block.name, ok: false };
-          invocationCtx.toolOutcome = outcome;
-          const out = await this._executeToolBounded(block.name, block.input, invocationCtx);
-          stat.toolMs += now() - toolStartAt;
-          stat.toolCount += 1;
-          // ok = the tool answered without failing (a timeout / in-flight
-          // refusal / caught failure is not a success — the handoff card
-          // must not tell staff a failed lookup succeeded, codex r1 P2).
-          const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
-          const toolOk = !sentinel && invocationCtx.toolFailed !== true;
-          if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
-          this._toolOutcomes.push(outcome);
-          if (!sentinel) outcome.ok = toolOk; // a timeout must not overwrite a later confirmed result
-          this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
-          this._clearedFailures.tool ||= toolOk;
-          results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
-          const failureHandoff = require('./relay-recovery').providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) === 'handoff';
-          if (failureHandoff || this._ending || this.ended) {
-            const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
-            results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current tool round has stopped.' })));
-            this.messages.push({ role: 'user', content: results });
-            if (failureHandoff) await this._maybeHandoffForFailure(toolCtx);
-            return;
-          }
-        }
-        this.messages.push({ role: 'user', content: results });
+        // PR C (finding 4): finalize already returned normally with the
+        // streamed filler's SENT PREFIX pushed to history the moment a
+        // barge-in lands — a barge-in only aborts `this._controller`
+        // (interrupt()), it never stops this tool loop from still running
+        // write tools the caller's barge-in cut off before hearing any
+        // confirmation. `roundSignal` is this round's own abort signal,
+        // captured once (== streamState.signal, pinned at round start);
+        // block-renderer rounds (`streamState` null) are unaffected. The
+        // loop itself — abort checks, tool execution, failure/ending stops —
+        // lives in `_runToolUseRound`, its own cohesive unit.
+        const roundSignal = streamState ? streamState.signal : null;
+        const { done } = await this._runToolUseRound(msg, toolCtx, stat, roundSignal);
+        if (done) return;
         continue; // let the model respond to the tool result
       }
       this._maybeEndAfterTurn(); // lead captured + agent done → end the call
@@ -3052,4 +3781,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

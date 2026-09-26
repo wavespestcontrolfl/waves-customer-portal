@@ -1,5 +1,114 @@
-const db = require('../../models/db');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+
+const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
+
+// AW-06: cues that route a typed question to the re-entry answer. A
+// location word ("outside"/"inside") only counts when the question is not
+// about treatment — "What was applied outside today?" must reach the
+// treatment answer, not be hijacked here. Safety-subject words (who is
+// affected) always win regardless of the rest of the wording, and their
+// plural forms are included (the old matcher had "pet" but missed "pets").
+const SAFETY_SUBJECT_RE = /\b(pets?|dogs?|cats?|kids?|child(?:ren)?)\b/;
+// Bare "come back" / "go back" / "wait" are NOT cues: "When will you come
+// back?" is a scheduling question.
+const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b(?!\s+to\s+(?:water|irrigate|run\s+(?:the\s+)?sprinklers?|mow|fertiliz\w*))|\bback\s*(?:out|outside|in|inside)\b/;
+// A scheduled return ("When will you come back in October?", "Will you be
+// back in two weeks?") is a visit question, not re-entry. A customer, pet or
+// location coming back ("Can I be back inside in two hours?", "Can my dog be
+// back outside in an hour?") is re-entry, and pests coming back ("Will ants
+// be back in two weeks?") are findings — only the technician returning is a
+// scheduled return.
+const SCHEDULED_RETURN_RE = /\b(?:you|y'?all|tech(?:nician)?s?|waves|someone|somebody|(?:your|the)\s+(?:team|crew|tech(?:nician)?s?))\s+(?:(?:will|are|is|going\s+to|gonna)\s+)*(?:come|coming|be)\s+back\b(?!\s+(?:inside|outside|indoors|outdoors|out|in\s+(?:the\s+)?(?:house|home|yard|room)))[^?.!]*\b(?:in|on|next|by|around)\s+(?:\d+|a|an|one|two|three|four|five|six|few|couple|the\s+next|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weeks|month|months|spring|summer|fall|winter)\b/;
+// A location word still means re-entry ("When can we go outside again?")
+// unless the question is about what was applied there.
+const LOCATION_RE = /\b(outside|inside|outdoors|indoors)\b/;
+const TREATMENT_QUESTION_RE = /\b(treat|treats|treating|treated|treatment|treatments|product|products|application|applications|apply|applies|applied|applying|spray|sprays|sprayed|spraying|bait|baits|baited|chemical|chemicals|used)\b/;
+// AW-06 r1: a location word also must not mean re-entry when the question is
+// about what was FOUND there — "What did you find outdoors?" / "Did you see
+// any ants indoors?" are findings questions, not re-entry timing.
+const FINDINGS_QUESTION_RE = /\b(find|found|finding|see|saw|notice|noticed|activity|ants?|pests?|bugs?|roaches?|spiders?|rodents?|mice|rats?)\b/;
+// Observation verbs only — an intent verb outranks topic nouns. A pest noun
+// alone ("…after the ant treatment?") never suppresses a safety subject.
+const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|observe|observed|spot|spotted|activity|evidence)\b/;
+// Observation as the question's main act ("what did you find/see…", "did
+// you notice…", "found", "findings") — not lookups ("Can I see my next
+// appointment?") or trend checks ("Did you notice the lawn improving?").
+const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
+// Future treatment timing ("When are you spraying next?", "What are you
+// treating next?", "When is the next treatment?") is a scheduling question.
+const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
+const PAST_TENSE_RE = /\b(?:was|were|did|today|applied|sprayed|treated|used)\b/;
+// Past-tense verbs only — "today" anchors time but doesn't cancel an explicit
+// future cue ("When is my next treatment after today?").
+// Past tense that governs the treatment itself ("was it treated", "did you
+// spray", "applied") — not an unrelated "I was wondering when…".
+const PAST_VERB_RE = /\b(?:was|were|did)\s+(?:you\s+|it\s+|they\s+|the\s+\w+\s+)?(?:treat|spray|appl|use)\w*|\b(?:applied|sprayed|treated)\b/;
+// "What did you spray near my dogs' beds?" asks what was applied, even with
+// a pet noun in it.
+const WHAT_APPLIED_RE = /\b(?:what|which)\b[^?.!]{0,40}\b(?:spray\w*|appl\w*|use[sd]?|treat\w*|products?)\b/;
+// Preparation / action wording outranks appointment nouns ("What should I do
+// before my next visit?"); "Should I schedule…" stays a scheduling question.
+// A bare "before my next…" is not preparation ("What product did you use
+// before my next appointment?" asks what was applied).
+const PREP_ADVICE_RE = /\b(what\s+should\s+i\s+do|should\s+i\s+(?:do|prepare|prep|move|clean|mow|water|cover|remove)|prepare|get\s+ready|(?:do|need\s+to\s+do|have\s+to\s+do)\s+before\s+(?:my|the|your)\s+next)\b/;
+// A temporal "when/after/how long … go/get/come/let … in/out" question is
+// re-entry even when it names the treatment ("When can I go inside after
+// the treatment?").
+// ("When will you come back?" stays a scheduling question.)
+const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:go|get|let|walk|play|be|stay|sit)\b[^?.]*\b(?:in|out|inside|outside|indoors|outdoors)\b|\b(?:okay|ok|fine|alright|safe)\s+to\s+(?:be|go|stay|sit|play|walk|let)\b[^?.]*\b(?:in|out|inside|outside|indoors|outdoors)\b|\bcan\s+(?:i|we|they|he|she|my\s+\w+|the\s+\w+)\s+(?:go|be|get|play|walk|stay|sit)\s+(?:back\s+)?(?:in|out|inside|outside|indoors|outdoors)\b/;
+// Codex #4839 round-4 P2 (4109926456): a findings question that happens to
+// name a pet/kid ("Did you find ants near the pet bowls?") must not be
+// swallowed by the safety-subject cue — genuine pet/kid re-entry questions
+// ("When can my pets go out?", "Is it safe for my pets to go outside?") are
+// still caught below by REENTRY_PHRASE_RE / REENTRY_TEMPORAL_RE on their own
+// wording, so this guard only needs to stop the bare-subject branch.
+// A past-tense treatment question ("Were chemicals applied around my cats?",
+// "Why did you spray near my dogs' beds?") asks about the application, not
+// re-entry — unless it also asks about safety or going back out.
+const REENTRY_ASK_RE = /\b(safe|okay|ok|fine|alright|harm\w*|hurt\w*|danger\w*|toxic|poison\w*|sick|when\s+can|can\s+(?:i|we|they|he|she|my\s+\w+)\s+(?:go|be|get|let|walk|play|return|come|stay|sit|use|touch)\b|go\s+(?:out|back|in)|let\s+(?:my|the|them))\b/;
+const HAZARD_RE = /\b(?:sick|ill|danger\w*|toxic|poison\w*|harm\w*|hurt\w*|vomit\w*|reaction)\b/;
+// Pests or weeds coming back ("Will ants be back in two weeks?") is a
+// recurrence question, not re-entry.
+const PEST_RETURN_RE = /\b(?:pests?|ants?|roaches?|cockroaches?|bugs?|mosquito(?:e?s)?|spiders?|rodents?|mice|rats?|termites?|fleas?|ticks?|wasps?|weeds?|chinch\w*|grubs?)\s+(?:(?:will|are|is|going\s+to|gonna)\s+)*(?:come|coming|be)\s+back\b/;
+function isReentryIntent(q) {
+  if (PEST_RETURN_RE.test(q)) return false;
+  if (SCHEDULED_RETURN_RE.test(q)) return false;
+  const askedAboutApplication = TREATMENT_QUESTION_RE.test(q) && PAST_TENSE_RE.test(q) && !REENTRY_ASK_RE.test(q);
+  // Appointment wording keeps a pet/kid noun from meaning re-entry ("When is
+  // my next appointment for the kids' room?").
+  // Hazard wording outranks an observation verb ("I noticed my dog got sick
+  // after the treatment. Is that dangerous?").
+  return (SAFETY_SUBJECT_RE.test(q) && (!FINDINGS_VERB_RE.test(q) || HAZARD_RE.test(q)) && !askedAboutApplication && !APPOINTMENT_RE.test(q))
+    || REENTRY_PHRASE_RE.test(q)
+    || REENTRY_TEMPORAL_RE.test(q)
+    // A bare location word is re-entry only without treatment, findings or
+    // appointment wording ("When is my next appointment outdoors?").
+    || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q));
+}
+// Results questions ("Is the weed treatment working?") belong to the trend
+// answer even though they name the treatment. "Change" counts only with a
+// result subject ("How did the pressure change?") — "Did you change the
+// product?" asks about the application.
+const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|decreas\w*)\b|\bchang\w*\b(?=[^?.!]*\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b)|\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b[^?.!]*\bchang\w*/;
+// Explicit advice wording outranks the broad lawn-trend subjects ("What do
+// you recommend for the stress areas?").
+const ADVICE_RE = /\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+action|next\s+step)\b/;
+// Explicit scheduling/appointment wording. Shared by the treatment guard
+// below (codex #4839 round-4 P2 4109926457: "What are you applying at my
+// next appointment?" must reach the appointment answer, not treatment) and
+// the appointment branch itself, so the two can never drift apart.
+const SCHEDULING_REQUEST_RE = /\b(?:schedul\w*|reschedul\w*|book\w*|when\s+is|what\s+time|what\s+day|move\s+my|cancel\w*)\b/;
+const APPOINTMENT_RE = /\b(appointment|appt|schedule|scheduled|next service|next visit)\b/;
+// Pressure/score words apply to any report (pest pressure or lawn score).
+const TREND_CORE_RE = /\b(pressure|trend|trending|better|worse|score|index|improving)\b/;
+// Codex #4839 round-4 P2 (4109926455): these subjects only mean the lawn
+// trend/score breakdown on a report that actually carries lawn data — on a
+// pest report "damage"/"color"/"stress" etc. describe a FINDING, not a lawn
+// score, and must fall through to the findings branches below instead.
+const LAWN_TREND_SUBJECT_RE = /\b(lawn|turf|weeds?|fungus|thatch|stress|damage|coverage|color|thicken\w*|thin)\b/;
+function isLawnReport(data = {}) {
+  return data.serviceLine === 'lawn' || Boolean(data.lawnAssessment) || Boolean(data.reportV2?.water);
+}
 
 const PRODUCT_INSIGHTS = [
   {
@@ -15,7 +124,11 @@ const PRODUCT_INSIGHTS = [
     customerMeaning: 'This adds a faster-acting residual barrier on exterior surfaces where crawling insects travel.',
   },
   {
-    match: /90\/10|nonionic|surfactant|lesco/i,
+    // Exact chemistry terms only (AW-07): a brand name alone (e.g. "LESCO",
+    // which sells fertilizers as well as adjuvants) is not reliable evidence
+    // of what a product actually is. Category-based classification below
+    // covers a catalog-approved adjuvant whose name doesn't use these words.
+    match: /90\/10|nonionic\s*surfactant|\bsurfactant\b/i,
     role: 'spray adjuvant',
     customerMeaning: 'This is not the insecticide. It helps the spray mix wet and spread more evenly on treated surfaces.',
   },
@@ -117,38 +230,48 @@ function productName(app = {}) {
   return cleanText(app.product?.name || app.productName || app.product_name || 'Treatment');
 }
 
-function productContextFor(app = {}, productContext = {}) {
-  const byApplicationId = productContext.byApplicationId || {};
-  const byProductName = productContext.byProductName || {};
-  return byApplicationId[app.id]
-    || byProductName[normalizeKey(productName(app))]
-    || {};
+// AW-07: classify from the approved catalog product_type/category (frozen or
+// live-approved — whichever report-data.js's attachApprovedReportProductFacts
+// already resolved onto app.product) before falling back to exact
+// product/ingredient text matches. A brand name alone is never sufficient
+// evidence of chemistry or function (a brand covers multiple product types).
+function categoryInsightFor(app = {}) {
+  const product = app.product || {};
+  // Only approved catalog facts may drive a chemistry claim; a frozen-null or
+  // unapproved product still carries its recorded category string.
+  if (!product.facts_approved) return null;
+  const productType = String(product.product_type || '').toLowerCase();
+  const category = String(product.category || '').toLowerCase();
+  if (productType === 'wetting_agent' || /\b(surfactant|adjuvant|wetting agent)\b/.test(category)) {
+    return {
+      role: 'spray adjuvant',
+      customerMeaning: 'This is not the insecticide. It helps the spray mix wet and spread more evenly on treated surfaces.',
+    };
+  }
+  return null;
 }
 
-function insightFor(app = {}, meta = {}) {
+function insightFor(app = {}) {
+  const categoryInsight = categoryInsightFor(app);
+  if (categoryInsight) return categoryInsight;
   const haystack = [
     productName(app),
     app.product?.active_ingredient,
     app.product?.activeIngredient,
-    meta.active_ingredient,
-    meta.activeIngredient,
-    meta.name,
   ].join(' ');
   return PRODUCT_INSIGHTS.find((insight) => insight.match.test(haystack)) || null;
 }
 
-function activeIngredientFor(app = {}, meta = {}) {
+function activeIngredientFor(app = {}) {
   return cleanText(
     app.product?.active_ingredient
     || app.product?.activeIngredient
-    || meta.active_ingredient
-    || meta.activeIngredient
-    || insightFor(app, meta)?.activeIngredient
+    || insightFor(app)?.activeIngredient
   );
 }
 
-function epaRegFor(app = {}, meta = {}) {
-  return cleanText(app.product?.epa_reg || app.product?.epaReg || meta.epa_reg_number || meta.epaRegNumber);
+function epaRegFor(app = {}) {
+  return cleanText(app.product?.epa_reg || app.product?.epaReg);
 }
 
 function rateText(app = {}) {
@@ -165,20 +288,9 @@ function rateText(app = {}) {
   return '';
 }
 
-function rainfastText(meta = {}) {
-  const minutes = Number(meta.rainfast_minutes ?? meta.rainfastMinutes);
-  if (!Number.isFinite(minutes) || minutes <= 0) return '';
-  if (minutes < 60) return `rainfast about ${Math.round(minutes)} min`;
-  const hours = minutes / 60;
-  return `rainfast about ${Number.isInteger(hours) ? hours : hours.toFixed(1)} hr`;
-}
-
-function reiText(meta = {}) {
-  const hours = Number(meta.rei_hours ?? meta.reiHours);
-  if (!Number.isFinite(hours) || hours <= 0) return '';
-  return `label REI ${hours} hr`;
-}
-
+// No re-entry or rainfast figure is rendered here: customer surfaces never
+// carry a fixed re-entry/drying duration (AGENTS.md compliance language) —
+// the re-entry answer gives the once-dry guidance instead.
 function applicationScope(data = {}) {
   const apps = Array.isArray(data.applications) ? data.applications : [];
   const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas : [];
@@ -217,7 +329,7 @@ function conditionSummary(conditions = {}) {
   return `${source || 'Application conditions'}: ${facts.join(', ')}.`;
 }
 
-function answerAppliedToday({ data = {}, productContext = {} } = {}) {
+function answerAppliedToday({ data = {} } = {}) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   if (!applications.length) return 'No product applications were recorded on this report.';
 
@@ -232,16 +344,15 @@ function answerAppliedToday({ data = {}, productContext = {} } = {}) {
   ]);
 
   const lines = applications.slice(0, 4).map((app) => {
-    const meta = productContextFor(app, productContext);
-    const insight = insightFor(app, meta);
+    const insight = insightFor(app);
     const name = productName(app);
     const method = cleanText(app.methodLabel || reportEnumLabel(app.method));
     const area = cleanText(app.applicationArea || app.area);
     const targets = Array.isArray(app.targets) && app.targets.length
       ? `targets ${app.targets.map(reportEnumLabel).join(', ')}`
       : '';
-    const active = activeIngredientFor(app, meta);
-    const epa = epaRegFor(app, meta);
+    const active = activeIngredientFor(app);
+    const epa = epaRegFor(app);
     const technical = compact([
       insight?.role,
       active ? `active ingredient: ${active}` : '',
@@ -249,8 +360,6 @@ function answerAppliedToday({ data = {}, productContext = {} } = {}) {
       area ? `area: ${area}` : '',
       targets,
       rateText(app),
-      rainfastText(meta),
-      reiText(meta),
       epa ? `EPA Reg. ${epa}` : '',
     ]);
     const meaning = insight?.customerMeaning ? ` ${insight.customerMeaning}` : '';
@@ -353,9 +462,12 @@ function answerReentry({ data = {} } = {}) {
   // reentry.js's framing (audit 2026-07-16 — this was the one surface that
   // still said "N min outside, N min inside").
   const hasWindow = Number(advisory.exterior_reentry_min) > 0 || Number(advisory.interior_reentry_min) > 0;
+  // AW-06: no recorded interval is not itself an answer — hand the customer
+  // an explicit way to confirm it's safe rather than leaving them with a
+  // bare "not recorded" and nothing to do next.
   const base = hasWindow
     ? 'Give treated areas time to fully dry before normal use.'
-    : 'No re-entry timer was recorded for this report.';
+    : `No re-entry timer was recorded for this report — call or text ${WAVES_PHONE_DISPLAY} and we'll confirm the timing for your treated areas.`;
   return `${base}${advisory.pet_advisory ? ` ${advisory.pet_advisory}` : ''}`;
 }
 
@@ -433,21 +545,125 @@ function answerNextAppointment({ nextAppointment } = {}) {
   return `Your next appointment is ${serviceDateText(nextAppointment.scheduled_date)} for ${nextAppointment.service_type || 'service'}${window ? `, window ${window}` : ''}.`;
 }
 
+// Aftercare: "should I water after today's treatment?" answers with the
+// label instruction, plus the reduced plan when a watering-in is credited.
+function answerWateringAftercare({ data, weekPlan, aftercare }) {
+  // Same guards as the rendered card: a credited watering-in only for a
+  // REQUIRED watering-in, on a visit inside the plan week, on a plan that
+  // prescribes a run (codex gh-r31).
+  const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
+  const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
+  // A HOLD plan beside a required watering-in: the answer must carry the
+  // plan's no-extra-runs guidance too — the label instruction alone reads
+  // as permission to resume the normal schedule (codex gh-r45).
+  const holdBeside = !reduced && aftercare.waterInRequired === true
+    && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
+    ? weekPlan : null;
+  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
+}
+
+// AW-06 / codex #4839 round-4 (4109926463): first-match precedence rules,
+// table-driven so the router itself is one loop instead of a growing chain
+// of if-statements (CLAUDE.md rule 20 — remove decisions, don't relocate
+// them into one-use helpers). Each `test` is the exact condition the
+// replaced if-statement used; order is the same precedence documented
+// inline on each entry below and pinned by report-question-routing.test.js.
+function questionRoutingRules({
+  data, nextAppointment, weekPlan, aftercare, wateringIntent,
+}) {
+  return [
+    // Aftercare/watering answers first — never re-entry or generic copy
+    // under the plan shown on the same page (codex #3565 gh-r29).
+    {
+      test: (q) => wateringIntent && Boolean(aftercare?.watering) && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q),
+      answer: () => answerWateringAftercare({ data, weekPlan, aftercare }),
+    },
+    {
+      test: () => Boolean(weekPlan?.title) && wateringIntent,
+      answer: () => [weekPlan.title, weekPlan.detail].filter(Boolean).join(' '),
+    },
+    { test: (q) => /\b(irrigation)\b/.test(q), answer: () => answerReentry({ data }) },
+    // AW-06: exact-word matching missed inflections ("treated", "applying",
+    // "products", "used") — this is the branch "What was applied outside
+    // today?" and "Why was <product> used?" must reach. A question naming
+    // both a treatment and the lawn trend ("What was applied to the weeds?")
+    // asks about the treatment, so treatment cues win when both match.
+    // codex #4839 round-4 P2 4109926457: explicit appointment wording
+    // outranks a treatment inflection ("What are you applying at my next
+    // appointment?" answers with the appointment, not today's application).
+    // Observation verbs outrank treatment inflections ("What did you find
+    // while treating?") — codex #4839 P2.
+    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
+    // Preparation wording outranks appointment nouns — codex #4839 P2.
+    { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    // Explicit advice outranks treatment inflections ("What do you recommend
+    // after spraying?") — codex #4839 P2.
+    // Only an actual scheduling request ("Should I schedule my next
+    // appointment?") outranks advice — "What do you recommend before my next
+    // appointment?" is still advice.
+    { test: (q) => ADVICE_RE.test(q) && !SCHEDULING_REQUEST_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    // Scheduled returns go to the appointment.
+    { test: (q) => SCHEDULED_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    // Future treatment timing is scheduling, not today's application.
+    {
+      test: (q) => TREATMENT_QUESTION_RE.test(q) && FUTURE_TREATMENT_RE.test(q) && !PAST_VERB_RE.test(q),
+      answer: () => answerNextAppointment({ nextAppointment }),
+    },
+    {
+      // A pressure/score question with only the generic "used" ("What is the
+      // pressure score used for?") belongs to the trend answer.
+      // Appointment wording only outranks treatment in a future/scheduling
+      // sense; "What was applied at my last appointment?" is a past question.
+      test: (q) => TREATMENT_QUESTION_RE.test(q) && (!APPOINTMENT_RE.test(q) || PAST_TENSE_RE.test(q) || /\b(?:last|today'?s?|previous)\b/.test(q))
+        && !(TREND_CORE_RE.test(q) && !/\b(?:products?|spray\w*|appl\w*|treat\w*|chemicals?|baits?)\b/.test(q)),
+      // "Is the treatment working?" asks about results, not what was applied.
+      answer: (q) => (EFFECTIVENESS_RE.test(q) ? answerTrend({ data }) : answerAppliedToday({ data })),
+    },
+    // Explicit scheduling wording outranks the broad advice phrases ("Should
+    // I schedule my next appointment?") and treatment inflections above.
+    { test: (q) => APPOINTMENT_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    // Explicit findings wording outranks the broad lawn subjects ("What
+    // damage did you find?" on a pest report).
+    { test: (q) => /\b(find|found|finding|findings)\b/.test(q), answer: () => answerFindings({ data }) },
+    // AW-06: covers the lawn V2 insight chips too (water/weeds/damage/
+    // coverage/color categories in ReportViewPage.jsx's reportAskPrompts),
+    // which all read from this same score breakdown in answerTrend. codex
+    // #4839 round-4 P2 4109926455: the lawn-specific subjects only apply on
+    // a report that actually carries lawn data — on a pest report "damage"/
+    // "color"/"stress" describe a finding, not a lawn score.
+    {
+      test: (q) => TREND_CORE_RE.test(q) || (isLawnReport(data) && LAWN_TREND_SUBJECT_RE.test(q)),
+      answer: () => answerTrend({ data }),
+    },
+    // "watch" added (AW-06): "What should I watch for next?" is advisory
+    // next-steps intent, not an appointment-date lookup — checked before the
+    // bare "next" appointment rule below.
+    {
+      test: (q) => /\b(do|watch|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q),
+      answer: () => answerNextSteps({ data, nextAppointment }),
+    },
+    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q) && !PEST_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    {
+      test: (q) => /\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q) || FINDINGS_QUESTION_RE.test(q),
+      answer: () => answerFindings({ data }),
+    },
+  ];
+}
+
 function answerServiceReportQuestion({
   question,
   data,
   nextAppointment,
-  productContext,
 } = {}) {
   const q = String(question || '').toLowerCase();
 
-  // This week's watering plan, when the report carries one, answers any
-  // watering question first — never re-entry or generic copy under the
-  // plan shown on the same page (codex #3565 gh-r29). Without a plan the
-  // existing routing (irrigation → re-entry) stands.
   // Safety first: re-entry / pets / kids questions answer with the once-dry
-  // rule even when they mention minutes or water (codex gh-r30).
-  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside)\b/.test(q)) {
+  // rule even when they mention minutes or water (codex gh-r30). AW-06: a
+  // bare location word ("outside"/"inside") is no longer enough on its own —
+  // see isReentryIntent — so "What was applied outside today?" reaches the
+  // treatment answer below instead of being hijacked here.
+  if (isReentryIntent(q)) {
     return answerReentry({ data });
   }
 
@@ -461,49 +677,12 @@ function answerServiceReportQuestion({
   const zoneRuntimeIntent = !/\btime\s*zones?\b/.test(q)
     && /\bzones?\b/.test(q) && /\b(run|runs|running|minutes?|duration|how long)\b/.test(q);
   const wateringIntent = /\b(water|watering|irrigat\w*|sprinklers?|run ?time)\b/.test(q) || zoneRuntimeIntent;
-  // Aftercare: "should I water after today's treatment?" answers with the
-  // label instruction, plus the reduced plan when a watering-in is credited.
-  if (wateringIntent && aftercare?.watering && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q)) {
-    // Same guards as the rendered card: a credited watering-in only for a
-    // REQUIRED watering-in, on a visit inside the plan week, on a plan that
-    // prescribes a run (codex gh-r31).
-    const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
-    const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
-    // A HOLD plan beside a required watering-in: the answer must carry the
-    // plan's no-extra-runs guidance too — the label instruction alone reads
-    // as permission to resume the normal schedule (codex gh-r45).
-    const holdBeside = !reduced && aftercare.waterInRequired === true
-      && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
-      ? weekPlan : null;
-    return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
-  }
-  if (weekPlan?.title && wateringIntent) {
-    return [weekPlan.title, weekPlan.detail].filter(Boolean).join(' ');
-  }
 
-  if (/\b(irrigation)\b/.test(q)) {
-    return answerReentry({ data });
-  }
-
-  if (/\b(pressure|trend|better|worse|score|index|improving|lawn|turf|weed|fungus|thatch)\b/.test(q)) {
-    return answerTrend({ data });
-  }
-
-  if (/\b(treat|treated|product|application|spray|bait|chemical|applied)\b/.test(q)) {
-    return answerAppliedToday({ data, productContext });
-  }
-
-  if (/\b(do|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q)) {
-    return answerNextSteps({ data, nextAppointment });
-  }
-
-  if (/\b(next|upcoming|appointment|appt|schedule|scheduled|come back)\b/.test(q)) {
-    return answerNextAppointment({ nextAppointment });
-  }
-
-  if (/\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q)) {
-    return answerFindings({ data });
-  }
+  const rules = questionRoutingRules({
+    data, nextAppointment, weekPlan, aftercare, wateringIntent,
+  });
+  const matched = rules.find((rule) => rule.test(q));
+  if (matched) return matched.answer(q);
 
   const summary = data?.dynamicContext?.aiSummary;
   if (summary?.headline || summary?.body) {
@@ -512,58 +691,8 @@ function answerServiceReportQuestion({
   return 'This service is complete. You can review the treatment map, applications, findings, conditions, and customer advisory on this report.';
 }
 
-async function loadReportAssistantProductContext(data = {}, knex = db) {
-  const applications = Array.isArray(data.applications) ? data.applications : [];
-  const ids = unique(applications.map((app) => app.product?.catalogId || app.product?.catalog_id));
-  const names = unique(applications.map(productName));
-  if (!ids.length && !names.length) return { byApplicationId: {}, byProductName: {} };
-
-  try {
-    const rows = await knex('products_catalog')
-      .where(function productLookup() {
-        if (ids.length) this.whereIn('id', ids);
-        if (names.length) this.orWhereIn('name', names);
-      })
-      .select(
-        'id',
-        'name',
-        'active_ingredient',
-        'epa_reg_number',
-        'moa_group',
-        'irac_group',
-        'frac_group',
-        'hrac_group',
-        'formulation',
-        'rainfast_minutes',
-        'rei_hours',
-        'reentry_text',
-        'label_url',
-        'sds_url',
-        'label_source_note',
-        'label_verified_at',
-        'requires_surfactant',
-        'allows_surfactant',
-      );
-    const byId = new Map(rows.map((row) => [String(row.id), row]));
-    const byName = new Map(rows.map((row) => [normalizeKey(row.name), row]));
-    return applications.reduce((ctx, app) => {
-      const meta = byId.get(String(app.product?.catalogId || app.product?.catalog_id || ''))
-        || byName.get(normalizeKey(productName(app)))
-        || {};
-      if (Object.keys(meta).length) {
-        ctx.byApplicationId[app.id] = meta;
-        ctx.byProductName[normalizeKey(productName(app))] = meta;
-      }
-      return ctx;
-    }, { byApplicationId: {}, byProductName: {} });
-  } catch {
-    return { byApplicationId: {}, byProductName: {} };
-  }
-}
-
 module.exports = {
   answerServiceReportQuestion,
   answerAppliedToday,
   answerNextSteps,
-  loadReportAssistantProductContext,
 };
