@@ -936,16 +936,17 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
   });
 
-  test('R4 owner ruling 2026-09-24: a fact the extractor labels temporary is silent even with temporary wording in the text', async () => {
+  test('R4 owner ruling 2026-09-24: a fact the extractor labels visit_only is silent even with temporary wording in the text', async () => {
     message.message_body = `For tomorrow only. ${message.message_body}`;
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
-    await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'temporary' }] }, context);
+    await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'visit_only' }] }, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test.each([['visit_only', false], ['temporary', false], ['durable', true]])(
+  // The extractor schema's durations are durable | visit_only | uncertain (Codex #4816 r32).
+  test.each([['visit_only', false], ['uncertain', true], ['durable', true]])(
     'Codex #4816 r29: a %s fact caught first by property ambiguity rings the review bell: %s', async (duration, bells) => {
       // Two active properties: property_ambiguous fires before the temporary check.
       await mockPg('customer_properties').insert({ customer_id: message.customer_id, address_line1: '200 Example Lane',

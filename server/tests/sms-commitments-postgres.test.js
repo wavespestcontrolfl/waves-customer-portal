@@ -1347,6 +1347,45 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').where({ id: ids[0] }).first()).sms_context.event_seen_at).toBeUndefined();
   });
 
+  test('Codex #4816 r32: a provider-failure backoff reached for a previous owner does not hold after a merge', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      property_id: null, quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const visitFor = async (customerId, propertyId, at) => {
+      const [v] = await mockPg('scheduled_services').insert({ customer_id: customerId, property_id: propertyId, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(at), window_start: '09:00:00', status: 'en_route', created_at: new Date(message.created_at.getTime() - 86400000), updated_at: at,
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: v.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: at });
+    };
+    const other = { id: randomUUID() };
+    await mockPg('customers').insert({ id: other.id, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550105', address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [otherProperty] = await mockPg('customer_properties').insert({ customer_id: other.id, address_line1: '300 Example Lane',
+      city: 'Sarasota', zip: '34236', active: true }).returning('id');
+    // The new owner's event (minute 3) is older than what the failed attempt
+    // read for the old owner (minute 5).
+    await visitFor(other.id, otherProperty.id, minutes(3));
+    await visitFor(message.customer_id, context.properties[0].id, minutes(5));
+    const verify = jest.fn(async (_row, _evidence, { now }) => ({ verdict: 'uncertain', reason: 'provider_failed', evidence_hash: 'x',
+      retry_after: new Date(now.getTime() + 3600000).toISOString() }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+      return verify.mock.calls.map(([r]) => r.id);
+    };
+    expect(await tick(minutes(40))).toEqual([target]);
+    // Inside the backoff, with nothing new, the row yields its slot.
+    expect(await tick(minutes(41))).toEqual([]);
+    await mockPg('sms_log').where({ id: message.id }).update({ customer_id: other.id });
+    expect(await tick(minutes(42))).toEqual([target]);
+  });
+
   test('Codex #4816 r28: an ownership change resets the event watermark', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',

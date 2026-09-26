@@ -421,27 +421,21 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
     // with the proposals, while execution hashes the same dedupe decision.
-    // Owner ruling 2026-09-24 (R4, the access-note text "my son should be there" —
-    // a temporary access note is not urgent): a fact the durability/wording
-    // check already labelled temporary_instruction never rings the bell on
-    // its own. It still rides in `analysis.facts` with that outcome, and
-    // still counts toward `unverified_count` on a bell that fires for some
-    // OTHER real exception in the same message.
-    // Only a KNOWN-temporary fact is silent: the extractor marks ambiguous
-    // timing duration 'uncertain' precisely for staff review, so that one
-    // still rings (Codex #4816 r10).
-    // Only a fact the extractor itself labelled temporary or visit-only is
-    // known temporary. One it labelled durable is held back by temporary
-    // wording somewhere in the message, and every fact carries the whole
-    // message as its quote, so that wording cannot be tied to it ("I'm away
-    // tomorrow. My lockbox code is 1234"): it still rings the bell (Codex
-    // #4816 r26/r27).
-    // Keyed on the extractor's label, not on which guard caught the fact
-    // first: a temporary fact is never written, so property ambiguity,
-    // contact authority, a duplicate or mixed topics add nothing for staff
-    // to decide (Codex #4816 r29).
+    // Owner ruling 2026-09-24 (R4, the access-note text "my son should be
+    // there"): a temporary access note is not urgent, so a fact the
+    // extractor labels visit_only never rings the review bell on its own.
+    // It still rides in `analysis.facts` and counts toward
+    // `unverified_count` on a bell some OTHER real exception raises.
+    // - Keyed on the extractor's label (the schema's only temporary value),
+    //   not on which guard caught the fact first: a visit-only fact is never
+    //   written, so property ambiguity, contact authority, a duplicate or
+    //   mixed topics add nothing for staff to decide (Codex #4816 r29/r32).
+    // - 'uncertain' is the extractor asking for review, so it rings (r10).
+    // - A durable fact held back only by temporary wording rings: every fact
+    //   quotes the whole message, so the wording cannot be tied to it ("I'm
+    //   away tomorrow. My lockbox code is 1234") (r26/r27).
     const settled = ['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'];
-    const temporaryFacts = facts.filter((f) => !settled.includes(f.outcome) && ['temporary', 'visit_only'].includes(f.duration));
+    const temporaryFacts = facts.filter((f) => !settled.includes(f.outcome) && f.duration === 'visit_only');
     const exceptions = facts.filter((f) => !settled.includes(f.outcome) && !temporaryFacts.includes(f));
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
@@ -659,6 +653,38 @@ const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
       WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
   ) a)`;
 
+// Match merge and intake: customer, source, then commitment. A relink, an
+// edited or ineligible source, a gate turned off, or a row a person already
+// closed while verification ran all return null, so the verdict is retried
+// against the current state.
+async function lockLiveCommitment(trx, row, message) {
+  const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first('id');
+  const source = customer && await scheduledSourceMessage(trx, await trx('sms_log').where({ id: message.id }).forUpdate().first());
+  const sameSource = !!source && eligibleMessage(source, { captured: true })
+    && source.customer_id === message.customer_id && source.message_body === message.message_body;
+  const live = sameSource && await trx('call_commitments').where({ id: row.id }).forUpdate().first();
+  return live && smsCommitmentsEnabled() && live.status === 'open' && live.human_state == null ? { source, live } : null;
+}
+
+const OVERDUE_BELL_BODY = {
+  uncertain: (when) => `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
+  open: (when) => `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
+};
+
+// The deadline passed and the records do not establish completion.
+async function ringOverdueBell(trx, { row, message, verdict, dedupeKey }) {
+  const when = new Date(message.created_at).toLocaleString('en-US', {
+    timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+  const body = (OVERDUE_BELL_BODY[verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
+  const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
+    { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
+      link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
+      metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
+        sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
+  if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+}
+
 // One open row: skip, verify, and close or bell. Returns what happened so
 // the caller can count it.
 async function refreshSmsCommitment(conn, row, now, verify) {
@@ -701,14 +727,9 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   // witness) — is retried, so its event stays unseen (Codex #4816 r18/r19).
   let persisted = false;
   await conn.transaction(async (trx) => {
-    // Match merge and intake: customer, source, then commitment. A relink
-    // while verification runs must retry against the current owner.
-    const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
-    if (!customer) return;
-    const source = await scheduledSourceMessage(trx, await trx('sms_log').where({ id: message.id }).forUpdate().first());
-    if (!source || !eligibleMessage(source, { captured: true }) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
-    const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
-    if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
+    const locked = await lockLiveCommitment(trx, row, message);
+    if (!locked) return;
+    const { source, live } = locked;
     const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
     if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
     const dedupeKey = `sms-commitment:${row.id}`;
@@ -738,19 +759,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
     // never rings a bell on its own (there is no stated deadline to have
     // passed). The fulfillment_check above is still stored so a later
     // pass with new evidence does not repeat the same model call for free.
-    if (!deadlinePassed) return;
-    const when = new Date(message.created_at).toLocaleString('en-US', {
-      timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-    });
-    const body = verdict.verdict === 'uncertain'
-      ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`
-      : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`;
-    const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
-      { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
-        link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
-        metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
-          sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
-    if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+    if (deadlinePassed) await ringOverdueBell(trx, { row, message, verdict, dedupeKey });
   });
   // A provider or schema failure is persisted with retry_after, but no model
   // judged the event: keep it pending (verify reuses the stored failure until
@@ -798,7 +807,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // Least recently stamped first, so a re-scan inside the commit grace never
   // holds back a row whose event has not been seen at all.
   const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
+    // A stored failure reached for another owner (sms_context.customer_id is
+    // rewritten with every persisted verdict) says nothing about the current
+    // owner's evidence: a merge or undo lifts the backoff (Codex #4816 r32).
     .where((q) => q.whereRaw(`${RETRY_AFTER_SQL} IS NULL OR ${RETRY_AFTER_SQL} <= ?`, [now])
+      .orWhereRaw("cc.sms_context->>'customer_id' IS DISTINCT FROM s.customer_id::text")
       // Newer than what the failed attempt read: the same commit-grace cap
       // as the watermark, so a visit write that began before that attempt
       // but committed after it still counts (Codex #4816 r30).
