@@ -325,6 +325,15 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('assassin bug')).toBeNull();
   });
 
+  test('an exact common-name match wins over a shorter alias fuzzy-matching inside it (Codex r1 P1)', () => {
+    // "honey bee" (an alias of honey-bee-swarm) is a substring of this exact
+    // common name; the exact match for honey-bee-wall-colony must still win.
+    const result = catalog.resolveName('Honey Bee (wall colony)');
+    expect(result).toBeTruthy();
+    expect(result.node.slug).toBe('honey-bee-wall-colony');
+    expect(result.via).toBe('common');
+  });
+
   test('an empty or nonsense query resolves to null', () => {
     expect(catalog.resolveName('')).toBeNull();
     expect(catalog.resolveName('   ')).toBeNull();
@@ -344,10 +353,11 @@ describe('loader API surface', () => {
     expect(catalog.listEntries({ kind: 'sign' }).length).toBe(0);
   });
 
-  test('getNode resolves entries, subgroups, and groups', () => {
+  test('getNode resolves entries, subgroups, groups, and categories', () => {
     expect(catalog.getNode('fire-ant').level).toBe('entry');
     expect(catalog.getNode('fire-ants').level).toBe('subgroup');
     expect(catalog.getNode('ants').level).toBe('group');
+    expect(catalog.getNode('insect').level).toBe('category');
     expect(catalog.getNode('not-a-real-id')).toBeNull();
   });
 
@@ -365,6 +375,11 @@ describe('loader API surface', () => {
 
   test('lineage on an unknown id returns an empty array', () => {
     expect(catalog.lineage('not-a-real-id')).toEqual([]);
+  });
+
+  test('lineage on a bare category returns just that one rung (Codex r1 P1)', () => {
+    const rungs = catalog.lineage('insect');
+    expect(rungs).toEqual([{ level: 'category', id: 'insect', label: 'Insect', generic: 'an insect' }]);
   });
 
   test('nextPhoto returns the authored next_photo for a group/subgroup', () => {

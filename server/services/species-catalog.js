@@ -130,11 +130,12 @@ function getCategory(id) {
   return CATALOG.categories.get(id) || null;
 }
 
-/** Any node — entry, subgroup, or group — by id/slug. Group and subgroup
- * ids are a small curated namespace (see index.json) that does not overlap
- * entry slugs, so checking groups, then subgroups, then entries is safe. */
+/** Any node — category, group, subgroup, or entry — by id/slug. Category
+ * ids (`insect`, `arachnid`, …), group/subgroup ids, and entry slugs are
+ * disjoint curated namespaces (see index.json), so checking them in any
+ * order is safe. */
 function getNode(id) {
-  return getGroup(id) || getSubgroup(id) || getEntry(id) || null;
+  return getGroup(id) || getSubgroup(id) || getEntry(id) || getCategory(id) || null;
 }
 
 function listEntries(filter = {}) {
@@ -255,12 +256,22 @@ function buildWholeWordIndex(pairs) {
   return { index, collisions };
 }
 
-function scanWholeWord(normalized, index) {
+// An exact (plural-aware) match against a whole normalized name — no regex
+// scan, so this is the highest-confidence hit and must be tried across
+// every index before any index's fuzzy whole-word scan runs. Otherwise a
+// short alias's fuzzy match (e.g. "honey bee" inside "honey bee wall
+// colony") would win over another entry's exact common-name match, purely
+// because its index happened to be checked first (Codex r1 P1).
+function exactMatch(normalized, index) {
   const variants = [normalized, `${normalized}s`, normalized.replace(/s$/, '')];
   for (const variant of variants) {
     const direct = variant && index.get(variant);
     if (direct) return direct;
   }
+  return null;
+}
+
+function fuzzyScan(normalized, index) {
   let best = null;
   let bestLen = 0;
   for (const [name, slug] of index.entries()) {
@@ -297,22 +308,32 @@ const NAME_INDICES = buildNameIndices();
 
 /**
  * Resolve free text (from a model, or typed by a customer) to a catalog
- * entry. Checks, in order: an exact scientific-name match, a whole-word
- * alias match, a whole-word common-name/aka match, then whether the raw
- * text is itself a known v1 legacy slug. Returns
- * `{ node, via: 'scientific' | 'alias' | 'common' | 'legacy' }` or `null`.
+ * entry. Priority is scientific > alias > common name, but within that an
+ * EXACT match always wins over a fuzzy (whole-word substring) match from a
+ * lower-priority index — an exact common-name match for "Honey Bee (wall
+ * colony)" must not lose to the shorter "honey bee" alias fuzzy-matching
+ * inside it. So this tries an exact match against all three indices first,
+ * then falls back to the fuzzy whole-word scan against all three, before
+ * finally checking whether the raw text is itself a known v1 legacy slug.
+ * Returns `{ node, via: 'scientific' | 'alias' | 'common' | 'legacy' }` or
+ * `null`.
  */
 function resolveName(text) {
   const normalized = normalizeName(text);
   if (!normalized) return null;
 
-  const sci = scanWholeWord(normalized, NAME_INDICES.scientific.index);
+  const exactSci = exactMatch(normalized, NAME_INDICES.scientific.index);
+  if (exactSci) return { node: getEntry(exactSci), via: 'scientific' };
+  const exactAlias = exactMatch(normalized, NAME_INDICES.alias.index);
+  if (exactAlias) return { node: getEntry(exactAlias), via: 'alias' };
+  const exactCommon = exactMatch(normalized, NAME_INDICES.common.index);
+  if (exactCommon) return { node: getEntry(exactCommon), via: 'common' };
+
+  const sci = fuzzyScan(normalized, NAME_INDICES.scientific.index);
   if (sci) return { node: getEntry(sci), via: 'scientific' };
-
-  const alias = scanWholeWord(normalized, NAME_INDICES.alias.index);
+  const alias = fuzzyScan(normalized, NAME_INDICES.alias.index);
   if (alias) return { node: getEntry(alias), via: 'alias' };
-
-  const common = scanWholeWord(normalized, NAME_INDICES.common.index);
+  const common = fuzzyScan(normalized, NAME_INDICES.common.index);
   if (common) return { node: getEntry(common), via: 'common' };
 
   const rawSlug = String(text || '').trim().toLowerCase();
