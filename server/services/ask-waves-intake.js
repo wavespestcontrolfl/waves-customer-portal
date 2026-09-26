@@ -586,6 +586,8 @@ const REVIEWED_REPLIES = new Set([
   EMERGENCY_FALLBACK_RESULT.reply,
   SUPPORT_FALLBACK_RESULT.reply,
   FALLBACK_RESULT.reply,
+  UNSAFE_CLAIM_REPLY,
+  UNSAFE_CLAIM_REPLY_ES,
 ]);
 
 // The emergency script for a reply that must be replaced, when the reply or

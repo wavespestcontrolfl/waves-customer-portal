@@ -466,6 +466,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.intent).toBe('question');
   });
 
+  test('the reviewed label copy passes through a second scrub unchanged', () => {
+    const first = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false });
+    expect(scrubUnsafeClaims(first, 'Is it safe for my pets after 30 minutes?')).toEqual(first);
+  });
+
   test('a breed-named pet gets the veterinary script', () => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My Labrador ate rat poison');
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
