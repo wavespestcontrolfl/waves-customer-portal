@@ -492,20 +492,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // is a ratchet: ANY new dynamic mutation in the file (which could carry
     // `payload.status` or `column === 'status'` invisibly to a textual scan)
     // fails until the file is re-audited and the count updated.
-    // server/routes/property.js — audited 2026-09-26 (termite annual plan
-    // slice 6a: the new GET /termite-annual-plan route's plain
-    // `db('annual_prepay_terms')` read is the reason this file entered the
-    // TABLE-containing candidate set for the first time). The one "dynamic
-    // mutation" the scanner finds here is a false positive: an UNRELATED,
-    // pre-existing whereRaw's raw SQL alias `AS t(v))` (property_preferences
-    // irrigation-fields merge, ~line 430) textually matches the `t(v)`
-    // dynamic-call shape, and because that match sits inside a template
-    // string the scanner's depth-tracking loses its place and runs on past
-    // the actual statement, sweeping up the next real `.update(` it meets —
-    // `trx('property_preferences').update({...})`, a plain LITERAL-table
-    // write carrying no `status` key (confirmed). Nothing in this file ever
-    // mutates annual_prepay_terms.
-    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 9, 'server/routes/property.js': 1 };
+    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 9 };
 
     const writes = [];
     const unscannable = [];
@@ -529,13 +516,22 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // could write this table's status invisibly — fail closed unless the
       // file is on the audited allowlist above.
       let dynamicSites = 0;
+      // Only a call in real CODE is a builder: a textual match inside a
+      // string or comment (e.g. raw SQL `… AS t(v))`) is not a call, and
+      // starting chainAfter mid-string walks the rest of the file out of
+      // phase (it once swept a later route's READ predicates into a
+      // phantom "mutation").
+      const codePositions = new Set();
+      walkSyntax(src, 0, (ch, i) => { codePositions.add(i); return true; });
       // Direct chains plus SPLIT dynamic builders (`const q = trx(x); … q.update()`),
       // whose later chains within the declaring function are scanned too.
       const dynamicChains = [];
       for (const m of src.matchAll(/(?<![.\w])(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
+        if (!codePositions.has(m.index)) continue;
         dynamicChains.push({ index: m.index, via: m[1], chain: chainAfter(src, m.index + m[0].length) });
       }
       for (const d of src.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
+        if (!codePositions.has(d.index)) continue;
         const restStart = d.index + d[0].length;
         const rest = src.slice(restStart);
         const scopeEnd = rest.search(/\n\}\n/);

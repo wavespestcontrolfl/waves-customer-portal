@@ -203,6 +203,24 @@ describe('termite annual plan renewal card', () => {
     await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
   });
 
+  // Codex r3 P2: a decline replay on a year that was refunded/disputed
+  // since answers not_covered — the card shows the decline with no
+  // "Coverage continues through …" claim.
+  it('a not_covered answer renders the decline without any coverage claim', async () => {
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [{ id: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }],
+    });
+    const notCovered = Object.assign(new Error('This plan will not renew, and its coverage is no longer active.'), { status: 409, code: 'not_covered' });
+    api.declineTermiteAnnualPlanRenewal.mockRejectedValue(notCovered);
+    render(<MyPlanTab customer={customer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Don’t renew my plan' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('Your plan will not renew.')).toBeInTheDocument();
+    expect(screen.queryByText(/Coverage continues/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+  });
+
   it('a failed decline does not refresh the customer', async () => {
     const refreshCustomer = vi.fn(async () => {});
     api.getTermiteAnnualPlan.mockResolvedValue({

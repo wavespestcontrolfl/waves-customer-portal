@@ -19,6 +19,11 @@
 const knexLib = require('knex');
 const { randomUUID } = require('crypto');
 
+// Each test builds a scratch schema through 8 real migrations — on a
+// loaded machine (load average ~60) that ran past jest's 5s default and
+// failed six tests in one run while passing 32/32 on the next.
+jest.setTimeout(60000);
+
 const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 

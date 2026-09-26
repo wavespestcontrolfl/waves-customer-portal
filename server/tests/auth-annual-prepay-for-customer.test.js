@@ -87,11 +87,18 @@ describe('annualPrepayForCustomer', () => {
     // decided-lapse OR branch correctly against a lightweight fake builder.
     const predicate = query.where.mock.calls.map((args) => args[0]).find((arg) => typeof arg === 'function');
     const seen = [];
+    const record = (...args) => {
+      if (typeof args[0] === 'function') args[0].call(fakeBuilder, fakeBuilder);
+      else seen.push(args);
+      return fakeBuilder;
+    };
     const fakeBuilder = {
       whereIn: jest.fn(() => fakeBuilder),
-      orWhere: jest.fn((fn) => { fn.call(fakeBuilder); return fakeBuilder; }),
-      where: jest.fn((...args) => { seen.push(args); return fakeBuilder; }),
-      andWhere: jest.fn((...args) => { seen.push(args); return fakeBuilder; }),
+      orWhere: jest.fn(record),
+      where: jest.fn(record),
+      andWhere: jest.fn(record),
+      whereNotNull: jest.fn((col) => { seen.push(['whereNotNull', col]); return fakeBuilder; }),
+      whereNull: jest.fn((col) => { seen.push(['whereNull', col]); return fakeBuilder; }),
     };
     predicate.call(fakeBuilder);
     expect(fakeBuilder.whereIn).toHaveBeenCalledWith('apt.status', ['active', 'renewal_pending', 'payment_pending']);
@@ -99,6 +106,10 @@ describe('annualPrepayForCustomer', () => {
       ['apt.status', 'cancelled'],
       ['apt.renewal_decision', 'cancel'],
       ['apt.term_end', '>=', expect.any(String)],
+      // Codex r3 P1: a declined term still awaiting its installation has
+      // only a provisional term_end — never cut off by it.
+      ['whereNull', 'apt.installation_anchored_at'],
+      ['whereNull', 'apt.renewed_from_term_id'],
     ]));
   });
 
@@ -191,6 +202,19 @@ describe('annualPrepayForCustomer', () => {
     const result = await annualPrepayForCustomer(null);
     expect(result).toBeNull();
     expect(db).not.toHaveBeenCalled();
+  });
+
+  // Codex r3 P2: the paid re-check sits inside the same fail-soft posture —
+  // /api/auth/me never 500s over it.
+  test('a thrown coverage re-check drops the payload (logged), never throws', async () => {
+    const logger = require('../services/logger');
+    mockIsPaidDecidedLapseTerm.mockRejectedValue(new Error('coverage lookup down'));
+    db.mockReturnValueOnce(chainSelecting([{
+      id: 'term-1', status: 'cancelled', renewal_decision: 'cancel', term_end: '2027-09-25', prepay_invoice_id: 'inv-1',
+    }]));
+
+    await expect(annualPrepayForCustomer('cust-1')).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('coverage lookup down'));
   });
 
   test('a query error is swallowed (logged) rather than thrown', async () => {

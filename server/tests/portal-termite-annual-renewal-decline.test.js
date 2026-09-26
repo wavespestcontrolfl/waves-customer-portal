@@ -49,6 +49,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   declineTermiteAnnualRenewal: (...args) => mockDeclineTermiteAnnualRenewal(...args),
   // The REAL shared eligibility rule — GET's canDecline must match the write.
   termiteDeclineBlockedReason: (...args) => jest.requireActual('../services/annual-prepay-renewals').termiteDeclineBlockedReason(...args),
+  whereTermCurrentOrAwaitingInstallation: (...args) => jest.requireActual('../services/annual-prepay-renewals').whereTermCurrentOrAwaitingInstallation(...args),
   isPaidDecidedLapseTerm: (...args) => mockIsPaidDecidedLapseTerm(...args),
   // The REAL provisional-term rule — the card must agree with billing about
   // whether a term_end is still provisional (awaiting installation).
@@ -130,12 +131,56 @@ afterAll(() => {
 });
 
 describe('GET /api/property/termite-annual-plan', () => {
-  test('gate off (either half): 200 {available:false, reason:disabled} without querying', async () => {
-    delete process.env.GATE_CANCEL_FLOW_V2;
+  // Codex r3 P0: the gates control only ISSUING new plans — a customer
+  // who already holds a termite annual term keeps the card and its decline
+  // (the signed agreement promises online nonrenewal).
+  test.each(['GATE_CANCEL_FLOW_V2', 'GATE_TERMITE_ANNUAL_PLAN'])('gate off (%s) with NO existing term: 200 {available:false, reason:disabled}', async (gate) => {
+    delete process.env[gate];
     const { statusCode, body } = await invoke(getHandler());
     expect(statusCode).toBe(200);
     expect(body).toEqual({ available: false, reason: 'disabled' });
-    expect(db).not.toHaveBeenCalled();
+  });
+
+  test.each(['GATE_CANCEL_FLOW_V2', 'GATE_TERMITE_ANNUAL_PLAN'])('gate off (%s) with an EXISTING termite annual term: the card and its decline control still show', async (gate) => {
+    delete process.env[gate];
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'active', renewal_decision: null,
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+    }];
+    const { body } = await invoke(getHandler());
+    expect(body.available).toBe(true);
+    expect(body.terms[0]).toEqual(expect.objectContaining({ id: 'term-1', canDecline: true }));
+  });
+
+  // Codex r3 P1: an original term awaiting installation has a PROVISIONAL
+  // term_end — neither the query's date cutoff nor canDecline uses it.
+  test('the date cutoff exempts an original term still awaiting installation', async () => {
+    await invoke(getHandler());
+    const predicates = state.whereArgs.map((args) => args[0]).filter((arg) => typeof arg === 'function');
+    const seen = [];
+    const fake = {
+      where: jest.fn((...args) => { seen.push(['where', ...args]); return fake; }),
+      orWhere: jest.fn((fn) => { if (typeof fn === 'function') fn.call(fake, fake); return fake; }),
+      whereNotNull: jest.fn((col) => { seen.push(['whereNotNull', col]); return fake; }),
+      whereNull: jest.fn((col) => { seen.push(['whereNull', col]); return fake; }),
+      whereIn: jest.fn(() => fake),
+      andWhere: jest.fn(() => fake),
+    };
+    predicates.forEach((fn) => fn.call(fake, fake));
+    expect(seen).toEqual(expect.arrayContaining([
+      ['where', 'term_end', '>=', '2026-09-26'],
+      ['whereNull', 'installation_anchored_at'],
+      ['whereNull', 'renewed_from_term_id'],
+    ]));
+  });
+
+  test('a PAST provisional term_end with installation pending still shows and is declinable', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2026-03-01', prepay_amount: '450.00', status: 'active', renewal_decision: null,
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
+    }];
+    const { body } = await invoke(getHandler());
+    expect(body.terms[0]).toEqual(expect.objectContaining({ id: 'term-1', awaitsInstallation: true, canDecline: true }));
   });
 
   test('no current term: 200 {available:false, reason:no_term}', async () => {
@@ -491,6 +536,17 @@ describe('POST /api/property/termite-annual-plan/decline', () => {
     expect(body).toEqual(expect.objectContaining({
       available: false, ok: false, reason: 'term_ended', termId: 'term-1', termEnd: '2026-01-01',
     }));
+  });
+
+  // Codex r3 P2: a replay on a declined term whose year was refunded or
+  // disputed since — 409 with a machine-readable code the portal renders
+  // without any "coverage continues" copy.
+  test('not_covered (declined, then refunded/disputed): 409 with code not_covered', async () => {
+    mockDeclineTermiteAnnualRenewal.mockResolvedValue({ ok: false, reason: 'not_covered', termId: TERM_ID });
+    const { statusCode, body } = await post();
+    expect(statusCode).toBe(409);
+    expect(body).toEqual(expect.objectContaining({ ok: false, code: 'not_covered', reason: 'not_covered' }));
+    expect(body.error).not.toMatch(/continues/i);
   });
 
   test('conflicting decision already on file: 409', async () => {

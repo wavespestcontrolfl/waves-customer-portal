@@ -11966,7 +11966,14 @@ function TermiteAnnualRenewalCard({
       });
       setConfirming(false);
     } catch (err) {
-      setError(err?.message || 'Something went wrong. Please try again.');
+      if (err?.code === 'not_covered') {
+        // Codex r3 P2: already declined, but that year was since refunded
+        // or disputed — render the decline with NO coverage claim.
+        onDeclined({ declined: true, canDecline: false, covered: false });
+        setConfirming(false);
+      } else {
+        setError(err?.message || 'Something went wrong. Please try again.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -11980,7 +11987,7 @@ function TermiteAnnualRenewalCard({
       )}
       {term.declined ? (
         <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
-          {nonRenewalCopy}
+          {term.covered === false ? 'Your plan will not renew.' : nonRenewalCopy}
         </div>
       ) : (
         <>

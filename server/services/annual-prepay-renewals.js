@@ -5822,11 +5822,16 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 // CUSTOMER decline renewal for their own termite annual term from the
 // portal — "The customer may decline renewal at any time before the
 // renewal date online through their customer portal ... never only by
-// phone." Dark behind termiteAnnualPlanSelectionEnabled() — the SAME
-// GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 pair the estimator's plan
-// selection reads (server/config/feature-gates.js: "also requires
-// GATE_CANCEL_FLOW_V2 for online nonrenewal"), so this online-decline path
-// can never go live independently of that ruling.
+// phone."
+//
+// NOT gated (Codex r3 P0): GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2
+// (termiteAnnualPlanSelectionEnabled) control only the ISSUING of new
+// plans. A customer who already holds a termite annual term
+// (annual_plan_version NOT NULL) signed an agreement promising online
+// nonrenewal, so that promise outlives any later gate flip. The existence
+// of such a term IS the eligibility check below — a customer with none
+// gets `no_term` / `not_found` (or `disabled` while the gates are off, the
+// same not-available answer as before).
 //
 // Reuses recordDecision's own semantics (status -> 'cancelled',
 // renewal_decision -> 'cancel') — it does NOT end coverage early.
@@ -5847,7 +5852,10 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 //
 // Idempotent: a repeat call against an already-declined term (status
 // 'cancelled', renewal_decision 'cancel') returns the SAME success shape
-// (alreadyDeclined: true) instead of erroring.
+// (alreadyDeclined: true) instead of erroring — as long as that year is
+// still paid (isPaidDecidedLapseTerm). A decline followed by a refund or
+// dispute answers `not_covered` instead (Codex r3 P2), so the portal never
+// says "Coverage continues through …" for a year billing no longer covers.
 const CUSTOMER_DECLINE_ACTIVITY_ACTION = 'termite_annual_renewal_declined';
 
 function declineResultFromRow(term, { alreadyDeclined }) {
@@ -5855,9 +5863,21 @@ function declineResultFromRow(term, { alreadyDeclined }) {
     ok: true,
     termId: term.id,
     termEnd: dateOnly(term.term_end),
+    // An un-anchored original term's termEnd is provisional (Codex r3 P2):
+    // staff/customer copy says "12 months from installation" instead.
+    awaitsInstallation: coverageAwaitsInstallation(term),
     prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
     alreadyDeclined,
   };
+}
+
+// "Coverage continues through <date>" — or, for an original term not yet
+// anchored to its station installation (its term_end is provisional),
+// installation-relative wording that quotes no date.
+function declineCoverageSentence(awaitsInstallation, termEnd, formatEnd = (d) => d) {
+  return awaitsInstallation
+    ? 'Coverage runs 12 months from the station installation (not yet installed)'
+    : `Coverage continues through ${formatEnd(termEnd)}`;
 }
 
 async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
@@ -5868,13 +5888,20 @@ async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
     await NotificationService.notifyAdmin(
       'estimate',
       'Termite annual plan — renewal declined online',
-      `${name || 'A customer'} declined renewal for their termite annual plan through the customer portal. Coverage continues through ${formatDateLabel(result.termEnd)} — no action needed unless they reach out.`,
+      `${name || 'A customer'} declined renewal for their termite annual plan through the customer portal. ${declineCoverageSentence(result.awaitsInstallation, result.termEnd, formatDateLabel)} — no action needed unless they reach out.`,
       {
         icon: '📋',
         link: `/admin/customers/${customerId}`,
         bell: true,
         dedupeKey: `termite-annual-renewal-decline:${result.termId}`,
-        metadata: { customerId, termId: result.termId, termEnd: result.termEnd, source: 'customer_portal' },
+        metadata: {
+          customerId,
+          termId: result.termId,
+          // A provisional end date is never recorded as the coverage end.
+          termEnd: result.awaitsInstallation ? null : result.termEnd,
+          awaitsInstallation: result.awaitsInstallation === true,
+          source: 'customer_portal',
+        },
         // Only a real caller transaction rides along: on the root pool
         // notifyAdmin must open its own, so its dedupe advisory lock spans
         // the lookup + insert (concurrent retries can't double-bell).
@@ -5905,34 +5932,69 @@ async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
 function termiteDeclineBlockedReason(term, today = etDateString()) {
   if (term.renewal_decision) return 'already_decided';
   if (!ACTIVE_STATUSES.includes(term.status)) return 'not_active';
+  // Codex r3 P1: an original term not yet anchored to its installation has
+  // a PROVISIONAL term_end — its real renewal date doesn't exist yet, so it
+  // is never cut off by that placeholder.
+  if (coverageAwaitsInstallation(term)) return null;
   const termEnd = dateOnly(term.term_end);
   if (!termEnd || termEnd <= today) return 'term_ended';
   return null;
 }
 
+// The portal's "current term" rule, shared by the GET (property.js) and the
+// no-selector decline path: a term not yet past its end date, OR an
+// original termite term still awaiting installation (coverageAwaitsInstallation
+// — its term_end is a placeholder, never a cutoff). Column names are bare
+// (annual_prepay_terms un-aliased).
+function whereTermCurrentOrAwaitingInstallation(builder, today) {
+  return builder.where('term_end', '>=', today)
+    .orWhere(function awaitingInstallation() {
+      this.whereNotNull('annual_plan_version').whereNull('renewed_from_term_id').whereNull('installation_anchored_at');
+    });
+}
+
+// Replay of an already-declined term: the same success shape only while the
+// year is still PAID (billing's own test) — a later refund/dispute answers
+// not_covered, never "coverage continues".
+async function alreadyDeclinedResult(term, conn) {
+  if (!(await isPaidDecidedLapseTerm(term, conn))) {
+    return { ok: false, reason: 'not_covered', termId: term.id };
+  }
+  return declineResultFromRow(term, { alreadyDeclined: true });
+}
+
 async function declineTermiteAnnualRenewal({ customerId, termId = null, today = etDateString(), conn = db } = {}) {
   if (!customerId) return { ok: false, reason: 'missing_customer' };
-  const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
-  if (!termiteAnnualPlanSelectionEnabled()) return { ok: false, reason: 'disabled' };
   if (!(await annualPrepayTableExists())) return { ok: false, reason: 'disabled' };
+  // Not gated — see the header: the gates only control issuing new plans.
+  const notFound = () => {
+    const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+    if (!termiteAnnualPlanSelectionEnabled()) return { ok: false, reason: 'disabled' };
+    return { ok: false, reason: termId ? 'not_found' : 'no_term' };
+  };
 
   const work = async (trx) => {
     const term = await trx('annual_prepay_terms')
       .where({ customer_id: customerId })
       .whereNotNull('annual_plan_version')
-      // No explicit term: the CURRENT term (earliest one not yet ended),
+      // No explicit term (internal callers only — the portal POST always
+      // names one): the CURRENT term (earliest one not yet ended, or one
+      // still awaiting installation, whose term_end is only provisional),
       // never a historical row — the same filter the portal GET uses.
-      .modify((q) => { if (termId) q.where({ id: termId }); else q.where('term_end', '>=', today); })
+      .modify((q) => {
+        if (termId) q.where({ id: termId });
+        else q.where((current) => whereTermCurrentOrAwaitingInstallation(current, today));
+      })
       .orderBy('term_end', 'asc')
       .forUpdate()
       .first('*');
-    if (!term) return { ok: false, reason: termId ? 'not_found' : 'no_term' };
+    if (!term) return notFound();
 
     // Idempotent replay first — a term already decided-lapse (cancelled +
     // renewal_decision 'cancel') answers the same success shape even once
     // its term_end has since passed, rather than a confusing term_ended.
     if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
-      return declineResultFromRow(term, { alreadyDeclined: true });
+      return alreadyDeclinedResult(term, trx);
     }
     const blocked = termiteDeclineBlockedReason(term, today);
     if (blocked === 'already_decided') return { ok: false, reason: blocked, decision: term.renewal_decision, termId: term.id };
@@ -5952,7 +6014,7 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
       // for the idempotent shape rather than report a false failure.
       const reread = await trx('annual_prepay_terms').where({ id: term.id }).first('*');
       if (reread && reread.status === 'cancelled' && reread.renewal_decision === 'cancel') {
-        return declineResultFromRow(reread, { alreadyDeclined: true });
+        return alreadyDeclinedResult(reread, trx);
       }
       return { ok: false, reason: 'conflict', termId: term.id };
     }
@@ -5960,7 +6022,7 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
     await trx('activity_log').insert({
       customer_id: customerId,
       action: CUSTOMER_DECLINE_ACTIVITY_ACTION,
-      description: `Declined renewal online through the customer portal. Coverage continues through ${dateOnly(decided.term_end)}.`,
+      description: `Declined renewal online through the customer portal. ${declineCoverageSentence(coverageAwaitsInstallation(decided), dateOnly(decided.term_end))}.`,
       metadata: {
         term_id: decided.id, source: 'customer_portal', decided_at: new Date().toISOString(),
       },
@@ -5977,6 +6039,7 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
 module.exports = {
   createTermForAnnualPrepay,
   termiteDeclineBlockedReason,
+  whereTermCurrentOrAwaitingInstallation,
   // Codex pre-push P1: the portal GET (property.js) and /api/auth/me's
   // paid-through badge (auth.js) both re-check a decided-lapse row
   // (cancelled + renewal_decision 'cancel') with this before ever

@@ -229,7 +229,15 @@ async function annualPrepayForCustomer(customerId) {
     .where(function applicableStatus() {
       this.whereIn('apt.status', ['active', 'renewal_pending', 'payment_pending'])
         .orWhere(function decidedLapse() {
-          this.where('apt.status', 'cancelled').andWhere('apt.renewal_decision', 'cancel').andWhere('apt.term_end', '>=', today);
+          this.where('apt.status', 'cancelled').andWhere('apt.renewal_decision', 'cancel')
+            // Codex r3 P1: a term still awaiting its installation has only a
+            // provisional term_end — never a cutoff.
+            .andWhere(function stillCovering() {
+              this.where('apt.term_end', '>=', today)
+                .orWhere(function awaitingInstallation() {
+                  this.whereNotNull('apt.annual_plan_version').whereNull('apt.renewed_from_term_id').whereNull('apt.installation_anchored_at');
+                });
+            });
         });
     })
     .orderByRaw(`
@@ -264,14 +272,22 @@ async function annualPrepayForCustomer(customerId) {
       return [];
     });
   let term = null;
-  for (const candidate of candidates) {
-    if (candidate.status === 'cancelled' && candidate.renewal_decision === 'cancel') {
-      // Bounded (limit 20) and sequential by design — the FIRST covered
-      // candidate wins, so this can't be parallelized with Promise.all.
-      if (!(await isPaidDecidedLapseTerm(candidate, db))) continue;
+  // Codex r3 P2: the paid re-check is inside the same fail-soft posture as
+  // the lookup above — a thrown error drops the annualPrepay payload (and
+  // logs), never 500s /api/auth/me.
+  try {
+    for (const candidate of candidates) {
+      if (candidate.status === 'cancelled' && candidate.renewal_decision === 'cancel') {
+        // Bounded (limit 20) and sequential by design — the FIRST covered
+        // candidate wins, so this can't be parallelized with Promise.all.
+        if (!(await isPaidDecidedLapseTerm(candidate, db))) continue;
+      }
+      term = candidate;
+      break;
     }
-    term = candidate;
-    break;
+  } catch (err) {
+    logger.warn(`[auth] annual prepay coverage check skipped for customer ${customerId}: ${err.message}`);
+    return null;
   }
   if (!term) return null;
   return {

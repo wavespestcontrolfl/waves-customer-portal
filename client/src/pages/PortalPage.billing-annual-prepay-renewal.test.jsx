@@ -81,27 +81,31 @@ beforeEach(() => {
   api.getAutopay.mockResolvedValue(annualPrepayAutopay);
 });
 
+// BillingTab loads several endpoints before the Auto Pay card settles —
+// give the first render headroom on a loaded machine.
+const SETTLE = { timeout: 10000 };
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
-describe('Billing tab annual-prepay renewal copy', () => {
+describe('Billing tab annual-prepay renewal copy', { timeout: 30000 }, () => {
   it('an undecided annual plan keeps the "saved method is used at renewal" copy', async () => {
     render(<BillingTab customer={{ ...baseCustomer, annualPrepay: annualPrepay() }} />);
-    expect(await screen.findByText('Your plan is prepaid; your saved method is used at renewal.')).toBeInTheDocument();
+    expect(await screen.findByText('Your plan is prepaid; your saved method is used at renewal.', {}, SETTLE)).toBeInTheDocument();
     expect(screen.queryByText(/won’t renew/)).not.toBeInTheDocument();
   });
 
   it('a declined plan says it won’t renew, with its coverage end', async () => {
     render(<BillingTab customer={{ ...baseCustomer, annualPrepay: annualPrepay({ status: 'cancelled', renewalDeclined: true }) }} />);
-    expect(await screen.findByText('Your plan won’t renew; coverage continues through Sep 25, 2027.')).toBeInTheDocument();
+    expect(await screen.findByText('Your plan won’t renew; coverage continues through Sep 25, 2027.', {}, SETTLE)).toBeInTheDocument();
     expect(screen.queryByText(/used at renewal/)).not.toBeInTheDocument();
   });
 
   it('a plan declined before its station installation never quotes the provisional end date', async () => {
     render(<BillingTab customer={{ ...baseCustomer, annualPrepay: annualPrepay({ status: 'cancelled', renewalDeclined: true, awaitsInstallation: true }) }} />);
-    expect(await screen.findByText('Your plan won’t renew; coverage runs 12 months from your station installation.')).toBeInTheDocument();
+    expect(await screen.findByText('Your plan won’t renew; coverage runs 12 months from your station installation.', {}, SETTLE)).toBeInTheDocument();
     expect(screen.queryByText(/2027/)).not.toBeInTheDocument();
     expect(screen.queryByText(/used at renewal/)).not.toBeInTheDocument();
   });

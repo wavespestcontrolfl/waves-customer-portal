@@ -2320,7 +2320,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     });
 
     expect(result).toEqual({
-      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, alreadyDeclined: false,
     });
     // The SAME status/decision transition recordDecision('cancel') always
     // writes (statusAfterDecision('cancel') === 'cancelled') — this is what
@@ -2374,7 +2374,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', today: '2026-09-26' });
 
     expect(result).toEqual({
-      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', awaitsInstallation: true, prepayAmount: 450, alreadyDeclined: false,
     });
     const NotificationService = require('../services/notification-service');
     expect(NotificationService.notifyAdmin).toHaveBeenCalled();
@@ -2382,7 +2382,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
 
   test('refuses once the renewal date itself has arrived — equality counts as ended, not merely a lower term_end', async () => {
     const termRow = {
-      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3',
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'active', renewal_decision: null, term_end: '2026-09-26', prepay_amount: '450.00',
     };
     setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
@@ -2396,13 +2396,16 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
 
   test('is idempotent — a repeat call on an already-declined term returns the same result and writes nothing new', async () => {
     const decidedRow = {
-      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3',
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'cancelled', renewal_decision: 'cancel', term_end: '2027-05-20', prepay_amount: '450.00',
     };
+    const paidCheck = query({ first: { id: 'term-1' } });
     setDbQueues({
       // Only ONE query on annual_prepay_terms — the idempotent branch
       // returns before recordDecision runs a second write.
       annual_prepay_terms: [query({ first: decidedRow })],
+      // Codex r3 P2: the replay re-checks the year is still PAID.
+      'annual_prepay_terms as t': [paidCheck],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
     });
 
@@ -2411,13 +2414,106 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     });
 
     expect(result).toEqual({
-      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: true,
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, alreadyDeclined: true,
     });
+    expect(paidCheck.where).toHaveBeenCalledWith('t.id', 'term-1');
+  });
+
+  // Codex r3 P2: a decline followed by a refund/dispute keeps the
+  // decided-lapse status, but the year is no longer paid — a replay must
+  // never answer "declined, coverage continues".
+  test('a replay on a declined term whose year was since refunded/disputed answers not_covered — no bell', async () => {
+    const decidedRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'cancelled', renewal_decision: 'cancel', term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    setDbQueues({
+      annual_prepay_terms: [query({ first: decidedRow })],
+      'annual_prepay_terms as t': [query({ first: null })],
+    });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
+      customerId: 'cust-1', termId: 'term-1', today: '2026-09-26',
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'not_covered', termId: 'term-1' });
+    const NotificationService = require('../services/notification-service');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // Codex r3 P1: an original term still awaiting installation has only a
+  // PROVISIONAL term_end — a past placeholder never cuts the decline off.
+  test('an original term awaiting installation with a PAST provisional term_end is still declinable', async () => {
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
+      status: 'active', renewal_decision: null, term_end: '2026-01-01', prepay_amount: '450.00',
+    };
+    const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
+    setDbQueues({
+      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      activity_log: [query()],
+      customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+    });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
+      customerId: 'cust-1', termId: 'term-1', today: '2026-09-26',
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, termId: 'term-1', awaitsInstallation: true, alreadyDeclined: false }));
+    expect(AnnualPrepayRenewals.termiteDeclineBlockedReason(termRow, '2026-09-26')).toBeNull();
+    // A renewal term (dates real from the start) with the same past end IS cut off.
+    expect(AnnualPrepayRenewals.termiteDeclineBlockedReason({ ...termRow, renewed_from_term_id: 'term-0' }, '2026-09-26')).toBe('term_ended');
+  });
+
+  // Codex r3 P2: staff-facing records never quote a provisional date.
+  test('an awaiting-installation decline records installation-relative wording in activity_log and the staff bell', async () => {
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
+      status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
+    const activityInsert = query();
+    setDbQueues({
+      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      activity_log: [activityInsert],
+      customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+    });
+
+    await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
+
+    const description = activityInsert.insert.mock.calls[0][0].description;
+    expect(description).toContain('Coverage runs 12 months from the station installation');
+    expect(description).not.toContain('2027');
+    const NotificationService = require('../services/notification-service');
+    const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('Coverage runs 12 months from the station installation');
+    expect(body).not.toMatch(/2027|May 20/);
+    expect(opts.metadata).toEqual(expect.objectContaining({ termEnd: null, awaitsInstallation: true }));
+  });
+
+  test('an anchored decline keeps its real coverage date in activity_log and the staff bell', async () => {
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
+    const activityInsert = query();
+    setDbQueues({
+      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      activity_log: [activityInsert],
+      customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+    });
+
+    await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
+
+    expect(activityInsert.insert.mock.calls[0][0].description).toContain('Coverage continues through 2027-05-20');
+    const NotificationService = require('../services/notification-service');
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toEqual(expect.objectContaining({ termEnd: '2027-05-20', awaitsInstallation: false }));
   });
 
   test('refuses once the term has already ended', async () => {
     const termRow = {
-      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3',
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'active', renewal_decision: null, term_end: '2026-01-01', prepay_amount: '450.00',
     };
     setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
@@ -2468,13 +2564,37 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     expect(result).toEqual({ ok: false, reason: 'already_decided', decision: 'renew', termId: 'term-1' });
   });
 
-  test('gate off refuses without touching the database at all', async () => {
-    delete process.env.GATE_CANCEL_FLOW_V2; // GATE_TERMITE_ANNUAL_PLAN alone is not enough
+  // Codex r3 P0: the gates control only ISSUING new plans. A customer who
+  // already holds a termite annual term was promised online nonrenewal —
+  // that outlives a later gate flip.
+  test.each([
+    ['GATE_CANCEL_FLOW_V2'],
+    ['GATE_TERMITE_ANNUAL_PLAN'],
+  ])('gate off (%s): an EXISTING termite annual term is still declinable', async (gate) => {
+    delete process.env[gate];
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
+    setDbQueues({
+      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      activity_log: [query()],
+      customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+    });
 
-    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1' });
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, termId: 'term-1', alreadyDeclined: false }));
+  });
+
+  test('gate off with NO termite annual term: still not available (disabled)', async () => {
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    setDbQueues({ annual_prepay_terms: [query({ first: null })] });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
 
     expect(result).toEqual({ ok: false, reason: 'disabled' });
-    expect(db).not.toHaveBeenCalled();
   });
 });
 
