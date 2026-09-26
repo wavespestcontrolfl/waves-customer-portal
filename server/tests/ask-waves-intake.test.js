@@ -1857,6 +1857,8 @@ describe('looksLikeEmergency', () => {
     "I think I've been poisoned",
     "I'm poisoned from the spray",
     'We might have been poisoned',
+    'El pesticida me cayó en los ojos',
+    'El insecticida le cayó en la piel a mi hijo',
     'At the hospital after a wasp sting',
     'Going to the hospital now after the treatment',
     'Hospital after a bee sting',
@@ -1920,6 +1922,9 @@ describe('looksLikeEmergency', () => {
     'The spray made my ants sick',
     'The treatment made my lawn sick',
     'How much to remove rats poisoned by bait?',
+    "My cat didn't collapse after treatment",
+    "My dog wasn't shaking after the pesticide treatment",
+    "My child hasn't been vomiting since the spray",
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
