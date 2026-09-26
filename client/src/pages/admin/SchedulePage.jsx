@@ -13700,6 +13700,7 @@ export function CompletionPanel({
       : treeShrubCloseoutOn
         ? "tree_shrub"
         : serviceLineForCloseout === "pest" && !isTypedFindings
+          && service.completionProfile?.billingType === "recurring"
           ? "recurring_pest"
           : null
     : null;
@@ -15967,14 +15968,18 @@ export function CompletionPanel({
       (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
-  function recordActionScope(label, scope, treatmentApplied) {
-    if (!label || (scope !== "interior" && scope !== "exterior")) return;
+  function recordActionScope(label, scope, treatmentApplied, completionChoice = false) {
+    const scoped = scope === "interior" || scope === "exterior";
+    if (!label || (!scoped && !completionChoice)) return;
     setActionScopeByLabel((prev) => ({
       ...prev,
-      [label]: { scope, treatmentApplied: treatmentApplied === true },
+      [label]: {
+        ...(scoped ? { scope, treatmentApplied: treatmentApplied === true } : {}),
+        ...(completionChoice ? { completionChoice: true } : {}),
+      },
     }));
   }
-  function applyProtocolAction(action, { conflictLabels = [] } = {}) {
+  function applyProtocolAction(action, { conflictLabels = [], completionChoice = false } = {}) {
     if (!action) return;
     // Same freeze + invalidation contract as every other payload mutation:
     // a productless protocol action (or one whose product is already
@@ -15996,7 +16001,7 @@ export function CompletionPanel({
     }
     const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
-    recordActionScope(noteText, action.scope, action.treatmentApplied);
+    recordActionScope(noteText, action.scope, action.treatmentApplied, completionChoice);
     if (!detachedAfterInvalidation) {
       const conflictSet = new Set(conflictLabels);
       const prefix = action.conditional ? "Protocol optional" : "Protocol";
@@ -17218,13 +17223,13 @@ export function CompletionPanel({
         // request fails or its gate turns off after this draft was saved.
         // Keep those visible, reviewed values; pre-generation hidden labels
         // still pass through the existing current-action allowlist below.
-        // Scope metadata is saved beside catalog-selected labels. It remains
+        // Choice provenance and scope are saved beside selected labels. They remain
         // authoritative when a pre-generation draft is restored after the
         // choices gate turns off or its probe fails; the visible marker still
         // controls selection through activeSelectedLabels above. Specialty
         // membership stays first and therefore cannot be bypassed by metadata.
         const savedScope = actionScopeByLabel[label];
-        if (completionChoiceFamily || chipLinesDetached
+        if (completionChoiceFamily || chipLinesDetached || savedScope?.completionChoice === true
           || savedScope?.scope === "interior" || savedScope?.scope === "exterior") return true;
         return !isLawn ||
           (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
@@ -18256,6 +18261,7 @@ export function CompletionPanel({
                 searchableProtocolActions.find(
                   (action) => (action.label || action.note) === label,
                 ) || { label },
+                { completionChoice: true },
               ));
           }}
           disabled={submitting || generating}

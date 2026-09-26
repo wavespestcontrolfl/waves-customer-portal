@@ -158,7 +158,7 @@ it('shows gated history as a suggestion and records only choices the technician 
 });
 
 it.each([
-  ['recurring pest', 'Quarterly Pest Control', { serviceKey: 'pest', requiresProducts: false }, null, 'Live pest activity was visible in an inspected exterior area.'],
+  ['recurring pest', 'Quarterly Pest Control', { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false }, null, 'Live pest activity was visible in an inspected exterior area.'],
   ['typed tree/shrub', 'Every 6 Weeks Tree & Shrub Care Service', { serviceKey: 'tree_shrub', findingsType: 'tree_shrub', requiresProducts: false }, { type: 'tree_shrub', schemaVersion: 2, fields: [], nextStepChips: [] }, 'Yellow foliage was visible; the cause was not confirmed.'],
 ])('submits a searchable %s observation through the customer-safe field', async (_family, serviceType, completionProfile, findingsSchema, observation) => {
   completionChoicesEnabled = true;
@@ -182,11 +182,24 @@ it.each([
   });
 });
 
+it.each(['one_time', 'consultation', undefined])('does not offer recurring-pest choices for a non-recurring profile: %s', async (billingType) => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  render(<CompletionPanel
+    service={{ ...service, id: 'unsupported-pest-choice', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', billingType, requiresProducts: false }, waveguardTier: null }}
+    products={[]}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+  expect(await screen.findByLabelText('Observations')).toBeTruthy();
+  expect(screen.queryByRole('combobox', { name: 'Search observations' })).toBeNull();
+});
+
 it('records interior treatment scope for a searchable pest application', async () => {
   completionChoicesEnabled = true;
   techTipsAvailable = false;
   render(<CompletionPanel
-    service={{ ...service, id: 'pest-choice', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', requiresProducts: false }, waveguardTier: null }}
+    service={{ ...service, id: 'pest-choice', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false }, waveguardTier: null }}
     products={[]}
     onClose={() => {}}
     onSubmit={submit}
@@ -222,7 +235,7 @@ it('removes a gated completed action from both selection state and marker notes 
   expect(body.technicianNotes).not.toContain(action);
 });
 
-it.each(['gate off', 'API error'])('submits a visible generated-draft action after choices are unavailable on reopen: %s', async (mode) => {
+it.each([['gate off', true], ['API error', true], ['gate off', false], ['API error', false]])('preserves unscoped searchable actions after choices are unavailable: %s, generated=%s', async (mode, generated) => {
   completionChoicesEnabled = true;
   techTipsAvailable = false;
   const first = mount();
@@ -231,12 +244,17 @@ it.each(['gate off', 'API error'])('submits a visible generated-draft action aft
   const actionSearch = await screen.findByRole('combobox', { name: 'Search completed actions' });
   fireEvent.change(actionSearch, { target: { value: action } });
   fireEvent.keyDown(actionSearch, { key: 'Enter' });
-  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
-  await waitFor(() => expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain('WHAT WE DID'));
+  const catalogAction = 'Completed lawn service in the front yard.';
+  fireEvent.change(actionSearch, { target: { value: catalogAction } });
+  fireEvent.click(await screen.findByRole('option', { name: catalogAction }));
+  if (generated) {
+    fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+    await waitFor(() => expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain('WHAT WE DID'));
+  }
   const key = `waves_completion_draft_${service.id}`;
   await waitFor(() => expect(JSON.parse(localStorage.getItem(key))).toMatchObject({
-    chipLinesDetached: true,
-    selectedProtocolActionLabels: [action],
+    chipLinesDetached: generated,
+    selectedProtocolActionLabels: [action, catalogAction],
   }));
 
   first.unmount();
@@ -244,11 +262,12 @@ it.each(['gate off', 'API error'])('submits a visible generated-draft action aft
   techTipsFailure = mode === 'API error';
   mount();
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
-  expect(await screen.findByRole('button', { name: `Remove protocol item: ${action}` })).toBeTruthy();
+  if (generated) expect(await screen.findByRole('button', { name: `Remove protocol item: ${action}` })).toBeTruthy();
+  else expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain(`[Protocol] ${action}`);
 
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
-  expect(submit.mock.calls[0][1].protocolActionsCompleted).toContain(action);
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual([action, catalogAction]);
 });
 
 it.each(['gate off', 'API error'])('keeps saved scope for a visible pre-generation catalog action after choices are unavailable: %s', async (mode) => {
