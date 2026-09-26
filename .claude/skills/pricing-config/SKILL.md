@@ -22,7 +22,8 @@ environment that carries the row (prod does), **editing
    the new shape.
 4. **Client mirrors** — search for static copies in the client estimators and
    update them manually; they do NOT read pricing_config. Known offender
-   class: `TechEstimatorPage` keeps static option tables (e.g. `TS_OPTS`).
+   class: `client/src/lib/estimateEngine.js` keeps static price mirrors
+   (e.g. `oneTimeMosquitoLadderPrice`).
    Use ripgrep (recursive `grep` is banned in this monorepo):
 
    ```

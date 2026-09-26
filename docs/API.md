@@ -116,7 +116,7 @@ Customer requests a reschedule.
 
 ---
 
-## Billing (Square)
+## Billing (Stripe)
 
 ### GET /billing
 Payment history with card details.
@@ -128,11 +128,11 @@ Current balance, upcoming charges, monthly rate, next charge date.
 All cards on file with brand, last four, expiry, default/autopay status.
 
 ### POST /billing/cards
-Add a new card using a Square card nonce from the Web Payments SDK.
+Add a new card from a confirmed Stripe SetupIntent (`setupIntentId` required; `paymentMethodId` optional).
 
 **Request:**
 ```json
-{ "cardNonce": "cnon:card-nonce-ok" }
+{ "paymentMethodId": "pm_1AbC2D...", "setupIntentId": "seti_1AbC2D..." }
 ```
 
 ### DELETE /billing/cards/:id
@@ -157,7 +157,6 @@ Update one or more notification preferences.
   "serviceReminder24h": true,
   "techEnRoute": true,
   "serviceCompleted": true,
-  "billingReminder": false,
   "seasonalTips": true,
   "smsEnabled": true
 }
@@ -179,8 +178,7 @@ These run on cron schedules and are not exposed as API endpoints:
 | Job | Schedule | Description |
 |-----|----------|-------------|
 | Service Reminders | Daily 8:00 AM ET | SMS to customers with services tomorrow |
-| Monthly Billing | 1st of month 6:00 AM ET | Process autopay charges via Square |
-| Billing Reminders | 28th of month 10:00 AM ET | SMS to opted-in customers about upcoming charge |
+| Monthly Billing | Daily 8:00 AM ET | Process autopay charges via Stripe for customers whose `billing_day` is today |
 
 ## Error Responses
 

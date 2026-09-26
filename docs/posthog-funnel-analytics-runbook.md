@@ -43,12 +43,16 @@ absent), so the marketing→portal handoff keeps stitching for existing users.
    **Project API key** (`phc_…`).
 2. **Astro** (Cloudflare Pages env, all relevant builds):
    - `PUBLIC_POSTHOG_KEY=phc_…`
-   - `PUBLIC_POSTHOG_HOST=https://us.i.posthog.com` (default; only set to override)
+   - `PUBLIC_POSTHOG_HOST=https://us.i.posthog.com` (default; only set to override —
+     or point at the portal's first-party `/ingest` proxy, dark behind
+     `GATE_POSTHOG_INGEST_PROXY`, if ad-blocker loss matters more than the extra hop)
 3. **Portal** (Railway, client build env — Vite reads these at build time):
    - `VITE_POSTHOG_KEY=phc_…`
-   - `VITE_POSTHOG_HOST=https://us.i.posthog.com` (default)
-4. Redeploy both. Verify network calls to `*.posthog.com` appear **only** after
-   accepting the cookie banner, and **never** on `/admin` or `/tech`.
+   - `VITE_POSTHOG_HOST=https://us.i.posthog.com` (default, or `/ingest` with the
+     proxy gate on)
+4. Redeploy both. Verify network calls to `*.posthog.com` (or same-site `/ingest/*`
+   when the proxy is on) appear **only** after accepting the cookie banner, and
+   **never** on `/admin` or `/tech`.
 5. In PostHog → **Settings → Replay**: set a recording **sampling rate** (start
    ~50–100% given low traffic; dial down later). Confirm "Mask all inputs" is on.
 

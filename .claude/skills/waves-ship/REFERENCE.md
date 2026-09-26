@@ -45,7 +45,7 @@ to the observed remote SHA.
 Always push by explicit `sha:ref` when recovering. The tracked hook at `scripts/hooks/pre-push` (wired via `core.hooksPath` in the npm `prepare` script) is innocent — it's a read-only Codex audit that blocks P0 findings and fails open on infra errors.
 
 ## Pre-push hook facts
-- Lives at `scripts/hooks/pre-push` (NOT `.git/hooks/` — AGENTS.md's claim of `.git/hooks/pre-push` is stale).
+- Lives at `scripts/hooks/pre-push` (NOT `.git/hooks/`).
 - Runs `codex exec --sandbox read-only` against the diff vs `origin/main` (override base with `CODEX_REVIEW_BASE`).
 - Blocks on P0, warns on P1, output schema at `.github/codex-review-schema.json`.
 - Findings JSON + codex stdout/stderr persist at `$(git rev-parse --absolute-git-dir)/codex-review-last/` (per-worktree, overwritten each audited push) — read a blocked push's verdict there; never re-roll the audit for evidence, its counts are nondeterministic.

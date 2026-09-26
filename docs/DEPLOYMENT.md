@@ -200,7 +200,7 @@ the publishable key drives the client.
 
 ### 4. Configure Webhook
 - Dashboard → Developers → Webhooks → Add endpoint
-- Endpoint URL: `https://portal.wavespestcontrol.com/api/webhooks/stripe`
+- Endpoint URL: `https://portal.wavespestcontrol.com/api/stripe/webhook`
 - Events: `payment_intent.succeeded`, `payment_intent.payment_failed`,
   `charge.refunded`, `customer.subscription.updated`,
   `invoice.payment_succeeded`, `invoice.payment_failed`

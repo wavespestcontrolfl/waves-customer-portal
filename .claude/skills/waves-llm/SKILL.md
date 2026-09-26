@@ -31,7 +31,8 @@ never from docs, which go stale.
 
 | Tier | Use for |
 |---|---|
-| `DEEP` | Deepest reasoning, latency-tolerant, low-volume (fable line: always-on thinking, minutes-long turns possible): agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate |
+| `DEEP` | Deepest reasoning, latency-tolerant, low-volume: agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate. Defaults to the same Opus model as FLAGSHIP, with an OpenAI backup on refusal or API failure (`llm/deep.js`) |
+| `EXTREME` | Explicit, latency-tolerant Fable opt-in only — no automatic live workflow routes here; callers must deliberately select it |
 | `FLAGSHIP` | Best general reasoning: Intelligence Bar, advisors, analysis, agents |
 | `WORKHORSE` | Drafting + content generation |
 | `FAST` | High-volume classification, tagging, signals |
@@ -48,20 +49,19 @@ const response = await createDeepMessage(anthropicClient, { ...params });
 ```
 
 Why (both have caused real parsing bugs):
-- **Thinking blocks.** fable-5 always thinks; `thinking` blocks precede the
-  `text` block, so `content[0].text` reads the wrong block. The helper strips
-  them.
-- **Refusals.** fable-5's safety classifiers can refuse benign
+- **Thinking blocks.** When an explicit `MODEL_DEEP` override selects Fable,
+  it always thinks; `thinking` blocks precede the `text` block, so
+  `content[0].text` reads the wrong block. The helper strips them.
+- **Refusals.** The model's safety classifiers can refuse benign
   pesticide/termiticide-adjacent content (HTTP 200, `stop_reason: 'refusal'`).
-  The helper retries the identical request once on FLAGSHIP — the lane
-  degrades to Opus, it never gaps.
+  The helper retries on OpenAI (`TEXT_POLICIES.deepAnalysis.fallback`), and
+  API failures get the same backup, unless less than `FALLBACK_MIN_MS` of the
+  caller's time budget remains.
 
 Also required at DEEP sites:
 - `max_tokens` **≥ 4096** — thinking spends from the same budget.
 - Pass your own Anthropic client (per-site timeout/retry config and test
   mocks keep working).
-- Kill switch: setting `MODEL_DEEP` to the current FLAGSHIP Opus ID (see
-  `models.js`) reverts every DEEP lane to Opus with no deploy.
 
 Enforced mechanically: `check:domain-rules` fails on a file referencing
 `MODELS.DEEP` without the helper.
