@@ -1678,9 +1678,9 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .map(([key]) => key);
 
 module.exports = {
-  replaysWithoutPhone,
   recheckDeferredReplay,
   dispatchDeferredReplay,
+  replaysWithoutPhone,
   deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
