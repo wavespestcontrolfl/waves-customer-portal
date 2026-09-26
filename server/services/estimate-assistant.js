@@ -701,6 +701,22 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // water" (mosquito breeding) and "keep mosquitoes off" (efficacy) are
 // service questions and stay on the normal path. keep-off is restricted to
 // people/pets — that's re-entry wording.
+//
+// This is the SAME pattern answerEstimateQuestionFallback's safety branch
+// (below) tests against — extracted to a shared constant (AW-04 round 3,
+// Codex P2) because it is also the one part of FORCE_FALLBACK_QUESTION_PATTERN
+// that stays unconditional at the answerEstimateQuestion gate: it names
+// pesticide-safety/product/label/precaution intent specifically, unlike the
+// broader service-family words below (lawn/pest/inside/outside/etc.), which
+// say nothing about safety and must not force-route to the fallback on their
+// own when the estimate's support lookups came back empty (a lawn-scheduling
+// question with database: null must still reach the live model).
+const LABEL_SAFETY_QUESTION_PATTERN = /\b(safe|pets?|dogs?|cats?|kids?|child|children|precautions?|chemical|product|products|spray|label|applied|application|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
+// Broadens LABEL_SAFETY_QUESTION_PATTERN with generic service-family words
+// (lawn/pest/inside/outside/etc.) that name a topic but not a safety intent
+// on their own. Still force-routes to the fallback when support rows exist
+// (populated-row behavior is unchanged — see the answerEstimateQuestion call
+// site), but is NOT unconditional the way LABEL_SAFETY_QUESTION_PATTERN is.
 const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pets?|dogs?|cats?|kids?|child|children|precautions?|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
@@ -1341,7 +1357,9 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // orders ("rains after my service" / "after my service can it rain"),
   // re-entry/dry wording. "water bugs"/"standing water"/"keep mosquitoes
   // off" are service questions and belong to the branches below.
-  if (/\b(safe|pets?|dogs?|cats?|kids?|child|children|precautions?|chemical|product|products|spray|label|applied|application|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
+  // (LABEL_SAFETY_QUESTION_PATTERN — shared with the unconditional part of
+  // the answerEstimateQuestion force-fallback gate; see its definition.)
+  if (LABEL_SAFETY_QUESTION_PATTERN.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
@@ -1499,11 +1517,20 @@ async function answerEstimateQuestion({
   // degrades gracefully with zero support rows (labelSafetyFactsFromSupport
   // returns '' and the safety branch still returns the controlled label-
   // directions copy — see "no catalog rows at all still gets the generic
-  // safety answer" in estimate-assistant-label-safety-fallback.test.js), so
-  // routing here no longer depends on row availability. Populated-row
-  // behavior is unchanged: the pattern match alone already routed here
-  // whenever rows existed.
-  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion)) {
+  // safety answer" in estimate-assistant-label-safety-fallback.test.js).
+  //
+  // AW-04 round 3 fix (Codex P2): making the WHOLE FORCE_FALLBACK_QUESTION_PATTERN
+  // unconditional over-corrected — that pattern also carries generic
+  // service-family words (lawn/pest/inside/outside/etc.) that name a topic
+  // but say nothing about safety, so e.g. "Can I schedule my lawn treatment
+  // for Tuesday?" with no support rows forced the fallback instead of
+  // reaching the model. Only LABEL_SAFETY_QUESTION_PATTERN — the actual
+  // safety/product/label/precaution intent — is unconditional; the broader
+  // family-word pattern keeps the original `&& supportRows(context).length`
+  // requirement, so it still routes deterministically whenever the estimate
+  // actually has matching support rows, exactly as before this round.
+  if (LABEL_SAFETY_QUESTION_PATTERN.test(cleanQuestion)
+    || (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',
@@ -1539,4 +1566,5 @@ module.exports = {
   cleanAssistantAnswer,
   selectPricingFrequency,
   FORCE_FALLBACK_QUESTION_PATTERN,
+  LABEL_SAFETY_QUESTION_PATTERN,
 };

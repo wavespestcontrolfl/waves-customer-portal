@@ -91,6 +91,31 @@ const KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES = [
   'agronomics', 'services', 'pests', 'turf', 'compliance',
 ];
 
+// AW-04 fix (round 2 follow-up, Codex P1): searchAgronomicWiki below queries
+// knowledge_entries with only the content-accuracy gate (TRUSTED_STATUSES) —
+// review_status is a "was this checked for accuracy" gate, not an audience
+// boundary (see the comment on TRUSTED_STATUSES usage below), so every
+// trusted row was eligible for the public estimate assistant. Checked against
+// the actual writers of this table (2026-09-25): the ONLY code that inserts
+// into knowledge_entries is agronomic-wiki.js's generatePage(), called with
+// exactly four categories — 'product', 'condition', 'track', and 'seasonal'
+// (updateProductPage/updateConditionPage/updateTrackPage/updateSeasonalPage).
+// generatePage's own system prompt frames EVERY one of those categories the
+// same way, unconditionally: "Frame every finding as internal field
+// intelligence, never as label authority... Field intelligence from Waves
+// treatment outcomes — not label guidance." That is staff-facing analytics
+// language for all four, not customer copy — knowledge-bridge.js's own
+// syncToClaudeopedia mirrors them into knowledge_base titled "Outcome Data:
+// …" for the SAME reason. So unlike knowledge_base (whose original migration
+// documented real customer-facing categories — services/pests/turf/
+// compliance — even before every one had a production row), this table has
+// no documented or observed customer-safe category today: the allowlist
+// below is intentionally empty. Fails closed the same way an unknown
+// category would: nothing in knowledge_entries reaches the public estimate
+// assistant until a genuinely customer-facing entry type/category exists for
+// this table and is added here.
+const KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES = [];
+
 const EXTERNAL_REFERENCES = {
   general: [
     {
@@ -453,6 +478,15 @@ async function searchKnowledgeBase(db, terms) {
             .orWhere('category', 'ilike', like);
         }
       })
+      // AW-04 fix (round 3, Codex P2): this used to run as a JS `.filter()`
+      // AFTER `.limit(6)` — six disallowed-category rows matching the search
+      // terms above could fill the entire cap and crowd out a seventh row
+      // that IS allowlisted but never even reached the JS loop. Applying the
+      // allowlist in the same query the LIMIT applies to means only
+      // allowlisted rows can ever occupy a cap slot. A NULL/missing category
+      // still fails closed here the same way it did in JS: `lower(NULL) =
+      // ANY(...)` is NULL, not true.
+      .whereRaw('lower(category) = ANY(?::text[])', [KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES])
       .select('path', 'title', 'summary', 'category', 'content')
       .limit(6);
 
@@ -463,10 +497,6 @@ async function searchKnowledgeBase(db, terms) {
       category: row.category || null,
       snippet: rowSnippet(row),
     })).filter((row) => row.snippet || row.title)
-      // AW-04 fix — see KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES above. A
-      // missing category is excluded too (fail closed): the allowlist is the
-      // boundary, not "not obviously internal".
-      .filter((row) => KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES.includes(cleanText(row.category).toLowerCase()))
       // Defense in depth — see INTERNAL_CONTENT_MARKER_PATTERN above.
       .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.title || ''} ${row.category || ''} ${row.snippet || ''}`));
   } catch (err) {
@@ -495,6 +525,15 @@ async function searchAgronomicWiki(db, terms) {
             .orWhere('category', 'ilike', like);
         }
       })
+      // AW-04 fix (round 2 follow-up, Codex P1) — see
+      // KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES above: TRUSTED_STATUSES is
+      // a content-accuracy gate, not an audience boundary, so every trusted
+      // page (all of them internal field-intelligence today) was reachable
+      // here. Applied in the query the LIMIT below runs against — see the
+      // AW-04 round 3 fix on searchKnowledgeBase's own allowlist above for
+      // why a post-limit JS filter would let disallowed rows crowd out an
+      // allowed one.
+      .whereRaw('lower(category) = ANY(?::text[])', [KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES])
       .select('slug', 'title', 'summary', 'category', 'content', 'confidence', 'data_point_count')
       .limit(5);
 
@@ -558,20 +597,28 @@ async function searchServiceLibrary(db, terms) {
         row.frequency ? `Frequency: ${row.frequency}` : '',
         row.visits_per_year ? `Visits per year: ${row.visits_per_year}` : '',
       ].filter(Boolean);
+      const rawSnippet = trimSnippet(parts.join(' '));
+      // AW-04 fix (round 2 follow-up, Codex P1): this used to drop the WHOLE
+      // row when its free-text description matched INTERNAL_CONTENT_MARKER_PATTERN
+      // (e.g. a stray "$" figure) — but that also dropped _productNames, the
+      // real service→product linkage loadEstimateAiSupportContext uses below
+      // to fetch and attribute label-verified catalog facts (default
+      // products like Tekko Pro IGR / Maxforce / Alpine on the initial roach
+      // knockdown services). A description with internal-sounding text must
+      // never reach the model prompt, but the row's structural identity
+      // (name/service_key/category) and its product linkage are not free
+      // text and are safe to keep either way — only the free-text snippet is
+      // redacted.
+      const unsafeSnippet = INTERNAL_CONTENT_MARKER_PATTERN.test(rawSnippet);
       return {
         source: 'admin_service_library',
         path: row.service_key,
         title: row.name || row.service_key,
         category: row.category || null,
         _productNames: products,
-        snippet: trimSnippet(parts.join(' ')),
+        snippet: unsafeSnippet ? '' : rawSnippet,
       };
-    }).filter((row) => row.snippet || row.title)
-      // Defense in depth — see INTERNAL_CONTENT_MARKER_PATTERN above. The
-      // service library is admin-curated sellable-service copy (not open
-      // free text like knowledge_base), so this is a backstop, not the
-      // boundary.
-      .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.title || ''} ${row.category || ''} ${row.snippet || ''}`));
+    }).filter((row) => row.snippet || row.title);
   } catch (err) {
     logger.warn(`[estimate-ai-context] services lookup skipped: ${err.message}`);
     return [];
@@ -1079,4 +1126,7 @@ module.exports = {
   serviceKeysFromContext,
   serviceFamiliesFromText,
   searchTermsFromContext,
+  // Exported for direct allowlist-mechanism testing only — production code
+  // never mutates this array. See its definition for why it is empty today.
+  KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,
 };

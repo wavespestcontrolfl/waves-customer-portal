@@ -110,4 +110,32 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(result.source).toBe('fallback');
     expect(result.answer).toContain('follow the product label directions');
   });
+
+  // AW-04 round 3 (Codex P2): the fix above made the ENTIRE
+  // FORCE_FALLBACK_QUESTION_PATTERN unconditional, not just its safety
+  // wording — that pattern also carries generic service-family words (lawn,
+  // pest, inside, outside…), so a non-safety scheduling question naming a
+  // service family with zero support rows also force-routed to the
+  // deterministic fallback instead of reaching the live model. Only the
+  // safety-specific LABEL_SAFETY_QUESTION_PATTERN is unconditional now; the
+  // broader family-word pattern keeps its original `&& supportRows(context)
+  // .length` requirement.
+  test('a non-safety scheduling question naming a service family reaches the live model when every support lookup returns nothing', async () => {
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'Can I schedule my lawn treatment for Tuesday?',
+      estimate: {
+        id: 'synthetic-estimate-3',
+        token: 'synthetic-token-3',
+        status: 'sent',
+        customer_name: 'Synthetic Customer',
+        address: 'Synthetic Address',
+      },
+      estData: { services: [{ service: 'lawn_care', label: 'Lawn Care' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.source).toBe('openai');
+  });
 });

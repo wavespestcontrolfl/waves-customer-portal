@@ -4,32 +4,55 @@ const {
   serviceKeysFromContext,
   serviceFamiliesFromText,
   searchTermsFromContext,
+  KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,
 } = require('../services/estimate-ai-context');
 
 function fakeDb(tables = {}) {
-  return (table) => ({
-    where(arg) {
-      if (typeof arg === 'function') {
-        arg.call(this);
-      }
-      return this;
-    },
-    whereNot(arg) {
-      if (typeof arg === 'function') {
-        arg.call(this);
-      }
-      return this;
-    },
-    whereIn() { return this; },
-    orWhereIn() { return this; },
-    whereNotIn() { return this; },
-    whereNull() { return this; },
-    orWhere() { return this; },
-    orWhereNull() { return this; },
-    orWhereRaw() { return this; },
-    select() { return this; },
-    limit(count) { return Promise.resolve((tables[table] || []).slice(0, count)); },
-  });
+  return (table) => {
+    // Minimal support for the category-allowlist predicate the loader pushes
+    // into SQL (`lower(category) = ANY(?::text[])`, AW-04 round 3 fix) —
+    // recorded here and applied in `.limit()`, BEFORE the row count is
+    // capped, exactly like the real query does. Mirrors Postgres NULL
+    // semantics: a missing category never matches ANY(...).
+    let categoryAllowlist = null;
+    return {
+      where(arg) {
+        if (typeof arg === 'function') {
+          arg.call(this);
+        }
+        return this;
+      },
+      whereNot(arg) {
+        if (typeof arg === 'function') {
+          arg.call(this);
+        }
+        return this;
+      },
+      whereIn() { return this; },
+      orWhereIn() { return this; },
+      whereNotIn() { return this; },
+      whereNull() { return this; },
+      orWhere() { return this; },
+      orWhereNull() { return this; },
+      orWhereRaw() { return this; },
+      whereRaw(sql, bindings = []) {
+        if (String(sql).includes('lower(category)')) {
+          categoryAllowlist = (Array.isArray(bindings) ? bindings[0] : bindings) || [];
+        }
+        return this;
+      },
+      select() { return this; },
+      limit(count) {
+        const rows = tables[table] || [];
+        const filtered = categoryAllowlist
+          ? rows.filter((row) => categoryAllowlist
+            .map((value) => String(value).toLowerCase())
+            .includes(String(row.category || '').toLowerCase()))
+          : rows;
+        return Promise.resolve(filtered.slice(0, count));
+      },
+    };
+  };
 }
 
 // WHERE-aware fake: applies the recorded ilike patterns (and the normalized
@@ -199,6 +222,49 @@ describe('estimate AI support context', () => {
     // area after it stays a recipient.
     expect(serviceFamiliesFromText('Is the lawn insecticide on my shrubs safe?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('')).toEqual([]);
+  });
+
+  // AW-04 fix (round 2 follow-up, Codex P1): searchServiceLibrary used to
+  // drop the WHOLE row when its description matched INTERNAL_CONTENT_MARKER_PATTERN
+  // (here, a stray "$" figure) — which also dropped _productNames, the real
+  // service→product linkage loadEstimateAiSupportContext uses to fetch and
+  // attribute label-verified catalog facts (e.g. the initial roach knockdown
+  // services' Tekko Pro IGR / Maxforce / Alpine defaults). The row's product
+  // linkage must survive; only the unsafe description text is redacted.
+  test('a service row with a marker-matching description still contributes its default products, but the description text never reaches the context', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [{
+          service_key: 'pest_initial_roach_knockdown',
+          name: 'Initial Roach Knockdown',
+          category: 'pest_control',
+          description: 'Initial cleanout — includes a $45 material surcharge for heavy infestations.',
+          default_products: ['Tekko Pro IGR'],
+        }],
+        products_catalog: [{
+          name: 'Tekko Pro IGR',
+          category: 'insect growth regulator',
+          active_ingredient: 'Pyriproxyfen + Novaluron',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is the roach treatment safe for pets?',
+      context: { services: [{ label: 'Initial Roach Knockdown', detail: 'Initial cleanout' }] },
+    });
+
+    // The service row itself survives (name/service_key/category kept) —
+    // and so does its product linkage: the catalog row attributes.
+    const serviceRow = result.serviceLibrary.find((row) => row.path === 'pest_initial_roach_knockdown');
+    expect(serviceRow).toBeDefined();
+    const catalogRow = result.productCatalog.find((row) => row.activeIngredient === 'Pyriproxyfen + Novaluron');
+    expect(catalogRow).toBeDefined();
+    expect(catalogRow.serviceKeys).toEqual(['pest_control']);
+
+    // The marker-matching description text never reaches the serialized context.
+    expect(JSON.stringify(result)).not.toContain('$45');
+    expect(JSON.stringify(result)).not.toContain('material surcharge');
+    expect(serviceRow.snippet).toBe('');
   });
 
   test('token-subset default_products aliases still attribute the catalog row', async () => {
@@ -784,10 +850,17 @@ describe('estimate AI support context', () => {
           summary: 'Seasonal lawn care guidance for Southwest Florida.',
           content: 'Longer content',
         }],
+        // AW-04 fix (round 2 follow-up, Codex P1): 'turf' was never a real
+        // knowledge_entries category — the table's only writer
+        // (agronomic-wiki.js) only ever uses 'product'/'condition'/'track'/
+        // 'seasonal', all framed as internal field intelligence, so
+        // KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES is empty and this row is
+        // excluded regardless of category. See the dedicated allowlist tests
+        // below for the exclude/allow mechanism itself.
         knowledge_entries: [{
           slug: 'st-augustine-fungus',
           title: 'St. Augustine Fungus',
-          category: 'turf',
+          category: 'condition',
           summary: 'Fungus pressure increases in wet conditions.',
           content: 'Longer wiki content',
           confidence: 'high',
@@ -823,14 +896,9 @@ describe('estimate AI support context', () => {
         title: 'Lawn Program',
       }),
     ]);
-    expect(result.agronomicWiki).toEqual([
-      expect.objectContaining({
-        source: 'agronomic_wiki',
-        path: 'st-augustine-fungus',
-        confidence: 'high',
-        dataPointCount: 12,
-      }),
-    ]);
+    // No knowledge_entries category is customer-safe today (see the fixture
+    // comment above) — the trusted 'condition' row above is excluded.
+    expect(result.agronomicWiki).toEqual([]);
     expect(result.serviceLibrary).toEqual([
       expect.objectContaining({
         source: 'admin_service_library',
@@ -1171,5 +1239,92 @@ describe('estimate AI support context', () => {
     });
 
     expect(result.knowledgeBase).toEqual([]);
+  });
+
+  // AW-04 fix (round 2 follow-up, Codex P1): searchAgronomicWiki used to
+  // accept ANY trusted (review_status auto/approved) knowledge_entries row —
+  // review_status is a content-accuracy gate, not an audience boundary, and
+  // every real category this table holds ('product', 'condition', 'track',
+  // 'seasonal' — the only ones agronomic-wiki.js's generatePage ever writes)
+  // is framed as internal field intelligence, never customer-facing label
+  // guidance. KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES now gates this too.
+  test.each([
+    ['product', 'Product: Celsius WG', 'Herbicide performance summary across tracked visits.'],
+    ['condition', 'Condition: Chinch Bug Damage', 'Chinch bug recovery outcomes across serviced properties.'],
+    ['track', 'Track B2 Performance', 'Turf health trend across the B2 track this season.'],
+    ['seasonal', 'September — Seasonal Intelligence', 'Fungus pressure trend across serviced lawns this month.'],
+  ])('AW-04 rd2 follow-up: a trusted %s-category knowledge_entries row is excluded even with no marker words', async (category, title, summary) => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_entries: [{ slug: `wiki/${category}`, title, category, summary, content: summary, confidence: 'high', data_point_count: 20 }] }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+    });
+    // None of these fixtures contain an INTERNAL_CONTENT_MARKER_PATTERN word
+    // or a dollar figure — exclusion here can only be the category allowlist.
+    expect(result.agronomicWiki).toEqual([]);
+  });
+
+  test('AW-04 rd2 follow-up: an allowlisted knowledge_entries category still loads (fail-closed, not block-everything)', async () => {
+    // No real knowledge_entries category is customer-safe today (see the
+    // allowlist's own comment) — this proves the GATE works both ways, not
+    // just that it happens to exclude everything the wiki currently writes.
+    expect(KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES).toEqual([]);
+    KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES.push('reference');
+    try {
+      const result = await loadEstimateAiSupportContext({
+        db: fakeDb({
+          knowledge_entries: [{
+            slug: 'reference/st-augustine-fungus',
+            title: 'St. Augustine Fungus Reference',
+            category: 'reference',
+            summary: 'General turf fungus reference notes.',
+            content: 'Longer wiki content',
+            confidence: 'high',
+            data_point_count: 12,
+          }],
+        }),
+        question: 'What is included with lawn care?',
+        context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+      });
+      expect(result.agronomicWiki).toEqual([
+        expect.objectContaining({ source: 'agronomic_wiki', path: 'reference/st-augustine-fungus' }),
+      ]);
+    } finally {
+      KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES.length = 0;
+    }
+  });
+
+  // AW-04 fix (round 3, Codex P2): the knowledge_base category allowlist used
+  // to run as a JS `.filter()` AFTER `.limit(6)` — enough disallowed-category
+  // rows matching the search terms could fill the cap and crowd out an
+  // allowed row that never even reached the filter. fakeDb's whereRaw support
+  // mirrors the real SQL predicate this loader now applies.
+  test('AW-04 rd3: an allowed knowledge_base row survives 6 internal-category rows filling the cap', async () => {
+    const internalRows = Array.from({ length: 6 }, (_, i) => ({
+      path: `kb/chemicals-${i}.md`,
+      title: `Chemical Note ${i}`,
+      category: 'chemicals',
+      summary: 'Lawn fertilizer supplier notes.',
+      content: 'x',
+    }));
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [
+          ...internalRows,
+          {
+            path: 'wiki/services/lawn.md',
+            title: 'Lawn Program',
+            category: 'services',
+            summary: 'Seasonal lawn care guidance for Southwest Florida.',
+            content: 'Longer content',
+          },
+        ],
+      }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+    });
+    expect(result.knowledgeBase).toEqual([
+      expect.objectContaining({ path: 'wiki/services/lawn.md' }),
+    ]);
   });
 });
