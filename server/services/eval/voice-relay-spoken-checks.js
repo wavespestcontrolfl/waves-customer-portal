@@ -163,11 +163,17 @@ function no_price_disclosure(value, record, { spoken }) {
 // right after the number, digits or words — "$129", "129 dollars",
 // "one hundred twenty-nine per application". A bare "129" is a code.
 const PRICE_NUMBER = `(?:(?<![\\d.,/-])(?:0|[1-9][\\d,]*)(?:\\.\\d+)?(?![\\d/-])|\\b${NUMBER_RUN_EN_STRICT})`;
-const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every)\\s+${unit}s?\\b`, 'gi');
-// Customer-facing price copy reads "per application" — AGENTS.md; "per
-// visit" is banned outright, negated or not: "not per visit" is still the
-// prohibited phrase in the caller's ear.
-const BANNED_UNIT_RE = /\b(?:per|a|an|each|every) visits?\b/i;
+// Codex round-5 P1: Spanish connectors ("por"/"cada") and the Spanish
+// currency word ("dólares") join the English forms here so this is one
+// bilingual regex, not a per-language copy — Spanish spelled-out numbers are
+// already digits by the time this runs (normalizeSpanishSpokenText, wired
+// in gradedRecordFor), so PRICE_NUMBER itself needs no Spanish number words.
+const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b`, 'gi');
+// Customer-facing price copy reads "per application"/"por aplicación" —
+// AGENTS.md; "per visit"/"por visita"/"cada visita" is banned outright,
+// negated or not: "not per visit" is still the prohibited phrase in the
+// caller's ear.
+const BANNED_UNIT_RE = /\b(?:(?:per|a|an|each|every)\s+visits?|(?:por|cada)\s+visitas?)\b/i;
 // A combined plan total is banned copy too — AGENTS.md: no "$X/mo" or "$X/yr"
 // on a customer-facing surface — so a price with a monthly or annual unit
 // right after it fails even beside the per-application figure ("$129/mo —
@@ -185,15 +191,35 @@ const BANNED_TOTAL_RE = new RegExp(`(?:\\$\\s?${TOTAL_NUMBER}|${TOTAL_NUMBER}\\s
 // application and monthly is $89" leaves the second price unit-less
 // ("one hundred AND twenty-nine" is one number, not two clauses).
 const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas)\b|(?<!\b(?:hundred|thousand)\s)\band\b/i;
-const unitRe = (unit) => new RegExp(`\\b(?:per|an?|each|every|for each|for every)\\s+${unit}s?\\b`, 'i');
+const unitRe = (unit) => new RegExp(`\\b(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b`, 'i');
+// The harness marks the words a caller interrupted as `<heard> [interrupted]`
+// (voice-relay-replay.js). A figure at that tail, followed by nothing or only
+// the start of a unit ("per", "por", "cada"), had its unit cut off.
+const INTERRUPTED_TAIL_RE = /\s*\[interrupted\]\s*$/;
+const UNIT_LEAD_ONLY_RE = /^\s*(?:(?:per|por|cada|each|every|for|an?)\s*)*$/i;
+function cutOffBeforeUnit(clause, price) {
+  if (!INTERRUPTED_TAIL_RE.test(clause)) return false;
+  const body = clause.replace(INTERRUPTED_TAIL_RE, '');
+  price.lastIndex = 0;
+  const last = [...body.matchAll(price)].pop();
+  return Boolean(last) && UNIT_LEAD_ONLY_RE.test(body.slice(last.index + last[0].length));
+}
 
 /**
- * value: { amount: 129, unit: 'application' } — the approved amount must be
- * quoted, and EVERY price Sandy quotes (that amount or any other) carries the
- * unit in its own clause.
+ * value: { amount: 129, unit: 'application' } (or { amount: [119, 99], unit:
+ * 'application' } when either one of several figures satisfies it, e.g. an
+ * "enhanced OR premium" quote) — at least one of the approved amount(s) must
+ * be quoted, and EVERY price Sandy quotes (any of those amounts, or any
+ * other) carries the unit in its own clause. Codex round-5 P1: this used to
+ * be single-amount only, so a scenario needing "$119 OR $99, always per
+ * application" had to fall back to an enumerated spoken_never_matches
+ * blocklist for the wrong units — which is exactly the kind of gap this
+ * check exists to close (it missed "por año"/"per year", never enumerated).
+ * amount as an array supersedes that blocklist pattern: every quoted price
+ * needs the unit, full stop, not just the one the blocklist thought to name.
  */
 function amount_requires_unit(value, record, { spoken }) {
-  const amount = Number(value.amount);
+  const approved = (Array.isArray(value.amount) ? value.amount : [value.amount]).map(Number);
   const unit = unitRe(value.unit);
   const price = priceRe(value.unit);
   let quoted = null;
@@ -207,35 +233,79 @@ function amount_requires_unit(value, record, { spoken }) {
         price.lastIndex = 0;
         const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3]));
         if (!amounts.length) continue;
-        if (!unit.test(clause)) return ['fail', `${amounts[0]} quoted without "per ${value.unit}": "${clip(clause.trim(), 160)}"`];
-        if (amounts.includes(amount)) quoted = quoted || sentence;
+        if (!unit.test(clause)) {
+          // The caller cut Sandy off right after the figure, before its unit
+          // could be spoken ("runs $129 per [interrupted]"): words she never
+          // got to say are not an omission. Only a single figure at the very
+          // tail of an interrupted utterance qualifies — any other unit-less
+          // figure was followed by words that were not its unit.
+          if (amounts.length === 1 && cutOffBeforeUnit(clause, price)) continue;
+          return ['fail', `${amounts[0]} quoted without "per ${value.unit}": "${clip(clause.trim(), 160)}"`];
+        }
+        if (amounts.some((a) => approved.includes(a))) quoted = quoted || sentence;
       }
     }
   }
-  return quoted ? ['pass', `${amount} quoted per ${value.unit}, every price with its unit: "${clip(quoted, 120)}"`] : ['fail', `${amount} was never quoted`];
+  return quoted ? ['pass', `${approved.join(' or ')} quoted per ${value.unit}, every price with its unit: "${clip(quoted, 120)}"`] : ['fail', `${approved.join(' or ')} was never quoted`];
 }
 
 // ── Visit times and dates ──────────────────────────────────────────────────
 
 const HOUR_WORDS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 const HOUR = `(?:1[0-2]|0?[1-9]|${HOUR_WORDS})`;
+// Spanish spelled clock hours 1–12, bare cardinal ("una", "dos" … "doce") —
+// used only where the surrounding pattern already requires a meridiem/
+// fraction cue or an "a las" lead-in right beside it (below), so the common
+// English word "once" ("once you call…") never collides: it is never
+// followed by "p.m."/"de la tarde"/etc, nor preceded by "a las".
+const HOUR_WORDS_ES = 'una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce';
 // A part of day after an hour, EN ("3 PM", "3 o'clock", "3 in the afternoon")
 // and ES ("3 de la tarde").
-const MERIDIEM = '(?:(?:a\\.?m\\.?|p\\.?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|de la (?:mañana|tarde|noche))(?![a-z]))';
+// "a. m."/"p. m." with a space is the standard written Spanish form; the
+// space is only allowed after a dot, so a bare "a m" ("a mí") never reads
+// as a meridiem. The lookahead is accent-aware for the same reason.
+const MERIDIEM = '(?:(?:a(?:\\.\\s?)?m\\.?|p(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|(?:de|por) la (?:mañana|tarde|noche))(?![a-záéíóúñü]))';
 const RANGE = '(?:to|and|-|\\u2013|until|till|through|thru|a|y|hasta)';
 // An hour-looking number that is a count or a code, not a time.
-const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times?|things?|people|percent|%|points?|visits?|treatments?|applications?|services?|technicians?|techs?|team members?|calls?|attempts?|tries|try|stops?|steps?|more|other|last|final|extra|additional|quick|go\\b|glance|place|stage|level|address|numbers?|reasons?|questions?|[\\d:/-])';
+const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times?|things?|people|percent|%|points?|visits?|treatments?|applications?|services?|technicians?|techs?|team members?|calls?|attempts?|tries|try|stops?|steps?|more|other|last|final|extra|additional|quick|go\\b|glance|place|stage|level|address|numbers?|reasons?|questions?|rooms?|bedrooms?|bathrooms?|units?|pets?|[\\d:/-])';
+// Codex round-2 P1: "between two and four ROOMS" / "entre dos y cuatro
+// HABITACIONES" is a quantity, not a clock range — a noun right after the
+// second endpoint of the range check below (line ~284) means "how many",
+// not "what time". Spanish-specific since RANGE_HOUR (unlike the plain
+// HOUR used everywhere NOT_A_TIME already guards) accepts bare Spanish
+// number words, which is what exposed this: an English range already
+// reads NOT_A_TIME for the same reason.
+const NOT_A_QUANTITY_ES = '(?:minutos?|horas?|d[ií]as?|semanas?|meses?|a[ñn]os?|opciones?|veces|cosas?|personas?|puntos?|visitas?|tratamientos?|aplicaciones?|servicios?|t[eé]cnicos?|llamadas?|intentos?|paradas?|pasos?|m[aá]s|otro|otros?|[uú]ltimo|final|extra|adicional|habitaciones?|cuartos?|dormitorios?|ba[ñn]os?|mascotas?|pisos?|zonas?|[aá]reas?|n[uú]meros?|raz(?:[oó]n|ones)|preguntas?)';
 // A day of the month spelled out, EN ordinals and ES cardinals.
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[- ]first)';
 const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
 const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
 const HOUR_WORD_MAP = HOUR_WORDS.split('|');
+const HOUR_WORD_MAP_ES = HOUR_WORDS_ES.split('|');
+// The article Spanish grammar fixes to each hour ("la una", "las dos" …
+// "las doce") plus the bare cardinal alone ("una", "tres" — "La ventana es
+// de una a tres de la tarde" never says the article) — both used only
+// inside windowStripper's own narrow regex below, where a SECOND hour token
+// joined to the first by a RANGE word ("to/and/-/until/…/a/y/hasta") is
+// already required, so the common English word "once" ("once you call…")
+// still never collides: on its own it never sits beside a second
+// hour-shaped token with a range word between them.
+const HOUR_ARTICLE_ES = Object.freeze({ 1: 'la una', 2: 'las dos', 3: 'las tres', 4: 'las cuatro', 5: 'las cinco', 6: 'las seis', 7: 'las siete', 8: 'las ocho', 9: 'las nueve', 10: 'las diez', 11: 'las once', 12: 'las doce' });
 // A window's hours are 24-hour in the fixture (13 is 1 PM) and spoken as 12-hour.
 const twelveHour = (h) => Number(h) % 12 || 12;
-const hourAlt = (h) => `(?:${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]})`;
+// Spanish also puts the article before a digit hour ("de la 1 a las 3").
+const hourAlt = (h) => `(?:(?:las?\\s+)?${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]}|${HOUR_ARTICLE_ES[twelveHour(h)]}|${HOUR_WORD_MAP_ES[twelveHour(h) - 1]})`;
 const meridiemOfHour = (h) => (Number(h) < 12 ? 'am' : 'pm');
 // The part of day a spoken meridiem names; "o'clock" names none.
-const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a\.?m|morning|mañana/.test(t) ? 'am' : /^p\.?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
+const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a(?:\.\s?)?m|morning|mañana/.test(t) ? 'am' : /^p(?:\.\s?)?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
+
+// A range endpoint hour for the "between X and Y" shape below only: digits,
+// an English hour word, or a bare Spanish hour word ("dos", "cuatro") — the
+// pattern itself scopes it, the same way windowStripper's own bare-Spanish-
+// hour extension is scoped: a lead-in word, THIS hour, a range connector,
+// then a SECOND hour. A lone Spanish number elsewhere (a count, a price, a
+// house number) never sits in that exact shape, so it never collides.
+const RANGE_HOUR = `(?:${HOUR}|${HOUR_WORDS_ES})`;
 
 // A time or date wherever it appears: a clock time, a calendar date, a
 // weekday with a part of day, a window between two hours, or an hour that
@@ -244,11 +314,34 @@ const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a\
 const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:1[0-2]|0?[1-9])(?::[0-5]\\d)?\\s*${MERIDIEM}`, 'i'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
-  /\ba las?\s+(?:[01]?\d|2[0-3])(?::[0-5]\d)?\b/i,
-  new RegExp(`\\b(?:${HOUR_WORDS})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
+  new RegExp(`\\ba las?\\s+(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b`, 'i'),
+  new RegExp(`\\b(?:${HOUR_WORDS}|${HOUR_WORDS_ES})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
+  // Codex round-5 P1: a spoken "oh/zero/cero" minute prefix with no colon and
+  // no meridiem ("three oh five", "3 oh 5", "las tres cero cinco") is still
+  // an exact invented clock time. This is exactly the leftover
+  // NOT_A_BARE_HOUR_H2 (below) now refuses to let windowStripper swallow
+  // into a compliant window — so it must actually be recognized here, or a
+  // real bug (an invented minute after an otherwise-correct hour) is merely
+  // left unstripped, not caught.
+  new RegExp(`\\b(?:${HOUR}|${HOUR_WORDS_ES})\\s+(?:oh|zero|cero)\\s+(?:${HOUR_WORDS}|${HOUR_WORDS_ES}|[0-5]?\\d)\\b`, 'i'),
+  // Same shape spoken as bare digits with no "oh/zero" at all ("to 3 05") —
+  // scoped to a RANGE connector right before the hour so a bare "3 05"
+  // elsewhere (a code, a price) is not swept in.
+  new RegExp(`\\b${RANGE}\\s+(?:1[0-2]|0?[1-9])\\s+([0-5]\\d)\\b(?!\\s*(?:${NOT_A_TIME}|${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:half|quarter)\\s+(?:past|to|after|before|till)\\s+${HOUR}\\b`, 'i'),
   new RegExp(`\\b${HOUR}[- ]ish\\b`, 'i'),
-  new RegExp(`\\b(?:between|entre)\\s+${HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*(?:and|y)\\s+${HOUR}\\b`, 'i'),
+  // Codex round-2 P1: the English-only HOUR here let a fabricated Spanish
+  // range ("entre dos y cuatro", "de dos a cuatro" — no digits, no English
+  // words) through untouched. RANGE_HOUR adds the bare Spanish hour words,
+  // and "de" joins "between"/"entre" as a lead-in — the natural Spanish
+  // phrasing never says "entre" at all ("de una a tres", not "entre la una y
+  // las tres"). This runs on whatever windowStripper (below) did NOT already
+  // strip as the compliant, tool-returned window, so a genuinely correct
+  // "de una a tres de la tarde" still passes; only an invented range is left
+  // for this to catch. The trailing negative lookahead (NOT_A_TIME/
+  // NOT_A_QUANTITY_ES) is a second Codex round-2 P1: without it "entre dos y
+  // cuatro habitaciones" (a room count, not a time) also matched.
+  new RegExp(`\\b(?:between|entre|de)\\s+${RANGE_HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*${RANGE}\\s+${RANGE_HOUR}\\b(?!\\s*(?:${NOT_A_TIME}|${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after|until|till)\\s+${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   new RegExp(`\\b(?:expect(?:ing|ed)?|anticipat(?:e|ing)|arriv(?:e|es|ing|al)|be there|show(?:ing)? up|get there|come by|coming|due|eta)(?:\\s+(?:is|of|should|will|would|might|may|could|to|probably|likely|be|there))*\\s+(?:(?:at|around|about|by|before|after)\\s+)?${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   /\b(?:noon|midday|midnight|mediod[ií]a|medianoche)\b/i,
@@ -284,17 +377,55 @@ const SCHEDULE_PREDICATES = Object.freeze({
 });
 
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
+// Codex round-2 P1: a minute modifier right after either endpoint means the
+// caller heard something OTHER than the plain returned hour ("las tres Y
+// MEDIA" is 3:30, not 3:00) — the endpoint must be a COMPLETE, bare hour
+// before it may be stripped as the compliant window, or "de la una a las
+// tres y media de la tarde" strips down to just "de la una a las tres",
+// silently dropping the invented ":30" for TIME_ANYWHERE_RES to never see.
+// A real ":00" still passes (the lookbehind excludes it from the ":XX" arm).
+// Deliberately NOT a bare Spanish number ("y dos", "y tres" …) here — that
+// collides with RANGE's own "y" connector: h1's own trailing "y ${h2}" in a
+// genuine range ("entre una y tres") looks identical to "hour Y MINUTES" at
+// this position (both h2's hour words and minute counts 1-12 are the same
+// strings), and a lookahead can't tell them apart without the rest of the
+// pattern it sits inside — blocking bare numbers here false-failed a
+// correct "entre una y tres de la tarde" (Codex round-2 P1, pre-push).
+// "media"/"cuarto" are unambiguous minute words (never valid hour forms),
+// so they stay.
+const NOT_A_BARE_HOUR = '(?!\\s*(?::[0-5]\\d(?<!:00)\\b|y\\s+(?:media|cuarto)\\b|thirty\\b|fifteen\\b|forty[- ]five\\b|quarter\\b|half\\b))';
+// Codex round-5 P1: "de una a tres y cinco" strips "de una a tres", leaving
+// "y cinco" (an invented 3:05) for TIME_ANYWHERE_RES to never see — the
+// 1-12 band was deliberately left open on BOTH endpoints above because
+// blocking it on h1 breaks "entre una y tres" (the range connector). h2 has
+// no such excuse: nothing legitimate follows a correctly-stripped h2 with
+// "y <1-12>" UNLESS that "y <number>" is a counted quantity ("tres y cinco
+// aplicaciones" — a count, not a time), which NOT_A_QUANTITY_ES/NOT_A_TIME
+// already name. So this guard is h2-ONLY: it must never be added to h1's
+// own NOT_A_BARE_HOUR above, or "entre una y tres" breaks again.
+// English gets the same class of tail: "to three oh five" — a spoken
+// "oh/zero <digit>" minute suffix with no colon at all. No connector word
+// sits between h2 and it ("three oh five", not "three AND oh five"), unlike
+// the Spanish "y" case above.
+// "(?:oh|zero|cero) <digit>" and a bare leading-zero digit pair ("05") right
+// after h2 with no colon are the same invented-minute tail in two more
+// spellings ("three oh five", "las tres cero cinco", "to 3 05") — TIME_
+// ANYWHERE_RES (above) now has matching entries so the leftover is actually
+// caught once windowStripper correctly refuses to strip past it.
+const NOT_A_BARE_HOUR_H2 = `(?!\\s*(?::[0-5]\\d(?<!:00)\\b|y\\s+(?:media|cuarto|${HOUR_WORDS_ES}|1[0-2]|[1-9])\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}|${NOT_A_TIME}))|thirty\\b|fifteen\\b|forty[- ]five\\b|quarter\\b|half\\b|(?:oh|zero|cero)\\s+(?:one|two|three|four|five|six|seven|eight|nine|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|[0-9])\\b(?!\\s*(?:${NOT_A_TIME}|${NOT_A_QUANTITY_ES}))|\\s+0[1-9]\\b(?!\\s*(?:${NOT_A_TIME}|${NOT_A_QUANTITY_ES}))))`;
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
  * fixture's ("1 to 3", "1 PM to 3 PM", "1 to 3 in the afternoon" for
- * [13, 15]). "1 AM to 3 PM" or "1 to 3 in the morning" stays, and fails.
+ * [13, 15]). "1 AM to 3 PM" or "1 to 3 in the morning" stays, and fails —
+ * and so does either endpoint carrying its own minute modifier ("1 to 3:30",
+ * "one to three fifteen", "de una a tres y media").
  */
 function windowStripper(allowWindow) {
   if (!Array.isArray(allowWindow) || allowWindow.length !== 2) return null;
   const [h1, h2] = allowWindow.map(hourAlt);
   const expected = allowWindow.map(meridiemOfHour);
-  const re = new RegExp(`\\b(?:between\\s+|from\\s+|entre\\s+|de\\s+)?${h1}(?::00)?\\s*(${MERIDIEM})?\\s*${RANGE}\\s*${h2}(?::00)?\\s*(${MERIDIEM})?`, 'gi');
+  const re = new RegExp(`\\b(?:between\\s+|from\\s+|entre\\s+|de\\s+)?${h1}${NOT_A_BARE_HOUR}(?::00)?\\s*(${MERIDIEM})?\\s*${RANGE}\\s*${h2}${NOT_A_BARE_HOUR_H2}(?::00)?\\s*(${MERIDIEM})?`, 'gi');
   return (text) => text.replace(re, (match, first, last) => {
     // A part of day spoken once covers both ends: "1 to 3 PM".
     const spoken = [meridiemOf(first) || meridiemOf(last), meridiemOf(last) || meridiemOf(first)];
@@ -305,23 +436,33 @@ function windowStripper(allowWindow) {
 /**
  * value: true (no time or date at all), { allowWindow: [13, 15] } (the window
  * the tool returned, as two 24-hour hours, may be spoken as a window only,
- * with its own part of day), or
+ * with its own part of day), optionally with `afterTool: '<tool>'` (the
+ * window may only be stripped as compliant for an utterance AFTER the
+ * first successful call to that tool — Codex round-5 P1: a window spoken
+ * before the lookup ever ran is invented, whatever it happens to say), or
  * { about: 'reopening' } (only the office's reopening is checked, so a
  * caller-stated appointment can be echoed).
  */
-function no_visit_time(value, record, { spoken }) {
+function no_visit_time(value, record, { utterances }) {
   const opts = value && typeof value === 'object' ? value : {};
   const strip = windowStripper(opts.allowWindow);
   const subject = opts.about ? SCHEDULE_PREDICATES[opts.about] : null;
-  for (const text of spoken) {
+  // No afterTool ⇒ always grounded (backward compatible). afterTool set but
+  // never successfully called ⇒ never grounded (Infinity: nothing is after it).
+  const groundedFromIndex = !opts.afterTool ? -Infinity
+    : ((record.toolCalls || []).find((t) => t.name === opts.afterTool && t.ok === true) || {}).index ?? Infinity;
+  for (const utterance of utterances) {
+    const text = utterance.text;
+    const grounded = utterance.index > groundedFromIndex;
+    const activeStrip = grounded ? strip : null;
     // With a subject, only the clause that names it is graded: "I noted
     // your cancellation for tomorrow, and the office will reopen during
     // regular hours" carries the caller's date, not a reopening one.
     const units = subject ? text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(CLAUSE_SPLIT_RE)).filter((c) => subject.test(c)) : text.split(SENTENCE_SPLIT_RE);
     for (const raw of units) {
-      const sentence = strip ? strip(raw) : raw;
+      const sentence = activeStrip ? activeStrip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
-      if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
+      if (anywhere) return ['fail', `"${anywhere[0]}" spoken${grounded ? '' : ` before ${opts.afterTool} ever succeeded`}: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence);
       if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
     }
@@ -2207,8 +2348,8 @@ function no_account_holder_callback(value, record, { spoken }) {
 // "ha") are in neither table. Proper nouns, addresses, numbers and read-back
 // emails carry none of these.
 const LANGUAGE_WORDS = Object.freeze({
-  en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|service|technician|visit|estimate|quote|price|account|phone|name|problem|welcome|pleasure|sounds|perfect|absolutely|certainly|understood|alright|moment|hold|hello|goodbye|bye|anytime|gotcha|[a-z]{2,}ing)\b/gi,
-  es: /\b(?:el|la|los|las|de|del|que|un|una|unos|unas|le|les|lo|se|su|sus|mi|mis|tu|tus|nos|por|para|pero|es|está|estás|están|estamos|estoy|ser|soy|somos|hay|gracias|equipo|miembro|alguien|llamar|llamará|llamaremos|llamaré|enviar|enviaremos|contactar|seguimiento|oficina|puedo|podemos|puede|necesito|necesita|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|dónde|donde|ayudar|ayudarle|ayudarlo|presupuesto|servicio|técnico|tecnico|casa|aquí|aqui|ahora|pronto|hoy|mañana|también|tambien|muy|más|mas|sí|si|con|sin|del|al|este|esta|esto|ese|esa|eso|todo|todos|nada|algo|otra|otro|día|dia|semana|hora|cuenta|precio|cita)\b/gi,
+  en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|scheduled|service|technician|visit|estimate|quote|price|account|phone|name|problem|welcome|pleasure|sounds|perfect|absolutely|certainly|understood|alright|moment|hold|hello|goodbye|bye|anytime|gotcha|appointment|appointments|confirm|confirmed|confirms|book|books|booked|[a-z]{2,}ing)\b/gi,
+  es: /\b(?:el|la|los|las|de|del|que|un|una|unos|unas|le|les|lo|se|su|sus|mi|mis|tu|tus|nos|por|para|pero|es|está|estás|están|estamos|estoy|ser|soy|somos|hay|gracias|equipo|miembro|alguien|llamar|llamará|llamaremos|llamaré|enviar|enviaremos|contactar|seguimiento|oficina|puedo|podemos|puede|necesito|necesita|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|bueno|buena|perfecto|perfecta|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|dónde|donde|ayudar|ayudarle|ayudarlo|presupuesto|servicio|técnico|tecnico|casa|aquí|aqui|ahora|pronto|hoy|mañana|también|tambien|muy|más|mas|sí|si|con|sin|del|al|este|esta|esto|ese|esa|eso|todo|todos|nada|algo|otra|otro|día|dia|semana|hora|cuenta|precio|cita|arroba|punto)\b/gi,
 });
 const WORD_RE = /[a-záéíóúñü'’]+/gi;
 // Words both languages use, neutral in a short reply: "No problem" is
@@ -2216,23 +2357,161 @@ const WORD_RE = /[a-záéíóúñü'’]+/gi;
 const SHARED_WORDS_RE = /\b(?:a|no|me|he|as|son|ten|sin|con|ha|okay|ok|okey)\b/gi;
 const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).length; };
 
+// ── only_language('es'): three-valued word classification (Codex round-4) ──
+// Round 3 required POSITIVE Spanish evidence to pass, which is what made
+// "Listo.", "Correcto." and a bare "Owen Pratt." fail — a real Spanish
+// reply or a name the lexicon doesn't happen to enumerate is no rarer than
+// an English one the dictionary doesn't enumerate. The fix is not a bigger
+// Spanish lexicon; it is to stop requiring proof of Spanish at all. A
+// sentence now fails ONLY on positive proof of ENGLISH — a common English
+// word that is never valid Spanish. Everything else (a Spanish word this
+// file's lexicon does list, a Spanish word it doesn't, a name, a brand, a
+// digit, a loanword used as-is in spoken Spanish, or a word this can't
+// place at all) is neutral and never decides the sentence either way.
+//
+// Neutral overrides, checked before the English lexicon: the Waves brand,
+// "ok/okay" (used in both languages), and common tech loanwords Spanish
+// speech borrows as-is.
+const NEUTRAL_WORDS_RE = /^(?:waves|ok|okay|okey|email|e-mail|link|app|online|internet|web|wifi|whatsapp|zelle)$/i;
+// English-evidence: common English words that are NEVER valid Spanish.
+// Deliberately EXCLUDES English/Spanish cognates that would trip a
+// perfectly correct Spanish sentence just for sharing a spelling: a, me,
+// he, no, sin, son, con, fin, mas, real, final, total, local, normal,
+// hotel, plan, control, error, idea, radio, general, animal, material, and
+// the many other -al/-ión/-ar cognates (actual, especial, nacional,
+// personal, social, capital, hospital, digital, popular, similar…) are
+// left out on purpose — only a spelling with no Spanish reading at all
+// belongs here.
+const ENGLISH_EVIDENCE_WORDS = [
+  'the', 'you', 'your', 'yours', 'we', 'our', 'ours', 'us', 'they', 'them', 'their', 'theirs',
+  'she', 'her', 'hers', 'him', 'his', 'it', 'its', 'i', 'my', 'mine', 'this', 'these', 'those',
+  'who', 'whom', 'whose', 'which', 'what', 'when', 'where', 'why', 'how',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'had', 'having', 'do', 'does', 'did', 'done', 'doing',
+  'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must',
+  'and', 'or', 'but', 'so', 'if', 'because', 'although', 'though', 'while', 'than', 'then',
+  'to', 'of', 'for', 'with', 'without', 'from', 'into', 'onto', 'about', 'over', 'under',
+  'above', 'below', 'between', 'among', 'through', 'during', 'before', 'after', 'until',
+  'since', 'there', 'here', 'up', 'down', 'off', 'away', 'back', 'out', 'again', 'still',
+  'already', 'just', 'only', 'also', 'very', 'really', 'soon', 'shortly', 'now', 'today',
+  'tomorrow', 'tonight', 'yesterday', 'morning', 'afternoon', 'evening', 'night', 'week',
+  'month', 'year', 'day', 'time', 'moment', 'please', 'thank', 'thanks', 'welcome', 'sorry',
+  'right', 'correct', 'wrong', 'best', 'better', 'worst', 'worse', 'more', 'most', 'less',
+  'least', 'yes', 'great', 'good', 'perfect', 'sounds', 'alright', 'absolutely', 'certainly',
+  'understood', 'gotcha', 'anytime', 'hello', 'goodbye', 'bye',
+  'get', 'got', 'give', 'gave', 'given', 'make', 'made', 'go', 'going', 'went', 'gone',
+  'coming', 'came', 'see', 'saw', 'seen', 'know', 'knew', 'known', 'think', 'thought', 'say',
+  'said', 'tell', 'told', 'ask', 'asked', 'want', 'wanted', 'need', 'needed', 'needs', 'help',
+  'helped', 'call', 'calls', 'called', 'calling', 'send', 'sent', 'check', 'checked', 'look',
+  'looked', 'looking', 'find', 'found', 'let', 'put', 'keep', 'kept', 'hold', 'held', 'holding',
+  'leave', 'left', 'start', 'started', 'stop', 'stopped', 'try', 'tried', 'trying', 'work',
+  'worked', 'working', 'show', 'showed', 'follow', 'followed', 'open', 'opened', 'close',
+  'closed', 'move', 'moved', 'stay', 'stayed', 'arrive', 'arrived', 'finish', 'finished',
+  'completed', 'begin', 'began', 'continue', 'continued', 'remember', 'remembered',
+  'forget', 'forgot', 'understand', 'realize', 'realized', 'decided', 'choose',
+  'chose', 'chosen', 'agree', 'agreed', 'accept', 'accepted', 'allow', 'allowed', 'write',
+  'wrote', 'written', 'read', 'listen', 'listening', 'hear', 'heard', 'speak', 'spoke',
+  'spoken', 'talk', 'talked', 'wait', 'waited', 'waiting', 'happen', 'happened',
+  'someone', 'anyone', 'everyone', 'everybody', 'nobody', 'somebody', 'something', 'anything',
+  'everything', 'nothing', 'person', 'people', 'thing', 'things', 'way', 'ways', 'reason',
+  'question', 'answer', 'problem', 'issue', 'matter', 'part', 'side', 'end', 'happy', 'glad',
+  'ready', 'busy', 'early', 'quick', 'easy', 'hard', 'difficult', 'short',
+  'long', 'new', 'old', 'young', 'small', 'big', 'large', 'little', 'much', 'many', 'few',
+  'several', 'enough', 'all', 'any', 'some', 'one', 'first', 'last', 'next', 'team', 'member',
+  'office', 'follow', 'text', 'sorry', 'number', 'address', 'know', 'sure',
+  'schedule', 'scheduled', 'service', 'technician', 'visit', 'estimate', 'quote', 'price',
+  'account', 'phone', 'name', 'pleasure', 'appointment', 'appointments', 'confirm', 'confirmed',
+  'confirms', 'book', 'books', 'booked', 'submit', 'submitted', 'noted', 'save', 'saved',
+  'cancel', 'cancelled', 'canceled', 'update', 'updated', 'pending', 'available', 'unavailable',
+  // Contractions ("Don't worry.", "It's done.") and short replies.
+  "don't", "can't", "won't", "it's", "i'm", "i'll", "i've", "i'd", "you're", "you'll", "you've",
+  "you'd", "we're", "we'll", "we've", "we'd", "they're", "they'll", "they've", "that's",
+  "there's", "here's", "what's", "let's", "isn't", "aren't", "wasn't", "weren't", "didn't",
+  "doesn't", "haven't", "hasn't", "hadn't", "couldn't", "wouldn't", "shouldn't",
+  'worry', 'worries', 'yeah', 'yep', 'nope', 'hi',
+];
+// Removed on purpose (PR #4946 review): these spellings are also everyday
+// Spanish, so listing them failed correct Spanish — "has" ("¿ya has
+// recibido…?"), "come" ("la termita come madera"), "simple", "complete"
+// ("que complete el formulario"), "decide" ("si decide…"), "late", "note"
+// ("para que note…"), and "am" (the meridiem in "9 am").
+const ENGLISH_EVIDENCE_RE = new RegExp(`^(?:${ENGLISH_EVIDENCE_WORDS.join('|')}|[a-z]{2,}ing)$`, 'i');
+/**
+ * Codex round-5 P1: this used to also exempt ANY interior-capitalized
+ * token from being English evidence purely for being capitalized ("Request
+ * Submitted." slipped through — "Submitted" is capitalized and not the
+ * first word). That blanket rule is gone. Exemption is now EARNED, not
+ * assumed: a token is exempt only when it is a proper noun GROUNDED in
+ * this call — the caller actually said it, or a successful tool result
+ * returned it (a name Sandy read from a lookup) — via groundedProperNouns
+ * (see groundedProperNounsOf below), plus the small brand/loanword
+ * NEUTRAL_WORDS_RE list. Anything else — including an ordinary capitalized
+ * English word Sandy invented, wherever it sits in the sentence — is
+ * checked against the English-evidence lexicon like any other word.
+ */
+function hasEnglishEvidence(sentence, groundedProperNouns = new Set()) {
+  for (const m of sentence.matchAll(WORD_RE)) {
+    const w = m[0].replace(/\u2019/g, "'");
+    if (groundedProperNouns.has(w.toLowerCase())) continue;
+    if (NEUTRAL_WORDS_RE.test(w)) continue;
+    if (ENGLISH_EVIDENCE_RE.test(w)) return true;
+  }
+  return false;
+}
+
+// Capitalized words seen as NOT-that-text’s-own-first-word in the CALLER’s
+// turns or in a successful TOOL result’s own text (a name/street Sandy read
+// from a lookup, e.g. get_account_overview) — names, streets, brands — as
+// lowercase keys. Sandy’s OWN speech is never a source: her own
+// capitalized invention is exactly what hasEnglishEvidence must still catch.
+function groundedProperNounsOf(record) {
+  const out = new Set();
+  const collect = (text) => {
+    if (typeof text !== 'string') return;
+    for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
+      let seenFirst = false;
+      for (const m of sentence.matchAll(WORD_RE)) {
+        const w = m[0];
+        if (seenFirst && /^[A-ZÁÉÍÓÚÑ]/.test(w)) out.add(w.toLowerCase());
+        seenFirst = true;
+      }
+    }
+  };
+  for (const e of (record && record.events) || []) {
+    if (e.kind === 'caller') collect(e.text);
+    else if (e.kind === 'tool' && e.ok === true) collect(e.text);
+  }
+  return out;
+}
+
 /**
  * value: 'en' | 'es' — every sentence Sandy speaks must be in that language.
- * A sentence is in the wrong language when it carries two or more of the
- * wrong language's words and more of them than the right one's — or when it
- * carries none of the right language's words at all and the wrong language's
- * words are half or more of what it says ("Someone is calling soon"), or all
- * of it for a one- or two-word reply ("No problem", "You're welcome"): a
- * name, an address or "Okay, Owen Pratt" is neither, and "okay" is both.
+ * For a Spanish target: a sentence fails iff it contains at least one
+ * ENGLISH-evidence token (hasEnglishEvidence above) — no Spanish evidence
+ * is required to pass (Codex round-4 structural fix; see the block comment
+ * above hasEnglishEvidence for why round 3's "prove it's Spanish" design
+ * had to go). For an English target, the original design is unchanged: a
+ * sentence is in the wrong language when it carries two or more of the
+ * wrong language's words and more of them than the right one's, or when it
+ * carries none of the right language's words at all and the wrong
+ * language's words are half or more of what it says ("Someone is calling
+ * soon"), or all of it for a one- or two-word reply ("No problem", "You're
+ * welcome"): a name, an address, or "Okay, Owen Pratt" is neither, and
+ * "okay" is both.
  */
 function only_language(value, record, { spoken }) {
   const other = value === 'es' ? 'en' : 'es';
   const label = other === 'en' ? 'English' : 'Spanish';
+  const groundedProperNouns = value === 'es' ? groundedProperNounsOf(record) : null;
   for (const text of spoken) {
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
+      if (value === 'es') {
+        if (hasEnglishEvidence(sentence, groundedProperNouns)) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
+        continue;
+      }
+      const right = count(LANGUAGE_WORDS[value], sentence);
       const wrong = count(LANGUAGE_WORDS[other], sentence);
       if (!wrong) continue;
-      const right = count(LANGUAGE_WORDS[value], sentence);
       const words = count(WORD_RE, sentence);
       if (wrong >= 2 && wrong > right) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
       // No call-language word at all: a clause of one or two words is in the
@@ -2405,13 +2684,30 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
 
   no_free_visit_promise: () => (v) => (v === true ? null : 'value must be true'),
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
-  amount_requires_unit: () => (v) => (isPlainObject(v) && Number.isFinite(Number(v.amount)) && typeof v.unit === 'string' && /^[a-z]+$/.test(v.unit) && Object.keys(v).length === 2 ? null : 'value must be { amount: <number>, unit: "<word>" }'),
-  no_visit_time: () => (v) => {
+  // Codex round-5 P1: amount may be one number or a non-empty array of
+  // numbers (either one satisfies it, e.g. an "enhanced OR premium" quote);
+  // unit allows accented Spanish letters ("aplicación") alongside plain a-z.
+  amount_requires_unit: () => (v) => (isPlainObject(v)
+    && (Array.isArray(v.amount) ? (v.amount.length > 0 && v.amount.every((n) => Number.isFinite(Number(n)))) : Number.isFinite(Number(v.amount)))
+    && typeof v.unit === 'string' && /^[a-záéíóúñ]+$/i.test(v.unit) && Object.keys(v).length === 2
+    ? null : 'value must be { amount: <number|number[]>, unit: "<word>" }'),
+  // Codex round-5 P1: `afterTool` (allowWindow only) makes the allowed
+  // window depend on an EARLIER successful call to that tool — a window
+  // spoken before it ever ran is invented (no tool has grounded it yet)
+  // regardless of whether it happens to match the tool's eventual answer.
+  no_visit_time: (knownTools) => (v) => {
     if (v === true) return null;
-    if (!isPlainObject(v) || Object.keys(v).length !== 1) return 'value must be true, { allowWindow: [h1, h2] } or { about: "reopening" }';
-    if (v.allowWindow !== undefined) return Array.isArray(v.allowWindow) && v.allowWindow.length === 2 && v.allowWindow.every((h) => Number.isInteger(h) && h >= 0 && h <= 23) ? null : 'allowWindow must be two hours 0–23 (24-hour clock: 13 is 1 PM)';
-    if (v.about !== undefined) return v.about in SCHEDULE_PREDICATES ? null : `about must be one of ${Object.keys(SCHEDULE_PREDICATES).join(', ')}`;
-    return 'value must be true, { allowWindow: [h1, h2] } or { about: "reopening" }';
+    if (!isPlainObject(v)) return 'value must be true, { allowWindow: [h1, h2], afterTool?: "<tool>" } or { about: "reopening" }';
+    const keys = Object.keys(v);
+    if (v.allowWindow !== undefined) {
+      const extra = keys.find((k) => !['allowWindow', 'afterTool'].includes(k));
+      if (extra) return `unknown key "${extra}" (allowWindow, afterTool)`;
+      if (!(Array.isArray(v.allowWindow) && v.allowWindow.length === 2 && v.allowWindow.every((h) => Number.isInteger(h) && h >= 0 && h <= 23))) return 'allowWindow must be two hours 0–23 (24-hour clock: 13 is 1 PM)';
+      if (v.afterTool !== undefined && (typeof v.afterTool !== 'string' || !v.afterTool || !knownTools.has(v.afterTool))) return 'afterTool must be a known tool name';
+      return null;
+    }
+    if (v.about !== undefined && keys.length === 1) return v.about in SCHEDULE_PREDICATES ? null : `about must be one of ${Object.keys(SCHEDULE_PREDICATES).join(', ')}`;
+    return 'value must be true, { allowWindow: [h1, h2], afterTool?: "<tool>" } or { about: "reopening" }';
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),

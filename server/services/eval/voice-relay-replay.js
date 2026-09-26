@@ -43,6 +43,13 @@ const Ajv = require('ajv');
 const logger = require('../logger');
 const { attemptReplay, emailFailure, defaultNotify, defaultSendEmail } = require('./call-extraction-replay');
 const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES } = require('./voice-relay-spoken-checks');
+const { normalizeSpanishSpokenText } = require('./voice-relay-spanish-numbers');
+// Same provider-usage normaliser the LLM call ledger uses (input/output/cache
+// read/cache write token columns) — reused here, not duplicated, purely for
+// its field shape; nothing here reads or writes llm_dispatch_log. Sandy's own
+// model calls never go through that ledger (see CLAUDE.md's Voice relay
+// entry), so this is the only place a replay's real token usage is captured.
+const { extractUsage } = require('../llm-dispatch-metrics');
 
 const SCHEMA_VERSION = 'voice-relay-scenarios.v1';
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'voice-relay-eval', 'scenarios.json');
@@ -55,15 +62,22 @@ const OPS_KEY = 'voice-relay-eval';
 const { retireIfClean } = require('../ops-digest-fall-off');
 const OPS_HEADING = 'Voice relay conversation eval';
 // Operational ceiling for the shipped fixture plus one retry, sized for a
-// fixture of up to ninety caller turns and thirty-four scenarios (today's is
-// smaller: 28 scenarios, 77 turns). Every caller turn may use all six
-// 20-second streams (relay-conversation MAX_TOOL_ROUNDS / STREAM_TIMEOUT_MS),
-// not merely one, so ninety turns can spend three hours on Sandy per attempt.
-// Thirty-four judge chains, four-wide at the dispatcher's four-minute budget,
-// add 36 minutes. Twice that is 7h12m; eight hours leaves 48 minutes for
-// fixture-tool timeouts and other overhead. Re-derive this ceiling if the
+// fixture of up to 130 caller turns and forty-five scenarios (today's is
+// smaller: 43 scenarios, 119 turns, added by the Spanish booking/mechanics
+// slice — was 36 scenarios/98 turns before it). Every caller turn may use all
+// six 20-second streams (relay-conversation MAX_TOOL_ROUNDS /
+// STREAM_TIMEOUT_MS), not merely one, so 130 turns can spend just over four
+// hours (4h20m) on Sandy per attempt. Forty-five judge chains, four-wide at
+// the dispatcher's four-minute budget, take ceil(45/4) = 12 batches — 48
+// minutes, not the 45/4 = 11.25 rounded DOWN to 45 minutes this comment used
+// to claim. 4h20m + 48m is 5h08m per attempt; the eval's own retry-once
+// wrapper doubles that to a 10h16m worst case for the pair. Twelve hours
+// leaves about 1h44m for fixture-tool timeouts and other overhead (Codex
+// round-2 P2: the prior 10h ceiling UNDERCUT that 10h16m worst case by 16
+// minutes — this is a floor, not a target, so it must exceed the bound with
+// margin, never merely round up to meet it). Re-derive this ceiling if the
 // live bounds change or the fixture grows past those counts.
-const CHILD_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+const CHILD_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const JUDGE_CONCURRENCY = 4;
 // scenario.gates key → the env var the relay reads at call time. Every one of
 // these is read per call (no module-top reads), so a scenario may flip them
@@ -383,14 +397,20 @@ const CHECK_VALUE_RULES = Object.freeze({
   // rejected or not — an early guess is the violation even if the fixture
   // refused it) before caller turn `turn`. The sibling of
   // `tools_called_at_most`'s per-scenario ceiling: a cap alone cannot say
-  // WHICH call was premature, only that too many happened.
+  // WHICH call was premature, only that too many happened. An optional
+  // `input` narrows it to a specific call shape (e.g. a specific slot_ref)
+  // when the same tool legitimately fires at different turns for different
+  // inputs (Codex round-4: slot-gone's S1 request may not precede the
+  // caller's first pick, but S3's REPLACEMENT request may not precede the
+  // second pick either, on the SAME tool).
   tool_not_called_before_turn: (knownTools) => (v) => {
-    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn> }';
-    const unknown = Object.keys(v).find((k) => !['tool', 'turn'].includes(k));
-    if (unknown) return `unknown key "${unknown}" (tool, turn)`;
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn>, input?: {...} }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'turn', 'input'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, turn, input)`;
     if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
     if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
     if (!Number.isInteger(v.turn) || v.turn < 1) return 'turn must be a caller turn number (1 is the first)';
+    if (v.input != null && !isPlainObject(v.input)) return 'input must be a plain object of expected fields';
     return null;
   },
   ...SPOKEN_CHECK_VALUE_RULES,
@@ -1118,7 +1138,22 @@ function installHarness() {
         if (record && stream && typeof stream.finalMessage === 'function') {
           const finalMessage = stream.finalMessage.bind(stream);
           stream.finalMessage = () => finalMessage().then(
-            (msg) => { record.modelRounds += 1; return msg; },
+            (msg) => {
+              record.modelRounds += 1;
+              // Real usage only — a scripted test double's message with no
+              // `usage` block (most of the harness's own tests) contributes
+              // nothing and is not counted as a round for the cache-hit rate.
+              if (msg && msg.usage && typeof msg.usage === 'object') {
+                const u = extractUsage('anthropic', msg);
+                record.usage.input_tokens += u.input_tokens || 0;
+                record.usage.output_tokens += u.output_tokens || 0;
+                record.usage.cached_input_tokens += u.cached_input_tokens || 0;
+                record.usage.cache_write_tokens += u.cache_write_tokens || 0;
+                record.usage.rounds += 1;
+                if (u.cached_input_tokens) record.usage.cacheReadRounds += 1;
+              }
+              return msg;
+            },
             (err) => {
               // The relay aborts the same controller for a caller barge-in AND
               // for its 20 s stream timeout. Only an abort that lands while the
@@ -1318,10 +1353,12 @@ const CHECK_RUNNERS = Object.freeze({
   // `tool` is the violation this check exists to catch even when the
   // fixture rejected it for missing/invalid arguments.
   tool_not_called_before_turn(value, record) {
-    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn);
+    const scope = value.input ? ` with ${JSON.stringify(value.input)}` : '';
+    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn
+      && (!value.input || inputIncludes(t.input || {}, value.input).length === 0));
     return early.length
-      ? ['fail', `${value.tool} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
-      : ['pass', `${value.tool} never called before caller turn ${value.turn}`];
+      ? ['fail', `${value.tool}${scope} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
+      : ['pass', `${value.tool}${scope} never called before caller turn ${value.turn}`];
   },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
@@ -1473,13 +1510,30 @@ function allowedToolsCheck(scenario, record) {
   };
 }
 
+// Codex round-3 structural fix: the SINGLE place every check obtains the
+// record it grades. For an `es` scenario, agent-spoken text is normalized
+// here — spelled-out Spanish numbers/times/phone digits become plain
+// digits — before ANY check regex sees it, so the existing digit-based
+// price/time/readback checks close a whole class of "spelled-out Spanish
+// number" gap by construction instead of each maintaining its own Spanish
+// word list. Tool response text is untouched (fixtures are always English).
+// A shallow clone, never a mutation of the caller's own record/events.
+function gradedRecordFor(scenario, record) {
+  if (scenario.language !== 'es') return record;
+  return {
+    ...record,
+    events: (record.events || []).map((e) => (e.kind === 'agent' ? { ...e, text: normalizeSpanishSpokenText(e.text) } : e)),
+  };
+}
+
 function evaluateChecks(scenario, record) {
+  const graded = gradedRecordFor(scenario, record);
   // Receipt evidence is mandatory for every scenario, including custom fixtures.
   // Ignore explicit copies so they cannot weaken or double-count the invariant.
   return [
-    allowedToolsCheck(scenario, record),
-    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, record),
-    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, record)),
+    allowedToolsCheck(scenario, graded),
+    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, graded),
+    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, graded)),
   ];
 }
 
@@ -1559,6 +1613,17 @@ function newRecord(scenario, h) {
     // — never the module-level constant a per-session override never moves.
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL, modelFallbackReason: null,
     modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false, toolResponseUse: {},
+    // Per-round Anthropic token usage, accumulated as each model round's
+    // finalMessage() resolves (see installHarness's stream.finalMessage
+    // patch below) — same field names extractUsage('anthropic', …) returns.
+    // `rounds` counts only rounds that actually carried a `usage` block (a
+    // scripted test double with none never counts), and `cacheReadRounds` is
+    // how many of those had a non-zero cached_input_tokens — the numerator
+    // for a cache-hit rate. Haiku 4.5's minimum cacheable prefix is 4,096
+    // tokens; Sandy's system prompt is smaller, so this is how we actually
+    // see whether any round gets a cache hit rather than guessing from trial
+    // position (see docs/sandy-benchmark.md).
+    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0 },
   };
 }
 
@@ -1708,6 +1773,21 @@ async function runScenario(scenario, { judge = false, judgeFn = null } = {}) {
 
 // ── The run ───────────────────────────────────────────────────────────────
 
+// Tokens were spent whether or not the scenario ultimately evaluated clean —
+// folded into the run summary unconditionally (a record with no `usage` at
+// all, e.g. a scripted test double with no `usage` block on its messages,
+// contributes zero), so a scenario the harness itself broke on still counts
+// its real spend. Its own function so tallyRecord's complexity stays where
+// it was before this field existed.
+function tallyUsage(summaryUsage, recordUsage = {}) {
+  summaryUsage.input_tokens += recordUsage.input_tokens || 0;
+  summaryUsage.output_tokens += recordUsage.output_tokens || 0;
+  summaryUsage.cached_input_tokens += recordUsage.cached_input_tokens || 0;
+  summaryUsage.cache_write_tokens += recordUsage.cache_write_tokens || 0;
+  summaryUsage.rounds += recordUsage.rounds || 0;
+  summaryUsage.cacheReadRounds += recordUsage.cacheReadRounds || 0;
+}
+
 // One record's contribution to the run summary (misses per tier and telemetry).
 function tallyRecord(summary, r, all) {
   summary.durationMs += r.durationMs || 0;
@@ -1717,6 +1797,7 @@ function tallyRecord(summary, r, all) {
   summary.warnings += (r.warnings || []).length;
   summary.modelRounds += r.modelRounds || 0;
   summary.modelErrors += (r.modelErrors || []).length;
+  tallyUsage(summary.usage, r.usage);
   if (r.error && r.error.code === 'EVAL_MODEL_UNAVAILABLE') summary.modelUnavailable += 1;
   if (r.status === 'error') { summary.replayErrors += 1; summary.replayErrorIds.push(r.id); return; }
   if (r.status === 'fail') { summary.failed += 1; summary.failedIds.push(r.id); } else summary.passed += 1;
@@ -1743,10 +1824,18 @@ function summarize(results, { judge = false } = {}) {
     criticalMisses: 0, adjudicatedMajorMisses: 0, majorMisses: 0, qualityMisses: 0,
     judge, judged: 0, judgeFallbacks: 0, judgeErrors: 0, dbRefusals: 0, unexpectedTools: 0, invalidInputs: 0, warnings: 0,
     modelRounds: 0, modelErrors: 0, modelUnavailable: 0, qualityScore: null, durationMs: 0,
+    // Real per-round Anthropic token usage, summed across every scenario in
+    // this run (see newRecord's `usage` field and the finalMessage patch in
+    // installHarness). `rounds` / `cacheReadRounds` are the cache-hit-rate
+    // denominator/numerator — see cacheHitRate below.
+    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0 },
   };
   const all = [];
   for (const r of results) tallyRecord(summary, r, all);
   summary.qualityScore = qualityScore(all);
+  // null (not 0) with zero rounds carrying usage — no evidence either way,
+  // never read as "no cache hits ever".
+  summary.usage.cacheHitRate = summary.usage.rounds ? summary.usage.cacheReadRounds / summary.usage.rounds : null;
   return summary;
 }
 
@@ -1762,6 +1851,9 @@ function summaryLine(summary = {}) {
     n('dbRefusals') && `dbRefusals=${n('dbRefusals')}`,
     (summary.failedIds || []).length && `failed=[${summary.failedIds.join(', ')}]`,
     (summary.replayErrorIds || []).length && `errors=[${summary.replayErrorIds.join(', ')}]`,
+    summary.usage && summary.usage.rounds
+      ? `tokens(in=${summary.usage.input_tokens}/out=${summary.usage.output_tokens}/cacheRead=${summary.usage.cached_input_tokens}/cacheWrite=${summary.usage.cache_write_tokens}) cacheHitRate=${summary.usage.cacheHitRate == null ? 'n/a' : `${(summary.usage.cacheHitRate * 100).toFixed(1)}%`} (${summary.usage.rounds} round(s) with usage)`
+      : null,
   ];
   return segments.filter(Boolean).join(' ');
 }
@@ -2023,6 +2115,7 @@ module.exports = {
   runVoiceRelayEval,
   runVoiceRelayEvalProcess,
   notifyEvalCrash,
+  summarize,
   summaryLine,
   isFailedVoiceRun,
   _internals: {
