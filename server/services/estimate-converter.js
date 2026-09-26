@@ -4290,6 +4290,10 @@ async function acquireConverterInvoiceDepositLocks(trx, {
 // 402 in-lane-charge quote bypass and the accept-payload nextStep
 // derivation), so the rule can never drift between where money is decided
 // and where the customer-facing flow reacts to that decision.
+// annual_prepay_terms.plan_label is varchar(120) and the term label is
+// "<plan label> Annual Prepay" (14 more characters).
+const TERMITE_ANNUAL_PLAN_LABEL_MAX = 120 - ' Annual Prepay'.length;
+
 function annualPlanRowsFor(estimateData, billingTerm) {
   return billingTerm === 'prepay_annual' ? selectedTermiteAnnualPlanRows(estimateData) : [];
 }
@@ -4668,8 +4672,15 @@ const EstimateConverter = {
     // billing the plan. A no-op for every other program: a quarterly
     // termite line, or any non-termite estimate, always resolves
     // selectedTermiteAnnualPlanRows to [] regardless of billingTerm.
+    //
+    // Detected from the estimate's own rows (selectedTermiteAnnualPlanRows),
+    // NOT the sign-before-pay eligibility helper: that helper also requires
+    // the live gate / a delivery witness / an activation stamp, so with
+    // GATE_TERMITE_ANNUAL_PLAN off an annual-plan draft marked won with
+    // standard billing slipped past (Codex #4937 r1 P1). The product has no
+    // per-application shape whatever the gate says.
     if (billingTerm !== 'prepay_annual'
-      && isTermiteAnnualSignBeforePayAccept(estimate, estimateData, 'prepay_annual')) {
+      && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
       const err = new Error(
         'The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront") — pick that option to continue.',
       );
@@ -7155,10 +7166,19 @@ const EstimateConverter = {
           // catalog's own canonical name, never invented here — falling back
           // to the catalog default only for a legacy/malformed row that
           // predates the stamp.
-          const termiteAnnualPlanLabel = isTermiteAnnualPlanAccept
-            ? (annualPlanRowsForDeferral.find(
+          // Capped so the persisted term label ("<label> Annual Prepay") fits
+          // annual_prepay_terms.plan_label varchar(120) — an over-long stamp
+          // falls back to the catalog name rather than failing the term
+          // insert after the customer has signed (Codex #4937 r1 P2).
+          const stampedTermiteLabel = isTermiteAnnualPlanAccept
+            ? annualPlanRowsForDeferral.find(
               (row) => row && typeof row.planLabel === 'string' && row.planLabel.trim(),
-            )?.planLabel.trim() || 'Subterranean Termite Protection')
+            )?.planLabel.trim()
+            : null;
+          const termiteAnnualPlanLabel = isTermiteAnnualPlanAccept
+            ? (stampedTermiteLabel && stampedTermiteLabel.length <= TERMITE_ANNUAL_PLAN_LABEL_MAX
+              ? stampedTermiteLabel
+              : 'Subterranean Termite Protection')
             : null;
           // Commercial plans are not a WaveGuard membership and tier is the
           // non-member 'none'; label them 'Commercial' rather than letting the

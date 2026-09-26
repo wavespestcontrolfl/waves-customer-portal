@@ -390,6 +390,15 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(invoiceService.create).toHaveBeenCalled();
     });
 
+    test('slice 4 — prepay-only enforcement holds with the gate OFF too (Codex #4937 r1 P1: an undelivered draft marked won with standard billing)', async () => {
+      const { renewals, invoiceService, EstimateConverter } = setup(termiteAnnualLine, { gateOn: false });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', { billingTerm: 'standard', skipAutoSchedule: true }))
+        .rejects.toMatchObject({ code: 'TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY', status: 422 });
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+    });
+
     test('slice 4 — prepay-only enforcement: non-prepay billingTerm on a termite annual-plan estimate is refused outright, never falls through to the ordinary per-application path', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
       const {
@@ -606,6 +615,21 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
       const createArgs = invoiceService.create.mock.calls[0][0];
       expect(createArgs.title).toBe('Subterranean Termite Protection (Custom Label) — Annual Prepay (12 months)');
+    });
+
+    test('slice 4 — naming: a stamped label too long for plan_label varchar(120) with the " Annual Prepay" suffix falls back to the catalog name (Codex #4937 r1 P2)', async () => {
+      const longLabel = `Subterranean Termite Protection ${'X'.repeat(80)}`; // 112 chars
+      const annualPlanRows = [{ plan: 'annual_protection', service: 'termite_bait', annual: 250, planLabel: longLabel }];
+      const { EstimateConverter, renewals } = setup(termiteAnnualLine, {
+        gateOn: true, annualPlanRows, ...awaiting(),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+
+      const termArgs = renewals.createTermForAnnualPrepay.mock.calls[0][0];
+      expect(termArgs.planLabel).toBe('Subterranean Termite Protection Annual Prepay');
+      expect(termArgs.planLabel.length).toBeLessThanOrEqual(120);
     });
 
     test('slice 4 — naming: a prepay discount keeps the effective-rate label on the termite annual line (never the WaveGuard waiver wording)', async () => {
