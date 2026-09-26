@@ -15254,6 +15254,27 @@ const CallRecordingProcessor = {
                 skippedReason: 'start_before_call',
               };
               scheduledDate = null;
+              // Enforce mode files the approved-but-unbooked card for this
+              // skip further down; shadow/legacy mode has no such fallback,
+              // so the office gets the same card here instead of a silent
+              // drop (pre-push audit P1). Same insert shape as the off-hour
+              // card above.
+              if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag: 'auto_booking_skipped_after_approval',
+                    extraction: v2ApprovedExtraction || undefined,
+                    extraPayload: {
+                      skipped_reason: 'start_before_call',
+                      preferred_date_time: extracted.preferred_date_time || null,
+                      service: serviceType,
+                    },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore()
+                  .catch((e) => logger.warn(`[call-proc] start-before-call triage insert failed for ${maskSid(callSid)}: ${e.message}`));
+              }
             }
             if (scheduledDate && scheduledDate < callDateET) {
               logger.warn(
