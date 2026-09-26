@@ -176,6 +176,19 @@ function prepaySwitchSupersededByMarker(prepayInvoiceId) {
 function prepaySwitchRestoreMarker(voidedInvoiceId) {
   return `[prepay-switch-restore:${voidedInvoiceId}]`;
 }
+// Did this prepay replace other charges when it was minted: an on-site
+// switch (a voided row carrying its superseded-by marker) or a positive
+// setup_fee_claims record? The claims table is server-mint only, so admin
+// routes ask here instead of reading it (setup-fee-claims-immutable test).
+async function prepayReplacedCharges(conn, prepayInvoiceId) {
+  return Boolean(
+    await conn("invoices")
+      .where({ status: "void" })
+      .where("notes", "like", `%${prepaySwitchSupersededByMarker(prepayInvoiceId)}%`)
+      .first("id")
+    || await conn("setup_fee_claims").where({ invoice_id: prepayInvoiceId }).where("amount", ">", 0).first("id"),
+  );
+}
 // A REPLACEMENT must never inherit the superseded-by marker (Codex
 // on-site-switch P0 r11): if the replacement is itself voided later, a
 // subsequent sync for the old prepay would read it as ANOTHER superseded
@@ -10247,6 +10260,7 @@ InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
+module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
 module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;

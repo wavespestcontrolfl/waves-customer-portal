@@ -2364,12 +2364,7 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     if (paymentOnInvoice) {
       return 'This annual prepay has a payment on it, so removing the flag would leave that payment on the invoice while the covered visits are billed again. To end the coverage, refund the invoice — a refund cancels the coverage and returns the money.';
     }
-    const replacedCharges = await conn('invoices')
-      .where({ status: 'void' })
-      .where('notes', 'like', `%${InvoiceService.prepaySwitchSupersededByMarker(row.id)}%`)
-      .first('id')
-      || await conn('setup_fee_claims').where({ invoice_id: row.id }).where('amount', '>', 0).first('id');
-    if (replacedCharges) {
+    if (await InvoiceService.prepayReplacedCharges(conn, row.id)) {
       return 'This annual prepay replaced other charges when it was created (an on-site switch or a rodent setup fee). Void the invoice instead — voiding cancels the coverage and restores those charges.';
     }
     return null;
