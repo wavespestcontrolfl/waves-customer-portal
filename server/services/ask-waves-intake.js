@@ -277,7 +277,7 @@ const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES
 // inside after 30 minutes.") — only with treatment context in the reply or
 // the visitor's words, so an appointment-window reply isn't caught.
 const EN_DURATION_RE = /\b(?:minutes?|mins?|hours?|hrs?)\b/i;
-const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
+const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|return(?:ing)?\s+(?:indoors|inside|outside|home|in|to)|back\s+in(?:side|doors)?|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
 const INTAKE_EPA_APPROVED_ES_RE = /\baprobad[oa]s?\s+por\s+la\s+epa\b|\bepa[-\s]+approved\b|\bapproved\s+by\s+(?:the\s+)?epa\b/i;
 
 // In a pest-control chat a pronoun or missing subject ("Yes, it's completely
@@ -292,8 +292,12 @@ function intakeSafetyClaimSupplement(reply, contextText = '') {
   const t = String(reply || '');
   if (INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${contextText || ''}`);
-  if (treatmentContext && INTAKE_REENTRY_MINUTES_ES_RE.test(t)) return true;
-  if (treatmentContext && EN_DURATION_RE.test(t) && EN_DRY_OR_REENTRY_RE.test(t)) return true;
+  // The drying/re-entry wording may be in the visitor's question and only
+  // the duration in the reply ("How long after treatment can I re-enter?" →
+  // "Usually about 30 minutes.").
+  const conversation = `${t}\n${contextText || ''}`;
+  if (treatmentContext && ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(conversation)) return true;
+  if (treatmentContext && EN_DURATION_RE.test(t) && EN_DRY_OR_REENTRY_RE.test(conversation)) return true;
   if (!INTAKE_SAFETY_WORD_RE.test(t)) return false;
   return treatmentContext
     || INTAKE_PRONOUN_SAFE_RE.test(t)
