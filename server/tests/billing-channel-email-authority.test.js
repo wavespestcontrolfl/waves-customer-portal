@@ -260,6 +260,22 @@ describe('billing channel email authority', () => {
     expect(invoiceLocked).toBe(false);
   });
 
+  test('threads the SAME locked transaction into the pre-send check as the invoice/recipient locks (codex r2 P1)', async () => {
+    const lockedTrx = jest.fn((table) => defaultDbImplementation(table));
+    mockWithCustomerCommsLock.mockImplementationOnce(async (database, customerId, callback) => {
+      expect(database).toBe(mockDb);
+      expect(customerId).toBe('cust-1');
+      return callback(lockedTrx);
+    });
+    const preSendCheck = jest.fn(async ({ trx }) => {
+      expect(trx).toBe(lockedTrx);
+      return { ok: true };
+    });
+    const { outcome } = await runAuthority({}, { preSendCheck });
+    expect(outcome.ok).toBe(true);
+    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', trx: lockedTrx });
+  });
+
   test('blocks when invoice ownership changes before provider dispatch', async () => {
     selfPayAtDispatch
       .mockImplementationOnce(() => async () => ({ ok: true }))
@@ -306,11 +322,16 @@ describe('billing channel email authority', () => {
     expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'EMAIL_RECIPIENT_CHANGED' });
   });
 
-  test('invokes the pre-send check for the email channel before dispatch', async () => {
+  test('invokes the pre-send check for the email channel before dispatch, threading the locked transaction (codex r2 P1)', async () => {
     const preSendCheck = jest.fn(async () => ({ ok: true }));
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email' });
+    // The check runs while withCustomerCommsLock's transaction is held —
+    // threading it through lets the boundary check's own fresh contact/
+    // suppression/annual-offer reads reuse this SAME connection instead of
+    // opening a second one from the root pool (DB_POOL_MAX=2 deadlock risk
+    // under two concurrent billing emails).
+    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', trx: mockDb });
   });
 
   test('blocks dispatch when the pre-send check fails', async () => {

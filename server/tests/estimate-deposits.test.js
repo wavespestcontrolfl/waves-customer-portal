@@ -353,6 +353,65 @@ describe('webhook + invoice credit', () => {
     renderSmsTemplate.mockResolvedValue(null);
   });
 
+  it('an App-only no-phone requeue is registered so the scheduler never exhausts phone-refresh (finding E)', async () => {
+    forceRecordableViaFailOpen();
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1' },
+      customerRow: { id: 'cust-1', phone: '', first_name: 'Sam' },
+      prefsRow: { payment_receipt_channels: ['push'] },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({ status: 'scheduled', message_type: 'deposit_receipt', to_phone: '' });
+    const meta = JSON.parse(state.smsLogInserts[0].metadata);
+    expect(meta).toMatchObject({
+      entry_point: 'estimate_deposit_receipt_requeue',
+      requires_registered_dispatch: true,
+      billingDeliveryCategory: 'payment_receipt',
+    });
+    const { replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
+    expect(replaysWithoutPhone(meta.entry_point)).toBe(true);
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('a phone-bearing requeue of the same entry point never stamps requires_registered_dispatch', async () => {
+    forceRecordableViaFailOpen();
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    const meta = JSON.parse(state.smsLogInserts[0].metadata);
+    expect(meta.entry_point).toBe('estimate_deposit_receipt_requeue');
+    expect(meta.requires_registered_dispatch).toBeUndefined();
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
   it('requeues a quiet-held deposit receipt onto the scheduled-SMS rail', async () => {
     forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');

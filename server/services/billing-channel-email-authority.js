@@ -112,11 +112,17 @@ async function loadBillingEmailContext(input, database = db, { lockRecipients = 
   };
 }
 
-async function preSendBlock(preSendCheck) {
+async function preSendBlock(preSendCheck, trx) {
   if (typeof preSendCheck !== 'function') return null;
   let verdict;
   try {
-    verdict = await preSendCheck({ channel: 'email' });
+    // Codex r2 P1: thread the locked withCustomerCommsLock transaction this
+    // recheck already runs inside (verifyAndDispatch below) so the boundary
+    // check's own fresh contact/suppression reads reuse it instead of
+    // opening a second root-pool connection — with DB_POOL_MAX=2, two
+    // concurrent billing emails each holding trx while also blocking on a
+    // second connection for this read can deadlock the pool.
+    verdict = await preSendCheck({ channel: 'email', trx });
   } catch (err) {
     verdict = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
   }
@@ -156,7 +162,7 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
       'Billing email recipient changed before delivery',
       { retryable: true },
     );
-  } else state.boundaryBlock = await preSendBlock(preSendCheck);
+  } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category);
   if (state.boundaryBlock) return { ok: false };
 

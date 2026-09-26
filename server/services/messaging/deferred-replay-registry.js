@@ -239,6 +239,32 @@ const REGISTRY = {
     },
   },
 
+  // estimate-deposits.js queues this row when the customer's deposit-receipt
+  // channel selection is App-ONLY and no phone is on file (or, per its own
+  // comment, when send_customer_message's provider handoff failed for a
+  // reason worth retrying). estimate-deposits.js stamps
+  // requires_registered_dispatch ONLY on the no-phone rows — a phone-bearing
+  // retry of this SAME entry_point never sets it, so this dispatch always
+  // delegates those straight back to defaultDispatch (the frozen queued
+  // body), byte-identical to before this entry existed.
+  //
+  // replayWithoutPhone lets the scheduler's canReplayBillingWithoutPhone
+  // (scheduler.js) tolerate a blank/unresolvable recipient for an App-only
+  // row instead of exhausting the bounded phone-refresh rail and blocking
+  // the receipt forever (codex r2 P1). A registered dispatch cannot reuse
+  // the frozen sms_log body (only claimMeta reaches it, never msg.body), so
+  // the no-phone case re-renders the receipt fresh from the current
+  // estimate/customer/ledger state and re-enters the canonical router —
+  // exactly what a fresh replay is supposed to do per this module's own
+  // dispatch contract above.
+  estimate_deposit_receipt_requeue: {
+    replayWithoutPhone: true,
+    async dispatch(meta, defaultDispatch) {
+      if (meta.requires_registered_dispatch !== true) return defaultDispatch();
+      return require('../estimate-deposits').replayDepositReceiptAppOnly(meta);
+    },
+  },
+
   invoice_send_deferred: {
     async recheck(meta) {
       return invoiceStillCollectible(meta);
@@ -1493,9 +1519,14 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
 // fresh copy and its final send guard. Their outcome/error propagates as-is:
 // falling back after either one could send the frozen queued body. The marker
 // protects rows produced during a rolling deploy until their entry is loaded.
+// defaultDispatch is threaded through as the entry's second argument so an
+// entry that only needs to intercept a SUBSET of its own rows (e.g. a
+// requires_registered_dispatch marker set on some but not all rows of one
+// entry_point — see estimate_deposit_receipt_requeue) can delegate the rest
+// straight back to the frozen-body default instead of reimplementing it.
 async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatch) {
   const entry = entryFor(entryPoint);
-  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta);
+  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta, defaultDispatch);
   if (claimMeta.requires_registered_dispatch === true) {
     return {
       sent: false,

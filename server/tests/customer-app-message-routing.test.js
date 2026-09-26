@@ -521,6 +521,21 @@ describe('explicit billing channel combinations', () => {
     expect(sendBillingChannelEmail).not.toHaveBeenCalled();
   });
 
+  test('an unresolved phone-keyed suppression read fails CLOSED for Email, same as App (finding A)', async () => {
+    // checkSuppression only consults the phone-keyed messaging_suppression
+    // table — the ONLY place manual_dnc / opt_out live. The billing email
+    // authority's own suppression recheck only ever consults the
+    // email-template suppression store, never this one, so a transient read
+    // failure here must fail closed for Email exactly like it already does
+    // for App, or a DB blip lets a manual_dnc / opt-out recipient through on
+    // the Email leg.
+    prefs.payment_receipt_channels = ['email'];
+    suppressionError = true;
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults.email).toMatchObject({ sent: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
   test.each([['push'], ['email', 'push']])('unavailable App never creates an unselected text: %j', async (...channels) => {
     prefs.payment_receipt_channels = channels;
     Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'no_fresh_device' });
@@ -528,6 +543,23 @@ describe('explicit billing channel combinations', () => {
     expect(result.channelResults.push).toMatchObject({ sent: false, code: 'APP_UNAVAILABLE' });
     expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
     expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+  });
+
+  test('a mid-dispatch App preference change is retryable, not a terminal APP_UNAVAILABLE (finding D)', async () => {
+    // pushEligibleRuntime's late re-read (push-channel-routing.js) can catch
+    // a switch away from App that landed after this leg was selected — the
+    // SAME race the consent layer's BILLING_PREFERENCES_CHANGED/
+    // CHANNEL_NOT_SELECTED refusals cover for Email/Text. It must get the
+    // identical retryable/not_sent contract so the caller's retry re-fans-out
+    // under the same notificationEventKey, instead of a dead-end terminal
+    // APP_UNAVAILABLE that drops the event.
+    prefs.payment_receipt_channels = ['push'];
+    Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'preference_changed' });
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults.push).toMatchObject({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'APP_PREFERENCES_CHANGED', retryable: true,
+    });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   });
 
   test('a provider failure does not prevent the other selected channels', async () => {
@@ -765,6 +797,36 @@ describe('explicit billing channel combinations', () => {
     expect(result.channelResults).toMatchObject({ push: { sent: true, deliveryOutcome: 'accepted' } });
     expect(Twilio.sendSMS).toHaveBeenCalledWith(null, input.body, expect.objectContaining({ explicitPushOnly: true }));
     expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
+  test('the withheld-link rewrite reaches the recursive App leg, not just the SMS-shaped pass (finding C)', async () => {
+    // Only the top-level call still has channel:'sms' when the withheld-link
+    // rewrite block runs — the recursive App leg's OWN sendCustomerMessageCore
+    // call has already flipped sendInput.channel to 'push' by then, so it
+    // never re-runs the rewrite itself. Without carrying the rewritten
+    // body/cleared estimateId into the fan-out, the App leg would still
+    // carry the original estimateId into annualOfferGuardVerdict and refuse
+    // an owed receipt whose offer is withheld.
+    prefs.payment_receipt_channels = ['push'];
+    const AnnualGuard = require('../services/estimate-annual-guard');
+    const rewrittenBody = 'Your deposit was received — view your receipt in the Waves app.';
+    const rewriteSpy = jest.spyOn(AnnualGuard, 'rewriteWithheldEstimateLinks')
+      .mockResolvedValue({ text: rewrittenBody, rewrittenIds: ['est-1'] });
+    try {
+      const result = await sendCustomerMessage({
+        ...input,
+        estimateId: 'est-1',
+        body: 'Your deposit was received. https://portal.wavespestcontrol.com/estimate/abcdefghijklmnop',
+      });
+      expect(result.channelResults.push).toMatchObject({ sent: true });
+      expect(Twilio.sendSMS).toHaveBeenCalledWith(
+        input.to,
+        rewrittenBody,
+        expect.objectContaining({ explicitPushOnly: true, estimateId: null, estimateIds: [] }),
+      );
+    } finally {
+      rewriteSpy.mockRestore();
+    }
   });
 
   test('a missing phone suppresses only the selected Text leg', async () => {
