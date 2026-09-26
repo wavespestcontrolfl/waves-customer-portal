@@ -165,7 +165,8 @@ jobs:
         run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
-        run: npx jest --ci --silent --maxWorkers=2
+        # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
+        run: npx jest --ci --silent --maxWorkers=2 --config='{"workerIdleMemoryLimit":"2GB"}'
       - name: Customer backend coverage floor
         # A focused, measured threshold for customer-app auth, pricing,
         # autopay, notification, and upload-validation logic. The broad suite
