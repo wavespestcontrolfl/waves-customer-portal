@@ -159,6 +159,7 @@ it('shows gated history as a suggestion and records only choices the technician 
 
 it.each([
   ['recurring pest', 'Quarterly Pest Control', { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false }, null, 'Live pest activity was visible in an inspected exterior area.'],
+  ['pest re-service', 'Pest Re-Service', { serviceKey: 'pest_re_service', billingType: 'one_time', requiresProducts: false }, null, 'Live pest activity was visible in an inspected exterior area.'],
   ['typed tree/shrub', 'Every 6 Weeks Tree & Shrub Care Service', { serviceKey: 'tree_shrub', findingsType: 'tree_shrub', requiresProducts: false }, { type: 'tree_shrub', schemaVersion: 2, fields: [], nextStepChips: [] }, 'Yellow foliage was visible; the cause was not confirmed.'],
 ])('submits a searchable %s observation through the customer-safe field', async (_family, serviceType, completionProfile, findingsSchema, observation) => {
   completionChoicesEnabled = true;

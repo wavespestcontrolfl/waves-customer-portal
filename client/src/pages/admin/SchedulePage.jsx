@@ -13700,7 +13700,8 @@ export function CompletionPanel({
       : treeShrubCloseoutOn
         ? "tree_shrub"
         : serviceLineForCloseout === "pest" && !isTypedFindings
-          && service.completionProfile?.billingType === "recurring"
+          && (service.completionProfile?.billingType === "recurring"
+            || service.completionProfile?.serviceKey === "pest_re_service")
           ? "recurring_pest"
           : null
     : null;
