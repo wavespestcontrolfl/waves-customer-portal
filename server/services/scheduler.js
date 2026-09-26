@@ -2415,6 +2415,35 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Amazon "Delivered" email → auto-restock safety net. The
+  // post-email-sync hook (email-sync.js) handles the common case right when
+  // the email lands; this sweep scans `emails` directly (from_address +
+  // subject, never LLM classification) for anything it missed — a process
+  // restart mid-sync, a swallowed hook error, a backfill. Gate
+  // GATE_PURCHASE_RECEIPT_RESTOCK is read INSIDE the sweep at call time
+  // (also requires PURCHASE_RECEIPT_SINCE); kill = unset either one.
+  // runExclusive: an overlapping tick must not double-claim the same line
+  // (purchase_receipt_lines' own UNIQUE constraint is the hard backstop).
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    if (!gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK')) return;
+    try {
+      await runExclusive('purchase-receipt-restock', async () => {
+        const { runPurchaseReceiptRestockSweep } = require('./purchase-receipts/sweep');
+        const result = await runPurchaseReceiptRestockSweep();
+        if (result?.skipped) return;
+        const loggedCount = result?.logged?.length || 0;
+        const attentionCount = (result?.unmatched?.length || 0) + (result?.sizeMismatch?.length || 0) + (result?.needsSize?.length || 0);
+        if (loggedCount > 0 || attentionCount > 0 || result?.errors?.length > 0) {
+          logger.info(`[purchase-receipt-restock] ${loggedCount} logged, ${attentionCount} need a look, ${result?.errors?.length || 0} error(s)`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Purchase receipt restock sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:20AM ET — Prune the inbound-webhook idempotency ledger. Twilio
   // never redelivers a webhook days later, so a 7-day horizon is ample; this
   // keeps inbound_webhook_events from growing unbounded.

@@ -245,6 +245,18 @@ Use for: "I ordered the Bifen", "the SiteOne order arrived", "cancel that Prodia
       required: ['request_id', 'action'],
     },
   },
+  {
+    name: 'list_unlogged_purchases',
+    description: `List Amazon deliveries the auto-restock lane could NOT log automatically: no confident product match, a title/catalog size conflict, or a product with no parseable container size. Read-only — never writes stock. Use to catch a delivery that needs a manual restock or a catalog fix (e.g. a missing container_size).
+Use for: "what Amazon deliveries need a look?", "why didn't the Taurus SC order log itself?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['unmatched', 'size_mismatch', 'needs_size', 'all'], description: 'Filter by why it was not logged (default: all three non-logged statuses)' },
+        limit: { type: 'integer', minimum: 1, maximum: 200 },
+      },
+    },
+  },
 ];
 
 
@@ -269,6 +281,7 @@ async function executeProcurementTool(toolName, input, actionContext = {}) {
       case 'adjust_stock': return await adjustStock(input, actionContext);
       case 'create_restock_request': return await createRestockRequest(input, actionContext);
       case 'update_restock_request': return await updateRestockRequest(input, actionContext);
+      case 'list_unlogged_purchases': return await listUnloggedPurchases(input);
       default: return { error: `Unknown procurement tool: ${toolName}` };
     }
   } catch (err) {
@@ -1148,6 +1161,38 @@ async function updateRestockRequest(input, actionContext) {
     ...(result.movement ? { movement_id: result.movement.id, stock_before: toNumber(result.movement.stock_before),
       added: toNumber(result.movement.quantity), stock_after: toNumber(result.movement.stock_after), unit: result.movement.unit } : {}),
     receipt: { label: labels[input.action], summary, href: result.href } };
+}
+
+const UNLOGGED_PURCHASE_STATUSES = ['unmatched', 'size_mismatch', 'needs_size'];
+
+// Read-only visibility into the Amazon delivery auto-restock lane
+// (server/services/purchase-receipts) for whatever it declined to log
+// automatically. Never writes stock — a manual adjust_stock/create_restock_request
+// call, or a catalog container_size fix, is how the office follows up.
+async function listUnloggedPurchases(input) {
+  const status = input?.status || 'all';
+  const limit = Math.min(input?.limit || 50, 200);
+  try {
+    let query = db('purchase_receipt_lines as prl')
+      .leftJoin('products_catalog as pc', 'pc.id', 'prl.product_id')
+      .whereIn('prl.status', status === 'all' ? UNLOGGED_PURCHASE_STATUSES : [status])
+      .select('prl.id', 'prl.vendor', 'prl.order_number', 'prl.raw_title', 'prl.quantity', 'prl.status', 'prl.created_at', 'pc.name as matched_product_name')
+      .orderBy('prl.created_at', 'desc')
+      .limit(limit);
+    const rows = await query;
+    return {
+      lines: rows.map((r) => ({
+        id: r.id, vendor: r.vendor, order_number: r.order_number, title: r.raw_title,
+        quantity: toNumber(r.quantity), status: r.status, matched_product: r.matched_product_name || null,
+        created_at: r.created_at,
+      })),
+      total: rows.length,
+      note: 'unmatched = no confident product match (non-chemical items land here too); size_mismatch = the title\'s own pack size disagreed with the product\'s container_size; needs_size = the matched product has no parseable container_size.',
+    };
+  } catch (err) {
+    logger.warn(`[intelligence-bar:procurement] list_unlogged_purchases failed: ${err.message}`);
+    return { lines: [], total: 0, error: 'Could not read purchase_receipt_lines.' };
+  }
 }
 
 module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget };

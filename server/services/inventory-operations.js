@@ -3,6 +3,12 @@
  * Bar. These record staff actions; vendor checkout remains in order-dispatch.
  * Product locks serialize adjustments/creation. Request actions retain the
  * dispatcher's ledger -> request -> product lock order.
+ *
+ * options.extraMetadata (adjustStock, updateRestockRequest): merged onto the
+ * written product_inventory_movements.metadata, after the fields this module
+ * always sets — an automated writer's own provenance (e.g. the Amazon
+ * delivery auto-restock lane's { source: 'amazon_delivery', orderNumber,
+ * emailId, rawTitle }) without inventing a second movement-writing path.
  */
 const crypto = require('crypto');
 const Joi = require('joi');
@@ -151,7 +157,8 @@ async function adjustStock(productId, raw, options = {}) {
       lot_number: input.lotNumber || null,
       metadata: { source: options.source || 'admin_manual_adjustment', adjustedBy: options.actorId || null,
         reason: input.reason || null, note: input.note || null, delta: plan.delta, setTotal: input.setTotal ?? null,
-        enteredQuantity: plan.enteredQuantity, enteredUnit: plan.enteredUnit, conversionConfidence: plan.conversionConfidence },
+        enteredQuantity: plan.enteredQuantity, enteredUnit: plan.enteredUnit, conversionConfidence: plan.conversionConfidence,
+        ...(options.extraMetadata || {}) },
     }).returning('*');
     const saved = await trx('products_catalog').where({ id: productId }).first();
     if (!movement?.id || numberOrNull(saved?.inventory_on_hand) !== plan.stockAfter || saved.inventory_unit !== plan.inventoryUnit) {
@@ -290,7 +297,8 @@ async function updateRestockRequest(requestId, raw, options = {}) {
         metadata: { source: options.source || 'restock_request_receive', restockRequestId: requestId,
           adjustedBy: options.actorId || null, note: input.note || null, enteredQuantity: plan.quantity,
           enteredUnit: plan.enteredUnit, conversionConfidence: plan.conversionConfidence,
-          ...(plan.secondReceive ? { secondReceive: true } : {}) },
+          ...(plan.secondReceive ? { secondReceive: true } : {}),
+          ...(options.extraMetadata || {}) },
       }).returning('*');
       const saved = await trx('products_catalog').where({ id: product.id }).first();
       if (!movement?.id || numberOrNull(saved?.inventory_on_hand) !== plan.stockAfter || saved.inventory_unit !== plan.inventoryUnit) {

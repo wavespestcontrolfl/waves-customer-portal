@@ -2840,6 +2840,12 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
+  // Amazon "Delivered" email → auto-restock (server/services/purchase-receipts).
+  // Ships DARK: off unless set (gateEnvValue), read at call time by both the
+  // post-email-sync hook and the ~15-minute scheduler sweep — a flip needs no
+  // redeploy. Also requires PURCHASE_RECEIPT_SINCE (an ISO timestamp) set,
+  // independently of this gate, or the lane does nothing (see sweep.js).
+  purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
