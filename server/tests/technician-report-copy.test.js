@@ -95,6 +95,13 @@ describe('custom action credential screening', () => {
     'USE 2468 TO OPEN THE GATE',
     'USE AB-24-68-XY AT THE SIDE GATE',
     'USE AB-24-68-XY TO OPEN THE GATE',
+    'Use 24-68-ab at the side gate',
+    'Use 24-68-xy to open the side gate',
+    'Opened side gate with 2468ml',
+    'Unlocked rear door using 2468ft',
+    'Use 2468ft to open the gate',
+    'Enter 2468ml at the side keypad',
+    'The gate opens with 2468oz',
     'Rear gate AB-24-0-11 fertilizer',
     'Rear gate is AB-24-0-11 fertilizer',
     'Rear gate #AB-24-0-11 fertilizer',
@@ -118,6 +125,7 @@ describe('custom action credential screening', () => {
     'Doorway #2468 was inspected; treated 120 linear feet',
     'Opened the gate onto 400 sqft of treated turf',
     'Opened rear gate, applied 100 ml around hinges',
+    'Opened rear gate, applied 100ml around hinges',
     'Inspected the rear gate 120–150 feet from the lanai',
     'Opened rear gate, applied 24-68ml around hinges',
     'Applied 24-0-11 near the rear gate',
@@ -142,7 +150,10 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'USE 2468 TO OPEN THE GATE',
     'USE AB-24-68-XY AT THE SIDE GATE',
     'USE AB-24-68-XY TO OPEN THE GATE',
-  ])('does not publish uppercase access instructions: %s', (instruction) => {
+    'Use 24-68-ab at the side gate',
+    'Opened side gate with 2468ml',
+    'Use 2468ft to open the gate',
+  ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
     expect(parsed.violations).toContain('access_code');

@@ -157,6 +157,25 @@ describe('generate-report provider fallback', () => {
     expect(anthropic.call).toHaveBeenCalledTimes(1);
   });
 
+  test.each([
+    'Use 24-68-ab at the side gate.',
+    'Opened side gate with 2468ml.',
+    'Use 2468ft to open the gate.',
+  ])('retries a shaped response carrying a disguised access credential: %s', async (instruction) => {
+    const unsafe = {
+      ok: true,
+      text: `WHAT WE DID\n\n${instruction}\n\nWHAT WE FOUND\n\nActivity was low.`,
+    };
+    const openai = provider('openai', [unsafe, { ok: true, text: cleanReport }]);
+
+    const result = await generateReportCopyWithFallback({
+      systemPrompt: 'system', userMessage: 'visit', providers: [openai, provider('anthropic', [])],
+    });
+
+    expect(result).toMatchObject({ ok: true, provider: 'openai', report: cleanReport });
+    expect(openai.call).toHaveBeenCalledTimes(2);
+  });
+
   test('fails cleanly only after both providers are unavailable', async () => {
     const anthropic = provider('anthropic', [{ ok: false, reason: 'anthropic_529' }]);
     const openai = provider('openai', [{ ok: false, reason: 'openai_503' }]);
@@ -569,8 +588,16 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('Rear gate A2B-XY-24-0-11-ZZ fertilizer.')).toBe('access_code');
     expect(reportCopyRejection('Rear gate ab 24-0-11 fertilizer.')).toBe('access_code');
     expect(reportCopyRejection('Rear gate 24-0-11-AB fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Use 24-68-ab at the side gate.')).toBe('access_code');
+    expect(reportCopyRejection('Use 24-68-xy to open the side gate.')).toBe('access_code');
+    expect(reportCopyRejection('Opened side gate with 2468ml.')).toBe('access_code');
+    expect(reportCopyRejection('Unlocked rear door using 2468ft.')).toBe('access_code');
+    expect(reportCopyRejection('Use 2468ft to open the gate.')).toBe('access_code');
+    expect(reportCopyRejection('Enter 2468ml at the side keypad.')).toBe('access_code');
+    expect(reportCopyRejection('The gate opens with 2468oz.')).toBe('access_code');
     expect(reportCopyRejection('Opened the gate onto 400 sqft of treated turf.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 100 ml around hinges.')).toBeNull();
+    expect(reportCopyRejection('Opened rear gate, applied 100ml around hinges.')).toBeNull();
     expect(reportCopyRejection('Inspected the rear gate 120–150 feet from the lanai.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 24-68ml around hinges.')).toBeNull();
     expect(reportCopyRejection('Applied 24-0-11 near the rear gate.')).toBeNull();

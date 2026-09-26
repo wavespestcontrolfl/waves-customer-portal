@@ -185,8 +185,12 @@ const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|
 // Uppercase relation/action words are context too: consuming "AT THE SIDE"
 // or "TO OPEN THE" would erase the link between a credential and its device.
 const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AT|FOR|TO|ON|IN|INTO|NEAR|BY|AS|WITH|USING|VIA|IS|WAS|WERE|REMAINS?|STAYS?|BECOMES?|OPEN(?:S|ED|ING)?|UNLOCK(?:S|ED|ING)?|ACCESS(?:ES|ED|ING)?|ENTER(?:S|ED|ING)?)\b)(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
+// A suffix joined by a hyphen is part of the credential token even when it
+// is lowercase ("24-68-ab"). Keep the uppercase-only rule for whitespace:
+// lowercase words separated by spaces are ordinary surrounding prose.
+const REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP = String.raw`(?!(?:at|for|to|on|in|into|near|by|as|with|using|via|is|was|were|remains?|stays?|becomes?|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b)(?=[A-Za-z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
 const REPORT_CREDENTIAL_TRAILING_AFFIX_RE = new RegExp(String.raw`^${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}$`);
-const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:[\s–—-]+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}){0,3}`;
+const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:(?:\s+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}|\s*[–—-]\s*${REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP})){0,3}`;
 const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
   String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
   'gi',
@@ -297,6 +301,7 @@ const REPORT_CREDENTIAL_TOKEN_RE = new RegExp(
   String.raw`(^|[^A-Za-z0-9])(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
   'g',
 );
+const REPORT_CREDENTIAL_CONTEXT_PREFIX_RE = /^(?:(?:use|using|enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|with|via|to|for|at|on|into|near|by)\s+)+/i;
 
 function accessCodeDetectionText(text) {
   return text.replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
@@ -308,13 +313,31 @@ function accessCodeDetectionText(text) {
       const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
       return `${prefix}${direction}${compactDevice[2]} ${digits}`;
     }
-    return `${prefix}${digits}`;
+    // The token grammar accepts alphabetic prefixes for forms such as
+    // "AB 2468". Preserve access verbs/connectors that happen to occupy that
+    // slot so normalization cannot erase the credential/device relationship.
+    const contextPrefix = token.match(REPORT_CREDENTIAL_CONTEXT_PREFIX_RE)?.[0] || '';
+    return `${prefix}${contextPrefix}${digits}`;
   });
 }
 
+// Measurement-looking suffixes do not make a credential safe when the
+// original sentence directly ties that token to opening or entering a device.
+// Keep this relationship check narrow so later treatment detail remains legal:
+// "Opened rear gate, applied 100 ml around hinges" has no access connector.
+const REPORT_DIRECT_ACCESS_CODE_RES = [
+  /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
+  /\b\d{3,8}\b\s+(?:to|for)\s+(?:open|unlock|access|enter)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
+  /\b(?:use|using|enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
+  /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
+];
+
 function containsReportAccessCode(text) {
   if (containsExplicitNumericCredential(text)) return true;
-  const value = maskFertilizerAnalyses(text).replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
+  const fertilizerScreened = maskFertilizerAnalyses(text);
+  const originalRelationship = accessCodeDetectionText(fertilizerScreened);
+  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(originalRelationship))) return true;
+  const value = fertilizerScreened.replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
   const normalized = accessCodeDetectionText(value);
   // Normalization adds grouped/affixed spellings; it must never remove an
   // access relationship that the original, measurement-screened copy exposes.
