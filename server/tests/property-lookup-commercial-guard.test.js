@@ -1460,8 +1460,10 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
   test('the kept unit sqft never becomes a slab / attic / perimeter footprint (codex r2 P1)', () => {
     const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
     expect(profile.homeSqFt).toBe(725);
-    expect(profile.footprint).toBe(0);
-    expect(profile.footprintUnknown).toBe(true);
+    // Pest still prices the unit's own living area — footprintUnknown
+    // would force it to manual review.
+    expect(profile.footprint).toBe(725);
+    expect(profile.footprintUnknown).toBeUndefined();
     expect(profile.estimatedPerimeterLF).toBeNull();
     expect(profile.estimatedAtticSqFt).toBeNull();
     expect(profile.estimatedSlabSqFt).toBeNull();

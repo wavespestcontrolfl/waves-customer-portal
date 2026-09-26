@@ -1912,11 +1912,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // #2721). Aggregates with a known story count (Manatee) still prefill.
   const aggregateStoriesUnknown = Boolean(rc?._parcel?.aggregated)
     && !(Number(rc?.stories) >= 1);
-  // One unit inside a building has no footprint of its own: a kept condo
-  // unit's living area is interior floor space, not the slab, attic deck, or
-  // exterior wall a termite measurement prices from — an upper unit has
-  // none of those at all (codex r2 P1). Same suppression as the aggregate,
-  // so the estimator's termite autofill never re-derives one from homeSqFt.
+  // One unit inside a building has no slab, attic deck, or exterior wall of
+  // its own: a kept condo unit's living area is interior floor space, so the
+  // termite measurement prefills stand down (codex r2 P1). footprint /
+  // footprintUnknown are NOT touched — recurring pest prices the unit's
+  // living area off them, and footprintUnknown would force it to manual
+  // review. The estimator suppresses its own termite autofill for a unit.
   const footprintNotDerivable = aggregateStoriesUnknown || unitLookup;
   const estimatedPerimeterLF = footprintSf > 0 && !footprintNotDerivable
     ? Math.round(buildingCount * 4 * Math.sqrt(footprintSf / buildingCount) * perimeterLayoutFactor)
@@ -2010,13 +2011,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
     // record/search source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
-    footprint: footprintNotDerivable ? 0 : footprintSf,
+    footprint: aggregateStoriesUnknown ? 0 : footprintSf,
     // Machine-readable twin of the HIGH footprint flag: BOTH the estimator's
     // termite autofill and calculatePropertyProfile re-derive a footprint
     // from homeSqFt/stories when footprint is 0, which would resurrect the
     // summed-living-area slab this suppression exists to prevent (codex P1
     // r4 #2721). Consumers skip derivation when this is set.
-    footprintUnknown: footprintNotDerivable || undefined,
+    footprintUnknown: aggregateStoriesUnknown || undefined,
     // Rough pre-fills for the estimator's termite measurement boxes: the
     // attic deck and the slab both approximate the ground-floor footprint
     // (top floor ≈ footprint on equal-floor homes). Published under
