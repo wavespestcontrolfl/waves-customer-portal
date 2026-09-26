@@ -30,7 +30,7 @@ const suite = local || managed || ci ? describe : describe.skip;
 
 suite('first-application-sibling-split — same-trip resplit on date change', () => {
   let db;
-  const { reconcileFirstApplicationSplitOnDateChange } = require('../services/first-application-sibling-split');
+  const { reconcileFirstApplicationSplitOnDateChange, reconcileFirstApplicationSplitOnDateChangeSafely } = require('../services/first-application-sibling-split');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
   afterAll(async () => { await db?.destroy(); await require('../models/db').destroy(); });
@@ -242,4 +242,40 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(result.action).toBe('skipped');
     expect(result.reason).toBe('not_estimate_anchor');
   }));
+
+  describe('reconcileFirstApplicationSplitOnDateChangeSafely — savepoint isolation', () => {
+    test('a successful split behaves identically through the safe wrapper', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await reconcileFirstApplicationSplitOnDateChangeSafely(trx, ids.lawnId, 'test');
+      expect(result.action).toBe('split');
+      const state = await readState(trx, ids);
+      expect(Number(state.pest.estimated_price)).toBe(97.2);
+      expect(Number(state.lawn.estimated_price)).toBe(56.4);
+    }));
+
+    // On Postgres, a failing statement aborts the WHOLE transaction it ran
+    // in until something rolls it back — every later statement, including
+    // the caller's own COMMIT, then fails too. A malformed uuid forces a
+    // genuine server-side error (not one of the function's own graceful
+    // declines) so this proves the safe wrapper's savepoint actually
+    // recovers the caller's transaction instead of just catching a JS
+    // exception that leaves the underlying connection poisoned.
+    test('a genuine DB error inside the reconcile is contained — the caller transaction stays usable afterward', () => rollbackTest(async (trx) => {
+      const result = await reconcileFirstApplicationSplitOnDateChangeSafely(trx, 'not-a-valid-uuid', 'test');
+      expect(result.action).toBe('error');
+
+      // If the savepoint had not absorbed the failure, this trx would now be
+      // aborted and ANY further statement on it — including this one — would
+      // throw "current transaction is aborted".
+      const customerId = randomUUID();
+      await trx('customers').insert({ id: customerId, first_name: 'Synthetic post-failure fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true });
+      const row = await trx('customers').where({ id: customerId }).first('id');
+      expect(row.id).toBe(customerId);
+    }));
+
+    test('calling the plain (non-safe) function directly with a bad id propagates — documents why callers with more work after it must use the safe wrapper', () => rollbackTest(async (trx) => {
+      await expect(reconcileFirstApplicationSplitOnDateChange(trx, 'not-a-valid-uuid')).rejects.toThrow();
+    }));
+  });
 });

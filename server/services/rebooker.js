@@ -1741,17 +1741,13 @@ class SmartRebooker {
       // Same-trip first-application resplit chokepoint (prod 2026-09-26): a
       // date-only move of this row may pull it off the date of a shared
       // first-application invoice (either side — the invoice-holding row or
-      // an unpriced sibling). Same transaction as the date write, so a
-      // successful split commits atomically with the move — but never blocks
-      // a legitimate reschedule: an unexpected failure here is logged loudly
-      // and left for reconciliation rather than aborting the whole move.
+      // an unpriced sibling). Runs in its own savepoint off this trx (the
+      // "safely" wrapper) — a successful split still commits atomically with
+      // the move, but a failure inside it never poisons this transaction the
+      // way a plain try/catch around a failing statement would on Postgres.
       if (dateOnly(newDate) !== dateOnly(originalDate)) {
-        try {
-          await require('./first-application-sibling-split')
-            .reconcileFirstApplicationSplitOnDateChange(trx, serviceId);
-        } catch (splitErr) {
-          logger.error(`[rebooker] first-application sibling-split reconcile failed for ${serviceId} (move still committing): ${splitErr.message}`);
-        }
+        await require('./first-application-sibling-split')
+          .reconcileFirstApplicationSplitOnDateChangeSafely(trx, serviceId, 'single-visit reschedule');
       }
     });
 
@@ -3332,17 +3328,12 @@ class SmartRebooker {
       // Same-trip first-application resplit chokepoint (prod 2026-09-26):
       // the anchor's own date always changes on this path (the caller only
       // reaches rescheduleSeries when it does) — it may pull the anchor off
-      // the date of a shared first-application invoice, on either side. Same
-      // transaction as the date write, but never blocks a legitimate series
-      // move: an unexpected failure here is logged loudly and left for
-      // reconciliation rather than aborting the whole move.
+      // the date of a shared first-application invoice, on either side. Runs
+      // in its own savepoint off this trx (the "safely" wrapper) — see the
+      // single-visit path above for why a plain try/catch does not suffice.
       if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
-        try {
-          await require('./first-application-sibling-split')
-            .reconcileFirstApplicationSplitOnDateChange(trx, serviceId);
-        } catch (splitErr) {
-          logger.error(`[rebooker] first-application sibling-split reconcile failed for series anchor ${serviceId} (move still committing): ${splitErr.message}`);
-        }
+        await require('./first-application-sibling-split')
+          .reconcileFirstApplicationSplitOnDateChangeSafely(trx, serviceId, 'series reschedule');
       }
 
       return touched;

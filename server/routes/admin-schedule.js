@@ -9727,17 +9727,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               }
               // Same-trip first-application resplit chokepoint (prod
               // 2026-09-26): a bulk date move may pull this row off the date
-              // of a shared first-application invoice, on either side — same
-              // transaction as the date write, but never blocks the batch:
-              // an unexpected failure here is logged loudly and left for
-              // reconciliation rather than failing this row's move.
+              // of a shared first-application invoice, on either side. Runs
+              // in its own savepoint off this trx (the "safely" wrapper) — a
+              // plain try/catch around a failing statement does not recover
+              // a Postgres transaction; every later statement on it,
+              // including this row's own commit, would fail.
               if (prevDate !== bulkTargetDate) {
-                try {
-                  await require('../services/first-application-sibling-split')
-                    .reconcileFirstApplicationSplitOnDateChange(trx, id);
-                } catch (splitErr) {
-                  logger.error(`[schedule] first-application sibling-split reconcile failed for ${id} (bulk move still committing): ${splitErr.message}`);
-                }
+                await require('../services/first-application-sibling-split')
+                  .reconcileFirstApplicationSplitOnDateChangeSafely(trx, id, 'bulk reschedule');
               }
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
@@ -13591,16 +13588,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // Same-trip first-application resplit chokepoint (prod 2026-09-26):
         // a date-only edit here may pull this row off the date of a shared
         // first-application invoice, on either side (the invoice-holding row
-        // or an unpriced sibling) — same transaction as the date write, but
-        // never blocks a legitimate save: an unexpected failure here is
-        // logged loudly and left for reconciliation rather than aborting.
+        // or an unpriced sibling). Runs in its own savepoint off this trx
+        // (the "safely" wrapper) — a plain try/catch around a failing
+        // statement does not recover a Postgres transaction; every later
+        // statement on it, including this route's own COMMIT, would fail.
         if (updates.scheduled_date !== undefined) {
-          try {
-            await require('../services/first-application-sibling-split')
-              .reconcileFirstApplicationSplitOnDateChange(trx, req.params.id);
-          } catch (splitErr) {
-            logger.error(`[schedule] first-application sibling-split reconcile failed for ${req.params.id} (save still committing): ${splitErr.message}`);
-          }
+          await require('../services/first-application-sibling-split')
+            .reconcileFirstApplicationSplitOnDateChangeSafely(trx, req.params.id, 'update-details save');
         }
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.

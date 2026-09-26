@@ -204,7 +204,12 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(src.slice(idx, idx + 2000)).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);');
     expect(src.slice(idx, idx + 2000)).toContain("code: 'terminal_invoice_lookup_failed',");
     expect(src.slice(idx, idx + 2000)).not.toContain('invoiceLookupFailed = true');
-    expect(src.slice(siblingAt - 100, siblingAt)).toMatch(/if \(!existingCompletionInvoice && !terminalCompletionInvoice\) \{\s*$/);
+    // first-application-sibling-split lane: the sibling fallback is ALSO
+    // skipped once this row has its own estimated_price (a row split off a
+    // shared invoice at reschedule time, or priced any other way, must
+    // never be treated as covered by a sibling's invoice again just because
+    // the two visits share a date).
+    expect(src.slice(siblingAt - 160, siblingAt)).toMatch(/if \(!existingCompletionInvoice && !terminalCompletionInvoice && svc\.estimated_price == null\) \{\s*$/);
     expect(src.slice(idx, idx + 160)).toMatch(/serviceRecordId: record\.id,\s*scheduledServiceId: svc\.id,/);
     const fn = src.slice(src.indexOf('async function completionTerminalInvoiceLookup'), src.indexOf('router.post', src.indexOf('async function completionTerminalInvoiceLookup')));
     expect(fn).not.toMatch(/source_estimate_id|first_visit|findFirstApplicationInvoiceForEstimateService/);

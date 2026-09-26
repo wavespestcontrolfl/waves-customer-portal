@@ -8521,7 +8521,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
     if (!packetEffects) {
       try {
-        if (!existingCompletionInvoice && !terminalCompletionInvoice) {
+        // The sibling-invoice lookup below is a DATE match only — it does
+        // not know whether this row was later split off its own-price (see
+        // first-application-sibling-split.js): a promoted parent is left
+        // covered by the reserved row's invoice ONLY while it stays
+        // estimated_price NULL (estimate-converter.js reservedAcceptPerVisitSplit).
+        // Once this row has its OWN estimated_price — split off at a
+        // reschedule, or priced any other way — it must bill through the
+        // normal per-application path below, never be treated as covered by
+        // a sibling's (possibly already-reduced) invoice just because the
+        // two visits happen to share a date again.
+        if (!existingCompletionInvoice && !terminalCompletionInvoice && svc.estimated_price == null) {
           const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);
           existingCompletionInvoice = siblingFirstApplication.invoice;
           if (!recapReviewOnly) {
