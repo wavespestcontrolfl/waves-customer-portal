@@ -453,19 +453,19 @@ function emergencyGuidance(result, contextText = '') {
   // gets the emergency script even if the model's reply names no direction —
   // and who it happened to picks the script ("My dog swallowed bait" → vet;
   // "My son swallowed bait" → 911 + Poison Control).
-  // Who is the patient is read from the emergency-bearing clauses only — an
-  // unrelated earlier pet (or person) mention must not change the script.
-  const emergencyClauses = context.split(/(?<=[.!?])\s+|\n+/).filter((c) => looksLikeEmergency(c)).join('\n');
+  // Patients are decided clause by clause, from the emergency-bearing clauses
+  // only — an unrelated earlier pet (or person) mention must not change the
+  // script, and "My dog swallowed bait. I cannot breathe." needs both.
   const visitorEmergency = looksLikeEmergency(context);
-  const patientText = emergencyClauses || context;
-  const petSubject = PET_SUBJECT_RE.test(patientText);
-  const personSubject = PERSON_SUBJECT_RE.test(patientText);
-  // Human guidance is dropped only when the animal is plainly the patient
-  // ("My dog swallowed bait") — a pet mention alone ("My leg is swelling after
-  // a dog bite") keeps it, and an ambiguous message gets both scripts.
-  const petIsPatient = PET_PATIENT_RE.test(patientText) && !personSubject;
-  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || (visitorEmergency && !petIsPatient);
-  const vet = VET_DIRECTION_RE.test(folded) || (visitorEmergency && petSubject);
+  const found = context.split(/(?<=[.!?])\s+|\n+/).filter((c) => looksLikeEmergency(c));
+  const clauses = found.length ? found : (visitorEmergency ? [context] : []);
+  // Human guidance is dropped for a clause only when the animal is plainly
+  // the patient ("My dog swallowed bait") — a pet mention alone ("My leg is
+  // swelling after a dog bite") keeps it; an ambiguous clause gets both.
+  const humanClause = clauses.some((c) => !(PET_PATIENT_RE.test(c) && !PERSON_SUBJECT_RE.test(c)));
+  const petClause = clauses.some((c) => PET_SUBJECT_RE.test(c));
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || humanClause;
+  const vet = VET_DIRECTION_RE.test(folded) || petClause;
   if (!(result.intent === 'emergency' || human || vet)) return null;
   const ingestion = POISON_MENTION_RE.test(folded) || INGESTION_RE.test(context);
   const parts = [];
