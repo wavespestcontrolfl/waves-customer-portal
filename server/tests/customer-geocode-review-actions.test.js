@@ -125,6 +125,9 @@ test('visit matching accepts the primary or an unstamped legacy row and rejects 
 
 test('verified fanout only replaces an empty pin or the customer prior pin', () => {
   expect(visitPinIsSafeToReplace(visit({ lat: null, lng: null }), customer)).toBe(true);
+  expect(visitPinIsSafeToReplace(visit({ lat: 0, lng: -82.4 }), customer)).toBe(true);
+  expect(visitPinIsSafeToReplace(visit({ lat: 27.4, lng: 0 }), customer)).toBe(true);
+  expect(visitPinIsSafeToReplace(visit({ lat: 0, lng: 0 }), customer)).toBe(true);
   expect(visitPinIsSafeToReplace(visit(), customer)).toBe(true);
   expect(visitPinIsSafeToReplace(visit({ lat: 27.3364, lng: -82.5307 }), {
     ...customer, latitude: 27.3364004, longitude: -82.5307004,
@@ -164,6 +167,26 @@ test('verify releases a protected review before atomically saving address, pin, 
     action: 'customer_geocode_review.verify_pin', critical: true, trx: conn,
   }));
   expect(detail.revision).toBe('rev-2');
+});
+
+test('only the active-property address uniqueness conflict becomes an operational review conflict', async () => {
+  const input = {
+    revision: 'rev-1', action: 'verify_pin', latitude: 27.4, longitude: -82.4,
+    source: 'site_visit', evidence: 'Marker observed', confirmed: true,
+  };
+  const duplicate = Object.assign(new Error('duplicate'), {
+    code: '23505', constraint: 'customer_properties_customer_address_uniq',
+  });
+  customerProperties.syncPrimaryAddress.mockRejectedValueOnce(duplicate);
+  await expect(resolveCustomerGeocodeReview(customer.id, input, 'actor-1', fakeConnection().conn))
+    .rejects.toMatchObject({ statusCode: 409, code: 'address_matches_existing_property', isOperational: true });
+  expect(auditLog.recordAuditEvent).not.toHaveBeenCalled();
+
+  const unrelated = Object.assign(new Error('other unique failure'), {
+    code: '23505', constraint: 'customer_properties_one_primary',
+  });
+  customerProperties.syncPrimaryAddress.mockRejectedValueOnce(unrelated);
+  await expect(resolveCustomerGeocodeReview(customer.id, input, 'actor-1', fakeConnection().conn)).rejects.toBe(unrelated);
 });
 
 test('pre-existing null and empty mirror fields are equivalent without hiding nonempty differences', async () => {
@@ -223,6 +246,21 @@ test('outside-area confirmation snapshots a revision-bound legacy pin before gua
     expect.objectContaining({ table: 'customers', patch: expect.objectContaining({ latitude: null, longitude: null }) }),
     expect.objectContaining({ table: 'customer_properties', patch: expect.objectContaining({ latitude: null, longitude: null }) }),
   ]));
+});
+
+test('outside-area confirmation rejects a non-human resolved source before saving', async () => {
+  const explicit = fakeConnection();
+  await expect(resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'outside_service_area', source: 'google',
+    evidence: 'County boundary checked', confirmed: true,
+  }, 'actor-1', explicit.conn)).rejects.toMatchObject({ statusCode: 400, code: 'review_evidence_required' });
+
+  const inherited = fakeConnection({ reviewOverrides: { source: 'google' } });
+  await expect(resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'outside_service_area', evidence: 'County boundary checked', confirmed: true,
+  }, 'actor-1', inherited.conn)).rejects.toMatchObject({ statusCode: 400, code: 'review_evidence_required' });
+  expect(reviewStore.saveReview).not.toHaveBeenCalled();
+  expect(auditLog.recordAuditEvent).not.toHaveBeenCalled();
 });
 
 test('retry refuses to strand an existing pin in pending and revoke refuses a pin with no provenance', async () => {

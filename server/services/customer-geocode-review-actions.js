@@ -9,6 +9,7 @@ const { toDateStr } = require('./auto-dispatch/dates');
 const reviewStore = require('./customer-geocode-review');
 
 const REVIEW_SOURCES = new Set(['county_records', 'customer_confirmation', 'site_visit']);
+const PROPERTY_ADDRESS_CONSTRAINT = 'customer_properties_customer_address_uniq';
 const ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 const VISIT_FIELDS = [
   'id', 'property_id', 'technician_id', 'scheduled_date', 'status', 'lat', 'lng',
@@ -79,9 +80,9 @@ function visitPinIsSafeToReplace(row, customer) {
   const priorLng = Number(customer.longitude);
   const rowLat = Number(row.lat);
   const rowLng = Number(row.lng);
-  const rowHasPair = Number.isFinite(rowLat) && Number.isFinite(rowLng);
+  const rowHasPair = Number.isFinite(rowLat) && Number.isFinite(rowLng) && rowLat !== 0 && rowLng !== 0;
   const customerHasPair = customer.latitude != null && customer.longitude != null
-    && Number.isFinite(priorLat) && Number.isFinite(priorLng);
+    && Number.isFinite(priorLat) && Number.isFinite(priorLng) && priorLat !== 0 && priorLng !== 0;
   return !rowHasPair || (customerHasPair
     && pinAtScale(rowLat, 6) === pinAtScale(priorLat, 6)
     && pinAtScale(rowLng, 6) === pinAtScale(priorLng, 6));
@@ -265,12 +266,16 @@ async function markOutside({ trx, customerId, input, actorId, customer, primary,
   if (input.confirmed !== true || !String(input.evidence || '').trim()) {
     throw actionError('Confirmation and evidence are required.', 400, 'confirmation_required');
   }
+  const source = input.source || storedReview?.source;
+  if (!REVIEW_SOURCES.has(source)) {
+    throw actionError('A reviewed source is required.', 400, 'review_evidence_required');
+  }
   const pin = hasUsablePin(customer)
     ? { ...storedReview, latitude: customer.latitude, longitude: customer.longitude }
     : storedReview;
   await reviewStore.saveReview(trx, customer, {
     status: 'outside_area', reason: 'staff_confirmed_outside_area',
-    source: input.source || storedReview?.source || null, evidence: input.evidence,
+    source, evidence: input.evidence,
     reviewed_by: actorId, latitude: pin?.latitude, longitude: pin?.longitude,
   });
   const cleared = await clearMatchingPins(trx, customer, primary, pin, prelockedVisits);
@@ -320,6 +325,15 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
       trx, customerId, input, actorId, customer, primary, storedReview, prelockedVisits,
     }) || null;
     if (!reviewStore.reviewEnabled()) throw actionError('Geocode review is disabled.', 404, 'review_disabled');
+  }).catch(err => {
+    if (err?.code === '23505' && err?.constraint === PROPERTY_ADDRESS_CONSTRAINT) {
+      throw actionError(
+        'That address already exists as another property on this customer.',
+        409,
+        'address_matches_existing_property',
+      );
+    }
+    throw err;
   });
 
   if (input.action === 'retry') {

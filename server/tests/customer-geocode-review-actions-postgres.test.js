@@ -1,4 +1,5 @@
 /** Real PostgreSQL: private QA database only, synthetic schema rolled back per test. */
+jest.setTimeout(15000);
 let mockConnection;
 jest.mock('../models/db', () => {
   const proxy = (...args) => mockConnection(...args);
@@ -18,6 +19,7 @@ const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const migration = require('../models/migrations/20260926000030_customer_geocode_reviews');
 const reviewStore = require('../services/customer-geocode-review');
+const { addressKey } = require('../services/customer-properties');
 const { resolveCustomerGeocodeReview } = require('../services/customer-geocode-review-actions');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -28,6 +30,7 @@ const SECONDARY = '71000000-0000-4000-8000-000000000013';
 const ACTOR = '72000000-0000-4000-8000-000000000011';
 const PIN = { latitude: 27.4981234, longitude: -82.5748123 };
 const ADDRESS = { address_line1: '100 Fixture Way', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
+const SECONDARY_ADDRESS = { address_line1: '900 Other Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236' };
 const postgres = connection ? describe : describe.skip;
 
 postgres('customer geocode review actions in PostgreSQL', () => {
@@ -70,6 +73,7 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       table.string('city', 50); table.string('state', 2); table.string('zip', 10); table.string('address_key');
       table.decimal('latitude', 10, 7); table.decimal('longitude', 10, 7); table.timestamp('updated_at', { useTz: true });
     });
+    await mockConnection.raw('CREATE UNIQUE INDEX customer_properties_customer_address_uniq ON customer_properties (customer_id, address_key) WHERE active');
     await mockConnection.schema.createTable('scheduled_services', table => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.uuid('property_id'); table.uuid('technician_id');
       table.string('status'); table.date('scheduled_date');
@@ -99,11 +103,14 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     await migration.up(mockConnection);
     await mockConnection('customers').insert({ id: CUSTOMER, first_name: 'Synthetic', last_name: 'Fixture', ...ADDRESS });
     await mockConnection('customer_properties').insert([
-      { id: PRIMARY, customer_id: CUSTOMER, is_primary: true, active: true, ...ADDRESS },
+      { id: PRIMARY, customer_id: CUSTOMER, is_primary: true, active: true,
+        ...ADDRESS, address_key: addressKey(ADDRESS) },
       { id: SECONDARY, customer_id: CUSTOMER, is_primary: false, active: true,
-        address_line1: '900 Other Ave', city: 'Sarasota', state: 'FL', zip: '34236' },
+        ...SECONDARY_ADDRESS, address_key: addressKey(SECONDARY_ADDRESS) },
     ]);
-    visitIds = Object.fromEntries(['matching', 'started', 'completed', 'frozen', 'divergent', 'individual']
+    visitIds = Object.fromEntries([
+      'matching', 'started', 'completed', 'frozen', 'divergent', 'individual', 'zeroLatitude', 'zeroLongitude', 'zeroBoth',
+    ]
       .map(name => [name, randomUUID()]));
     const tomorrow = etDateString(addETDays(new Date(), 1));
     const baseVisit = { customer_id: CUSTOMER, property_id: PRIMARY, status: 'confirmed', scheduled_date: tomorrow,
@@ -117,6 +124,9 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       { ...baseVisit, id: visitIds.divergent, property_id: SECONDARY, service_address_line1: '900 Other Ave',
         service_address_city: 'Sarasota', service_address_zip: '34236' },
       { ...baseVisit, id: visitIds.individual, lat: 27.4, lng: -82.4 },
+      { ...baseVisit, id: visitIds.zeroLatitude, lat: 0, lng: -82.4 },
+      { ...baseVisit, id: visitIds.zeroLongitude, lat: 27.4, lng: 0 },
+      { ...baseVisit, id: visitIds.zeroBoth, lat: 0, lng: 0 },
     ]);
   });
 
@@ -162,6 +172,10 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       expect((await visit(visitIds[name])).lat).toBeNull();
     }
     expect(Number((await visit(visitIds.individual)).lat)).toBe(27.4);
+    for (const name of ['zeroLatitude', 'zeroLongitude', 'zeroBoth']) {
+      expect(Number((await visit(visitIds[name])).lat)).toBe(Number(PIN.latitude.toFixed(6)));
+      expect(Number((await visit(visitIds[name])).lng)).toBe(Number(PIN.longitude.toFixed(6)));
+    }
     expect(await mockConnection('audit_log').where({ action: 'customer_geocode_review.verify_pin' }).count('* as count').first())
       .toMatchObject({ count: '1' });
 
@@ -194,6 +208,15 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     }));
     expect((await customer()).address_line2).toBeNull();
     expect((await primary()).address_line2).toBeNull();
+  });
+
+  test('a duplicate active property address is an operational conflict and rolls back verification', async () => {
+    await expect(verify({ address: SECONDARY_ADDRESS })).rejects.toMatchObject({
+      statusCode: 409, code: 'address_matches_existing_property', isOperational: true,
+    });
+    expect(await customer()).toMatchObject({ ...ADDRESS, latitude: null, longitude: null });
+    expect(await review()).toBeUndefined();
+    expect((await mockConnection('audit_log').count('* as count').first()).count).toBe('0');
   });
 
   test('outside-area confirmation snapshots a revision-bound legacy pin before clearing every matching mirror', async () => {
