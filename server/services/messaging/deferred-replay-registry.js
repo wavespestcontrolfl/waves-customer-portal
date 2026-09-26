@@ -683,7 +683,10 @@ const REGISTRY = {
         // hold the receipt and retry rather than send or drop it.
         let paymentMeta = payment.metadata || {};
         if (typeof paymentMeta === 'string') {
-          try { paymentMeta = JSON.parse(paymentMeta); } catch { paymentMeta = {}; }
+          // Unreadable metadata can't prove there's no refund in flight.
+          try { paymentMeta = JSON.parse(paymentMeta); } catch {
+            return { eligible: false, reason: 'refund-state-unreadable', retryable: true };
+          }
         }
         if (paymentMeta.pending_refund_key) {
           return { eligible: false, reason: 'refund-unresolved', retryable: true };
