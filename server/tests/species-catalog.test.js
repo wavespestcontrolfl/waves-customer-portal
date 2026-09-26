@@ -253,20 +253,19 @@ describe('cross-worker slugs (planned_slugs contract)', () => {
   });
 });
 
-describe('alias collisions', () => {
-  // The one known, intentional exception: honey-bee-swarm and
-  // honey-bee-wall-colony are both genuinely Apis mellifera — the same
-  // species in two different situations (BRIEF's own split). Every other
-  // scientific-name / alias / common-name collision is a data bug.
-  const ALLOWED = new Set(['apis mellifera:honey-bee-swarm:honey-bee-wall-colony']);
+describe('name collisions', () => {
+  // A name several nodes share resolves to their deepest common ancestor
+  // (Codex #4873 r1): Apis mellifera is both the swarm and the wall colony,
+  // so it names the bees subgroup, never one of them. A name that would only
+  // meet at a category is too broad and must not exist.
+  test('every shared name resolves to a common subgroup or group', () => {
+    const unresolved = catalog.nameIndexCollisions().filter((c) => !c.resolvesTo);
+    expect(unresolved).toEqual([]);
+  });
 
-  test('no alias/common-name/scientific-name maps to two different entries, except the documented Apis mellifera split', () => {
-    const collisions = catalog.nameIndexCollisions();
-    const unexpected = collisions.filter((c) => {
-      const key = `${c.name}:${[...c.slugs].sort().join(':')}`;
-      return !ALLOWED.has(key);
-    });
-    expect(unexpected).toEqual([]);
+  test('Apis mellifera names the bees subgroup, not one honey bee situation', () => {
+    const result = catalog.resolveName('Apis mellifera');
+    expect(result.node).toMatchObject({ level: 'subgroup', id: 'bees' });
   });
 });
 
@@ -300,11 +299,35 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('antenna')).toBeNull();
   });
 
-  test('whole-word alias match: "fire ants" resolves to the fire-ant entry', () => {
-    const result = catalog.resolveName('fire ants');
-    expect(result).toBeTruthy();
-    expect(result.node.slug).toBe('fire-ant');
-    expect(result.via).toBe('alias');
+  test('a group or subgroup name resolves to that node, never one arbitrary species (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('fire ants').node).toMatchObject({ level: 'subgroup', id: 'fire-ants' });
+    expect(catalog.resolveName('termite').node).toMatchObject({ level: 'group', id: 'termites' });
+    expect(catalog.resolveName('I think these are termites').node).toMatchObject({ level: 'group', id: 'termites' });
+    expect(catalog.resolveName('insect').node).toMatchObject({ level: 'category', id: 'insect' });
+  });
+
+  test('a specific name inside a sentence still beats the group name inside it', () => {
+    expect(catalog.resolveName('drywood termite pellets on the sill').node.slug).toBe('drywood-termite');
+  });
+
+  test('a raw v1 legacy slug resolves through the legacy map before any fuzzy match (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('drywood-termite')).toMatchObject({ via: 'legacy', node: { slug: 'drywood-termite' } });
+    expect(catalog.resolveName('whitefly')).toMatchObject({ via: 'legacy', node: { id: 'whiteflies' } });
+    expect(catalog.resolveName('aphid-scale')).toMatchObject({ via: 'legacy', node: { id: 'plant-pests-small' } });
+    expect(catalog.resolveName('beneficial')).toBeNull();
+  });
+
+  test('hyphens and spaces are the same (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('golden silk orb weaver').node.slug).toBe('golden-silk-orbweaver');
+    expect(catalog.resolveName('Golden Silk Orb-weaver').node.slug).toBe('golden-silk-orbweaver');
+  });
+
+  test('a curated short alias still matches inside a sentence (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('I found an asp on the oak').node.slug).toBe('puss-caterpillar');
+  });
+
+  test('a bare genus resolves an "X spp." scientific name', () => {
+    expect(catalog.resolveName('Phyllophaga').node.slug).toBe('white-grub');
   });
 
   test('scientific name match takes priority and works case-insensitively', () => {
@@ -321,8 +344,8 @@ describe('resolveName regressions', () => {
     expect(result.via).toBe('legacy');
   });
 
-  test('an unbuilt cross-worker term (e.g. "assassin bug") resolves to null rather than a wrong entry', () => {
-    expect(catalog.resolveName('assassin bug')).toBeNull();
+  test('a name whose species aren\'t in this batch resolves to its subgroup, never a wrong entry', () => {
+    expect(catalog.resolveName('assassin bug').node).toMatchObject({ level: 'subgroup', id: 'assassin-bugs' });
   });
 
   test('an exact common-name match wins over a shorter alias fuzzy-matching inside it (Codex r1 P1)', () => {
@@ -393,6 +416,14 @@ describe('loader API surface', () => {
     expect(rungs).toEqual([{ level: 'category', id: 'insect', label: 'Insect', generic: 'an insect' }]);
   });
 
+  test('nextPhoto has guidance for a category too (Codex #4873 r1)', () => {
+    for (const id of ['insect', 'arachnid', 'rodent', 'wildlife', 'other']) {
+      const np = catalog.nextPhoto(id);
+      expect(np.ask.length).toBeGreaterThan(0);
+      expect(np.why.length).toBeGreaterThan(0);
+    }
+  });
+
   test('nextPhoto returns the authored next_photo for a group/subgroup', () => {
     const np = catalog.nextPhoto('ants');
     expect(np.ask.length).toBeGreaterThan(0);
@@ -402,7 +433,7 @@ describe('loader API surface', () => {
   test('nextPhoto falls back to the first look-alike photo for an entry, with its rationale (Codex r3 P1)', () => {
     const np = catalog.nextPhoto('fire-ant');
     const firstLookAlike = catalog.getEntry('fire-ant').look_alikes[0];
-    expect(np).toEqual({ ask: firstLookAlike.next_photo, why: firstLookAlike.difference });
+    expect(np).toEqual({ ask: firstLookAlike.next_photo, why: firstLookAlike.difference, photo_can_confirm: firstLookAlike.photo_can_confirm !== false });
     expect(np.why).toBeTruthy();
   });
 

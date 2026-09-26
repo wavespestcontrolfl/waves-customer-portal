@@ -5,27 +5,47 @@
     "insect": {
       "id": "insect",
       "label": "Insect",
-      "generic": "an insect"
+      "generic": "an insect",
+      "next_photo": {
+        "ask": "A sharp photo of the whole insect from above and one from the side, next to a coin for size.",
+        "why": "Body shape, wings, legs and antennae tell us which group it belongs to."
+      }
     },
     "arachnid": {
       "id": "arachnid",
       "label": "Arachnid",
-      "generic": "a spider or other arachnid"
+      "generic": "a spider or other arachnid",
+      "next_photo": {
+        "ask": "Zoom in from a safe distance for a sharp photo of the body from above, showing the legs and any markings.",
+        "why": "Body shape, eye pattern and markings separate spiders, ticks and scorpions."
+      }
     },
     "rodent": {
       "id": "rodent",
       "label": "Rodent",
-      "generic": "a rat, mouse, or other rodent"
+      "generic": "a rat, mouse, or other rodent",
+      "next_photo": {
+        "ask": "A photo of the animal, droppings or gnaw marks next to a coin or ruler for size. Don’t handle droppings.",
+        "why": "Size and shape of droppings and marks separate rats from mice."
+      }
     },
     "wildlife": {
       "id": "wildlife",
       "label": "Wildlife",
-      "generic": "a wildlife visitor"
+      "generic": "a wildlife visitor",
+      "next_photo": {
+        "ask": "From a safe distance, a clear photo of the whole animal, head and markings included. Never approach or handle it.",
+        "why": "Head shape, markings and size identify the animal and whether it is protected."
+      }
     },
     "other": {
       "id": "other",
       "label": "Other",
-      "generic": "something we want a closer look at"
+      "generic": "something we want a closer look at",
+      "next_photo": {
+        "ask": "A sharp, well-lit close-up of the whole creature or sign, next to a coin for size.",
+        "why": "A clearer view of the body or the damage tells us which group to look in."
+      }
     }
   },
   "groups": [

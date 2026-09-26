@@ -195,9 +195,10 @@ function lineage(id) {
 function nextPhoto(id) {
   const node = getNode(id);
   if (!node) return null;
-  if (node.next_photo) return node.next_photo;
+  if (node.next_photo) return { ...node.next_photo, photo_can_confirm: node.next_photo.photo_can_confirm !== false };
   if (node.level === 'entry' && Array.isArray(node.look_alikes) && node.look_alikes[0]) {
-    return { ask: node.look_alikes[0].next_photo, why: node.look_alikes[0].difference || null };
+    const pair = node.look_alikes[0];
+    return { ask: pair.next_photo, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
   }
   return null;
 }
@@ -216,6 +217,7 @@ function lookAlikes(slug) {
     node: getNode(la.slug),
     difference: la.difference,
     next_photo: la.next_photo,
+    photo_can_confirm: la.photo_can_confirm !== false,
   }));
 }
 
@@ -226,32 +228,68 @@ function lookAlikes(slug) {
 // "antenna" contains "ant". The fix is the same one the live engine uses —
 // build an index of normalized names, try an exact (plural-aware) lookup
 // first, then a whole-word regex scan that prefers the longest match and
-// skips anything under 4 characters (too likely to false-positive as a
-// substring of an unrelated word).
+// skips anything under 4 characters unless it is a curated short alias.
+//
+// Names resolve to the node they honestly name, at any level (Codex #4873
+// r1): a group or subgroup name ("termite", "fire ants") resolves to that
+// node, never to one arbitrary species in it, and a name shared by several
+// entries (Apis mellifera: the swarm and the wall colony) resolves to their
+// deepest common ancestor. Hyphens and spaces are the same character.
+
+// Short aliases that are real names people use for a hazard; everything else
+// under 4 characters is too likely to match inside an unrelated word.
+const SHORT_ALIASES = new Set(['asp']);
 
 function normalizeName(value) {
   return String(value || '')
     .toLowerCase()
     .replace(/[^a-z\s-]/g, ' ')
+    .replace(/-/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+// "an ant" → "ant", "a fire ant" → "fire ant": generic phrases index without
+// their article.
+function withoutArticle(value) {
+  return normalizeName(value).replace(/^(a|an|the) /, '');
+}
+
+// The deepest node every id's ladder passes through, or null when they only
+// meet at a category (too broad to call a match).
+function commonAncestor(ids) {
+  const ladders = ids.map((id) => lineage(id).map((rung) => rung.id));
+  if (ladders.some((ladder) => !ladder.length)) return null;
+  let shared = null;
+  for (let depth = 0; ladders.every((ladder) => depth < ladder.length); depth += 1) {
+    const id = ladders[0][depth];
+    if (!ladders.every((ladder) => ladder[depth] === id)) break;
+    shared = id;
+  }
+  const node = shared ? getNode(shared) : null;
+  return node && node.level !== 'category' ? shared : null;
+}
+
 function buildWholeWordIndex(pairs) {
-  // pairs: [[name, slug], ...]. Later entries do not overwrite earlier ones
-  // for exact-match purposes, but every collision is recorded so a caller
-  // (the species-catalog test) can flag "alias maps to two different
-  // entries" instead of silently picking one.
-  const index = new Map();
-  const collisions = [];
-  for (const [name, slug] of pairs) {
+  // pairs: [[name, nodeId], ...]. A name claimed by two or more different
+  // nodes resolves to their deepest common ancestor (or is left out when they
+  // only share a category); every such name is recorded in `collisions` so
+  // the species-catalog test can check each one resolves somewhere sensible.
+  const claims = new Map();
+  for (const [name, id] of pairs) {
     const key = normalizeName(name);
     if (!key) continue;
-    if (index.has(key) && index.get(key) !== slug) {
-      collisions.push({ name: key, slugs: [index.get(key), slug] });
-      continue;
-    }
-    index.set(key, slug);
+    if (!claims.has(key)) claims.set(key, new Set());
+    claims.get(key).add(id);
+  }
+  const index = new Map();
+  const collisions = [];
+  for (const [key, ids] of claims) {
+    const list = [...ids];
+    if (list.length === 1) { index.set(key, list[0]); continue; }
+    const ancestor = commonAncestor(list);
+    collisions.push({ name: key, slugs: list, resolvesTo: ancestor });
+    if (ancestor) index.set(key, ancestor);
   }
   return { index, collisions };
 }
@@ -281,14 +319,14 @@ function exactMatch(normalized, index) {
 // `indexed` is `[{ via, index }, ...]` in priority order, used only as a
 // tie-break when two matches are the same length.
 function fuzzyScanAcross(normalized, indexed) {
-  let best = null; // { slug, via, len }
+  let best = null; // { id, via, len }
   for (const { via, index } of indexed) {
-    for (const [name, slug] of index.entries()) {
-      if (name.length < 4) continue;
+    for (const [name, id] of index.entries()) {
+      if (name.length < 4 && !SHORT_ALIASES.has(name)) continue;
       if (best && name.length <= best.len) continue;
       const pluralSuffix = name.endsWith('larva') ? 'e?' : '(?:s|es)?';
       if (new RegExp(`\\b${name}${pluralSuffix}\\b`).test(normalized)) {
-        best = { slug, via, len: name.length };
+        best = { id, via, len: name.length };
       }
     }
   }
@@ -299,73 +337,85 @@ function buildNameIndices() {
   const scientificPairs = [];
   const aliasPairs = [];
   const commonPairs = [];
+  const nodePairs = [];
   for (const e of CATALOG.entries.values()) {
     for (const part of String(e.scientific_name || '').split('/')) {
       scientificPairs.push([part, e.slug]);
+      // "Phyllophaga spp." also answers to its bare genus.
+      const genus = part.trim().match(/^([A-Z][a-z]+) spp?\.?$/);
+      if (genus) scientificPairs.push([genus[1], e.slug]);
     }
     for (const alias of e.aliases || []) aliasPairs.push([alias, e.slug]);
     commonPairs.push([e.common_name, e.slug]);
     for (const a of e.aka || []) commonPairs.push([a, e.slug]);
   }
+  // Category names ("insect", "arachnid") name the category itself; a group
+  // whose generic is just its category's name ("an insect") must not claim it.
+  const categoryNames = new Set();
+  for (const c of CATALOG.categories.values()) {
+    for (const name of [c.label, c.id]) categoryNames.add(normalizeName(name));
+    nodePairs.push([c.label, c.id], [c.id, c.id]);
+  }
+  const generic = (value) => {
+    const name = withoutArticle(value);
+    return categoryNames.has(name) ? null : name;
+  };
+  // Only a taxon ("Solenopsis", "Latrodectus mactans") indexes as a
+  // scientific name — never descriptive text like "several families".
+  const TAXON = /^[A-Z][a-z]+( [a-z]+)?$/;
+  for (const g of CATALOG.groups.values()) {
+    nodePairs.push([g.label, g.id], [g.id, g.id]);
+    if (generic(g.generic)) nodePairs.push([generic(g.generic), g.id]);
+  }
+  for (const sg of CATALOG.subgroups.values()) {
+    nodePairs.push([sg.label, sg.id], [sg.id, sg.id]);
+    if (generic(sg.generic)) nodePairs.push([generic(sg.generic), sg.id]);
+    if (sg.scientific && TAXON.test(sg.scientific.trim())) nodePairs.push([sg.scientific, sg.id]);
+  }
   return {
     scientific: buildWholeWordIndex(scientificPairs),
+    node: buildWholeWordIndex(nodePairs),
     alias: buildWholeWordIndex(aliasPairs),
     common: buildWholeWordIndex(commonPairs),
   };
 }
 
 const NAME_INDICES = buildNameIndices();
+const NAME_ORDER = ['scientific', 'node', 'alias', 'common'];
 
 /**
- * Resolve free text (from a model, or typed by a customer) to a catalog
- * entry. Priority is scientific > alias > common name, but within that an
- * EXACT match always wins over a fuzzy (whole-word substring) match from a
- * lower-priority index — an exact common-name match for "Honey Bee (wall
- * colony)" must not lose to the shorter "honey bee" alias fuzzy-matching
- * inside it. So this tries an exact match against all three indices first
- * (priority order breaks a same-string tie), then a SINGLE fuzzy scan
- * across all three indices together, which picks the overall longest
- * whole-word match rather than the first index's best match — a longer,
- * more specific common name must beat a shorter alias that happens to be
- * a substring of it, even when the alias index would otherwise be checked
- * first. Finally checks whether the raw text is itself a known v1 legacy
- * slug. Returns `{ node, via: 'scientific' | 'alias' | 'common' | 'legacy' }`
- * or `null`.
+ * Resolve free text (from a model, or typed by a customer) to the catalog
+ * node it names — an entry, subgroup or group. A raw v1 legacy slug resolves
+ * first, through the legacy map. Then an EXACT match across the indices in
+ * priority order (scientific > group/subgroup names > aliases > common
+ * names), then a SINGLE fuzzy scan across all of them that picks the overall
+ * longest whole-word match. Returns `{ node, via: 'legacy' | 'scientific' |
+ * 'node' | 'alias' | 'common' }` or `null`.
  */
 function resolveName(text) {
-  const normalized = normalizeName(text);
-  if (!normalized) return null;
-
-  const exactSci = exactMatch(normalized, NAME_INDICES.scientific.index);
-  if (exactSci) return { node: getEntry(exactSci), via: 'scientific' };
-  const exactAlias = exactMatch(normalized, NAME_INDICES.alias.index);
-  if (exactAlias) return { node: getEntry(exactAlias), via: 'alias' };
-  const exactCommon = exactMatch(normalized, NAME_INDICES.common.index);
-  if (exactCommon) return { node: getEntry(exactCommon), via: 'common' };
-
-  const fuzzy = fuzzyScanAcross(normalized, [
-    { via: 'scientific', index: NAME_INDICES.scientific.index },
-    { via: 'alias', index: NAME_INDICES.alias.index },
-    { via: 'common', index: NAME_INDICES.common.index },
-  ]);
-  if (fuzzy) return { node: getEntry(fuzzy.slug), via: fuzzy.via };
-
   const rawSlug = String(text || '').trim().toLowerCase();
   if (CATALOG.legacySlugMap[rawSlug]) {
     const legacy = resolveLegacySlug(rawSlug);
-    if (legacy && legacy.node) return { node: legacy.node, via: 'legacy' };
+    return legacy && legacy.node ? { node: legacy.node, via: 'legacy' } : null;
   }
 
-  return null;
+  const normalized = normalizeName(text);
+  if (!normalized) return null;
+
+  for (const via of NAME_ORDER) {
+    const exact = exactMatch(normalized, NAME_INDICES[via].index);
+    if (exact) return { node: getNode(exact), via };
+  }
+
+  const fuzzy = fuzzyScanAcross(normalized, NAME_ORDER.map((via) => ({ via, index: NAME_INDICES[via].index })));
+  return fuzzy ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
 }
 
-/** Every collision found while building the name indices (an alias/common
- * name that would otherwise resolve to two different entries). Exposed for
- * the species-catalog test; empty in a healthy catalog. */
+/** Every name claimed by two or more nodes while building the indices, with
+ * the ancestor it resolves to (null = too broad, left unresolved). Exposed
+ * for the species-catalog test. */
 function nameIndexCollisions() {
-  return NAME_INDICES.scientific.collisions
-    .concat(NAME_INDICES.alias.collisions)
-    .concat(NAME_INDICES.common.collisions);
+  return NAME_ORDER.flatMap((via) => NAME_INDICES[via].collisions.map((c) => ({ ...c, via })));
 }
 
 /**
