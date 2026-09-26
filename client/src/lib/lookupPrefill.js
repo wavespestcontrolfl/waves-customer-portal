@@ -88,8 +88,14 @@ const UNIT_PARCEL_AREA_READS = [
   "estimatedBedAreaSf", "estimatedBedAreaPercent", "bedAreaSource",
 ];
 
-// The unit_parcel reads that size a price (turf, beds).
-const PARCEL_PRICED_AREA_READS = ["estimatedTurfSf", "turfFallbackPreviewSf", "estimatedBedAreaSf"];
+// A priced profile still carrying the development parcel's turf or bed read.
+// The request builder writes a TYPED bed area into estimatedBedAreaSf too,
+// marked bedAreaSource 'manual' — that one is the operator's (pre-push P1).
+function pricedFromParcelAreaReads(profile) {
+  return Number(profile.estimatedTurfSf) > 0
+    || Number(profile.turfFallbackPreviewSf) > 0
+    || (Number(profile.estimatedBedAreaSf) > 0 && profile.bedAreaSource !== "manual");
+}
 
 /**
  * The profile the estimator works from, scoped once where it enters the
@@ -167,7 +173,7 @@ export function scrubReopenedEstimateForm(form, engineProfile) {
       next.fleaExteriorAreaSource = "UNKNOWN";
       cleared.push("flea exterior area");
     }
-    if (PARCEL_PRICED_AREA_READS.some((key) => Number(engineProfile[key]) > 0)) {
+    if (pricedFromParcelAreaReads(engineProfile)) {
       cleared.push("lawn and bed areas from the development's parcel");
     }
   }

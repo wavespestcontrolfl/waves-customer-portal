@@ -173,6 +173,16 @@ describe("reopened estimate scrub (legacy-reopen follow-up to #4862 / #4871)", (
     expect(cleared).toEqual(["lawn and bed areas from the development's parcel"]);
   });
 
+  it("keeps a price whose bed area the operator typed (pre-push P1)", () => {
+    // What buildTurfRequestProfile persists for a typed bed area on a scoped profile.
+    const { cleared } = scrubReopenedEstimateForm(
+      { bedArea: "200", _manualFields: ["bedArea"] },
+      { ...UNIT_PARCEL, estimatedBedAreaSf: 200, bedAreaSource: "manual" });
+    expect(cleared).toEqual([]);
+    expect(scrubReopenedEstimateForm({}, { ...UNIT_PARCEL, estimatedBedAreaSf: 6000, bedAreaSource: "estimated" }).cleared)
+      .toEqual(["lawn and bed areas from the development's parcel"]);
+  });
+
   it("leaves a whole-home estimate alone", () => {
     const input = { lotSqFt: "9000", termiteFootprintSqFt: "1200", _termiteFootprintAuto: true };
     const { form, cleared } = scrubReopenedEstimateForm(input, { lotSqFt: 9000 });
