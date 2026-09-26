@@ -219,6 +219,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ["Our treatment won't bother your pets.", ''],
     ['It will not irritate your kids.', ''],
     ['No les hará daño a sus mascotas.', ''],
+    ['El tratamiento no molesta a sus mascotas.', ''],
+    ['El producto no irrita a los niños.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
     ['Our treatment is non\u2011toxic.', ''],
@@ -246,6 +248,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['At 4 PM.', 'When can we come back after treatment?'],
     ['Avoid your yard until 4 PM after the application.', ''],
     ['Evite el jardín hasta las 4 PM.', ''],
+    ['Stay off the treated lawn until dusk.', ''],
+    ['Keep pets inside until dawn after treatment.', ''],
+    ['You may re-enter at sunrise.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -739,6 +744,7 @@ describe('normalizeIntakeResult', () => {
       'Which rat poison do you use and what does it cost?',
     'The roach put a bait pellet in its mouth',
     'La hormiga se metió el cebo en la boca',
+    'Which hospital do you service?',
     );
     expect(out.reply).toMatch(/Get my price/);
   });
@@ -764,6 +770,23 @@ describe('normalizeIntakeResult', () => {
       'How much is service?',
     );
     expect(out.reply).toMatch(/Get my price/);
+  });
+
+  test('a vague "now" is not a follow-up to an old emergency', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'Service is $50 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
+      'openai',
+      'My child was stung and had swelling\nWhat do you charge now?',
+      'What do you charge now?',
+    );
+    expect(out.reply).toMatch(/Get my price/);
+  });
+
+  test.each([
+    'Vamos a volver en dos semanas para la próxima visita.',
+    'No puede volver a la casa del vecino para tratarla.',
+  ])('Spanish scheduling / non-claim wording is untouched: %s', (reply) => {
+    expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, '¿Cuándo es la próxima visita?').reply).toBe(reply);
   });
 
   test('a follow-up to an emergency in history still gets the emergency script', () => {
@@ -1464,6 +1487,9 @@ describe('looksLikeEmergency', () => {
     'My dog ate the bait',
     'My child put a bait pellet in his mouth',
     'mi hijo se metió un cebo en la boca',
+    'Ingerí el pesticida',
+    'I need a hospital now',
+    'My child got rat poison in his eyes',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
   ])('flags urgent/medical text: %s', (text) => {
