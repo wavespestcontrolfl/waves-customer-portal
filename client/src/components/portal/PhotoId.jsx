@@ -79,6 +79,17 @@ const NEXT_STEP_CTA_LABEL = {
   unclear: 'Send to the team',
 };
 
+// v2 result card (GATE_PHOTO_ID_V2, server side) — rendered only when the
+// response carries a `data.v2` object (see V2-CONTRACT.md). Every string a
+// customer sees below is either payload text verbatim (headline, subhead,
+// verdict_label, safety_line, evidence, candidate names, referral text,
+// next_photo ask/why, entry facts) or one of these two fixed tier labels —
+// never composed species facts.
+const V2_TIER_LABEL = {
+  ai_suggestion: 'AI suggestion',
+  needs_more_evidence: 'Needs more evidence',
+};
+
 // Fallback category for a LIVE result's request handoff when the server
 // omits request_prefill.category (request_prefill is optional on every
 // kind) — matches ReportIssueOverlay's fixed category enum. tree_shrub has
@@ -299,8 +310,24 @@ function BackButton({ onClick }) {
   );
 }
 
+// tone: 'default' | 'alert' | 'accent' plus the four v2 verdict tones —
+// ally/harmless/watch/call are deliberately calm and distinct from one
+// another; `call` ("Worth a pro look") is NOT alarm-red (that's `alert`,
+// reserved for the pest-result safety chips above).
+// Verdict chip text is 14px on the light glass chip, so each tone uses a
+// dark shade of its hue (≥ 4.5:1 on white): the brand green, sky and amber
+// are too light to read as text at this size.
+const VERDICT_TEXT = {
+  ally: '#166534', // green-800
+  harmless: '#075985', // sky-800
+  watch: '#92400E', // amber-800
+  call: B.glassNavy,
+};
+
 function Chip({ children, tone = 'default' }) {
-  const toneColor = tone === 'alert' ? B.red : tone === 'accent' ? B.glassNavy : SHELL.text;
+  const toneColor = tone === 'alert' ? B.red
+    : tone === 'accent' ? B.glassNavy
+    : VERDICT_TEXT[tone] || SHELL.text;
   return (
     <span data-glass="chip" style={{
       display: 'inline-flex', alignItems: 'center', padding: '5px 12px', borderRadius: 999,
@@ -333,6 +360,12 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const [unavailableHistoryPhotoIds, setUnavailableHistoryPhotoIds] = useState([]);
   const [historyError, setHistoryError] = useState('');
   const [loadingHistoryId, setLoadingHistoryId] = useState(null);
+  // Set by the v2 result's "A photo that would help confirm it" button
+  // (handleRetakePhoto below) — { ask } shown as a banner on the photos
+  // step. While the photos are at the 3-photo limit the banner also asks the
+  // customer to remove one; that line follows the live photo count, so it
+  // disappears the moment a photo is removed.
+  const [retakeBanner, setRetakeBanner] = useState(null);
 
   // Every async op (photo add, identify, history load) captures the current
   // generation and checks it again before touching state. Closing the sheet
@@ -359,6 +392,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       setUnavailableHistoryPhotoIds([]);
       setHistoryError('');
       setLoadingHistoryId(null);
+      setRetakeBanner(null);
     }
   }, [open]);
 
@@ -377,6 +411,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     setLocation('');
     setSubmitError('');
     setUnavailableHistoryPhotoIds([]);
+    setRetakeBanner(null);
     setStep('photos');
   };
 
@@ -497,6 +532,38 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     }
   };
 
+  // v2 "A photo that would help confirm it" (V2Result's NextPhotoCard). Returns
+  // to the photos step, KEEPING the live photos already on the sheet — for
+  // a live result those are this session's own uploads; for a history-
+  // opened result `photos` is already [] (cleared in openHistoryItem), so
+  // the retake starts empty rather than resurrecting the saved photos.
+  // Respects the existing 3-photo limit: at the limit, the banner tells the
+  // customer to remove one first instead of silently doing nothing.
+  //
+  // A history-sourced retake also clears note/location: openHistoryItem
+  // never touches them, so a note typed on an EARLIER, unrelated photos-step
+  // visit (picker -> photos -> Back -> a history item) would otherwise still
+  // be sitting in state and ride along into this new submission (Codex
+  // round-0 P1). A live retake is the same identification's own note, so it
+  // stays.
+  //
+  // Also resets busyPhotos, same as pickType: openHistoryItem already bumped
+  // genRef when the customer opened this history item, so if a photo add
+  // was still in flight from an earlier, abandoned photos-step visit, its
+  // own `finally` can no longer clear the flag (its generation no longer
+  // matches) — left set, Add and Identify would stay disabled forever on
+  // this new photos-step visit (Codex round-0 P1).
+  const handleRetakePhoto = (nextPhoto) => {
+    setSubmitError('');
+    setBusyPhotos(false);
+    if (resultSource === 'history') {
+      setNote('');
+      setLocation('');
+    }
+    setRetakeBanner({ ask: nextPhoto?.ask || '' });
+    setStep('photos');
+  };
+
   const handleNextStepRequest = () => {
     const nextStep = resultData?.next_step;
     const prefill = nextStep?.request_prefill || {};
@@ -606,6 +673,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
             note={note}
             location={location}
             submitError={submitError}
+            retakeBanner={retakeBanner}
             fileInputRef={fileInputRef}
             onAddFiles={addFiles}
             onCameraTap={handleCameraTap}
@@ -632,6 +700,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
               : undefined}
             onOpenRequestCta={handleNextStepRequest}
             onDone={onClose}
+            onRetakePhoto={handleRetakePhoto}
           />
         )}
       </div>
@@ -726,11 +795,21 @@ function PickerStep({ items, historyError, loadingHistoryId, onPick, onOpenHisto
   );
 }
 
-function PhotosStep({ type, photos, busyPhotos, note, location, submitError, fileInputRef, onAddFiles, onCameraTap, onRemovePhoto, onNoteChange, onLocationChange, onSubmit }) {
+function PhotosStep({ type, photos, busyPhotos, note, location, submitError, retakeBanner, fileInputRef, onAddFiles, onCameraTap, onRemovePhoto, onNoteChange, onLocationChange, onSubmit }) {
   const remaining = PHOTO_LIMIT - photos.length;
   const canSubmit = photos.length > 0 && !busyPhotos;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {retakeBanner && (
+        <div data-glass="soft" role="status" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {retakeBanner.ask && <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text, lineHeight: 1.4 }}>{retakeBanner.ask}</div>}
+          {photos.length >= PHOTO_LIMIT && (
+            <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.4 }}>
+              You're at the 3-photo limit — remove one below to add this one.
+            </div>
+          )}
+        </div>
+      )}
       <input
         ref={fileInputRef}
         type="file"
@@ -803,7 +882,7 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, fil
 
       {submitError && <div role="alert" style={{ fontSize: 15, color: B.red }}>{submitError}</div>}
 
-      <button type="button" data-glass-accent="" onClick={onSubmit} disabled={!canSubmit} style={{
+      <button type="button" data-glass-accent="" data-glass-size="primary" onClick={onSubmit} disabled={!canSubmit} style={{
         minHeight: 48, borderRadius: 8, border: 'none', fontSize: 16, fontWeight: 700,
         cursor: canSubmit ? 'pointer' : 'not-allowed', fontFamily: FONTS.body,
       }}>
@@ -852,9 +931,9 @@ function NextStepBlock({ nextStep, onOpenRequestCta, onDone }) {
   return (
     <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
       {nextStep.title && <div style={{ fontSize: 17, fontWeight: 700, color: SHELL.text }}>{nextStep.title}</div>}
-      {nextStep.body && <div style={{ fontSize: 15, color: SHELL.muted, lineHeight: 1.5 }}>{nextStep.body}</div>}
+      {nextStep.body && <div style={{ fontSize: kind === 'referral' ? 16 : 15, color: SHELL.muted, lineHeight: 1.5 }}>{nextStep.body}</div>}
       {kind === 'reservice' && nextStep.url && (
-        <a href={nextStep.url} data-glass-accent="" style={{
+        <a href={nextStep.url} data-glass-accent="" data-glass-size="primary" style={{
           minHeight: 48, borderRadius: 8, textDecoration: 'none', display: 'inline-flex',
           alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
         }}>
@@ -862,7 +941,7 @@ function NextStepBlock({ nextStep, onOpenRequestCta, onDone }) {
         </a>
       )}
       {(kind === 'request' || kind === 'inspection' || kind === 'unclear') && (
-        <button type="button" data-glass-accent="" onClick={onOpenRequestCta} style={{
+        <button type="button" data-glass-accent="" data-glass-size="primary" onClick={onOpenRequestCta} style={{
           minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer',
           fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
         }}>
@@ -875,6 +954,17 @@ function NextStepBlock({ nextStep, onOpenRequestCta, onDone }) {
           color: SHELL.text, cursor: 'pointer', fontSize: 15, fontWeight: 700, fontFamily: FONTS.body,
         }}>
           Got it
+        </button>
+      )}
+      {/* v2 referral (bee relocation / wildlife trapper / report to FWC or
+          FDACS / protected-leave-alone): title + body are the server's own
+          fixed template text — this is a routing note, never a request. */}
+      {kind === 'referral' && (
+        <button type="button" onClick={onDone} style={{
+          minHeight: 48, borderRadius: 8, border: `1px solid ${SHELL.borderStrong}`, background: SHELL.surface,
+          color: SHELL.text, cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
+        }}>
+          Done
         </button>
       )}
     </section>
@@ -981,16 +1071,255 @@ function ResultPhotos({ photos, unavailablePhotoIds, onPhotoUnavailable }) {
   );
 }
 
-function ResultStep({ data, photos, unavailablePhotoIds, onPhotoUnavailable, onOpenRequestCta, onDone }) {
+// =========================================================================
+// v2 result card (server-decided; every string below is payload text) —
+// see V2-CONTRACT.md for the response shape.
+// =========================================================================
+
+// Waves' own site — the only origin an entry's "Read more" link may point
+// at. `entry.site_url` is server data, not a trusted internal link, so it's
+// validated before ever reaching an href (Codex-style boundary discipline:
+// a same-origin check, not a blind render).
+const V2_SITE_URL_PREFIX = 'https://www.wavespestcontrol.com/';
+
+function EvidenceList({ title, icon, items }) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+        {title}
+      </div>
+      <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {items.map((text, i) => (
+          <li key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
+            <Icon name={icon} size={16} strokeWidth={2} style={{ color: SHELL.muted, flexShrink: 0, marginTop: 3 }} />
+            <span>{text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function EvidenceSection({ evidence }) {
+  const matches = evidence?.matches;
+  const stillNeed = evidence?.still_need;
+  const hasMatches = Array.isArray(matches) && matches.length > 0;
+  const hasStillNeed = Array.isArray(stillNeed) && stillNeed.length > 0;
+  if (!hasMatches && !hasStillNeed) return null;
+  return (
+    <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {hasMatches && <EvidenceList title="What matches" icon="check" items={matches} />}
+      {hasStillNeed && <EvidenceList title="What we still need to see" icon="eye" items={stillNeed} />}
+    </section>
+  );
+}
+
+// "A photo that would help confirm it" — the one decisive next photo the
+// engine asks for (never "settles it" — 2026-09-26 contract delta #4:
+// a photo narrows things, it doesn't settle them). Tapping the button hands
+// next_photo back up to the sheet, which returns to the photos step with
+// `ask` shown as a banner (PhotoIdSheet's handleRetakePhoto).
+//
+// `photo_can_confirm === false` (contract delta #3): the chosen look-alike
+// pair can't be told apart by photo at all — the ask text says what DOES
+// confirm it (e.g. a technician's sample), so there is no retake button.
+// `true` or missing keeps today's retake flow.
+function NextPhotoCard({ nextPhoto, onRetakePhoto }) {
+  const canConfirm = nextPhoto.photo_can_confirm !== false;
+  return (
+    <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>
+        {canConfirm ? 'A photo that would help confirm it' : "A photo can't confirm this one"}
+      </div>
+      {nextPhoto.ask && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{nextPhoto.ask}</div>}
+      {nextPhoto.why && <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.45 }}>{nextPhoto.why}</div>}
+      {canConfirm && (
+        <button type="button" data-glass-accent="" data-glass-size="primary" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
+          minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
+        }}>
+          Take this photo
+        </button>
+      )}
+    </section>
+  );
+}
+
+// `hasEntry` says whether the rendered entry card above already names
+// candidates[0] (species-level answers only). A group-level answer
+// (`entry` null) has no card or headline naming any one species, so the
+// leading candidate is kept here rather than dropped as "already shown".
+function CandidatesSection({ candidates, hasEntry }) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const others = hasEntry ? candidates.slice(1) : candidates;
+  if (others.length === 0) return null;
+  return (
+    <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        Other possibilities
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {others.map((c, i) => (
+          <div key={c.slug || i} style={{
+            display: 'flex', flexDirection: 'column', gap: 4,
+            paddingBottom: i < others.length - 1 ? 10 : 0,
+            borderBottom: i < others.length - 1 ? `1px solid ${SHELL.border}` : 'none',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>{c.common_name}</span>
+              <Chip>{c.strength === 'strong' ? 'Strong match' : 'Possible match'}</Chip>
+              {c.local === 'common_here_now' && <Chip tone="ally">Common here now</Chip>}
+              {c.local === 'uncommon_here' && <Chip>Uncommon here</Chip>}
+            </div>
+            {c.difference_from_top && (
+              <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.4 }}>{c.difference_from_top}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// "About {common_name}" — collapsed by default (name-to-action detail, not
+// the headline answer). `site_url` is only ever rendered when it points at
+// Waves' own site — see V2_SITE_URL_PREFIX.
+function AboutEntrySection({ entry }) {
+  const [open, setOpen] = useState(false);
+  if (!entry) return null;
+  const siteUrl = typeof entry.site_url === 'string' && entry.site_url.startsWith(V2_SITE_URL_PREFIX)
+    ? entry.site_url
+    : null;
+  const hasBody = entry.what_it_means || entry.fact || (Array.isArray(entry.look_alikes) && entry.look_alikes.length > 0) || siteUrl;
+  if (!hasBody) return null;
+  return (
+    <div>
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} style={{
+        width: '100%', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '6px 0', border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: FONTS.body,
+      }}>
+        <span style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>About {entry.common_name}</span>
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={16} strokeWidth={2} style={{ color: SHELL.muted, flexShrink: 0 }} />
+      </button>
+      {open && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '2px 0 6px' }}>
+          {entry.what_it_means && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.55 }}>{entry.what_it_means}</div>}
+          {entry.fact && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.55 }}>{entry.fact}</div>}
+          {Array.isArray(entry.look_alikes) && entry.look_alikes.length > 0 && (
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+                Commonly confused with
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {entry.look_alikes.map((la, i) => (
+                  <div key={la.slug || i} style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
+                    <span style={{ fontWeight: 700, color: SHELL.text }}>{la.common_name}</span>
+                    {la.difference ? ` — ${la.difference}` : ''}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {siteUrl && (
+            <a href={siteUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, textDecoration: 'underline' }}>
+              Read more on our website
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Order (V2-CONTRACT.md "Client"): headline + subhead -> tier line ->
+// customer's photos -> verdict chip + safety line -> About (name-to-action
+// detail) -> what matches / what we still need to see -> the next-photo
+// card -> other possibilities -> referral text. The next-step block sits
+// outside this component (ResultStep renders it either way).
+function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetakePhoto }) {
+  const answer = v2.answer || {};
+  const entry = v2.entry || null;
+  const tierLabel = V2_TIER_LABEL[v2.tier] || null;
+
+  return (
+    <>
+      <section data-glass="card" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div>
+          {answer.headline && <div style={{ fontSize: 20, fontWeight: 700, color: SHELL.text, lineHeight: 1.25 }}>{answer.headline}</div>}
+          {answer.subhead && <div style={{ fontSize: 16, fontStyle: 'italic', color: SHELL.muted, marginTop: 2 }}>{answer.subhead}</div>}
+        </div>
+        {tierLabel && (
+          <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{tierLabel}</div>
+        )}
+        <ResultPhotos photos={photos} unavailablePhotoIds={unavailablePhotoIds} onPhotoUnavailable={onPhotoUnavailable} />
+        {entry && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {entry.verdict_label && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <Chip tone={entry.verdict}>{entry.verdict_label}</Chip>
+              </div>
+            )}
+            {entry.safety_line && (
+              <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{entry.safety_line}</div>
+            )}
+            {/* Fixed catalog labels (2026-09-26 contract delta #2) — payload
+                strings, rendered only for the fields present. */}
+            {entry.role_label && (
+              <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
+                <span style={{ fontWeight: 700, color: SHELL.text }}>What it is: </span>{entry.role_label}
+              </div>
+            )}
+            {entry.risk_label && (
+              <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
+                <span style={{ fontWeight: 700, color: SHELL.text }}>Risk: </span>{entry.risk_label}
+              </div>
+            )}
+            {entry.action_label && (
+              <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
+                <span style={{ fontWeight: 700, color: SHELL.text }}>What to do: </span>{entry.action_label}
+              </div>
+            )}
+            <AboutEntrySection entry={entry} />
+          </div>
+        )}
+      </section>
+
+      <EvidenceSection evidence={v2.evidence} />
+
+      {v2.next_photo && <NextPhotoCard nextPhoto={v2.next_photo} onRetakePhoto={onRetakePhoto} />}
+
+      <CandidatesSection candidates={v2.candidates} hasEntry={!!entry} />
+
+      {v2.referral?.text && (
+        <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16 }}>
+          <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{v2.referral.text}</div>
+        </section>
+      )}
+    </>
+  );
+}
+
+function ResultStep({ data, photos, unavailablePhotoIds, onPhotoUnavailable, onOpenRequestCta, onDone, onRetakePhoto }) {
   const result = data.result || {};
   const ResultBody = RESULT_BODY_BY_TYPE[data.type];
+  const v2 = data.v2;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section data-glass="card" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <ResultPhotos photos={photos} unavailablePhotoIds={unavailablePhotoIds} onPhotoUnavailable={onPhotoUnavailable} />
-        {ResultBody && <ResultBody result={result} />}
-      </section>
+      {v2 ? (
+        <V2Result
+          v2={v2}
+          photos={photos}
+          unavailablePhotoIds={unavailablePhotoIds}
+          onPhotoUnavailable={onPhotoUnavailable}
+          onRetakePhoto={onRetakePhoto}
+        />
+      ) : (
+        <section data-glass="card" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <ResultPhotos photos={photos} unavailablePhotoIds={unavailablePhotoIds} onPhotoUnavailable={onPhotoUnavailable} />
+          {ResultBody && <ResultBody result={result} />}
+        </section>
+      )}
 
       <NextStepBlock nextStep={data.next_step} onOpenRequestCta={onOpenRequestCta} onDone={onDone} />
     </div>

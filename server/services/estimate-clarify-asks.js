@@ -1625,7 +1625,7 @@ async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
             'Bedroom count received — re-price the unit draft',
             `The customer answered the bedroom question (${bedroomCount === 0 ? 'studio' : `${bedroomCount} bedroom${bedroomCount === 1 ? '' : 's'}`}) but the automated re-draft did not produce a replacement. The draft still carries its fallback price — re-price it before sending.`,
             {
-              link: `/admin/estimates/${repriceTarget}`,
+              link: `/admin/estimates?estimateId=${repriceTarget}`,
               metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: repriceTarget, bedroomCount },
             },
           );

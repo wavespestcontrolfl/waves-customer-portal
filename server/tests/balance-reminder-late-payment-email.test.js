@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.fn() }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -36,7 +37,19 @@ jest.mock('../services/collections/contact-policy', () => ({
   evaluate: jest.fn(async () => ({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] })),
 }));
 
+jest.mock('../services/invoice-followups', () => ({
+  hasActiveSequence: jest.fn(async () => false),
+  isDunningStopped: jest.fn(async () => false),
+}));
+jest.mock('../services/stripe', () => ({
+  isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false),
+}));
+
+const InvoiceFollowUps = require('../services/invoice-followups');
+const StripeService = require('../services/stripe');
+const logger = require('../services/logger');
 const db = require('../models/db');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const EmailTemplates = require('../services/email-template-library');
@@ -70,12 +83,22 @@ function chain({ result = [], first, returning } = {}) {
   return q;
 }
 
-function setDbQueues(queues) {
+function setDbQueues(queues, { plan = chain(), microdeposits = chain() } = {}) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
-    const queue = tableQueues.get(table);
-    if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
-    return queue.shift();
+    if (table === 'payment_plans') return plan;
+    const next = () => {
+      const queue = tableQueues.get(table);
+      if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+      return queue.shift();
+    };
+    // The batch dunning read starts with whereIn; existing invoice reads
+    // start with where and retain their original queue/assertions.
+    if (table === 'invoices') return {
+      whereIn: (...args) => microdeposits.whereIn(...args),
+      where: (...args) => next().where(...args),
+    };
+    return next();
   });
   return tableQueues;
 }
@@ -121,8 +144,18 @@ function customer(overrides = {}) {
 }
 
 describe('late-payment email sidecar', () => {
+  let lockHeld;
+  const trx = jest.fn((table) => {
+    expect(lockHeld).toBe(true);
+    return db(table);
+  });
   beforeEach(() => {
     jest.clearAllMocks();
+    lockHeld = false;
+    withCustomerCommsLock.mockImplementation(async (_db, _customerId, fn) => {
+      lockHeld = true;
+      try { return await fn(trx); } finally { lockHeld = false; }
+    });
   });
 
   test('latePaymentCheck keeps SMS send behavior and sends the matching 7-day email template', async () => {
@@ -306,14 +339,13 @@ describe('late-payment email sidecar', () => {
     },
   );
 
-  test('still sends required late-payment email when general customer email is disabled', async () => {
+  test('skips late-payment email when general customer email is disabled', async () => {
     setDbQueues({
       invoices: [chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: false } })],
-      customer_interactions: [chain()],
     });
 
-    await BalanceReminder.sendLatePaymentEmail({
+    const result = await BalanceReminder.sendLatePaymentEmail({
       customer: customer(),
       invoice: invoice(),
       balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
@@ -323,9 +355,173 @@ describe('late-payment email sidecar', () => {
       payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
     });
 
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      templateKey: 'billing_late_payment_30_day',
-      suppressionGroupKey: 'transactional_required',
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['enabled preference', { email_enabled: true }, null],
+    ['missing preference row', undefined, null],
+    ['failed initial preference read', undefined, new Error('preferences unavailable')],
+  ])('late-payment email proceeds with %s', async (_label, prefs, error) => {
+    const prefRead = chain({ first: prefs });
+    const freshPrefs = chain({ first: prefs });
+    const freshCustomer = chain({ first: customer() });
+    const ownershipRead = chain({ first: { payer_id: null, scheduled_send_error: null } });
+    if (error) prefRead.first.mockRejectedValueOnce(error);
+    setDbQueues({
+      invoices: [chain({ first: invoice() }), ownershipRead],
+      notification_prefs: [prefRead, freshPrefs],
+      customers: [freshCustomer],
+      customer_interactions: [chain()],
+    });
+    const dispatch = jest.fn(async (database) => {
+      expect(lockHeld).toBe(true);
+      expect(database).toBe(trx);
+      await Promise.resolve();
+      expect(lockHeld).toBe(true);
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      expect(verdict).toEqual({ ok: true });
+      return { sent: verdict.ok };
+    });
+
+    const result = await BalanceReminder.sendLatePaymentEmail({
+      customer: customer(),
+      invoice: invoice(),
+      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
+      smsTemplateKey: 'late_payment_30d',
+      invoiceTitle: 'Quarterly Pest Control',
+      serviceDateClause: '',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs'], ['customers']]);
+    expect(ownershipRead.where).toHaveBeenCalledWith({ id: 'inv-1' });
+    expect(freshPrefs.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(freshPrefs.first).toHaveBeenCalledTimes(1);
+    expect(freshCustomer.where).toHaveBeenCalledWith({ id: 'cust-1' });
+    expect(require('../services/customer-contact').getInvoiceEmailRecipients)
+      .toHaveBeenLastCalledWith(customer(), prefs || {});
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(lockHeld).toBe(false);
+  });
+
+  test('a fresh email opt-out before provider handoff prevents dispatch', async () => {
+    const dispatch = jest.fn();
+    let handoffResult;
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      handoffResult = await withProviderHandoff(dispatch);
+      return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+    });
+    setDbQueues({
+      invoices: [
+        chain({ first: invoice() }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
+      notification_prefs: [
+        chain({ first: { email_enabled: true } }),
+        chain({ first: { email_enabled: false } }),
+      ],
+    });
+
+    const result = await BalanceReminder.sendLatePaymentEmail({
+      customer: customer(),
+      invoice: invoice(),
+      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
+      smsTemplateKey: 'late_payment_30d',
+      invoiceTitle: 'Quarterly Pest Control',
+      serviceDateClause: '',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+    });
+
+    expect(handoffResult).toEqual({ ok: false });
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs']]);
+    expect(lockHeld).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+  });
+
+  test('legacy email opt-out still sends SMS without recording an email delivery', async () => {
+    const smsInteraction = chain();
+    ContactLedger.recordContact
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }));
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }),
+        chain({ first: { id: 'inv-1', token: 'token-1' } }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+      ],
+      sms_log: [chain({ first: { count: '0' } }), chain({ first: null })],
+      notification_prefs: [chain({ first: { email_enabled: false } })],
+      customer_interactions: [smsInteraction],
+    });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['sms', 'email']);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-email' }),
+      expect.objectContaining({ reason: 'email_disabled' }),
+    );
+    expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
+    expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'sms_outbound',
+    }));
+  });
+
+  test('email opt-out with explicit Email and Text still sends SMS without recording an email delivery', async () => {
+    const smsInteraction = chain();
+    ContactLedger.recordContact
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }));
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }),
+        chain({ first: { id: 'inv-1', token: 'token-1' } }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+      ],
+      sms_log: [chain({ first: null })],
+      notification_prefs: [chain({ first: { email_enabled: false, billing_channels: ['email', 'sms'] } })],
+      collections_contact_ledger: [chain({ result: [] }), chain({ result: [] })],
+      customer_interactions: [smsInteraction],
+    });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['email', 'sms']);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-email' }),
+      expect.objectContaining({
+        code: 'email_disabled',
+        resolved: true,
+        resolution: 'email_terminal_refusal',
+      }),
+    );
+    expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
+    expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'sms_outbound',
     }));
   });
 
@@ -479,7 +675,7 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     const failedPrefs = chain();
     failedPrefs.first.mockRejectedValue(new Error('preferences temporarily unavailable'));
     const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 5 * 86400000) });
-    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
     const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
     try {
       setDbQueues({
@@ -726,5 +922,151 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     await BalanceReminder.latePaymentCheck();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('balance reminder pay link', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('a tokenless oldest invoice gets no pay link and skips the reminder, never texting /pay/<customer id>', async () => {
+    setDbQueues({
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }), // payer-billed invoice-id lookup (none)
+        chain({ first: invoice({ token: null }) }),
+      ],
+    });
+
+    const balance = await BalanceReminder.getCustomerBalance('cust-1');
+    expect(balance).toEqual(expect.objectContaining({ oldestInvoiceId: 'inv-1', oldestInvoiceUrl: null }));
+
+    await expect(BalanceReminder.sendReminder({ id: 'svc-1', cust_id: 'cust-1', scheduled_date: '2026-06-01' }, balance, 'three_day', 3))
+      .rejects.toThrow('no unpaid invoice id/token found');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('account-level dunning stops', () => {
+  const paths = [
+    ['latePaymentCheck', null],
+    ['latePaymentCheck', ['email', 'sms']],
+    ['dailyCheck', null],
+    ['dailyCheck', ['email', 'sms']],
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    InvoiceFollowUps.hasActiveSequence.mockReset().mockResolvedValue(false);
+    InvoiceFollowUps.isDunningStopped.mockReset().mockResolvedValue(false);
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockReset().mockResolvedValue(false);
+    ContactLedger.recordContact.mockResolvedValue({ id: 'led-1', metadata: {} });
+  });
+
+  function armReminder(entry, channels, { stop, stoppedId, readError } = {}) {
+    const service = customer({ cust_id: 'cust-1', id: 'visit-1',
+      scheduled_date: new Date(Date.now() + 5 * 86400000) });
+    const prefs = channels ? { billing_channels: channels } : {};
+    const activity = chain();
+    const smsHistory = chain({ first: null });
+    const plan = chain({ first: stop === 'plan' ? { id: 'plan-1' } : null });
+    const microdeposits = chain({ result: ['inv-1', 'inv-2', 'inv-3'].map((id) => ({
+      id, stripe_payment_intent_id: `pi-${id}`,
+    })) });
+    if (stop === 'sequence') InvoiceFollowUps.hasActiveSequence.mockImplementation(async (id) => id === stoppedId);
+    if (stop === 'dunning') InvoiceFollowUps.isDunningStopped.mockImplementation(async (id) => id === stoppedId);
+    if (stop === 'microdeposit') StripeService.isInvoiceAwaitingMicrodepositVerification
+      .mockImplementation(async (row) => row.id === stoppedId);
+    const error = new Error('stop state unavailable');
+    if (readError === 'sequence') InvoiceFollowUps.hasActiveSequence.mockRejectedValue(error);
+    if (readError === 'dunning') InvoiceFollowUps.isDunningStopped.mockRejectedValue(error);
+    if (readError === 'plan') plan.first.mockRejectedValue(error);
+    if (readError === 'invoice') microdeposits.then = (resolve, reject) => Promise.reject(error).then(resolve, reject);
+    if (readError === 'stripe') StripeService.isInvoiceAwaitingMicrodepositVerification.mockRejectedValue(error);
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      scheduled_services: [chain({ result: [service] })],
+      payments: [chain({ result: [
+        { ...overduePayment(), metadata: { invoice_id: 'inv-2' } },
+        { ...overduePayment(), id: 'pay-2', metadata: JSON.stringify({ invoice_id: 'inv-3' }) },
+      ] })],
+      invoices: [chain(), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
+      sms_log: entry === 'dailyCheck' || channels ? [smsHistory] : [chain({ first: { count: '0' } }), smsHistory],
+      collections_contact_ledger: [chain(), chain()],
+      customer_interactions: [activity, activity, activity],
+    }, { plan, microdeposits });
+    return { activity, smsHistory, plan, microdeposits };
+  }
+
+  function expectNoContact({ activity, smsHistory }) {
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(activity.insert).not.toHaveBeenCalled();
+    expect(smsHistory.insert).not.toHaveBeenCalled();
+    expect(db.mock.calls.map(([table]) => table)).not.toContain('customer_interactions');
+  }
+
+  describe.each(paths)('%s with channels %j', (entry, channels) => {
+    test.each(['sequence', 'dunning', 'plan', 'microdeposit'].flatMap((stop) =>
+      ['inv-1', 'inv-2', 'inv-3'].map((stoppedId) => [stop, stoppedId])))('%s on %s prevents every send', async (stop, stoppedId) => {
+      const queries = armReminder(entry, channels, { stop, stoppedId });
+      await BalanceReminder[entry]();
+      expectNoContact(queries);
+      if (stop === 'sequence') expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(stoppedId);
+      if (stop === 'dunning') expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(stoppedId);
+      if (stop === 'plan') {
+        expect(queries.plan.whereIn).toHaveBeenCalledWith('invoice_id', expect.arrayContaining([stoppedId]));
+        expect(queries.plan.where).toHaveBeenCalledWith({ status: 'active' });
+      }
+      if (stop === 'microdeposit') expect(StripeService.isInvoiceAwaitingMicrodepositVerification).toHaveBeenCalledWith(
+        expect.objectContaining({ id: stoppedId }), { throwOnError: true });
+    });
+
+    test.each(['sequence', 'dunning', 'plan', 'invoice', 'stripe'])('%s read error warns and skips without send records', async (readError) => {
+      const queries = armReminder(entry, channels, { readError });
+      await BalanceReminder[entry]();
+      expectNoContact(queries);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('dunning-stop check failed'));
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('sent 0 reminders'));
+    });
+
+    test('no stop preserves delivery and checks every invoice behind the balance', async () => {
+      const queries = armReminder(entry, channels);
+      await BalanceReminder[entry]();
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(entry === 'dailyCheck' && channels ? 2 : 1);
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(entry === 'latePaymentCheck' ? 1 : 0);
+      expect(ContactLedger.recordContact).toHaveBeenCalledTimes(entry === 'latePaymentCheck' || channels ? 2 : 1);
+      expect(queries.activity.insert).toHaveBeenCalled();
+      expect(queries.microdeposits.whereIn).toHaveBeenCalledWith('id', ['inv-2', 'inv-3', 'inv-1']);
+      for (const id of ['inv-1', 'inv-2', 'inv-3']) {
+        expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(id);
+        expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(id);
+      }
+    });
+  });
+
+  test.each(['legacy', 'explicit'])('%s late-payment selection checks an invoice chosen after the balance read', async (path) => {
+    armReminder('latePaymentCheck', path === 'explicit' ? ['email', 'sms'] : null, { stop: 'dunning', stoppedId: 'inv-1' });
+    const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue({
+      totalBalance: 129, daysOverdue: 8, oldestInvoiceId: 'inv-old', invoiceIds: ['inv-old'],
+    });
+    // The balance mock leaves the payer/oldest lookup slots unused.
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      notification_prefs: [chain({ first: path === 'explicit' ? { billing_channels: ['email', 'sms'] } : {} })],
+      sms_log: [chain({ first: { count: '0' } }), chain()],
+      invoices: [chain({ first: invoice() })],
+    });
+    try {
+      await BalanceReminder.latePaymentCheck();
+      expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith('inv-1');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    } finally { balanceRead.mockRestore(); }
   });
 });

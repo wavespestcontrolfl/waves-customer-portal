@@ -923,6 +923,7 @@ app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
 app.use('/api/admin/pest-pressure', require('./routes/admin-pest-pressure'));
 app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
 app.use('/api/admin/pricing-reality-check', require('./routes/admin-pricing-reality-check'));
+app.use('/api/admin/route-scorecard', require('./routes/admin-route-scorecard'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
 app.use('/api/tech/lawn-diagnostic', require('./routes/tech-lawn-diagnostic'));
 app.use('/api/tech/social', require('./routes/tech-social'));

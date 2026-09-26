@@ -23,10 +23,8 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
 import PortalUsageTab from "../../components/admin/PortalUsageTab";
 import { trackAdminPageView } from "../../lib/adminUsage";
-import {
-  DEFAULT_KPI_TARGETS,
-  KPI_METRIC_LABELS,
-} from "./dashboard/kpi-targets";
+import { DEFAULT_KPI_TARGETS } from "@kpi-targets";
+import { KPI_METRIC_LABELS } from "./dashboard/kpi-targets";
 import {
   ActionFeedback,
   Badge,

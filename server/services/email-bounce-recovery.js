@@ -1077,7 +1077,7 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
     category: 'alert',
     title: 'Email bounced — needs a correct address',
     body: `${email} hard-bounced on a ${bouncedMessage?.template_key || 'service'} email and ${reasonLabel}.${suggestion} Check/update the address on file.`,
-    link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
+    link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications',
     metadata: { customer_id: customerId || null, original_message_id: bouncedMessage?.id || null, status, suggested_email: candidate?.corrected || null },
   });
 }
@@ -1089,7 +1089,7 @@ async function alertEmailCollision({ recovery, correctedEmail }) {
     category: 'alert',
     title: 'Bounced email recovered, but address is in use',
     body: `A bounced email was re-sent and delivered to ${correctedEmail}, but that address already belongs to another customer, so the record was not updated. Reconcile manually.`,
-    link: recovery.customer_id ? `/admin/customers/${recovery.customer_id}` : '/admin/communications',
+    link: recovery.customer_id ? `/admin/customers?customerId=${recovery.customer_id}` : '/admin/communications',
     metadata: { customer_id: recovery.customer_id || null, recovery_id: recovery.id },
   });
 }
@@ -1101,7 +1101,7 @@ async function notifyRecoverySuccess({ recovery, bouncedEmail, correctedEmail, r
     category: 'system',
     title: 'Recovered a bounced email',
     body: `Corrected ${bouncedEmail} → ${correctedEmail} (${recovery.correction_rule || 'domain fix'}) and the re-send delivered.${recordUpdated ? ` Updated ${field} on the customer record.` : ''}`,
-    link: recovery.customer_id ? `/admin/customers/${recovery.customer_id}` : '/admin/communications',
+    link: recovery.customer_id ? `/admin/customers?customerId=${recovery.customer_id}` : '/admin/communications',
     metadata: { customer_id: recovery.customer_id || null, recovery_id: recovery.id, record_updated: recordUpdated },
   });
 }
@@ -1223,7 +1223,7 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
         : ((viaRecord?.customer_name || viaRecord?.recipient_name || '').trim() || 'customer');
     const alsoNote = recordCustomers.map(({ type, customer: rc }) => {
       const name = `${rc.first_name || ''} ${rc.last_name || ''}`.trim() || 'another customer';
-      return ` The address is also the recipient on ${type === 'estimate' ? 'an estimate' : 'a contract'} for ${name} (/admin/customers/${rc.id}) — the bounced send may belong to that account.`;
+      return ` The address is also the recipient on ${type === 'estimate' ? 'an estimate' : 'a contract'} for ${name} (/admin/customers?customerId=${rc.id}) — the bounced send may belong to that account.`;
     }).join('');
     // Lead-only matches are precisely the callback case — fall back to the
     // lead's phone when there is no customer row.
@@ -1237,7 +1237,7 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       category: 'alert',
       title: 'Email bounced — needs a correct address',
       body: `${email} for ${who} hard-bounced (${reason}) and is now suppressed — estimates and receipts will not deliver until it is corrected.${phoneHint}${alsoNote}`,
-      link: linkCustomerId ? `/admin/customers/${linkCustomerId}` : '/admin/leads',
+      link: linkCustomerId ? `/admin/customers?customerId=${linkCustomerId}` : '/admin/leads',
       metadata: {
         customer_id: linkCustomerId,
         lead_id: leads[0]?.id || null,
