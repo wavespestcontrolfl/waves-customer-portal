@@ -174,6 +174,12 @@ async function lockVisitContext(trx, customerId, prelocked, {
       throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
     }
   }
+  if (verifyPin) {
+    const plannedIds = new Set(groups.flatMap(group => group.memberIds));
+    const newlyEligibleGroup = visits.some(row => row.visit_id
+      && !plannedIds.has(String(row.id)) && rowIsEligible(row, customer, primary, true));
+    if (newlyEligibleGroup) throw retry();
+  }
 
   const rootsById = new Map(roots.map(row => [String(row.id), row]));
   const missingIds = prelocked.seriesIds.filter(id => !rootsById.has(id));
@@ -194,9 +200,8 @@ async function lockVisitContext(trx, customerId, prelocked, {
 }
 
 async function updatePrimaryVisits(trx, customer, primary, after, latitude, longitude, visitContext, actorId) {
-  const groupedIds = new Set(visitContext.groups.flatMap(group => group.memberIds));
   const ids = visitContext.visits
-    .filter(row => !groupedIds.has(String(row.id)))
+    .filter(row => !row.visit_id)
     .filter(row => rowIsEligible(row, customer, primary, true))
     .map(row => row.id);
   if (ids.length) {

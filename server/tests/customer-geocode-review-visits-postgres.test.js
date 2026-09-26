@@ -250,4 +250,24 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       customer, primary, verifyPin: true,
     })).rejects.toMatchObject({ statusCode: 409, code: 'visit_changed' });
   });
+
+  test('a grouped row that becomes eligible after planning retries instead of taking the direct update path', async () => {
+    const visitId = randomUUID();
+    const ids = [randomUUID(), randomUUID()];
+    await trx('service_visits').insert({
+      id: visitId, customer_id: CUSTOMER_ID, property_id: null,
+      scheduled_date: '2099-10-01', stop_base_key: `${CUSTOMER_ID}:2099-10-01`, stop_seq: 1, status: 'open',
+    });
+    await trx('scheduled_services').insert(ids.map(id => visitRow(id, {
+      visit_id: visitId, lat: 27.4, lng: -82.4,
+    })));
+    const prelocked = await prelockVisitContext(trx, CUSTOMER_ID);
+    await trx('scheduled_services').where({ id: ids[0] }).update({ lat: null, lng: null });
+
+    await expect(lockVisitContext(trx, CUSTOMER_ID, prelocked, {
+      customer, primary, verifyPin: true,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'visit_changed', isOperational: true });
+    expect((await trx('scheduled_services').whereIn('id', ids)).every(row => row.property_id == null)).toBe(true);
+    expect(await trx('audit_log')).toHaveLength(0);
+  });
 });
