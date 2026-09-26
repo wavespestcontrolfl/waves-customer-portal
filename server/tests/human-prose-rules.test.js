@@ -40,7 +40,7 @@ describe('injection — every long-form prose prompt carries the block', () => {
     const rodent = require('../services/service-report/rodent-report-narrative');
     const treatment = require('../services/service-report/treatment-narrative');
 
-    expect(visit._test.PROMPT_VERSION).toBe('pest_visit_summary_narrative_v2');
+    expect(visit._test.PROMPT_VERSION).toBe('pest_visit_summary_narrative_v3');
     expect(visit._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
     expect(lawn._test.PROMPT_VERSION).toBe('lawn_report_v2_narrative_v7');
     expect(lawn._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
