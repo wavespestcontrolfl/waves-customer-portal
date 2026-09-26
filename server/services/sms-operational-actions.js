@@ -311,7 +311,7 @@ const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 // the source text; 'default_kind' when this per-kind/basis table filled one
 // in instead; null when the kind has no default and nothing was stated
 // (legacy behavior — refreshSmsCommitments' null-due branch still applies).
-function resolveDueDeadline(item, messageCreatedAt) {
+function resolveDueDeadline(item, messageCreatedAt, messageBody = '') {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
   // Defaults are Waves' own service windows. A customer-owned promise ("I'll
   // send photos") keeps the legacy undated behavior; a 48h stamp would show
@@ -321,7 +321,10 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // extractor could not resolve to a clock instant: leave it undated rather
   // than manufacture a per-kind deadline that contradicts what was said
   // (Codex #4816 r1). The row still closes on evidence; it never bells.
-  if (item.due_text || item.timing_unverified || STATED_TIMING.test(item.quote || '')) return { due_at: null, due_basis: null };
+  // The whole source text, not just the model's quote: a shortened quote
+  // ("call me" from "Can you call me tomorrow?") must not hide the timing
+  // (Codex #4816 r22).
+  if (item.due_text || item.timing_unverified || STATED_TIMING.test(`${item.quote || ''} ${messageBody || ''}`)) return { due_at: null, due_basis: null };
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
@@ -372,9 +375,14 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const additional = !replay && matchedContext.captureAdditionalProperties
       ? await require('./sms-additional-properties').stageAdditionalProperties({ trx, message: live, proposals: extracted.additional_properties })
       : null;
+    // Sole only when the snapshot taken before the provider call and the one
+    // read under the lock agree: a property deactivated while extraction was
+    // in flight must not make an ambiguous request unambiguous (Codex #4816 r22).
+    const soleOf = (list) => (list?.length === 1 ? list[0].id : null);
+    const soleProperty = soleOf(properties) && soleOf(properties) === soleOf(matchedContext.properties) ? soleOf(properties) : null;
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
-      const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at);
+      const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at, message.message_body);
       return {
         sms_log_id: message.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
         description: item.description, channel: 'sms', due_at: dueAt,
@@ -385,7 +393,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         // unscoped cancel ask is answered only by a cancellation there, never
         // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
-          property_ambiguous: !propertyId, sole_property_id: properties.length === 1 ? properties[0].id : null,
+          property_ambiguous: !propertyId, sole_property_id: soleProperty,
           customer_id: customer.id, source_at: message.created_at },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();

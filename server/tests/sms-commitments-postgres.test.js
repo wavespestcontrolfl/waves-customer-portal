@@ -1458,6 +1458,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     // Codex #4816 r20: deactivating one later does not make the old ask unambiguous.
     ['two at request time, one deactivated before the cancellation', 2, 'deactivate', false],
     ['one at request time, a second added later', 1, 'add', true],
+    // Codex #4816 r22: two when extraction started, one deactivated before the
+    // write committed — still ambiguous.
+    ['two before extraction, one deactivated before the write', 2, 'deactivate-before-write', false],
   ])('Codex #4816 r14/r20: an unscoped cancel ask admits a cancellation only at the request-time sole property (%s)',
     async (_label, activeAtRequest, later, admissible) => {
       result.facts = [];
@@ -1467,7 +1470,9 @@ postgres('SMS commitments on PostgreSQL', () => {
       const addSecond = () => mockPg('customer_properties').insert({ id: second, customer_id: message.customer_id,
         address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
       if (activeAtRequest === 2) await addSecond();
-      await recordMessageOperations(mockPg, message, result, context);
+      const snapshot = { ...context, properties: await mockPg('customer_properties').where({ customer_id: message.customer_id, active: true }).select('id') };
+      if (later === 'deactivate-before-write') await mockPg('customer_properties').where({ id: second }).update({ active: false });
+      await recordMessageOperations(mockPg, message, result, snapshot);
       const [commitment] = await mockPg('call_commitments').select('*');
       expect(commitment.sms_context).toMatchObject({ property_id: null,
         sole_property_id: activeAtRequest === 1 ? context.properties[0].id : null });

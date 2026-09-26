@@ -728,6 +728,13 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     },
   );
 
+  test('Codex #4816 r22: timing elsewhere in the source text counts even when the quote is shortened', () => {
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote: 'call me' },
+      at, 'Can you call me tomorrow?')).toEqual({ due_at: null, due_basis: null });
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote: 'call me' },
+      at, 'Can you call me?').due_basis).toBe('default_kind');
+  });
+
   test.each(['Please call me back', 'Can you send the estimate?', 'Call me back ASAP', 'Are you still coming?',
     'The sun is burning the lawn, can someone call me?', 'The dog sat on the bait station, please call'])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
