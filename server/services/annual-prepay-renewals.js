@@ -14,6 +14,38 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // decidedCoveredAndPaid branch in coveredTermsAsOf.
 const DECIDED_COVERED_STATUSES = ['renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
+// TERMITE renewal successor grace window (owner ruling 2026-09-26, P2-4): an
+// unpaid termite renewal successor (renewed_from_term_id NOT NULL,
+// annual_plan_version NOT NULL, still payment_pending) stays COVERED through
+// this many days — the exact cutoff termite-annual-renewal-charge.js's
+// grace-lapse pass (P1-2) also voids on. One constant, one date formula
+// (termiteRenewalGraceDeadlineSql / termiteRenewalGraceDeadlineFor below),
+// consulted by both coveredTermsAsOf (this file) and the lapse pass (that
+// file) — coverage and the lapse can never disagree about the exact day.
+const TERMITE_RENEWAL_GRACE_DAYS = 30;
+
+// The successor's own coverage clock doesn't necessarily start exactly on
+// term_start — a delayed sweep tick can mint the row days after its nominal
+// term_start (immutable, derived from the parent's own term_end). Anchoring
+// the deadline on whichever is LATER — term_start or the row's own
+// created_at (ET date) — means the successor never gets LESS than a full
+// grace window from the moment it actually came into existence.
+function termiteRenewalGraceDeadlineSql(alias = 't') {
+  return `(GREATEST(${alias}.term_start, ${alias}.created_at::date) + INTERVAL '${TERMITE_RENEWAL_GRACE_DAYS} days')::date`;
+}
+
+// JS-side twin for a single already-fetched row (the lapse pass reads
+// candidate rows directly rather than through a live query) — same
+// GREATEST(term_start, created_at ET-date) + GRACE_DAYS formula.
+function termiteRenewalGraceDeadlineFor(term) {
+  const termStartYmd = dateOnly(term?.term_start);
+  const createdYmd = term?.created_at ? etDateString(new Date(term.created_at)) : null;
+  const later = createdYmd && termStartYmd
+    ? (createdYmd > termStartYmd ? createdYmd : termStartYmd)
+    : (createdYmd || termStartYmd);
+  if (!later) return null;
+  return etDateString(addETDays(parseETDateTime(`${later}T12:00`), TERMITE_RENEWAL_GRACE_DAYS));
+}
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
 // Days BEFORE term_start the unpaid-prepay payment reminder fires (daily cron
 // granularity: 3 days out and the day before the first visit).
@@ -2670,6 +2702,24 @@ function coveredTermsAsOf(conn, coverageDate = null) {
               .orWhere('i.status', 'paid')
               .orWhereNotNull('i.paid_at');
           });
+        })
+        // P2-4 (owner ruling 2026-09-26): an UNPAID termite renewal
+        // successor stays covered through its own 30-day payment grace —
+        // termiteRenewalGraceDeadlineSql is the SAME cutoff the renewal-
+        // charge job's grace-lapse pass voids on, so the two can never
+        // disagree. Scoped tight on purpose: payment_pending status, a
+        // termite renewal SUCCESSOR specifically (renewed_from_term_id NOT
+        // NULL) and the termite marker (annual_plan_version NOT NULL) — a
+        // non-termite payment_pending term, or an ORIGINAL (non-successor)
+        // termite term still awaiting its first payment, never matches.
+        // Once the lapse pass actually voids the invoice, `i.status`
+        // flips to a cancelled shape and the whereRaw exclusion below
+        // drops this row on its own — no separate revocation needed here.
+        .orWhere(function termiteRenewalGraceCovered() {
+          this.where('t.status', PAYMENT_PENDING_STATUS)
+            .whereNotNull('t.renewed_from_term_id')
+            .whereNotNull('t.annual_plan_version')
+            .whereRaw(`${termiteRenewalGraceDeadlineSql('t')} >= ?`, [coverageDate || etDateString()]);
         });
     })
     .whereRaw(
@@ -2900,6 +2950,30 @@ async function statusForPrepayInvoice(invoiceId, conn = db) {
   }
 }
 
+// Move 14 (docs/annual-prepay-term-states.md): the PARENT's renewal
+// decision is recorded 'renew' the moment its successor's own renewal
+// invoice is genuinely paid — deliberately NOT at mint (P2-1): a minted
+// successor is only a PROPOSED renewal, and an unpaid one can still lapse
+// (termite-annual-renewal-charge.js's grace pass), so deciding 'renew'
+// before that is known would leave a lapsed-and-cancelled successor
+// sitting behind a parent already marked 'renewed'. Reuses the canonical
+// recordDecision('renew') writer (the SAME code path an operator's manual
+// "renew" click uses — move 6) rather than a parallel status write; its
+// own `whereIn(ACTIVE_STATUSES) AND renewal_decision IS NULL` guard makes
+// this idempotent no matter how many times invoice-payment sync re-fires
+// for the same successor (retries, a replayed webhook, the daily
+// reconcile sweep). Best-effort: a miss here self-heals on the NEXT sync
+// of this same successor invoice (every one of them re-enters the
+// pending→active / cancelled→active branches below).
+async function stampParentRenewedForSuccessor(successorTerm, contextLabel) {
+  if (!successorTerm?.renewed_from_term_id) return;
+  try {
+    await recordDecision({ termId: successorTerm.renewed_from_term_id, action: 'renew' });
+  } catch (err) {
+    logger.warn(`[annual-prepay] parent renewed-stamp (${contextLabel}) skipped for successor ${successorTerm.id}: ${err.message}`);
+  }
+}
+
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   const invoice = typeof invoiceOrId === 'object'
@@ -2970,6 +3044,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         ? await conn.transaction(reviveFromPending)
         : await reviveFromPending(conn);
       current = updated || term;
+      // Termite renewal successor, freshly paid: stamp the PARENT 'renewed'
+      // now (move 14) — see stampParentRenewedForSuccessor's own comment.
+      // Deliberately OUTSIDE the transaction above: recordDecision writes
+      // through the global `db` handle (it has no conn parameter), and this
+      // stamp only fires once the successor's own flip has durably
+      // committed.
+      if (updated) await stampParentRenewedForSuccessor(updated, 'pending->active');
     } else if (nextStatus === 'active' && term.status === 'cancelled') {
       // Lost-dispute revival (see the marker-gated select above). The
       // conditional WHERE keeps it race-safe and replay-idempotent; a miss
@@ -3000,6 +3081,10 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         ? await conn.transaction(reviveFromCancelled)
         : await reviveFromCancelled(conn);
       current = updated || term;
+      // Same stamp as the pending→active branch above, for the (rarer)
+      // dispute-revival shape: a termite renewal successor whose OWN
+      // invoice was disputed and lost, then re-paid.
+      if (updated) await stampParentRenewedForSuccessor(updated, 'cancelled->active revival');
     } else if (nextStatus === 'cancelled') {
       // The cancel flip and EVERY restoration commit TOGETHER (codex #3591
       // r53 local P0 — symmetric with the revival branches): on the global
@@ -3503,6 +3588,24 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   }
   for (const term of terms) {
     summary.terms += 1;
+    // P2-4 guard: coveredTermsAsOf now also matches an UNPAID termite
+    // renewal successor riding its 30-day grace — that is a "don't cancel
+    // it yet" signal, not "money collected". Every leg below (pending-
+    // window completion settle/credit, extension-credit restore, dispute
+    // recovery) assumes real money landed on the prepay invoice; running
+    // any of them against a still-unpaid successor would settle or credit
+    // against a charge that never happened. Confirm the invoice actually
+    // reads paid before touching a payment_pending row — the pre-existing
+    // paidPending branch (invoice already paid, term flip just lagging)
+    // still proceeds untouched; only a genuinely-unpaid grace row skips.
+    if (term.status === PAYMENT_PENDING_STATUS) {
+      const invoiceRow = term.prepay_invoice_id
+        ? await conn('invoices').where({ id: term.prepay_invoice_id }).first('status', 'paid_at')
+        : null;
+      const reallyPaid = !!invoiceRow
+        && (String(invoiceRow.status || '').toLowerCase() === 'paid' || !!invoiceRow.paid_at);
+      if (!reallyPaid) continue;
+    }
     // Dispute-marker leg (Codex round-3 P2): a COVERED term still carrying
     // dispute_suspended_at means the dispute resolved (coverage requires the
     // prepay invoice paid again) but the one-shot won-dispute restore didn't
@@ -5770,6 +5873,12 @@ module.exports = {
   coveredTermsAsOf,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
+  // Termite renewal grace window (P1-2 / P2-4): the ONE shared cutoff
+  // between coveredTermsAsOf's grace-coverage branch (here) and
+  // termite-annual-renewal-charge.js's own grace-lapse pass.
+  TERMITE_RENEWAL_GRACE_DAYS,
+  termiteRenewalGraceDeadlineFor,
+  termiteRenewalGraceDeadlineSql,
   // Root exports (not only _private): the annual-prepay-invoice route
   // validates the operator's first-visit time with the SAME normalizer that
   // persists it and the SAME conflict predicate the seeder re-checks with, so
@@ -5827,5 +5936,6 @@ module.exports = {
     detachCallbacksFromTerm,
     fileCoverageExceptionAfterCommit,
     resetCachesForTests,
+    stampParentRenewedForSuccessor,
   },
 };

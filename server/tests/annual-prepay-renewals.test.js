@@ -3608,6 +3608,53 @@ describe('annual_prepay billing_mode stamp timing', () => {
       expect.objectContaining({ billing_mode: 'annual_prepay' }),
     );
   });
+
+});
+
+// Move 14 (docs/annual-prepay-term-states.md, P2-1/P2-4 termite renewal
+// lane): stampParentRenewedForSuccessor is the hook syncTermForInvoicePayment
+// calls on the pending→active (and cancelled→active revival) transitions
+// for a row carrying renewed_from_term_id. Tested in isolation — the exact
+// call sites inside syncTermForInvoicePayment's much larger flow are
+// exercised end-to-end by termite-annual-renewal-charge.test.js's own
+// mint/decideAndCharge/grace-lapse suites and the real-Postgres grace-
+// coverage suite.
+describe('stampParentRenewedForSuccessor (move 14) — the parent-renewed hook', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+  });
+
+  test('a successor with renewed_from_term_id calls recordDecision(\'renew\') on the PARENT — reusing the canonical writer, not a new status-write site', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({ annual_prepay_terms: [recordDecisionQ] });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.where).toHaveBeenCalledWith({ id: 'parent-term' });
+    expect(recordDecisionQ.whereIn).toHaveBeenCalledWith('status', ['active', 'renewal_pending']);
+    expect(recordDecisionQ.whereNull).toHaveBeenCalledWith('renewal_decision');
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'renewed', renewal_decision: 'renew',
+    }));
+  });
+
+  test('a term with no renewed_from_term_id (ordinary annual prepay, or an original termite term) touches the db not at all', async () => {
+    setDbQueues({}); // any db(table) call here throws "Unexpected db table" and fails the test
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'term-s', renewed_from_term_id: null }, 'test')).resolves.toBeUndefined();
+  });
+
+  test('idempotent — a parent already decided (guard miss) is a silent no-op, never throws', async () => {
+    const recordDecisionQ = query({ returning: [] }); // guard miss: recordDecision resolves null
+    setDbQueues({ annual_prepay_terms: [recordDecisionQ] });
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+  });
+
+  test('a db failure is best-effort — logged and swallowed, never thrown to the caller', async () => {
+    db.mockImplementation(() => { throw new Error('connection lost'); });
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+  });
 });
 
 // billing_mode reset on term void/refund (Codex round-5): the monthly cron

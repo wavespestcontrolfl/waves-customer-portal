@@ -463,6 +463,53 @@ describe('annual prepay late-payment gap fixes', () => {
       expect(postCreditMovement).not.toHaveBeenCalled();
     });
 
+    // P2-4 guard: coveredTermsAsOf's new grace-coverage branch (owner ruling
+    // 2026-09-26) admits an UNPAID termite renewal successor into this
+    // sweep's result set — every leg below assumes real money landed on the
+    // prepay invoice, so a genuinely-unpaid grace row must be skipped
+    // entirely rather than settled/credited against a charge that never
+    // happened.
+    test('P2-4: a payment_pending term whose invoice is NOT actually paid (grace-covered, unpaid) is skipped entirely — no leg touches it', async () => {
+      const graceCoveredTerm = {
+        id: 'succ-term-1', customer_id: 'cust-1', status: 'payment_pending',
+        term_start: '2026-09-27', term_end: '2027-09-27',
+        prepay_amount: '249.00', coverage_visit_count: null, coverage_service_type: null,
+        prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', annual_plan_version: 'v3',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [graceCoveredTerm] })],
+        invoices: [query({ first: { status: 'draft', paid_at: null } })], // not actually paid
+        customer_credit_ledger: [query({ rows: [] })], // sweep grant scan (runs once, unconditionally)
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-09-27', conn });
+
+      expect(summary.terms).toBe(1);
+      expect(settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    test('P2-4: a payment_pending term whose invoice IS actually paid (the pre-existing paidPending shape) still proceeds normally', async () => {
+      const paidPendingTerm = {
+        id: 'term-1', customer_id: 'cust-1', status: 'payment_pending',
+        term_start: '2026-07-01', term_end: '2027-07-01',
+        prepay_amount: '480.00', coverage_visit_count: null, coverage_service_type: null,
+        prepay_invoice_id: 'inv-pp-1',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [paidPendingTerm] })],
+        invoices: [query({ first: { status: 'paid', paid_at: '2026-07-01' } })],
+        customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
+          query({ rows: [] }), // sweep grant scan
+        ],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.terms).toBe(1);
+    });
+
     // WaveGuard extension-credit recovery pass — the refunded ANCHOR is the
     // whole evidence (codex #3344 r1 P1): a refunded term that already
     // decided renewal keeps 'renewed'/'switch_plan' status, so a
@@ -1235,6 +1282,14 @@ describe('annual prepay late-payment gap fixes', () => {
         g.whereIn = (col, arr) => g.comb('and', arr.includes(row[col]));
         g.whereNull = (col) => g.comb('and', row[col] == null);
         g.orWhereNotNull = (col) => g.comb('or', row[col] != null);
+        // P2-4's termiteRenewalGraceCovered branch: none of the fixtures
+        // below carry renewed_from_term_id/annual_plan_version, so
+        // whereNotNull always short-circuits that branch to false before
+        // whereRaw (the exact grace-deadline SQL, exercised for real
+        // against Postgres in termite-annual-renewal-grace-coverage-
+        // postgres.test.js) would ever matter here.
+        g.whereNotNull = (col) => g.comb('and', row[col] != null);
+        g.whereRaw = () => g.comb('and', true);
         return g;
       }
       const root = makeGroup();
@@ -1253,6 +1308,16 @@ describe('annual prepay late-payment gap fixes', () => {
       pendingPaidInvoice: { 't.status': 'payment_pending', 't.prepay_invoice_id': 'inv-1', 'i.status': 'paid', 'i.paid_at': '2026-01-01' },
       pendingOpenInvoice: { 't.status': 'payment_pending', 't.prepay_invoice_id': 'inv-1', 'i.status': 'sent', 'i.paid_at': null },
       trueCancel: { 't.status': 'cancelled', 't.renewal_decision': null, 't.prepay_invoice_id': 'inv-1', 'i.status': 'refunded', 'i.paid_at': null },
+      // P2-4: an unpaid termite renewal successor — the whereRaw grace-
+      // deadline check is stubbed true above (its real SQL is exercised
+      // against Postgres separately); this fixture only pins that the
+      // whereNotNull gates are the termite-specific ones.
+      termiteGraceUnpaidSuccessor: {
+        't.status': 'payment_pending', 't.renewed_from_term_id': 'parent-1', 't.annual_plan_version': 'v3', 't.prepay_invoice_id': 'inv-1', 'i.status': 'draft', 'i.paid_at': null,
+      },
+      pendingSuccessorNoTermiteMarker: {
+        't.status': 'payment_pending', 't.renewed_from_term_id': 'parent-1', 't.annual_plan_version': null, 't.prepay_invoice_id': 'inv-1', 'i.status': 'draft', 'i.paid_at': null,
+      },
     };
 
     test('decided terms lose coverage when the prepay invoice reopens (lost/open chargeback)', () => {
@@ -1271,6 +1336,15 @@ describe('annual prepay late-payment gap fixes', () => {
       expect(evaluateGuard(guard, rows.pendingPaidInvoice)).toBe(true);
       expect(evaluateGuard(guard, rows.pendingOpenInvoice)).toBe(false);
       expect(evaluateGuard(guard, rows.trueCancel)).toBe(false);
+    });
+
+    // P2-4 (owner ruling 2026-09-26): a termite renewal SUCCESSOR gets the
+    // grace-coverage branch; a payment_pending row with the same shape but
+    // missing the termite marker does not.
+    test('P2-4: only a termite renewal successor (renewed_from_term_id AND annual_plan_version) reaches the grace-coverage branch', () => {
+      const guard = captureStatusGuard();
+      expect(evaluateGuard(guard, rows.termiteGraceUnpaidSuccessor)).toBe(true);
+      expect(evaluateGuard(guard, rows.pendingSuccessorNoTermiteMarker)).toBe(false);
     });
   });
 });
