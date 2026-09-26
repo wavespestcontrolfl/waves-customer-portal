@@ -335,8 +335,13 @@ function checkTcpaConsent(extraction, opts = {}) {
 // v2-1.43.0 (codex round 32): "a.m."/"p.m." collapse keeps the sentence
 // break before a new capitalized non-calendar word ("10 a.m. Okay.") —
 // grounds a booking v2-1.42.0 held.
-const V2_DECISION_VERSION = 'v2-1.43.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0'];
+// v2-1.44.0: a real_estate_agent/lender arranging a WDO inspection with a
+// confirmed time is an authorized caller (owner ruling 2026-09-26,
+// isAuthorizedWdoArrangerBooking) — caller_not_authorized is no longer raised
+// for that shape, so a force-reprocess of such a call can move from review to
+// auto-route and must write a fresh decision row.
+const V2_DECISION_VERSION = 'v2-1.44.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0'];
 
 function buildRouteDecision({
   callLogId,
