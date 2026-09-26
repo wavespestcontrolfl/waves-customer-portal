@@ -219,6 +219,16 @@ describe('invoice SMS provider handoff', () => {
   // here, a standalone double) rather than the claim-path `db` mock above,
   // pinning that it re-reads the invoice through exactly the handle it was
   // given.
+  test('billingEmailPreSendCheck refuses when called without the locked handle', async () => {
+    let captured;
+    sendCustomerMessage.mockImplementation(async ({ billingEmailPreSendCheck }) => {
+      captured = await billingEmailPreSendCheck({});
+      return { sent: true, deliveryOutcome: 'accepted' };
+    });
+    await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+    expect(captured).toMatchObject({ ok: false, code: 'INVOICE_LOCK_UNAVAILABLE', retryable: true });
+  });
+
   test('billingEmailPreSendCheck (the explicit Email leg guard) passes when nothing changed, reading the invoice through its own given handle', async () => {
     const emailTrx = jest.fn((table) => {
       if (table === 'invoices') return query({ first: invoice });

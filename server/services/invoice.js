@@ -5222,6 +5222,13 @@ const InvoiceService = {
         // this handoff's own lock there would deadlock against it. See
         // checkInvoiceDeliveryPreconditions for the shared check both legs run.
         billingEmailPreSendCheck: async ({ database } = {}) => {
+          // Runs only under the Email authority's lock, which always passes
+          // its locked transaction. Without it, refuse rather than read the
+          // invoice unlocked.
+          if (!database) {
+            return { ok: false, code: "INVOICE_LOCK_UNAVAILABLE",
+              reason: "Invoice email check ran without the invoice lock", retryable: true };
+          }
           const current = await database("invoices").where({ id: invoiceId }).first();
           return checkInvoiceDeliveryPreconditions(database, current, {
             sendClaimToken: invoice.send_claim_token, sendInvoice,
