@@ -4300,7 +4300,17 @@ function annualPlanRowsFor(estimateData, billingTerm) {
 // delivery/fingerprint stamp estimate-offer-version.js already writes at
 // send time, the same evidence annualPlanPublicReplayBlocked uses to keep
 // such an offer viewable and acceptable.
+const PERSISTED_SIGN_BEFORE_PAY_STAMPS = ['awaiting_signature', 'activated', 'signature_expired'];
+
 function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm) {
+  // A persisted stamp is checked BEFORE the billing-term row filter: it
+  // proves this estimate already entered sign-before-pay, whatever
+  // billingTerm a later caller passes. A retry that omits billingTerm
+  // (default 'standard' selects no annual-plan rows) must still reach
+  // parkTermiteAnnualPlanAccept's no-op for a parked / activated / closed
+  // estimate — never an ordinary conversion that mints services or an
+  // invoice beside it.
+  if (PERSISTED_SIGN_BEFORE_PAY_STAMPS.includes(estimate?.annual_plan_activation_status)) return true;
   const rows = annualPlanRowsFor(estimateData, billingTerm);
   if (rows.length === 0) return false;
   // Codex round-3 P0: once an estimate has actually parked, the PERSISTED
@@ -4324,9 +4334,7 @@ function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm)
   // that already closed — never the intended outcome. parkTermiteAnnualPlanAccept
   // (below) is what actually decides what a re-run of a 'signature_expired'
   // estimate does; this only ensures every re-run reaches that decision.
-  if (estimate.annual_plan_activation_status === 'awaiting_signature'
-    || estimate.annual_plan_activation_status === 'activated'
-    || estimate.annual_plan_activation_status === 'signature_expired') return true;
+  // (All three stamps are checked at the top of this function.)
   return termiteAnnualPlanSelectionEnabled() || annualPlanHasDeliveredOffer(estimate);
 }
 

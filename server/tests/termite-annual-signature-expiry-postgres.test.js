@@ -597,4 +597,38 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(await db('customer_contract_events').where({ contract_id: contract.id })).toHaveLength(0);
     });
   });
+
+  describe('close-out bell is atomic with the state change', () => {
+    test('the closed-offer bell is written on the close-out transaction', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 2) });
+      await makeAgreement(db, { estimateId, customerId });
+
+      expect((await sweep()).signatureExpired).toBe(1);
+      const [, , , opts] = closedBellCalls(notifyAdmin)[0];
+      expect(typeof opts.trx).toBe('function');
+      expect(opts).toMatchObject({ bell: true, dedupeKey: `termite-annual-signature-expiry:${estimateId}` });
+    });
+
+    test('a bell that fails to persist rolls the close-out back — still parked, agreement untouched, retried later', async () => {
+      const { sweep, db } = load({
+        notifyAdminImpl: async (category, title) => {
+          if (/offer closed/i.test(title)) throw new Error('admin notification insert failed');
+          return { id: randomUUID(), deduped: false };
+        },
+      });
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 2) });
+      const contract = await makeAgreement(db, { estimateId, customerId });
+
+      const counts = await sweep();
+      expect(counts).toMatchObject({ signatureExpired: 0, signatureExpireFailed: 1 });
+      const estimate = await db('estimates').where({ id: estimateId }).first();
+      expect(estimate.annual_plan_activation_status).toBe('awaiting_signature');
+      expect(estimate.annual_plan_activation_attempted_at).toBeInstanceOf(Date);
+      const stillOpen = await db('customer_contracts').where({ id: contract.id }).first();
+      expect(stillOpen.status).toBe('sent');
+      expect(stillOpen.share_token_hash).toBe('a-token-hash');
+      expect(await db('customer_contract_events').where({ contract_id: contract.id })).toHaveLength(0);
+    });
+  });
 });

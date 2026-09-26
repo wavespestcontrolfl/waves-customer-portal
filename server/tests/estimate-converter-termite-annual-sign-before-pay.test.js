@@ -293,6 +293,30 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(estimateUpdate).not.toHaveBeenCalled();
     });
 
+    test.each([
+      ['signature_expired', null, { annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null }],
+      ['awaiting_signature', { version: 1, parkedAt: '2026-08-01T00:00:00.000Z', frozenFinancials: { total: 449 } }, { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: 449 }],
+      ['activated', null, { annualPlanActivationStatus: 'activated', annualPlanDeferredTotal: null }],
+    ])('a retry that OMITS billingTerm (default standard) on a %s estimate still no-ops — never an ordinary conversion beside the plan', async (status, deferred, expected) => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const customerUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: true,
+        estimateUpdate,
+        customerUpdate,
+        priorActivationStatus: status,
+        ...(deferred ? { priorDeferredInvoice: deferred } : {}),
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', { skipAutoSchedule: true });
+
+      expect(result).toEqual(expected);
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+      expect(customerUpdate).not.toHaveBeenCalled();
+      expect(estimateUpdate).not.toHaveBeenCalled();
+    });
+
     test('slice 3b: signature_expired still routes here even with the live gate OFF and no delivered-offer stamp — never falls through to an ordinary re-accept', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
       const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {

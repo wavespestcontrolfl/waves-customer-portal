@@ -1250,6 +1250,26 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
         metadata: JSON.stringify({ reason: 'annual_plan_signature_expired', estimateId, abandonDays: ANNUAL_SIGNATURE_ABANDON_DAYS }),
       });
     }
+    // The staff bell is written INSIDE this transaction (notifyAdmin's trx
+    // option): once the estimate leaves 'awaiting_signature' no later sweep
+    // selects it again, so a bell sent after commit could be lost for good
+    // (insert failure, process exit). On the caller's trx notifyAdmin
+    // propagates an insert failure, which rolls the close-out back for the
+    // next sweep to retry — state change and bell land together or not at all.
+    const NotificationService = require('./notification-service');
+    await NotificationService.notifyAdmin(
+      'estimate',
+      'Termite annual plan offer closed — never signed',
+      `The Waves Subterranean Termite Protection annual plan offer for estimate #${estimateId} closed automatically after ${ANNUAL_SIGNATURE_ABANDON_DAYS} days unsigned. Nothing was billed or booked. Re-quote the customer if they still want the plan.`,
+      {
+        icon: '⚠️',
+        link: `/admin/estimates?estimateId=${estimateId}`,
+        bell: true,
+        dedupeKey: `termite-annual-signature-expiry:${estimateId}`,
+        metadata: { estimateId },
+        trx,
+      },
+    );
     return { expired: true, retiredCount, customerId: estimate.customer_id };
   });
 }
@@ -1280,25 +1300,10 @@ async function expireAbandonedSignatures({ conn, limit, counts }) {
       .select('e.id as estimate_id')
       .limit(limit);
     counts.signatureExpireScanned = candidates.length;
-    const NotificationService = require('./notification-service');
     for (const row of candidates) {
       try {
         const result = await expireAbandonedSignature({ estimateId: row.estimate_id, conn });
-        if (result?.expired) {
-          counts.signatureExpired += 1;
-          await NotificationService.notifyAdmin(
-            'estimate',
-            'Termite annual plan offer closed — never signed',
-            `The Waves Subterranean Termite Protection annual plan offer for estimate #${row.estimate_id} closed automatically after ${ANNUAL_SIGNATURE_ABANDON_DAYS} days unsigned. Nothing was billed or booked. Re-quote the customer if they still want the plan.`,
-            {
-              icon: '⚠️',
-              link: `/admin/estimates?estimateId=${row.estimate_id}`,
-              bell: true,
-              dedupeKey: `termite-annual-signature-expiry:${row.estimate_id}`,
-              metadata: { estimateId: row.estimate_id },
-            },
-          );
-        }
+        if (result?.expired) counts.signatureExpired += 1;
       } catch (err) {
         counts.signatureExpireFailed += 1;
         logger.error(`[termite-annual-activation] signature hard-expiry failed for estimate ${row.estimate_id}: ${err.message}`);
