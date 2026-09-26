@@ -232,7 +232,12 @@ describe('termite annual renewal charge', () => {
   // term's bell has actually been asked for — never relying on
   // notifyAdmin's own dedupe alone to keep a backlog from starving newer
   // terms out of LIMIT.
-  describe('exception-bell scans — persisted exclusion (Codex round-5 P1)', () => {
+  // Codex round-6 P1: one column PER KIND (20260926050001) —
+  // renewal_no_witness_belled_at / renewal_unanchored_belled_at /
+  // renewal_stale_overdue_belled_at. Round-5's single shared
+  // renewal_exception_belled_at column is left in the DB, unused (050000
+  // is pushed/frozen) — no test here should reference it any more.
+  describe('exception-bell scans — per-kind persisted exclusion (Codex round-6 P1)', () => {
     function tableQuery(rows) {
       const q = {};
       // Full chain every one of whereDueForRenewal / whereNoticeWitnessed /
@@ -244,30 +249,34 @@ describe('termite annual renewal charge', () => {
       return q;
     }
 
+    // stampUpdates is keyed by the ACTUAL column name each whereNull() call
+    // used — never a single fixed assertion baked into the mock — so a
+    // test can inspect exactly which per-kind column got the write.
     function makeBellConn(rows) {
       const scanQ = tableQuery(rows);
-      const stampUpdate = jest.fn().mockResolvedValue(1);
+      const stampUpdates = {};
       const conn = jest.fn((table) => {
         if (table === 'annual_prepay_terms as t') return scanQ;
         if (table === 'annual_prepay_terms') {
           return {
             where: jest.fn().mockReturnValue({
               whereNull: jest.fn((col) => {
-                expect(col).toBe('renewal_exception_belled_at');
-                return { update: stampUpdate };
+                const update = jest.fn().mockResolvedValue(1);
+                stampUpdates[col] = update;
+                return { update };
               }),
             }),
           };
         }
         throw new Error(`unexpected table ${table}`);
       });
-      return { conn, scanQ, stampUpdate };
+      return { conn, scanQ, stampUpdates };
     }
 
-    test('bellNoWitnessTerms excludes renewal_exception_belled_at in SQL and stamps it once a bell has been asked for', async () => {
+    test('bellNoWitnessTerms excludes/stamps renewal_no_witness_belled_at — its OWN kind-specific column', async () => {
       mockCommon();
       const term = { id: 'term-1', customer_id: 'cust-1', term_end: '2026-09-01' };
-      const { conn, scanQ, stampUpdate } = makeBellConn([term]);
+      const { conn, scanQ, stampUpdates } = makeBellConn([term]);
       const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: false, suppressed: false }));
       jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
 
@@ -275,22 +284,23 @@ describe('termite annual renewal charge', () => {
       const counts = { noWitnessBelled: 0 };
       await _private.bellNoWitnessTerms({ conn, limit: 1, today: '2026-09-26', counts });
 
-      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_exception_belled_at');
+      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_no_witness_belled_at');
+      expect(scanQ.whereNull).not.toHaveBeenCalledWith('t.renewal_exception_belled_at');
       expect(scanQ.limit).toHaveBeenCalledWith(1);
       expect(counts.noWitnessBelled).toBe(1);
-      expect(stampUpdate).toHaveBeenCalledWith(expect.objectContaining({
-        renewal_exception_belled_at: expect.any(Date), renewal_exception_kind: 'no_witness',
+      expect(stampUpdates.renewal_no_witness_belled_at).toHaveBeenCalledWith(expect.objectContaining({
+        renewal_no_witness_belled_at: expect.any(Date),
       }));
     });
 
-    // The exact scenario the finding names: with limit 1, an older
+    // The exact scenario the round-5 finding named: with limit 1, an older
     // already-belled term must not be in the result set at all (the real
     // SQL exclusion already filtered it out before LIMIT), so the ONE slot
     // goes to whatever newer term still needs its bell.
     test('bellNoWitnessTerms: with limit 1, a newer term still gets its bell — an older already-belled one never occupies the slot', async () => {
       mockCommon();
       const newerTerm = { id: 'term-newer', customer_id: 'cust-2', term_end: '2026-09-20' };
-      const { conn, stampUpdate } = makeBellConn([newerTerm]);
+      const { conn, stampUpdates } = makeBellConn([newerTerm]);
       const notifyAdmin = jest.fn(async () => ({ id: 'n2', deduped: false, suppressed: false }));
       jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
 
@@ -302,38 +312,40 @@ describe('termite annual renewal charge', () => {
         dedupeKey: 'termite-renewal-no-witness:term-newer',
       }));
       expect(counts.noWitnessBelled).toBe(1);
-      expect(stampUpdate).toHaveBeenCalledTimes(1);
+      expect(stampUpdates.renewal_no_witness_belled_at).toHaveBeenCalledTimes(1);
     });
 
-    test('bellUnanchoredOriginalTerms excludes renewal_exception_belled_at in SQL and stamps it', async () => {
+    test('bellUnanchoredOriginalTerms excludes/stamps renewal_unanchored_belled_at — its OWN kind-specific column', async () => {
       mockCommon();
       const term = { id: 'term-2', customer_id: 'cust-1', term_end: '2026-09-01' };
-      const { conn, scanQ, stampUpdate } = makeBellConn([term]);
+      const { conn, scanQ, stampUpdates } = makeBellConn([term]);
       jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1', deduped: false, suppressed: false })) }));
 
       const { _private } = require('../services/termite-annual-renewal-charge');
       const counts = { unanchoredBelled: 0 };
       await _private.bellUnanchoredOriginalTerms({ conn, limit: 1, today: '2026-09-26', counts });
 
-      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_exception_belled_at');
+      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_unanchored_belled_at');
+      expect(scanQ.whereNull).not.toHaveBeenCalledWith('t.renewal_exception_belled_at');
       expect(counts.unanchoredBelled).toBe(1);
-      expect(stampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_exception_kind: 'unanchored' }));
+      expect(stampUpdates.renewal_unanchored_belled_at).toHaveBeenCalledTimes(1);
     });
 
-    test('bellStaleOverdueTerms excludes renewal_exception_belled_at in SQL and stamps it', async () => {
+    test('bellStaleOverdueTerms excludes/stamps renewal_stale_overdue_belled_at — its OWN kind-specific column', async () => {
       mockCommon();
       mockGraceHelpers({ graceDays: 30 });
       const term = { id: 'term-3', customer_id: 'cust-1', term_end: '2026-06-01' };
-      const { conn, scanQ, stampUpdate } = makeBellConn([term]);
+      const { conn, scanQ, stampUpdates } = makeBellConn([term]);
       jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1', deduped: false, suppressed: false })) }));
 
       const { _private } = require('../services/termite-annual-renewal-charge');
       const counts = { staleOverdueBelled: 0 };
       await _private.bellStaleOverdueTerms({ conn, limit: 1, today: '2026-09-26', counts });
 
-      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_exception_belled_at');
+      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_stale_overdue_belled_at');
+      expect(scanQ.whereNull).not.toHaveBeenCalledWith('t.renewal_exception_belled_at');
       expect(counts.staleOverdueBelled).toBe(1);
-      expect(stampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_exception_kind: 'stale_overdue' }));
+      expect(stampUpdates.renewal_stale_overdue_belled_at).toHaveBeenCalledTimes(1);
     });
 
     // A bell that DEDUPES from a prior tick still means "staff was told" —
@@ -341,7 +353,7 @@ describe('termite annual renewal charge', () => {
     test('a deduped bell (already rang on a prior tick) still stamps the exclusion, even though the count does not increment', async () => {
       mockCommon();
       const term = { id: 'term-4', customer_id: 'cust-1', term_end: '2026-09-01' };
-      const { conn, stampUpdate } = makeBellConn([term]);
+      const { conn, stampUpdates } = makeBellConn([term]);
       jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1', deduped: true })) }));
 
       const { _private } = require('../services/termite-annual-renewal-charge');
@@ -349,7 +361,65 @@ describe('termite annual renewal charge', () => {
       await _private.bellNoWitnessTerms({ conn, limit: 1, today: '2026-09-26', counts });
 
       expect(counts.noWitnessBelled).toBe(0);
-      expect(stampUpdate).toHaveBeenCalledTimes(1);
+      expect(stampUpdates.renewal_no_witness_belled_at).toHaveBeenCalledTimes(1);
+    });
+
+    // Codex round-6 P1 — the exact scenario the finding named: a term
+    // already belled for kind A (no_witness — e.g. staff eventually sent
+    // the notice, fixing that condition) later legitimately matches a
+    // DIFFERENT kind (unanchored) and must still be scanned and belled for
+    // it. A single shared exclusion column would have silently skipped it
+    // forever the instant kind A belled it; the per-kind columns don't.
+    test('a term already belled for no_witness (kind A) is still scanned and belled for unanchored (kind B) once it matches — limit 1', async () => {
+      mockCommon();
+      const term = {
+        id: 'term-5', customer_id: 'cust-1', term_end: '2026-06-01',
+        // Belled for no_witness on an earlier tick; renewal_unanchored_belled_at
+        // is still null, so bellUnanchoredOriginalTerms' own column exclusion
+        // still admits this row.
+        renewal_no_witness_belled_at: new Date('2026-07-01T00:00:00Z'),
+      };
+      const { conn, scanQ, stampUpdates } = makeBellConn([term]);
+      const notifyAdmin = jest.fn(async () => ({ id: 'n5', deduped: false, suppressed: false }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { unanchoredBelled: 0 };
+      await _private.bellUnanchoredOriginalTerms({ conn, limit: 1, today: '2026-09-26', counts });
+
+      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_unanchored_belled_at');
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
+        dedupeKey: 'termite-renewal-unanchored:term-5',
+      }));
+      expect(counts.unanchoredBelled).toBe(1);
+      expect(stampUpdates.renewal_unanchored_belled_at).toHaveBeenCalledTimes(1);
+    });
+
+    // Same scenario, the other pairing: already belled for unanchored
+    // (kind A — e.g. staff anchored the installation, fixing THAT
+    // condition), then the term goes stale-overdue (kind B) and must still
+    // be scanned and belled for it.
+    test('a term already belled for unanchored (kind A) is still scanned and belled for stale_overdue (kind B) once it matches — limit 1', async () => {
+      mockCommon();
+      mockGraceHelpers({ graceDays: 30 });
+      const term = {
+        id: 'term-6', customer_id: 'cust-1', term_end: '2026-06-01',
+        renewal_unanchored_belled_at: new Date('2026-07-01T00:00:00Z'),
+      };
+      const { conn, scanQ, stampUpdates } = makeBellConn([term]);
+      const notifyAdmin = jest.fn(async () => ({ id: 'n6', deduped: false, suppressed: false }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { staleOverdueBelled: 0 };
+      await _private.bellStaleOverdueTerms({ conn, limit: 1, today: '2026-09-26', counts });
+
+      expect(scanQ.whereNull).toHaveBeenCalledWith('t.renewal_stale_overdue_belled_at');
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
+        dedupeKey: 'termite-renewal-stale-overdue:term-6',
+      }));
+      expect(counts.staleOverdueBelled).toBe(1);
+      expect(stampUpdates.renewal_stale_overdue_belled_at).toHaveBeenCalledTimes(1);
     });
   });
 

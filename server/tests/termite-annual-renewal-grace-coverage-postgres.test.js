@@ -168,4 +168,37 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
     const notCoveredDayAfter = await AnnualPrepayRenewals.coveredTermsAsOf(db, '2026-10-31').where('t.id', id).first('t.id');
     expect(notCoveredDayAfter).toBeUndefined();
   });
+
+  // Codex round-6 P1: a direct, unmocked agreement check between the two
+  // deadline twins — termiteRenewalGraceDeadlineSql's raw expression,
+  // evaluated by REAL Postgres against the SAME row, and
+  // termiteRenewalGraceDeadlineFor's JS computation on that row's own
+  // fields. The suite above only proves the SQL twin indirectly (through
+  // coveredTermsAsOf's boundary behavior); this proves the two formulas
+  // compute the IDENTICAL calendar date, row for row, including the ET
+  // evening boundary and a delayed-mint case.
+  test('termiteRenewalGraceDeadlineSql and termiteRenewalGraceDeadlineFor agree on the exact deadline date for every row', async () => {
+    const cases = [
+      { termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z' }, // same-day mint
+      { termStart: '2026-09-27', createdAt: '2026-10-02T12:00:00Z' }, // delayed mint — created_at later
+      { termStart: '2026-10-15', createdAt: '2026-09-27T12:00:00Z' }, // term_start later
+      { termStart: '2026-09-30', createdAt: '2026-10-01T01:30:00Z' }, // ET evening boundary
+      { termStart: '2026-12-15', createdAt: '2026-12-15T12:00:00Z' }, // year-end rollover
+    ];
+    for (const c of cases) {
+      const id = await insertSuccessor({ termStart: c.termStart, createdAt: c.createdAt });
+      const row = await db('annual_prepay_terms').where({ id }).first('term_start', 'created_at');
+      const jsDeadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor(row);
+
+      const sqlRow = await db('annual_prepay_terms as t')
+        .where('t.id', id)
+        .select(db.raw(`${AnnualPrepayRenewals.termiteRenewalGraceDeadlineSql('t')} as deadline`))
+        .first();
+      const sqlDeadline = typeof sqlRow.deadline === 'string'
+        ? sqlRow.deadline.slice(0, 10)
+        : new Date(sqlRow.deadline).toISOString().slice(0, 10);
+
+      expect(sqlDeadline).toBe(jsDeadline);
+    }
+  });
 });

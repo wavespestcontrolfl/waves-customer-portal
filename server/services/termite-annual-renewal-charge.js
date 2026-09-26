@@ -40,10 +40,16 @@
 //      exception bucket, the oldest ones keep consuming every tick's LIMIT
 //      slot (dedupe-skipped every time) while a newer term past that
 //      backlog never gets scanned, hence never gets its required staff
-//      alert. Each scan now excludes on renewal_exception_belled_at
-//      directly in SQL (stampRenewalExceptionBelled, stamped once the bell
-//      has actually been asked for — fresh or deduped, either way staff
-//      has been told) instead of relying on dedupe alone.
+//      alert. Each scan now excludes on its OWN kind-specific column
+//      (Codex round-6 P1: renewal_no_witness_belled_at /
+//      renewal_unanchored_belled_at / renewal_stale_overdue_belled_at,
+//      20260926050001 — round-5's single shared renewal_exception_belled_at
+//      column excluded a term from ALL three scans the instant any ONE
+//      kind belled it, so a term fixed for kind A that later legitimately
+//      matches kind B would never be scanned for B either) directly in SQL
+//      (stampRenewalExceptionBelled, stamped once the bell has actually
+//      been asked for — fresh or deduped, either way staff has been told)
+//      instead of relying on dedupe alone.
 //   4. processRenewalCandidates — for every due, witnessed, anchor-eligible,
 //      NOT-stale, undecided termite term with no successor yet: mints the
 //      successor term + its renewal invoice (§2), then decides whether to
@@ -250,25 +256,48 @@ function graceDeadlineFor(term) {
   return require('./annual-prepay-renewals').termiteRenewalGraceDeadlineFor(term);
 }
 
-// Codex round-5 P1: persisted exclusion for the three exception-bell scans
-// below (bellNoWitnessTerms / bellUnanchoredOriginalTerms /
-// bellStaleOverdueTerms) — stamped once a term's exception bell has
-// actually been asked for, whether it fired fresh or deduped from a prior
-// tick (either way staff has already been told). Each scan excludes on
-// this column directly in SQL, so once more than one scan's LIMIT worth
-// of terms sit in the SAME exception bucket, the oldest ones stop
-// consuming every tick's LIMIT slot and a newer term past that backlog
-// still gets scanned and belled. Never affects a term's eligibility for
-// minting/charging once its underlying condition is actually fixed — only
-// these three scans read it.
+// Codex round-6 P1: ONE column PER KIND (20260926050001 — 050000's shared
+// renewal_exception_belled_at/renewal_exception_kind pair is left in place,
+// unused, since 050000 is already pushed/frozen). The three exception-bell
+// scans' WHERE clauses partition the SAME term into at most one kind at any
+// given moment — but a term's underlying facts can change OVER TIME (staff
+// sends the missing notice, then it later goes stale-overdue; staff anchors
+// the installation, then it later goes stale-overdue) and move it into a
+// DIFFERENT kind's bucket. A single shared exclusion column can't tell "already
+// belled for kind A, never checked for kind B" apart from "already belled for
+// THIS kind" — it would silently and permanently exclude the term from every
+// OTHER kind's scan too, the instant any one kind belled it once. Scoping
+// exclusion per kind means a term already belled for A remains fully
+// eligible to be scanned and belled for B once it comes to match B.
+// Stamped once a term's exception bell has actually been asked for, whether
+// it fired fresh or deduped from a prior tick (either way staff has already
+// been told). Each scan excludes on its OWN column directly in SQL, so once
+// more than one scan's LIMIT worth of terms sit in the SAME exception
+// bucket, the oldest ones stop consuming every tick's LIMIT slot and a
+// newer term past that backlog still gets scanned and belled. Never affects
+// a term's eligibility for minting/charging once its underlying condition
+// is actually fixed — only these three scans read these columns. Written
+// with three literal-key branches (never a computed `[column]:` key) —
+// annual-prepay-term-states.test.js's write-site scanner fails closed on
+// any computed identifier key on this table in case it disguises a dynamic
+// status write, and none of these three kinds needs one to stay a single
+// shared function.
 async function stampRenewalExceptionBelled(term, kind, conn = db) {
   try {
-    await conn('annual_prepay_terms')
-      .where({ id: term.id })
-      .whereNull('renewal_exception_belled_at')
-      .update({ renewal_exception_belled_at: new Date(), renewal_exception_kind: kind });
+    if (kind === 'no_witness') {
+      await conn('annual_prepay_terms').where({ id: term.id })
+        .whereNull('renewal_no_witness_belled_at').update({ renewal_no_witness_belled_at: new Date() });
+    } else if (kind === 'unanchored') {
+      await conn('annual_prepay_terms').where({ id: term.id })
+        .whereNull('renewal_unanchored_belled_at').update({ renewal_unanchored_belled_at: new Date() });
+    } else if (kind === 'stale_overdue') {
+      await conn('annual_prepay_terms').where({ id: term.id })
+        .whereNull('renewal_stale_overdue_belled_at').update({ renewal_stale_overdue_belled_at: new Date() });
+    } else {
+      throw new Error(`unknown exception-bell kind: ${kind}`);
+    }
   } catch (err) {
-    logger.error(`[termite-annual-renewal] failed to stamp renewal_exception_belled_at for term ${term.id} (${kind}): ${err.message}`);
+    logger.error(`[termite-annual-renewal] failed to stamp the exception-bell column for term ${term.id} (${kind}): ${err.message}`);
   }
 }
 
@@ -385,9 +414,9 @@ async function bellNoWitnessTerms({ conn = db, limit = 200, today = etDateString
       today,
     )
       .whereNull('t.notice_45_sent_at')
-      // Codex round-5 P1: excluded here, not just deduped at bell time —
-      // see stampRenewalExceptionBelled's own doc.
-      .whereNull('t.renewal_exception_belled_at')
+      // Codex round-5/6 P1: excluded here, not just deduped at bell time —
+      // see stampRenewalExceptionBelled's own doc. This kind's OWN column.
+      .whereNull('t.renewal_no_witness_belled_at')
       .orderBy('t.term_end', 'asc')
       .select('t.*')
       .limit(limit);
@@ -428,7 +457,7 @@ async function bellUnanchoredOriginalTerms({ conn = db, limit = 200, today = etD
     const rows = await whereNoticeWitnessed(whereDueForRenewal(conn('annual_prepay_terms as t'), today))
       .whereNull('t.renewed_from_term_id')
       .whereNull('t.installation_anchored_at')
-      .whereNull('t.renewal_exception_belled_at')
+      .whereNull('t.renewal_unanchored_belled_at')
       .orderBy('t.term_end', 'asc')
       .select('t.*')
       .limit(limit);
@@ -466,7 +495,7 @@ async function bellStaleOverdueTerms({ conn = db, limit = 200, today = etDateStr
     const cutoff = addDaysYmd(today, -graceDays());
     const rows = await whereAnchoredOrSuccessor(whereNoticeWitnessed(whereDueForRenewal(conn('annual_prepay_terms as t'), today)))
       .where('t.term_end', '<', cutoff)
-      .whereNull('t.renewal_exception_belled_at')
+      .whereNull('t.renewal_stale_overdue_belled_at')
       .orderBy('t.term_end', 'asc')
       .select('t.*')
       .limit(limit);

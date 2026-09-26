@@ -2317,6 +2317,68 @@ describe('annual prepay renewal helpers', () => {
 
 });
 
+// Codex round-6 P1 (in part a false alarm): the auditor claimed `dateOnly`
+// is undefined inside termiteRenewalGraceDeadlineFor — it is NOT; `dateOnly`
+// is a function declaration (line ~148), function-hoisted above its call
+// site here, so this has always run correctly. The VALID part of the
+// finding: neither termiteRenewalGraceDeadlineFor nor
+// termiteRenewalGraceDeadlineSql was ever executed UNMOCKED anywhere in
+// this PR's tests — termite-annual-renewal-charge.test.js's mockGraceHelpers
+// always substitutes a separate, hand-rolled fake implementation of
+// termiteRenewalGraceDeadlineFor for its own tests, and the real-Postgres
+// coverage suite only exercises the SQL twin INDIRECTLY, through
+// coveredTermsAsOf's full query — never a direct, unmocked call to either
+// twin. These tests call the REAL functions, requiring nothing about
+// termite-annual-renewal-charge.js or annual-prepay-renewals.js itself
+// mocked (this file's own top-of-file jest.mock calls target unrelated
+// dependencies — datetime-et.js is never mocked here).
+describe('termiteRenewalGraceDeadlineFor / termiteRenewalGraceDeadlineSql — the real, unmocked twins (Codex round-6 P1)', () => {
+  test('anchors on term_start when it is LATER than created_at (a mint recorded well after its nominal start)', () => {
+    // term_start 2026-10-15 is later than created_at's ET date 2026-09-27.
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-10-15', created_at: '2026-09-27T12:00:00Z',
+    });
+    expect(deadline).toBe('2026-11-14');
+  });
+
+  test('anchors on created_at (ET date) when it is LATER than term_start (a delayed sweep tick mint)', () => {
+    // created_at's ET date 2026-10-02 is later than term_start 2026-09-27.
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-09-27', created_at: '2026-10-02T12:00:00Z',
+    });
+    expect(deadline).toBe('2026-11-01');
+  });
+
+  // Codex round-1 P1's own fix, now proven against the REAL function rather
+  // than the mock's reimplementation: 2026-10-01T01:30Z is 2026-09-30 21:30
+  // in America/New_York (EDT, UTC-4) — a mint that landed just before
+  // midnight ET must anchor on the ET calendar day (2026-09-30), not the
+  // UTC one (2026-10-01) a bare cast would read.
+  test('the ET evening boundary — a mint at 2026-10-01T01:30Z anchors on 2026-09-30 ET, not the UTC calendar day', () => {
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-09-30', created_at: '2026-10-01T01:30:00Z',
+    });
+    // Correct ET-anchored deadline: 2026-09-30 + 30 days = 2026-10-30. The
+    // bug's deadline (a bare UTC cast reading created_at as 2026-10-01)
+    // would instead compute 2026-10-31.
+    expect(deadline).toBe('2026-10-30');
+  });
+
+  test('month/year-end rollover — December 15 plus the 30-day grace window rolls into the next January', () => {
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-12-15', created_at: '2026-12-15T12:00:00Z',
+    });
+    expect(deadline).toBe('2027-01-14');
+  });
+
+  test('termiteRenewalGraceDeadlineSql builds the exact GREATEST/INTERVAL expression for a given alias', () => {
+    expect(AnnualPrepayRenewals.termiteRenewalGraceDeadlineSql('t')).toBe(
+      "(GREATEST(t.term_start, (t.created_at AT TIME ZONE 'America/New_York')::date) + INTERVAL '30 days')::date",
+    );
+    expect(AnnualPrepayRenewals.termiteRenewalGraceDeadlineSql('s')).toContain('s.term_start');
+  });
+});
+
 describe('reconcilePendingWindowCompletions (pending-window double-bill guard)', () => {
   const InvoiceService = require('../services/invoice');
   const { postCreditMovement } = require('../services/customer-credit');
