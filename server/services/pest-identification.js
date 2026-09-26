@@ -483,6 +483,10 @@ async function callGeminiVision(base64Image, mimeType) {
 
 const CONFIDENCE_RANK = { low: 0, moderate: 1, high: 2 };
 
+// The prompt's sentinel for a photo too blurry, dark or distant to read, plus
+// the plain variants a model uses for it. Anything else is a named answer.
+const UNIDENTIFIABLE_ANSWERS = new Set(['unidentifiable', 'unknown', 'unclear', 'not identifiable', 'cannot identify']);
+
 // Owner ruling 2026-09-26: a Gemini answer scored below this goes to ChatGPT's
 // best vision model too. Read per call; a missing or bad value means 0.80.
 const DEFAULT_ESCALATE_BELOW = 0.8;
@@ -576,14 +580,13 @@ function mergeModelResults(openai, gemini) {
     }
     const single = a.match ? a : (b.match ? b : null);
     if (single) {
-      // One model named a library species, the other did not. Only an
-      // inconclusive read (nothing identifiable) leaves that species standing;
-      // naming something else, calling it not-a-pest, or another category
-      // disagrees with it and collapses like any conflict (Codex #4865 r2).
+      // One model named a library species, the other did not. Only the
+      // prompt's explicit "unidentifiable" answer leaves that species
+      // standing; any named alternative, a not-a-pest call or another
+      // category disagrees with it and collapses like any conflict
+      // (Codex #4865 r2 + pre-push audit).
       const other = single === a ? b : a;
-      const inconclusive = normalizeName(other.raw.best_match) === 'unidentifiable'
-        || (other.category === 'other' && other.confidence === 'low');
-      if (inconclusive) {
+      if (UNIDENTIFIABLE_ANSWERS.has(normalizeName(other.raw.best_match))) {
         return { ...base, entry: single.match, confidence: downgrade(single.confidence), category: single.match.category, agreement: 'single_model' };
       }
       const otherCategory = other.notAPest ? 'not_a_pest' : other.category;

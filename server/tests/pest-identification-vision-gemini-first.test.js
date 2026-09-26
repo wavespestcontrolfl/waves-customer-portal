@@ -203,6 +203,7 @@ describe('merging the ladder\'s results', () => {
     ['names something outside the library', { ...OPENAI_ID, best_match: 'white-footed ant' }, 'insect'],
     ['calls it not a pest', { ...OPENAI_ID, best_match: 'march fly', category: 'not_a_pest', not_a_pest: true }, 'other'],
     ['puts it in another category', { ...OPENAI_ID, best_match: 'springtail', category: 'other', confidence: 'moderate' }, 'other'],
+    ['names an alternative even at low confidence', { ...OPENAI_ID, best_match: 'springtail', category: 'other', confidence: 'low' }, 'other'],
   ])('a second look that %s disagrees: no species survives', (_label, openai, category) => {
     const merged = mergeModelResults(openai, { ...GEMINI_ID, confidence: 'moderate' });
     expect(merged).toMatchObject({ entry: null, confidence: 'low', category, agreement: 'conflict' });
