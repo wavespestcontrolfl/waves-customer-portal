@@ -254,6 +254,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['This treatment cannot possibly cause any harm.', ''],
     ['It could not conceivably hurt you.', ''],
     ['It will never under any circumstances harm anyone.', ''],
+    ['This is the safest treatment for pets.', ''],
+    ['Our safest pesticide for children.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -510,6 +512,21 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
 
   test('"didn\'t eat the bait, but he licked it" keeps the dog as the patient (vet script)', () => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, "My dog didn't eat the bait, but he licked it");
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test.each([
+    'It is safe; there is no reason to seek medical attention.',
+    'It is safe, and you do not have to seek medical care.',
+    'It is safe and medical attention is unnecessary.',
+  ])('a denied need for care is not escalated: %s', (reply) => {
+    const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
+    expect(out.reply).toMatch(/label directions/);
+    expect(out.reply).not.toContain('911');
+  });
+
+  test('"I sprayed my dog with pesticide" gets the veterinary script', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I sprayed my dog with pesticide');
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
   });
 
@@ -878,6 +895,11 @@ describe('normalizeIntakeResult', () => {
     ['Your service plan has a 30-day cancellation period.', ''],
     ['A refund posts within 5 days.', ''],
     ['El técnico puede entrar a las 4 PM para hacer la inspección.', ''],
+    ['Your service plan begins in 2 days.', ''],
+    ['Your plan expires in 2 weeks.', ''],
+    ['Your account will be active in 2 hours.', ''],
+    ['The EPA has not accepted this pesticide; it is EPA-registered.', ''],
+    ['The EPA did not okay this product; it is EPA-registered.', ''],
     ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
     ['Please wait 30 minutes for our dispatcher to call you back.', ''],
     ['Please wait 2 business days for the refund to appear.', ''],
@@ -1825,6 +1847,11 @@ describe('looksLikeEmergency', () => {
     'My dog got into the rat poison',
     'My toddler got into the ant bait',
     'I accidentally sprayed myself with pesticide',
+    'I accidentally sprayed pesticide on myself',
+    'I sprayed my dog with pesticide',
+    'Pesticide spilled on my cat',
+    'They are vomiting after the pesticide treatment',
+    'My mother is coughing after the lawn spray',
     'At the hospital after a wasp sting',
     'Going to the hospital now after the treatment',
     'Hospital after a bee sting',
@@ -1887,6 +1914,7 @@ describe('looksLikeEmergency', () => {
     'The pesticide made my plants sick',
     'The spray made my ants sick',
     'The treatment made my lawn sick',
+    'How much to remove rats poisoned by bait?',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
