@@ -766,7 +766,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // flight: a call while a send is in flight (the guard's, then a
     // shutdown flush) returns that same send, so the flush waits for the
     // real dispatch instead of a duplicate that finds the claim and returns.
-    const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient: true })
+    const leadReceivedAt = new Date();
+    const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient: true, leadReceivedAt })
       // Stable code + id only: provider/messaging errors can carry the phone or body.
       .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed for customer ${customer.id}: ${fallbackErr?.code || fallbackErr?.name || 'error'}`)));
     // With the agent configured, the lead's one-minute clock starts here,

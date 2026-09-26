@@ -7,6 +7,7 @@
 
 let mockCustomerRow = null;
 let mockLeads = [];
+let mockInbound = null;
 const mockSend = jest.fn();
 const mockLockCalls = [];
 
@@ -19,7 +20,8 @@ jest.mock('../models/db', () => {
       whereNotNull: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
       forNoKeyUpdate: jest.fn(() => { chain.locked = true; return chain; }),
-      first: jest.fn(async () => (table === 'customers' ? mockCustomerRow : null)),
+      orWhereRaw: jest.fn(() => chain),
+      first: jest.fn(async () => (table === 'customers' ? mockCustomerRow : table === 'sms_log' ? mockInbound : null)),
       select: jest.fn(async () => (table === 'leads' ? mockLeads : [])),
       insert: jest.fn(() => chain),
       onConflict: jest.fn(() => chain),
@@ -66,6 +68,7 @@ beforeEach(() => {
   mockLockCalls.length = 0;
   mockCustomerRow = { phone: '(941) 555-1234', lead_intake_status: 'awaiting_service' };
   mockLeads = [{ status: 'new', deleted_at: null }];
+  mockInbound = null;
 });
 
 describe('recipientStillCurrent', () => {
@@ -141,6 +144,16 @@ describe('delayedLeadReplyStillEligible', () => {
   ])('lead %s → refused', async (_label, leads) => {
     mockLeads = leads;
     await expect(delayedLeadReplyStillEligible('cust-1', '9415551234')).resolves.toMatchObject({ ok: false, code: 'LEAD_NO_LONGER_PRE_CONTACT' });
+  });
+
+  test('the customer texted since the form (intake and lead status unchanged) → refused', async () => {
+    mockInbound = { id: 'sms-1' };
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234', undefined, { since: new Date() }))
+      .resolves.toMatchObject({ ok: false, code: 'LEAD_CONVERSATION_STARTED' });
+  });
+
+  test('no inbound text since the form → ok', async () => {
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234', undefined, { since: new Date() })).resolves.toEqual({ ok: true });
   });
 
   test('no lead row at all (lead insert failed) → still ok', async () => {

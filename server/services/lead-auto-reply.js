@@ -163,14 +163,26 @@ async function recipientStillCurrent(customerId, phoneDigits, conn = db) {
 // The delayed fallback goes out up to a minute after the form; in that time
 // staff may have contacted, disqualified or deleted the lead, or the
 // customer may have texted first. Send only while the lead is still
-// untouched: the recipient is current, intake has not moved past the
-// webhook's own seeding (a customer reply advances it), and the customer's
-// lead rows (if any) include a live pre-contact one.
+// untouched: the recipient is current, the customer has not texted since the
+// form arrived (a reply need not move intake or lead status), intake has not
+// moved past the webhook's own seeding, and the customer's lead rows (if
+// any) include a live pre-contact one.
 const UNTOUCHED_INTAKE_STATUSES = [null, 'awaiting_service', 'awaiting_address'];
 const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
-async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db) {
+async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db, { since = null } = {}) {
   const recipient = await recipientStillCurrent(customerId, phoneDigits, conn);
   if (!recipient.ok) return recipient;
+  if (since) {
+    const inbound = await conn('sms_log')
+      .where({ direction: 'inbound' })
+      .where('created_at', '>=', since)
+      .where((q) => q.where({ customer_id: customerId })
+        .orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits]))
+      .first('id');
+    if (inbound) {
+      return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'The customer texted before the delayed lead reply' };
+    }
+  }
   const customer = await conn('customers').where({ id: customerId }).first('lead_intake_status');
   if (!UNTOUCHED_INTAKE_STATUSES.includes(customer?.lead_intake_status ?? null)) {
     return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'The lead conversation moved on before the delayed lead reply' };
@@ -198,7 +210,7 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db)
 // send — a missed greeting beats texting a customer twice. Later inbound
 // replies are still classified by server/services/lead-intake.js. Edit copy
 // in the admin UI.
-async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient = false }) {
+async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient = false, leadReceivedAt = null }) {
   if (await hasPriorLeadAutoReply(phoneFormatted)) {
     logger.info(`[lead-auto-reply] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
     return;
@@ -252,7 +264,7 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
     // which releases the claim below) or waits until Twilio has the request.
     ...(revalidateRecipient ? {
       withSmsHandoff: dispatch => withSmsConsentLock(db, { phone: phoneFormatted, customerId: customer.id }, async (trx) => {
-        const current = await delayedLeadReplyStillEligible(customer.id, phoneDigits, trx);
+        const current = await delayedLeadReplyStillEligible(customer.id, phoneDigits, trx, { since: leadReceivedAt });
         return current.ok ? dispatch(trx) : current;
       }),
     } : {}),
