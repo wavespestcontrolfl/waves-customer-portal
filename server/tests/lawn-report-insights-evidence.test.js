@@ -146,6 +146,24 @@ describe('lawn insight evidence boundaries', () => {
     expect(report.smsSummary).not.toMatch(/No action needed/i);
   });
 
+  test('every reported issue needs supported ownership before no-action reassurance', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: assessment({
+        scores: {
+          turfDensity: 35, weedSuppression: 60, colorHealth: 86,
+          stressDamage: 90, fungusControl: 92, overallScore: 65, season: 'peak',
+        },
+      }),
+      applications: [{ product: { name: 'Synthetic Fertilizer', category: 'fertilizer' } }],
+    });
+    expect(report.insights.slice(0, 2)).toEqual([
+      expect.objectContaining({ category: 'coverage', provenance: expect.objectContaining({ actionSource: 'recorded_application' }) }),
+      expect.objectContaining({ category: 'weeds', provenance: expect.objectContaining({ actionSource: null }) }),
+    ]);
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.smsSummary).not.toMatch(/No action needed/i);
+  });
+
   test('the real report carries recorded method and scope provenance into insights', () => {
     const report = buildLawnReportV2({
       lawnAssessment: assessment(),
@@ -155,6 +173,7 @@ describe('lawn insight evidence boundaries', () => {
           service_report_summary: 'Reviewed weed-control role.', facts_approved: true,
         },
         method: 'broadcast_spray', methodInferred: false,
+        methodSource: 'recorded_application',
         applicationArea: 'Front lawn', areaValue: 4200, areaUnit: 'sqft',
       }],
     });
@@ -163,6 +182,14 @@ describe('lawn insight evidence boundaries', () => {
       method: 'broadcast_spray', methodSource: 'recorded_application',
       applicationArea: 'Front lawn', applicationAreaSource: 'recorded_application',
       area: '4200 sqft', purposeSource: 'approved_product_fact',
+    });
+    expect(groundingFacts(report, {}).treatment.products[0]).toMatchObject({
+      applicationArea: 'Front lawn',
+      applicationAreaSource: 'recorded_application',
+      area: '4200 sqft',
+      method: 'broadcast_spray',
+      methodSource: 'recorded_application',
+      purposeSource: 'approved_product_fact',
     });
     const weed = report.insights.find((card) => card.category === 'weeds');
     expect(weed.wavesAction).toMatch(/recorded broadcast method/i);
@@ -184,6 +211,26 @@ describe('lawn insight evidence boundaries', () => {
     });
     expect(inferred.treatment.products[0].whatItDoes).not.toMatch(/diagnostic claim/i);
     expect(inferred.insights.find((card) => card.category === 'weeds').wavesAction)
+      .not.toMatch(/spot/i);
+
+    const ambiguousPersisted = buildLawnReportV2({
+      lawnAssessment: assessment(),
+      applications: [{
+        id: 'product-1',
+        product: { name: 'Synthetic Weed Control', category: 'herbicide' },
+        // Exact persisted report-data shape after completion inferred and saved
+        // the method: the non-null column makes methodInferred false even though
+        // no technician provenance survived persistence.
+        method: 'spot_treatment', methodInferred: false, methodLabel: 'spot treatment',
+        applicationArea: 'Front lawn', areaValue: 4200, areaUnit: 'sqft',
+      }],
+    });
+    expect(ambiguousPersisted.treatment.products[0]).toMatchObject({
+      method: null,
+      inferredMethod: 'spot_treatment',
+      methodSource: 'unverified_persisted_method',
+    });
+    expect(ambiguousPersisted.insights.find((card) => card.category === 'weeds').wavesAction)
       .not.toMatch(/spot/i);
   });
 

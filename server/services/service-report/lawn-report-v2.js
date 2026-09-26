@@ -74,9 +74,18 @@ function buildTreatment({ applications = [], actions = [] } = {}) {
     const areaUnit = firstValue(app.areaUnit, app.area_unit);
     const area = areaVal && areaUnit ? `${areaVal} ${areaUnit}` : null;
     const applicationMethod = firstValue(app.applicationMethod, app.application_method, app.method);
-    const methodSource = applicationMethod
-      ? (app.methodInferred === true ? 'category_inference' : 'recorded_application')
-      : null;
+    // Persisted inferred defaults and technician-entered methods share the same
+    // service_products column. Only an affirmative provenance marker can turn
+    // that value into completed-method copy.
+    const recordedMethod = [
+      app.applicationMethodSource,
+      app.application_method_source,
+      app.methodSource,
+    ].includes('recorded_application');
+    const methodSource = !applicationMethod
+      ? null
+      : (recordedMethod ? 'recorded_application'
+        : (app.methodInferred === true ? 'category_inference' : 'unverified_persisted_method'));
     const applicationArea = firstValue(app.applicationArea, app.application_area, app.area);
     return {
       name,
@@ -93,7 +102,7 @@ function buildTreatment({ applications = [], actions = [] } = {}) {
       // never reached the narrative for stored reports. Inferred methods remain
       // metadata and cannot become a completed-method claim.
       method: methodSource === 'recorded_application' ? applicationMethod : null,
-      inferredMethod: methodSource === 'category_inference' ? applicationMethod : null,
+      inferredMethod: methodSource !== 'recorded_application' ? applicationMethod : null,
       methodSource,
     };
   }).filter(Boolean);
@@ -727,19 +736,20 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const realCustomerAction = topIssue ? (topIssue.customerAction || null) : null;
   const hasCustomerTask = issues.some((issue) => Boolean(issue.customerAction));
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
-  const ownedEvidence = [topIssue].filter(Boolean).flatMap((issue) => {
+  const issueOwnership = issues.map((issue) => {
     const provenance = issue.provenance || {};
-    return [
+    const ownedEvidence = [
       [issue.wavesAction, provenance.actionSource],
       [issue.nextVisitPlan, provenance.planSource],
     ];
+    return ownedEvidence.some((evidence) => evidence.every(Boolean));
   });
-  const wavesOwnsTopIssue = ownedEvidence.some((evidence) => evidence.every(Boolean));
+  const wavesOwnsEveryIssue = [issues.length, ...issueOwnership].every(Boolean);
   const noIssueNeedsAction = [!topIssue, overallHealthVerified].every(Boolean);
   const noActionNeeded = [
     !hasCustomerTask,
     drySignal !== null,
-    [noIssueNeedsAction, wavesOwnsTopIssue].includes(true),
+    [noIssueNeedsAction, wavesOwnsEveryIssue].includes(true),
   ].every(Boolean);
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one

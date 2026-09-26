@@ -405,6 +405,19 @@ Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
 (or the original email timestamp on older snapshots), with the same policy,
 plan-week and service-premise checks. Unpublished drafts remain unavailable.
+For lawn reports, `reportV2.treatment.products[]` exposes the normalized
+application evidence used by the deterministic insight cards: `name`,
+`activeIngredient`, `kind`, `whatItDoes`, `purposeSource`, `targets`, `area`,
+`applicationArea`, `applicationAreaSource`, `method`, `inferredMethod`, and
+`methodSource`. Product-purpose prose is emitted from approved report facts or
+falls back to neutral category wording. Application area and numeric area come
+from the saved application row. Because a saved inferred method is
+indistinguishable from a technician-entered method in legacy persistence,
+`method` and completed-method copy require an affirmative
+`recorded_application` provenance marker; otherwise the value remains metadata
+under `inferredMethod` with `category_inference` or
+`unverified_persisted_method`. These response additions do not change the
+existing report token, eligibility, privacy, or rate-limit guards.
 The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
