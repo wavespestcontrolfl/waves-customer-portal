@@ -35,64 +35,44 @@ function classifyProduct(app = {}) {
   let kind = 'other';
   let tag = 'lawn treatment';
   let fallback = 'applied as part of today’s lawn program';
-  if (/fung|azoxy|propiconazole|thiophanate/.test(hay)) { kind = 'fungicide'; tag = 'fungus protection'; fallback = 'supports management of labeled turf diseases'; }
-  else if (/pre.?emerg|prodiamine|dithiopyr|pendimethalin/.test(hay)) { kind = 'pre_emergent'; tag = 'weed prevention'; fallback = 'supports prevention of susceptible weeds'; }
-  else if (/herb|weed|celsius|atrazine|2,?4-?d|metsulfuron|halosulfuron|sedgehammer|sulfentrazone|iodosulfuron|dicamba/.test(hay)) { kind = 'herbicide'; tag = 'weed control'; fallback = 'supports control of labeled weeds'; }
-  else if (/insect|bifenthrin|imidacloprid|chinch|grub|dinotefuran|clothianidin/.test(hay)) { kind = 'insecticide'; tag = 'pest control'; fallback = 'supports control of labeled turf insects'; }
-  else if (/iron|micro|biostim|humic|kelp|seaweed/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'provides general color and stress support'; }
-  else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'provides nutrients as part of the lawn program'; }
-  // Catalog prose is customer-facing only after report-data's approval gate.
-  const approvedFacts = p.facts_approved === true || Object.keys(facts).length > 0;
-  const approvedSummary = approvedFacts
-    ? (facts.serviceReportSummary || facts.publicSummary || p.service_report_summary || p.public_summary)
-    : null;
-  return {
-    kind,
-    tag,
-    whatItDoes: approvedSummary || fallback,
-    purposeSource: approvedSummary ? 'approved_product_fact' : 'category_heuristic',
-  };
+  if (/fung|azoxy|propiconazole|thiophanate/.test(hay)) { kind = 'fungicide'; tag = 'fungus protection'; fallback = 'helps protect turf where fungus pressure or wet conditions call for it'; }
+  else if (/pre.?emerg|prodiamine|dithiopyr|pendimethalin/.test(hay)) { kind = 'pre_emergent'; tag = 'weed prevention'; fallback = 'a pre-emergent that stops weeds before they sprout'; }
+  else if (/herb|weed|celsius|atrazine|2,?4-?d|metsulfuron|halosulfuron|sedgehammer|sulfentrazone|iodosulfuron|dicamba/.test(hay)) { kind = 'herbicide'; tag = 'weed control'; fallback = 'targets actively growing weeds'; }
+  else if (/insect|bifenthrin|imidacloprid|chinch|grub|dinotefuran|clothianidin/.test(hay)) { kind = 'insecticide'; tag = 'pest control'; fallback = 'targets turf-damaging insects'; }
+  else if (/iron|micro|biostim|humic|kelp|seaweed/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'supports color and stress tolerance'; }
+  else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'feeds the lawn to support density, color, and recovery'; }
+  const whatItDoes = p.service_report_summary || p.public_summary || facts.serviceReportSummary || facts.publicSummary || fallback;
+  return { kind, tag, whatItDoes };
 }
 
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const uniq = (arr) => [...new Set(arr.filter(Boolean))];
-const firstTruthy = (...values) => values.find(Boolean);
 
 // "What Waves did" — solutions/products applied, in plain language, plus the focus
 // tags those products + completed actions add up to. Grounds the report in the
 // actual treatment, not just the photo scores.
 function buildTreatment({ applications = [], actions = [] } = {}) {
   const products = (applications || []).map((app) => {
-    const { product: p = {}, approved_report_product_facts: facts = {} } = app;
-    const name = firstTruthy(p.name, app.product_name, facts.name) || null;
+    const p = app.product || {};
+    const facts = app.approved_report_product_facts || {};
+    const name = p.name || app.product_name || facts.name || null;
     if (!name) return null;
     const cls = classifyProduct(app);
     const targets = Array.isArray(app.targets) ? app.targets.filter(Boolean) : [];
     const areaVal = app.areaValue ?? app.area_value;
-    const areaUnit = firstTruthy(app.areaUnit, app.area_unit);
+    const areaUnit = app.areaUnit || app.area_unit;
     const area = areaVal && areaUnit ? `${areaVal} ${areaUnit}` : null;
-    const applicationMethod = firstTruthy(app.applicationMethod, app.application_method, app.method) || null;
-    const methodSource = applicationMethod
-      ? (app.methodInferred === true ? 'category_inference' : 'recorded_application')
-      : null;
-    const applicationArea = firstTruthy(app.applicationArea, app.application_area, app.area) || null;
     return {
       name,
-      activeIngredient: firstTruthy(p.active_ingredient, app.active_ingredient, facts.activeIngredient) || null,
+      activeIngredient: p.active_ingredient || app.active_ingredient || facts.activeIngredient || null,
       kind: cls.kind,
       whatItDoes: cls.whatItDoes,
-      purposeSource: cls.purposeSource,
       targets,
       area,
-      applicationArea,
-      applicationAreaSource: applicationArea ? 'recorded_application' : null,
       // app.method is the normalized field on persisted service_products
       // payloads (codex P2 2026-07-22) — without it drench/injection context
-      // never reached the narrative for stored reports. Inferred methods remain
-      // metadata and cannot become a completed-method claim.
-      method: methodSource === 'recorded_application' ? applicationMethod : null,
-      inferredMethod: methodSource === 'category_inference' ? applicationMethod : null,
-      methodSource,
+      // never reached the narrative for stored reports.
+      method: app.applicationMethod || app.application_method || app.method || null,
     };
   }).filter(Boolean);
 
@@ -142,16 +122,20 @@ function clientWaterStatus(advice) {
   }
 }
 
-function waterExplanation(advice, target, grassLabel) {
+function waterExplanation(advice, target, grassLabel, hasPlan = false) {
   const t = target != null ? `about ${target}"/wk` : 'the seasonal target';
   if (!advice || advice.profileMissing) {
     return `We don’t have your irrigation schedule on file yet. The seasonal target for your ${grassLabel} is ${t}.`;
   }
   switch (advice.status) {
     case 'surplus':
-      return `Your weekly water (rain + irrigation) is running above ${t}. Easing back on irrigation should help reduce fungus, mushrooms, and weed pressure.`;
+      return hasPlan
+        ? `Your weekly water (rain + irrigation) is running above ${t}. Easing back on irrigation should help reduce fungus, mushrooms, and weed pressure.`
+        : `Your weekly water (rain + irrigation) is running above ${t}. No upcoming watering plan is recorded here, so don’t change your irrigation schedule from this estimate alone.`;
     case 'deficit':
-      return `Your weekly water is below ${t}. A little more irrigation time will help the ${grassLabel} handle the heat.`;
+      return hasPlan
+        ? `Your weekly water is below ${t}. A little more irrigation time will help the ${grassLabel} handle the heat.`
+        : `Your weekly water is below ${t}. No upcoming watering plan is recorded here, so don’t change your irrigation schedule from this estimate alone.`;
     case 'balanced':
       return `Total water for the week is close to ${t} — right where we want it. If one area still looks off, that’s usually coverage, not total watering.`;
     case 'rain_unknown':
@@ -162,7 +146,7 @@ function waterExplanation(advice, target, grassLabel) {
 
 // Interpretation (from the area water-intake snapshot) → customer copy. Uses
 // "your area received" wording and stays honest about confidence/coverage.
-function snapshotWaterExplanation(snap, grassLabel) {
+function snapshotWaterExplanation(snap, grassLabel, hasPlan = false) {
   const t = snap.target_water_inches_per_week != null ? `~${round1(snap.target_water_inches_per_week)}"/wk` : 'the seasonal target';
   const rain = snap.adjusted_rain_7day_inches != null ? snap.adjusted_rain_7day_inches : snap.rain_7day_inches;
   const lead = snap.confidence === 'high'
@@ -175,11 +159,15 @@ function snapshotWaterExplanation(snap, grassLabel) {
     : '';
   switch (snap.interpretation) {
     case 'wet_condition_watch':
-      return `${lead}${totals}That's above ${t}. Easing back on irrigation should help reduce fungus, mushrooms, and weed pressure.`;
+      return hasPlan
+        ? `${lead}${totals}That's above ${t}. Easing back on irrigation should help reduce fungus, mushrooms, and weed pressure.`
+        : `${lead}${totals}That's above ${t}. No upcoming watering plan is recorded here, so don’t change your irrigation schedule from this estimate alone.`;
     case 'coverage_issue_possible':
       return `${lead}${totals}That's right around ${t}. Since one area still looks dry, we recommend checking sprinkler coverage there rather than watering the whole yard more.`;
     case 'water_deficit_likely':
-      return `${lead}${totals}That's below ${t}. A little more irrigation time will help your ${grassLabel} handle the heat.`;
+      return hasPlan
+        ? `${lead}${totals}That's below ${t}. A little more irrigation time will help your ${grassLabel} handle the heat.`
+        : `${lead}${totals}That's below ${t}. No upcoming watering plan is recorded here, so don’t change your irrigation schedule from this estimate alone.`;
     case 'irrigation_unknown':
       return `We don't have your irrigation schedule on file yet. The seasonal target for your ${grassLabel} is ${t}.`;
     case 'rain_unknown':
@@ -195,6 +183,7 @@ const SNAP_STATUS = { low: 'low', high: 'high', balanced: 'balanced', unknown: '
 // reading; otherwise fall back to the live irrigation-advice water context.
 function mapWater(waterContext, waterSnapshot = null) {
   const grassLabel = 'lawn';
+  const hasPlan = Boolean(waterContext?.weekPlan?.title);
   // Property-level rainfall (Open-Meteo at the client's exact lat/lng, behind
   // waterContext.rainfallInches7d) is authoritative — it's more precise than the
   // regional area centroid and is the same source the 7-day chart now uses, so the
@@ -219,7 +208,7 @@ function mapWater(waterContext, waterSnapshot = null) {
       targetInches: num(waterSnapshot.target_water_inches_per_week),
       status: SNAP_STATUS[waterSnapshot.status] || 'unknown',
       confidence: waterSnapshot.confidence || 'medium',
-      explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
+      explanation: snapshotWaterExplanation(waterSnapshot, grassLabel, hasPlan),
       source: 'area_snapshot',
       rainProvider: 'area',
       // A POSITIVE stored per-week irrigation figure means the customer has a real
@@ -246,7 +235,7 @@ function mapWater(waterContext, waterSnapshot = null) {
     // "your irrigation schedule on file" would contradict that (gh-r39).
     explanation: waterContext.scheduleUnconfirmed
       ? `Your sprinkler settings need a quick re-entry after your address change, so this week reads from rainfall alone. The seasonal target for your ${grassLabel} is ${target != null ? `about ${target}"/wk` : 'the seasonal target'}.`
-      : waterExplanation(advice, target, grassLabel),
+      : waterExplanation(advice, target, grassLabel, hasPlan),
     source: 'irrigation_advice',
     // True provider of rainfallInches7d (open_meteo | fawn) — the Source row
     // credits the real one (codex P2 r6).
@@ -611,8 +600,6 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
-  const insightTreatment = treatment || {};
-
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
   const aftercare = buildAftercare(applications);
@@ -630,8 +617,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     mowing,
     grassLabel,
     customerConcern,
-    treatmentKinds: insightTreatment.kinds,
-    treatmentProducts: insightTreatment.products,
+    treatmentKinds: treatment ? treatment.kinds : [],
     waterInRequired: aftercare.waterInRequired === true,
     waterInInstructionRecorded: ['product_instruction'].includes(aftercare.evidenceSource),
   });

@@ -4,7 +4,7 @@
  * the root-cause sentence, the surplus watering-in aftercare clause.
  */
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
-const { buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN } = require('../services/service-report/lawn-report-v2');
+const { buildRootCause, buildAftercare, mapWater, NEUTRAL_AFTERCARE_WITH_PLAN } = require('../services/service-report/lawn-report-v2');
 
 const PLAN = { title: 'This week: check the rain before you water', detail: '…', action: 'run', conditionalOnForecast: true };
 const RUN_PLAN = { title: 'This week: 25 minutes per turf zone', detail: '…', action: 'run', conditionalOnForecast: false };
@@ -25,6 +25,38 @@ describe('insight cards defer to the plan', () => {
     expect(waterCard({ status: 'surplus' }).customerAction).toMatch(/No upcoming watering plan is recorded/);
     expect(waterCard({ status: 'surplus', weekPlan: PLAN }).customerAction).toMatch(/Follow this week’s watering plan below — it already accounts for the extra water/);
     expect(waterCard({ status: 'surplus', weekPlan: PLAN }, { waterInRequired: true }).customerAction).toMatch(/exact amount and timing are not recorded/);
+  });
+});
+
+describe('water explanation agrees with no-plan action boundaries', () => {
+  const context = (status, weekPlan = null) => ({
+    rainfallInches7d: 0.5,
+    irrigationInchesPerWeek: 0.5,
+    effectiveInches7d: status === 'surplus' ? 2 : 0.5,
+    targetInchesPerWeek: 1.25,
+    irrigationAdvice: { status, rainKnown: true, profileMissing: false },
+    weekPlan,
+  });
+
+  test.each(['deficit', 'surplus'])('%s explanation does not prescribe a change without a plan', (status) => {
+    const water = mapWater(context(status));
+    expect(water.explanation).toMatch(/No upcoming watering plan is recorded.*don’t change your irrigation schedule/i);
+    expect(water.explanation).not.toMatch(/more irrigation time|Easing back/i);
+  });
+
+  test('a stored area snapshot also stays observational without a plan', () => {
+    const water = mapWater({}, {
+      status: 'low', interpretation: 'water_deficit_likely', confidence: 'medium',
+      total_water_7day_inches: 0.5, target_water_inches_per_week: 1.25,
+    });
+    expect(water.explanation).toMatch(/No upcoming watering plan is recorded.*don’t change your irrigation schedule/i);
+    expect(water.explanation).not.toMatch(/more irrigation time/i);
+  });
+
+  test('an approved plan remains attached and owns the action', () => {
+    const water = mapWater(context('deficit', RUN_PLAN));
+    expect(water.weekPlan).toBe(RUN_PLAN);
+    expect(water.explanation).toMatch(/more irrigation time/i);
   });
 });
 
