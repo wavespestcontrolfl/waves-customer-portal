@@ -2658,13 +2658,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               };
               unitScope.sizeBasis = suiteSize.source;
               propertyFacts.commercialSuiteSize = suiteSize;
-              // A food-service business the resolver identified (DBPR
-              // license, or a web-search businessType) sets the commercial
-              // cadence when the composer left it null — a restaurant needs
-              // the 12-visit program, not the pricer's generic default.
+              // An active state food-service license at this suite sets the
+              // commercial cadence when the composer left it null — a
+              // restaurant needs the 12-visit program, not the pricer's
+              // generic default. ONLY the license (a public record) may do
+              // this: a web-search businessType is model output, and model
+              // output must not pick the pricing program (AGENTS.md).
               if (!intent.commercial_risk_type
-                && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
-                  || /restaurant|food/i.test(String(suiteSize.businessType || '')))) {
+                && suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
                 intent.commercial_risk_type = 'restaurant_food';
               }
             }

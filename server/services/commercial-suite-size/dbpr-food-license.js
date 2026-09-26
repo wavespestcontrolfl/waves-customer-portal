@@ -301,6 +301,26 @@ function warmDistrictRowsInBackground(district, opts = {}) {
   Promise.resolve(loadDistrictRows(district, opts)).catch(() => {});
 }
 
+// Only an ACTIVE PERMANENT food-service license sizes a suite. The extract
+// also carries mobile food units (2014), caterers (2013), vending (2015) and
+// temporary events (2016) — none of them occupy the bay — plus inactive
+// licenses a prior tenant left behind (primary status other than 20).
+// Seats must be a clean integer: a seated place (rank SEAT) needs at least
+// one, a takeout-only place (rank NOST) legitimately has zero.
+const DBPR_PERMANENT_FOOD_SERVICE = '2010';
+const DBPR_ACTIVE_STATUS = '20';
+
+function isEligibleDineInLicense(row) {
+  if (!row) return false;
+  if (String(row['License Type Code'] || '').trim() !== DBPR_PERMANENT_FOOD_SERVICE) return false;
+  if (String(row['Primary Status Code'] || '').trim() !== DBPR_ACTIVE_STATUS) return false;
+  const seatsRaw = String(row['Number of Seats or Rental Units'] || '').trim();
+  if (!/^\d+$/.test(seatsRaw)) return false;
+  const rank = String(row['Rank Code'] || '').trim().toUpperCase();
+  if (rank === 'NOST') return true;
+  return rank === 'SEAT' && Number(seatsRaw) > 0;
+}
+
 /**
  * Resolve a suite's size from an active DBPR food-service license, or null.
  * Fail-open: any fetch/parse error resolves null, never throws.
@@ -330,6 +350,7 @@ async function resolveViaDbprLicense({ address = {}, phone = null, businessNameH
         rows = rows.concat(districtRows);
       }
     }
+    rows = rows.filter(isEligibleDineInLicense);
     if (!rows.length) return null;
     const row = matchDbprRow(rows, {
       street: address.street,
@@ -368,6 +389,7 @@ module.exports = {
   seatsToSqft,
   resolveViaDbprLicense,
   loadDistrictRows,
+  isEligibleDineInLicense,
   peekDistrictRows,
   warmDistrictRowsInBackground,
   _resetCacheForTests,

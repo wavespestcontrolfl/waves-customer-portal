@@ -83,6 +83,9 @@ test('a warm DBPR cache on a cache-hit request resolves the real match with zero
     'Location Zip Code': '00000',
     'Business Name': 'Test Taco Shop',
     'Number of Seats or Rental Units': '25',
+    'License Type Code': '2010',
+    'Primary Status Code': '20',
+    'Rank Code': 'SEAT',
   }]);
   const warmFetch = jest.fn().mockResolvedValue(warmupText);
   // Simulates a prior FRESH lookup that already warmed DBPR's in-process

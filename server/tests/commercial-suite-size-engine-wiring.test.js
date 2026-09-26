@@ -134,3 +134,16 @@ describe('classifyLane — commercial-suite-size review reasons', () => {
     expect(out.reasons.some((r) => /suite size 1,400 sq ft from a web listing.*confirm on site/.test(r))).toBe(true);
   });
 });
+
+describe('risk-type inference source', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('only the state license may set commercial_risk_type — never a web-search businessType', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    const i = src.indexOf("intent.commercial_risk_type = 'restaurant_food'");
+    expect(i).toBeGreaterThan(-1);
+    const guard = src.slice(src.lastIndexOf('if (!intent.commercial_risk_type', i), i);
+    expect(guard).toMatch(/suiteSize\.source === SQFT_SOURCES\.LICENSE_SEATS/);
+    expect(guard).not.toMatch(/businessType/);
+  });
+});

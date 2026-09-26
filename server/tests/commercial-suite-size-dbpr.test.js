@@ -22,8 +22,18 @@ const DBPR_HEADER = [
 // Builds one synthetic CSV row from a sparse field map — every column the
 // test doesn't care about is blank, matching how the real extract pads
 // unused columns.
+// Defaults describe an ACTIVE PERMANENT food-service license (type 2010,
+// status 20, rank SEAT — NOST for a zero-seat takeout) unless a test
+// overrides them.
 function csvRow(fields = {}) {
-  return DBPR_HEADER.map((h) => `"${String(fields[h] ?? '').replace(/"/g, '""')}"`).join(',');
+  const seats = String(fields['Number of Seats or Rental Units'] ?? '');
+  const withDefaults = {
+    'License Type Code': '2010',
+    'Primary Status Code': '20',
+    'Rank Code': seats === '0' ? 'NOST' : 'SEAT',
+    ...fields,
+  };
+  return DBPR_HEADER.map((h) => `"${String(withDefaults[h] ?? '').replace(/"/g, '""')}"`).join(',');
 }
 
 function csv(rows) {
@@ -245,5 +255,29 @@ describe('requireWarmCache — the cache-hit fast path never awaits a download',
   test('warmDistrictRowsInBackground never throws even when the fetch rejects', () => {
     const fetchText = jest.fn().mockRejectedValue(new Error('network down'));
     expect(() => warmDistrictRowsInBackground(7, { fetchText })).not.toThrow();
+  });
+});
+
+describe('isEligibleDineInLicense', () => {
+  const { isEligibleDineInLicense } = require('../services/commercial-suite-size/dbpr-food-license');
+  const base = {
+    'License Type Code': '2010', 'Primary Status Code': '20', 'Rank Code': 'SEAT', 'Number of Seats or Rental Units': '25',
+  };
+  test('an active seated permanent food-service license is eligible', () => {
+    expect(isEligibleDineInLicense(base)).toBe(true);
+  });
+  test('a takeout-only (NOST) license with zero seats is eligible', () => {
+    expect(isEligibleDineInLicense({ ...base, 'Rank Code': 'NOST', 'Number of Seats or Rental Units': '0' })).toBe(true);
+  });
+  test.each([
+    ['mobile food unit', { 'License Type Code': '2014', 'Rank Code': 'MFDV', 'Number of Seats or Rental Units': '0' }],
+    ['caterer', { 'License Type Code': '2013', 'Rank Code': 'CATR', 'Number of Seats or Rental Units': '0' }],
+    ['vending', { 'License Type Code': '2015', 'Rank Code': 'VEND' }],
+    ['inactive prior-tenant license', { 'Primary Status Code': '45' }],
+    ['blank seat count', { 'Number of Seats or Rental Units': '' }],
+    ['non-numeric seat count', { 'Number of Seats or Rental Units': 'N/A' }],
+    ['seated rank with zero seats', { 'Number of Seats or Rental Units': '0' }],
+  ])('%s is not eligible', (_label, override) => {
+    expect(isEligibleDineInLicense({ ...base, ...override })).toBe(false);
   });
 });
