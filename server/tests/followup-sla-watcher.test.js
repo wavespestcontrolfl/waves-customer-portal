@@ -546,6 +546,31 @@ test('a quote hint from before a floor time does not keep the promise', async ()
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
 });
 
+test('a booking after the call keeps a scheduling promise even before its stated time (usually the appointment itself); a quote promise still waits for it', async () => {
+  mockDb();
+  const base = db.getMockImplementation();
+  db.mockImplementation((t) => {
+    const q = base(t);
+    // Booked 13:58 for a visit "around 2" promised on a 12:45 call.
+    if (t === 'scheduled_services') q.select = async () => ['cust-visit', 'cust-untyped', 'cust-quote']
+      .map((customer_id) => ({ customer_id, created_at: et('13:58').toISOString() }));
+    return q;
+  });
+  const stated = { call_started_at: et('12:45').toISOString(), due_at: et('14:00').toISOString() };
+  listOpenCommitments.mockResolvedValue([
+    row('visit', { kind: 'schedule_visit', ...stated, due_type: 'floor' }),
+    row('untyped', { kind: 'schedule_visit', ...stated }),
+    row('quote', { kind: 'send_estimate', ...stated, due_type: 'floor' }),
+  ]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(rollingCall()[3].metadata.missed_commitment_ids).toEqual(['quote']);
+  // The scan (the lock's re-check covers only the listed quote): bookings are
+  // read from the call's end, texts still from the stated time.
+  const scanSince = (t) => queriesOn(t)[0].calls.filter(([m, col]) => m === 'where' && col === 'created_at').map(([, , , v]) => new Date(v).toISOString());
+  expect(scanSince('scheduled_services')).toEqual([et('12:45').toISOString()]);
+  expect(scanSince('sms_log')).toEqual([et('14:00').toISOString()]);
+});
+
 test('a pager run in progress right now counts as healthy; a stuck one does not', async () => {
   db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => ({ last_status: 'running', last_started_at: et('14:00').toISOString(), last_success_at: et('13:46').toISOString() }); return q; });
   expect(await pagerHealthy(db, et('14:02'))).toBe(true);

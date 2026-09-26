@@ -168,15 +168,26 @@ function evidenceFrom(r) {
   return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
 }
 
+// Where a booking may start. On a scheduling promise the booking IS the
+// promised work, and the time said with it is usually the appointment
+// itself ("I'll put you on the schedule for around 3"), which the booking
+// always precedes — so any booking after the call counts. Every other
+// promise keeps its stated time: booking Thursday's inspection does not
+// send the quote promised after it.
+function bookingsFrom(r) {
+  return r.kind === 'schedule_visit' ? (promisedAt(r) || evidenceFrom(r)) : evidenceFrom(r);
+}
+
 async function followedUpIds(conn, rows) {
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).
-  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
+  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), booked: bookingsFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
     .filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
+  const bookedFloor = new Date(Math.min(...scoped.map((x) => x.booked.getTime())));
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
   // Numbers match however they were written (9415550123, +19415550123,
   // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
@@ -201,7 +212,7 @@ async function followedUpIds(conn, rows) {
   // (the nightly series top-up, a booking's seeded follow-ups) and never one
   // later cancelled (the proof's own rule).
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
-    .where('created_at', '>', floor).whereNull('recurring_parent_id').whereNull('parent_service_id')
+    .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at') : [];
   // A call that reached the customer — the proof's bar for a returned
   // callback (completed customer leg of 60 s or more, affirmatively not
@@ -252,7 +263,7 @@ async function followedUpIds(conn, rows) {
   const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
     : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
   for (const x of scoped) {
-    if (visits.some((v) => visitFor(v, x) && after(v, x.since))
+    if (visits.some((v) => visitFor(v, x) && after(v, x.booked))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || texts.some((t) => mine(t, x) && after(t, x.since))) done.add(x.r.id);
   }
