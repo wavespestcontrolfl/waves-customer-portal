@@ -28,8 +28,8 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const MODEL = require('../config/models').FLAGSHIP;
 const { ROUTES } = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { dispatch, anthropicText } = require('./llm/call');
-const { ledgerCall } = require('./llm-dispatch-metrics');
+const { dispatch, anthropicText, rejectCall } = require('./llm/call');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -37,6 +37,14 @@ const { ledgerCall } = require('./llm-dispatch-metrics');
 
 function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
+}
+
+// callClaude's sole caller needs a JSON object and fails the run as
+// ungrounded on anything else (codex P1 r32 there). Such an answer is a failed
+// call in the ledger on whichever leg produced it; what callClaude returns is
+// unchanged (codex r2 on #4884).
+function objectAnswerProblem(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? null : 'invalid_output';
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
@@ -47,7 +55,11 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
   // fallback below rather than returning text the caller can't parse.
   {
     const r = await dispatch(ROUTES.knowledgeAnswer, { laneId: 'knowledge_qa', system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
-    if (r.ok && r.json) return JSON.stringify(r.json);
+    if (r.ok && r.json) {
+      const problem = objectAnswerProblem(r.json);
+      if (problem) rejectCall(r, problem);
+      return JSON.stringify(r.json);
+    }
   }
   // Fallback — Claude (FLAGSHIP).
   if (!Anthropic) return null;
@@ -61,7 +73,14 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
       messages: [{ role: 'user', content: userPrompt }],
     }), { laneId: 'knowledge_qa' });
     // First TEXT block — a thinking block leads the content on Opus 5.5.
-    return anthropicText(response) || null;
+    const text = anthropicText(response) || null;
+    if (text) {
+      // The caller's own parse, so the ledger fails exactly what it will reject.
+      let problem;
+      try { problem = objectAnswerProblem(JSON.parse(text.replace(/```json|```/g, '').trim())); } catch { problem = 'invalid_json'; }
+      if (problem) ledgerCallRejected(response, problem);
+    }
+    return text;
   } catch (err) {
     logger.error(`[knowledge-bridge] Claude call failed: ${err.message}`);
     return null;

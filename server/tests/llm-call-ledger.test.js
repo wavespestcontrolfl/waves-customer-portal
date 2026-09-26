@@ -396,6 +396,22 @@ describe('llm call ledger', () => {
       ]);
     });
 
+    it('rejectCall flips the row of an adapter leg a dispatch() caller rejects after the fact; a foreign object is a no-op', async () => {
+      mockAnthropicCreate.mockResolvedValue(ANTHROPIC_MESSAGE);
+      const { call } = load();
+      const result = await call.callAnthropic({ model: 'a', system: 's', text: 't' });
+      expect(result.ok).toBe(true);
+      await flush();
+      mockUpdate.mockClear();
+      call.rejectCall(result, 'invalid_output');
+      call.rejectCall({ ...result }, 'invalid_output');
+      call.rejectCall(null, 'invalid_output');
+      await flush();
+      expect(mockUpdate.mock.calls.map(([t, cond, patch]) => [t, cond.id > 0, patch])).toEqual([
+        ['llm_dispatch_log', true, { ok: false, error_code: 'invalid_output', error_class: 'instruction' }],
+      ]);
+    });
+
     it("ledgerCallRejected flips the row ledgerCall recorded for that exact value to the caller's reason; anything else is a no-op", async () => {
       const { metrics } = load();
       const message = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn' };

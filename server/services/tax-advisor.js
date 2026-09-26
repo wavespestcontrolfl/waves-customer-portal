@@ -18,7 +18,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { etDateString } = require('../utils/datetime-et');
-const { ledgerCall } = require('./llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -177,6 +177,7 @@ Please search for current FL and federal tax changes, then provide your analysis
       try {
         report = JSON.parse(cleaned);
       } catch (parseErr) {
+        ledgerCallRejected(response, 'invalid_json');
         logger.error(`[TaxAdvisor] Failed to parse AI response: ${parseErr.message}`);
         report = this.generateFallbackReport(analysisData);
         report.raw_ai_response = rawText;
