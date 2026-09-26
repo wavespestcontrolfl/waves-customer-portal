@@ -197,6 +197,39 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('stripe_payment_intent_id')).stripe_payment_intent_id).toBe('pi_synthetic_kept');
   });
 
+  test('removing the flag is refused while a submitted saved-card charge awaits reconciliation, even with no payment row or invoice PI', async () => {
+    // A saved-card charge can succeed at Stripe while its DB transaction rolls
+    // back: no payments row, no stripe_payment_intent_id on the invoice, but
+    // the stripe_invoice_charge_attempts claim is still 'claimed'/submitted
+    // and unresolved. Every other refusal check (invoice status/paid_at,
+    // payments table, the pay-page PI triage) sees nothing wrong and would
+    // pass, so this proves assertNoInvoiceChargeReconciliationPending itself
+    // blocks removal.
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId, stripe_payment_intent_id: null });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+    const attemptId = randomUUID();
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId, invoice_id: prepayInvoiceId, stripe_payment_method_id: 'pm_fixture_removal',
+      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`, status: 'claimed',
+      submitted_at: new Date(), amount: 400,
+    });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/in progress or awaiting reconciliation/);
+    expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
+    // Nothing moved: the term, invoice flag and the claim itself are untouched.
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
+    expect((await trx('stripe_invoice_charge_attempts').where({ id: attemptId }).first('status', 'resolved_at')))
+      .toEqual({ status: 'claimed', resolved_at: null });
+  });
+
   test('removing the flag from an unpaid prepay runs the canonical cancel: prior billing mode back, covered invoice owed again, open visits released', async () => {
     const { customerId, prepayInvoiceId, term } = await markedPaidPrepay();
     const coveredVisits = await trx('scheduled_services').where({ annual_prepay_term_id: term.id }).orderBy('scheduled_date');

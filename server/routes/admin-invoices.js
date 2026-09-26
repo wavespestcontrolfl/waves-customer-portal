@@ -2375,6 +2375,23 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const refusal = await removalRefusal(db, invoice);
     if (refusal) return res.status(409).json({ error: refusal });
 
+    // Saved-card claim fence (mirrors apply-credit): a card charge whose
+    // process died right after the Stripe call can succeed there while its
+    // DB transaction rolls back, leaving this invoice with no payment row
+    // and no PI while its stripe_invoice_charge_attempts row is still
+    // claimed/submitted. removalRefusal's payment checks above (status,
+    // paid_at, payments table) see none of that and would pass, so ask the
+    // fence directly before touching anything — not yet in a transaction,
+    // so a stale-claim promotion here commits on its own statement.
+    try {
+      await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(invoice.id);
+    } catch (fenceErr) {
+      if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
+        return res.status(409).json({ error: `${fenceErr.message} — resolve it before removing the annual prepay flag` });
+      }
+      throw fenceErr;
+    }
+
     // Retire an open pay-page session, the one mechanism apply-credit and
     // manual payments use: a customer confirming it after coverage is removed
     // would pay for coverage that no longer exists. Money already moving, or a
@@ -2390,7 +2407,7 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // Settlement stopped their reminders and the reopen skips the re-arm
     // inside a transaction, so it runs after commit (below).
     let coveredInvoiceIds = [];
-    await db.transaction(async (trx) => {
+    const txResult = await db.transaction(async (trx) => {
       // Customer before invoice — the order reverse-prepaid and apply-credit
       // take, and the cancel below locks the customer too — then re-read the
       // invoice under its own lock: a payment landing on it waits for us.
@@ -2406,6 +2423,22 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       }
       const lockedRefusal = await removalRefusal(trx, locked);
       if (lockedRefusal) throw refuse(lockedRefusal);
+      // Saved-card claim fence again under the lock (mirrors apply-credit): a
+      // charge could have started between the pre-check above and this lock.
+      // assertNoInvoiceChargeReconciliationPending can itself WRITE on this
+      // same trx (promoting a stale 'claimed' row to 'ambiguous' once its
+      // active window has passed) — return a sentinel instead of throwing so
+      // the transaction still COMMITS that promotion, and map it to a
+      // refusal outside, after commit (same shape as apply-credit's own
+      // chargeReconciliationPending handling).
+      try {
+        await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, trx);
+      } catch (fenceErr) {
+        if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
+          return { chargeReconciliationPending: `${fenceErr.message} — resolve it before removing the annual prepay flag` };
+        }
+        throw fenceErr;
+      }
       const termId = locked.annual_prepay_term_id;
       // The invoice survives as an ordinary one: drop the triaged (now
       // cancelled) session with the flag, or every edit refuses it as a live
@@ -2443,7 +2476,12 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'no_show'])
           .update({ annual_prepay_term_id: null, updated_at: new Date() });
       }
+      return null;
     });
+
+    if (txResult?.chargeReconciliationPending) {
+      return res.status(409).json({ error: txResult.chargeReconciliationPending });
+    }
 
     // Re-arm reminders on the invoices the cancel actually reopened (a
     // cash-paid one keeps its coverage marker and is skipped), the same way
