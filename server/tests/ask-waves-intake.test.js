@@ -160,6 +160,16 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
 
+  test.each([
+    'The EPA has approved our products.',
+    'Our products are EPA–approved.',
+    'La EPA aprobó nuestros productos.',
+    'The treatment dries in 30min.',
+    'Keep the kids inside for 2hrs after the spray.',
+  ])('active/dashed EPA claims and glued duration units are replaced: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, 'Is the treatment okay for my family?').reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
   test('an appointment-window reply with no treatment context is untouched', () => {
     const reply = 'Your technician arrives in a 2 hour window; you do not need to be home or let them in.';
     expect(scrubUnsafeClaims({ ...base, reply }, 'When will the tech arrive?').reply).toBe(reply);

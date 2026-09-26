@@ -267,7 +267,7 @@ const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w
 // opening holes): any minutes/hours unit word plus any drying or re-entry
 // word anywhere in the reply ("se seca en dos horas", "tarda veintidós
 // minutos en secarse", "puede volver en media hora").
-const ES_DURATION_RE = /\b(?:minutos?|horas?|min|mins|hrs?|h)\b\.?/i;
+const ES_DURATION_RE = /(?:\b|(?<=\d))(?:minutos?|horas?|min|mins|hrs?|h)\b\.?/i;
 const ES_DRY_OR_REENTRY_RE = /\b(?:sec[oa]s?|seca(?:r|rse|do|da)?|se\s+seca|volver|regresar|entrar|reingres\w*|salir|re-?entrada|esper\w*|evit\w*|mant[eé]n\w*\s+(?:\w+\s+){0,3}(?:fuera|alejad\w*)|lejos|antes\s+de\s+(?:dejar|permitir|caminar|salir))\b/i;
 const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(t) };
 // Spanish duration matches need the same treatment context as English
@@ -276,9 +276,12 @@ const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES
 // plus drying or re-entry wording ("It dries in 30 minutes.", "You can go
 // inside after 30 minutes.") — only with treatment context in the reply or
 // the visitor's words, so an appointment-window reply isn't caught.
-const EN_DURATION_RE = /\b(?:minutes?|mins?|hours?|hrs?)\b/i;
+// Units may be glued to digits ("30min", "2hrs").
+const EN_DURATION_RE = /(?:\b|(?<=\d))(?:minutes?|mins?|hours?|hrs?)\b/i;
 const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|(?:keep|stay|kept)\s+(?:\w+\s+){0,3}(?:off|away|out|inside|indoors)|wait(?:ing)?|avoid\w*|before\s+(?:letting|walking|going|allowing|touching)|return(?:ing)?\s+(?:indoors|inside|outside|home|in|to)|back\s+in(?:side|doors)?|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
-const INTAKE_EPA_APPROVED_ES_RE = /\baprobad[oa]s?\s+por\s+la\s+epa\b|\bepa[-\s]+approved\b|\bapproved\s+by\s+(?:the\s+)?epa\b/i;
+// Passive, active and dash-joined forms in both languages ("EPA–approved",
+// "The EPA has approved…", "aprobado por la EPA", "la EPA aprobó…").
+const INTAKE_EPA_APPROVED_ES_RE = /\bepa\s*[-‐‑‒–—\s]\s*approv\w*|\bapproved\s+by\s+(?:the\s+)?epa\b|\bepa\s+(?:has\s+|have\s+|had\s+)?(?:fully\s+)?approv\w*|\baprobad[oa]s?\s+por\s+la\s+epa\b|\bla\s+epa\s+(?:ha\s+|los\s+ha\s+)?aprob\w*/i;
 
 // In a pest-control chat a pronoun or missing subject ("Yes, it's completely
 // safe for pets", "Totally safe for dogs", "Sí, es seguro") is the treatment;
