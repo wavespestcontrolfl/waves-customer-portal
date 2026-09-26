@@ -42,7 +42,7 @@ audit of the current repo:
   and `assessment_completion_tracking` all aggregate every row assuming it's a real
   customer assessment. Injecting prospect/spot-check rows silently corrupts those metrics
   unless a filter is patched into every consumer.
-- Baseline assignment has two paths: with `GATE_LAWN_PROPERTY_HISTORY` and `GATE_LAWN_VISIT_ASSESSMENT` both off, the insert in `server/routes/admin-lawn-assessment.js` marks a customer's first assessment as baseline; with either gate on, the insert writes `is_baseline: false` and confirmation promotes the baseline through `installConfirmedBaseline` (the /confirm route and `server/services/lawn-visit-runs.js`). Either way it is incompatible with standalone records.
+- Baseline assignment has three paths: (1) with `GATE_LAWN_PROPERTY_HISTORY` and `GATE_LAWN_VISIT_ASSESSMENT` both off, the insert in `server/routes/admin-lawn-assessment.js` marks a customer's first assessment as baseline; (2) with only `GATE_LAWN_VISIT_ASSESSMENT` on, the insert writes `is_baseline: false` and confirmation in `server/services/lawn-visit-runs.js` sets `is_baseline = true` directly when the customer has no baseline yet; (3) with `GATE_LAWN_PROPERTY_HISTORY` on, confirmation promotes the baseline through `installConfirmedBaseline` (the /confirm route and `lawn-visit-runs.js`). All three are incompatible with standalone records.
 
 Reuse doesn't require sharing the table: the AI engine, S3 upload, PDF renderer, and
 report-token rails are all service-layer functions that don't care which table the row

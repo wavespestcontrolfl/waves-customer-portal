@@ -131,5 +131,7 @@ CTAs. The authoritative spec is `docs/design/estimate-glass-plan.md` (implementa
 `docs/design/estimate-glass-blueprint.js` (approved behavior); shipped via PRs #2358/#2359 +
 the copy PR. The `?glass=1` override was retired 2026-07-07 — glass is now the only
 customer theme, unconditional on roughly 32 customer-facing pages, including booking,
-invoice, portal and follow-up. The warm-serif direction sketched above is superseded on
+invoice, portal and follow-up. The one exception is official compliance documents: WDO
+inspection reports and pre-treatment termite certificates keep the navy/beige paper look
+(owner ruling 2026-07-16; `ProjectReportViewPage.jsx`, `isPaperDocument`). The warm-serif direction sketched above is superseded on
 those surfaces.
