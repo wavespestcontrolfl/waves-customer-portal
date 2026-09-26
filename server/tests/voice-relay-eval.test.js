@@ -4714,6 +4714,23 @@ describe('voice relay eval — named spoken checks', () => {
     const noLongerAppears = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no aparece; pedí la de las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(noLongerAppears.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: noLongerAppears })).toBe('pass');
+    // Codex round-2 P1 (pre-push): "fue reservado" satisfied the required
+    // slot-loss phrasing but ALSO tripped this scenario's own certainty-claim
+    // prohibition ("reservad[oa]s?" is banned), making a correct explanation
+    // unpassable once both checks are critical. "reservado/reservada" was
+    // removed from the required alternative — "fue tomado/ocupado" cover the
+    // same meaning without colliding.
+    const takenNeverReserved = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Ese horario ya fue ocupado; pedí la de las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
+    expect(takenNeverReserved.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
+    expect(takenNeverReserved.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([]);
+    expect(replay._internals.scenarioStatus({ checks: takenNeverReserved })).toBe('pass');
+    // "fue reservado" is genuinely ambiguous with the certainty-claim ban and
+    // is correctly NOT accepted as the required slot-loss phrasing either —
+    // it fails both checks rather than silently passing one.
+    const ambiguousReservado = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Ese horario ya fue reservado; pedí la de las diez de la mañana, y la oficina le llamará para confirmar.' }] }));
+    expect(ambiguousReservado.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(ambiguousReservado.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: ambiguousReservado })).toBe('fail');
   });
 
   test('spanish-reservice-matched blocks when request_reservice is never called, and only_language blocks English speech', () => {

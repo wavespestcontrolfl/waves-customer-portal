@@ -1975,7 +1975,7 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(ya no (?:está|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocupó|tomaron|tomó|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa]|reservad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no quedó disponible|ya no (?:hay|aparece))"
+      "(ya no (?:está|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocupó|tomaron|tomó|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no quedó disponible|ya no (?:hay|aparece))"
      ],
      "severity": "critical"
     },
