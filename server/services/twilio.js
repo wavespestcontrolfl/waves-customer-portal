@@ -1325,15 +1325,7 @@ const TwilioService = {
       // operator alert and treat the row as ordinary customer-facing
       // history (codex #4211 P2).
       const sentToKnownOwnerPhone = isKnownOwnerPhone(to);
-      // The property the visit is at WHEN this notice is sent, snapshotted on
-      // the row: property-scoped readers must not re-derive it from a visit
-      // that may be moved to another property later (Codex #4816 r49).
-      let noticePropertyId = null;
-      if (options.appointmentId) {
-        try {
-          noticePropertyId = (await db('scheduled_services').where({ id: options.appointmentId }).first('property_id'))?.property_id || null;
-        } catch { noticePropertyId = null; }
-      }
+      const scope = await require('./messaging/notice-scope').noticeScope(options.appointmentId);
       try {
         await db("sms_log").insert({
           customer_id: options.customerId || null,
@@ -1377,8 +1369,8 @@ const TwilioService = {
             // messaging audit is best-effort, and readers that scope by
             // property (SMS commitment evidence) must not depend on it
             // (Codex #4816 r41). Same key the push proof row uses.
-            ...(options.appointmentId ? { scheduled_service_id: String(options.appointmentId) } : {}),
-            ...(noticePropertyId ? { property_id: String(noticePropertyId) } : {}),
+            // The visit and its send-time property (Codex #4816 r41/r49).
+            ...scope,
           }),
         });
       } catch (logErr) {
