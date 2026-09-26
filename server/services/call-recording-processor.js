@@ -15211,7 +15211,9 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore()
-              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+              // Knex prefixes err.message with the SQL and its bound values
+              // (the extraction payload) — log only an allowlisted token.
+              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)} (${safeErrorToken(e?.code) || safeErrorToken(e?.name) || 'error'})`));
           }
           // Last-name advisory (owner ruling 2026-09-26): the booking no
           // longer holds on a missing surname, so the "get the full name"
