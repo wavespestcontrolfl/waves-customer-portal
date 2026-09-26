@@ -19,6 +19,19 @@ const CATEGORY_LABELS = Object.freeze({
   payment_receipt: 'Payment receipt',
 });
 
+// Single source for which template a billing category's email uses. A
+// payment_receipt send reuses the SMS body, which may carry a withheld
+// estimate link that estimate-deposits.js's SMS receipt path deliberately
+// rewrites rather than refuses — the generic billing.notice template makes
+// withheldLinkPolicyForTemplate (estimate-annual-guard.js) resolve 'refuse'
+// instead, silently dropping the whole email if the offer is withheld
+// before dispatch. Both the adapter's sendTemplate call and this module's
+// own suppression recheck (which loads a template by key) resolve the key
+// here, so a fresh send and a locked-recheck-time recheck never disagree.
+function billingEmailTemplateKey(category) {
+  return category === 'payment_receipt' ? 'billing.receipt_notice' : 'billing.notice';
+}
+
 function clean(value) {
   return String(value || '').trim();
 }
@@ -115,9 +128,9 @@ async function preSendBlock(preSendCheck) {
   );
 }
 
-async function suppressionBlock(trx, recipientEmail) {
+async function suppressionBlock(trx, recipientEmail, category) {
   await lockCustomerEmail(trx, recipientEmail);
-  const loaded = await EmailTemplateLibrary.loadTemplateByKey('billing.notice', trx);
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey(billingEmailTemplateKey(category), trx);
   if (!loaded?.template) {
     return blocked('BILLING_EMAIL_RECHECK_FAILED', 'Billing email template is unavailable', { retryable: true });
   }
@@ -144,7 +157,7 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
       { retryable: true },
     );
   } else state.boundaryBlock = await preSendBlock(preSendCheck);
-  if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail);
+  if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category);
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;
@@ -180,4 +193,5 @@ module.exports = {
   blocked,
   loadBillingEmailContext,
   dispatchUnderBillingEmailAuthority,
+  billingEmailTemplateKey,
 };
