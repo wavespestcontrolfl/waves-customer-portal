@@ -2314,8 +2314,14 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 });
 
 // DELETE /:id/annual-prepay — remove the annual-prepay flag from an invoice.
-// Clears the invoice link and cancels the linked term so the banner stops
-// rendering. Idempotent — re-marking later re-activates the same term row.
+// Clears the invoice link and cancels the linked term through the SAME
+// canonical cancel pipeline the void/refund sync uses (ADMIN-BUG-R16) — a
+// raw status write here used to leave the customer stranded in
+// billing_mode='annual_prepay' forever (never billed again) and coverage-
+// settled visit invoices closed. A DECIDED term (renewal_decision set —
+// renewed / switch_plan / a decided lapse) is refused with 409 instead of
+// being destroyed; re-marking later re-activates a term this route did
+// cancel.
 router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await db('invoices')
@@ -2324,26 +2330,50 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
     const termId = invoice.annual_prepay_term_id;
+    if (termId) {
+      const term = await db('annual_prepay_terms').where({ id: termId }).first('id', 'renewal_decision', 'status');
+      if (term?.renewal_decision) {
+        return res.status(409).json({
+          error: `This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`,
+        });
+      }
+    }
     await db.transaction(async (trx) => {
       await trx('invoices')
         .where({ id: invoice.id })
         .update({ annual_prepay_term_id: null, updated_at: new Date() });
       if (termId) {
-        await trx('annual_prepay_terms')
-          .where({ id: termId })
-          .update({ status: 'cancelled', updated_at: new Date() });
-        // Clear per-visit prepaid_amount stamps on the term's not-yet-completed
-        // visits FIRST (while they can still be found by term id). Completion
-        // billing keys on prepaid_amount independently of the term link, so an
-        // unflagged future visit would otherwise stay "prepaid" and skip
-        // invoicing — same cleanup the refund/void path runs.
-        await AnnualPrepayRenewals.clearPrepaidStampsForTerm(termId, trx);
+        // Canonical cancel: renewal_decision guard, stamp clear
+        // (throwOnError — a swallowed failure here used to leave a future
+        // visit silently prepaid-free of charge), covered-invoice reopen,
+        // pending-window/WaveGuard credit reversal, customers.billing_mode
+        // reset to the recorded prior mode, and switch/setup-fee restores —
+        // all inside this same transaction. throwOnError: true because this
+        // is an explicit operator action, not a best-effort background
+        // sync: a half-finished cancel here must roll back, not strand the
+        // customer between states.
+        const cancelled = await AnnualPrepayRenewals.cancelTermWithRestorations(termId, trx, { throwOnError: true });
+        // The pre-transaction check above can miss a decision that lands
+        // (recordDecision) between that read and this transaction opening —
+        // the guarded update then matches nothing and returns null. Abort
+        // rather than silently unlinking the invoice and detaching the
+        // decided term's visits (they would lose valid coverage linkage and
+        // could be billed again for already-paid work).
+        if (!cancelled) {
+          const err = new Error('This term already has a renewal decision and cannot be removed this way — use the renewal workflow instead.');
+          err.statusCode = 409;
+          err.isOperational = true;
+          throw err;
+        }
         // Detach any scheduled visits attachScheduledServices() stamped while
         // the term was active — pricing-reality-check treats a non-null
         // annual_prepay_term_id as "Annual Prepay", so leaving them linked keeps
-        // visits reported/seeded as prepaid after the flag is removed.
+        // visits reported/seeded as prepaid after the flag is removed. Only
+        // non-terminal rows: a completed/invoiced visit's billing history
+        // must not be rewritten by this cleanup.
         await trx('scheduled_services')
           .where({ annual_prepay_term_id: termId })
+          .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'no_show'])
           .update({ annual_prepay_term_id: null, updated_at: new Date() });
       }
     });
@@ -2970,7 +3000,7 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
         // Prepaid-only: a partial credit on a collectible invoice never activated
         // a term.
         if (isPrepaid && locked.annual_prepay_term_id) {
-          await trx('annual_prepay_terms')
+          const demotedCount = await trx('annual_prepay_terms')
             .where({ id: locked.annual_prepay_term_id })
             .whereNull('renewal_decision')
             .whereNotIn('status', ['cancelled', 'canceled'])
@@ -2978,6 +3008,25 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
           // throwOnError → if stamp cleanup fails, the whole reversal rolls
           // back rather than restoring credit while visits stay stamped free.
           await AnnualPrepayRenewals.clearPrepaidStampsForTerm(locked.annual_prepay_term_id, trx, { throwOnError: true });
+          // ADMIN-BUG-R17: pair the SAME demotion the dispute-suspend path
+          // pairs it with (annual-prepay-renewals.js suspendActiveTermsForDisputedInvoice)
+          // — a payment_pending term must never leave the customer stranded
+          // in billing_mode='annual_prepay': the completion gate deliberately
+          // never auto-invoices unpriced annual-prepay visits (the coverage
+          // check is stamp-based, not amount-based), so a visit completing
+          // before the reopened invoice is repaid would be serviced FREE, and
+          // the monthly cron also skips 'annual_prepay' outright. throwOnError
+          // for the same reason as the stamp clear above — a swallowed
+          // failure here is exactly the nothing-bills limbo this fixes.
+          // resetBillingModeAfterTermCancel only needs id + customer_id (it
+          // re-reads prior_billing_mode itself), so no extra fetch is needed.
+          if (demotedCount) {
+            await AnnualPrepayRenewals.resetBillingModeAfterTermCancel(
+              { id: locked.annual_prepay_term_id, customer_id: locked.customer_id },
+              trx,
+              { throwOnError: true },
+            );
+          }
         }
 
         return { invoice: locked, restore, balanceAfter };
