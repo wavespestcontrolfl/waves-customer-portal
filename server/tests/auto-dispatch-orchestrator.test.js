@@ -29,7 +29,7 @@ const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 const apply = require('../services/auto-dispatch/apply');
 const geocoder = require('../services/geocoder');
 const audit = require('../services/auto-dispatch/audit');
-const { runAutoDispatch } = require('../services/auto-dispatch');
+const { runAutoDispatch, _internals } = require('../services/auto-dispatch');
 
 function buildChain(result) {
   const chain = {};
@@ -400,4 +400,253 @@ test.each([
     if (previous === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY;
     else process.env.AUTO_DISPATCH_ALLOW_APPLY = previous;
   }
+});
+
+// GATE_AUTO_DISPATCH_SHARED_MODEL SLOT_TAKEN fallback — Codex pre-push P1
+// findings (2026-09-26): (1) a fallback candidate offered to apply.js must
+// itself clear the SAME move threshold as `best`; (2) a successful fallback
+// that lands on a DIFFERENT candidate must be audited as the candidate that
+// ACTUALLY moved, not the first one tried.
+describe('SLOT_TAKEN fallback correctness (Codex pre-push P1)', () => {
+  const PREFS = {
+    preferred_day_indexes: [], effective_time_window: null, preferred_time_window: null,
+    blackout: null, service_category: 'general', preferred_days: null, raw_snapshot: null,
+  };
+  const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35 };
+
+  test('P1 #1: an alternate that does NOT itself clear the move threshold is excluded from rankedCandidates', async () => {
+    // Barely better than CURRENT (detour 40→38, same stop count/tech) — a
+    // real improvement of ~1.8 points, well under the 15-point threshold.
+    const CAND_TINY = { is_current: false, detour_minutes: 38, stops_that_day: 3, technician_id: 't1', date: '2026-08-12', start_time: '09:00', capability_level: 'qualified', total_drive_minutes: 50 };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_TINY], drops: {} });
+
+    const result = await _internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20');
+
+    expect(result.kind).toBe('move');
+    expect(result.best.date).toBe(CAND_BIG.date);
+    expect(result.rankedCandidates.some((c) => c.date === CAND_TINY.date)).toBe(false);
+    expect(result.rankedCandidates.every((c) => c.date === CAND_BIG.date)).toBe(true);
+  });
+
+  test('P1 #1 wired end to end: apply.js is never handed the below-threshold alternate as alternateCandidates', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      const CAND_TINY = { is_current: false, detour_minutes: 38, stops_that_day: 3, technician_id: 't1', date: '2026-08-12', start_time: '09:00', capability_level: 'qualified', total_drive_minutes: 50 };
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_TINY], drops: {} });
+      await runAutoDispatch({ mode: 'apply' });
+      const config = apply.applyAutoDispatchMove.mock.calls[0][3];
+      expect(config.alternateCandidates.some((c) => c.date === CAND_TINY.date)).toBe(false);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  test('P1 #1: a second candidate that ALSO clears the threshold (just not as good as best) IS offered as a fallback', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE], drops: {} });
+    const result = await _internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20');
+    expect(result.kind).toBe('move');
+    expect(result.rankedCandidates.map((c) => c.date + c.start_time)).toContain(CAND_MODERATE.date + CAND_MODERATE.start_time);
+  });
+
+  test('P1 #2: a successful SLOT_TAKEN fallback is audited as the candidate that ACTUALLY moved, not fresh.best', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE], drops: {} });
+      // apply.js reports it landed on CAND_MODERATE (a fallback) after a
+      // SLOT_TAKEN on CAND_BIG (fresh.best), on its 2nd attempt.
+      apply.applyAutoDispatchMove.mockResolvedValue({
+        ok: true, pre_status: 'confirmed', post_status: 'confirmed', applied: CAND_MODERATE, attempts: 2,
+      });
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 1 });
+      const changed = lastDecision('changed');
+      // The audit describes CAND_MODERATE (what actually moved) — NOT CAND_BIG.
+      expect(changed.newPlacement).toMatchObject({
+        date: CAND_MODERATE.date, window_start: CAND_MODERATE.start_time, window_end: CAND_MODERATE.end_time, technician_id: CAND_MODERATE.technician_id,
+      });
+      expect(changed.routeMetrics.candidate_detour_minutes).toBe(CAND_MODERATE.detour_minutes);
+      expect(changed.routeMetrics.candidate_total_drive_minutes).toBe(CAND_MODERATE.total_drive_minutes);
+      // attempts (ids/numbers only) surfaces how many candidates were tried.
+      expect(changed.routeMetrics.attempts).toBe(2);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  test('P1 #2: the common (no-fallback) case still audits fresh.best, with attempts defaulting to 1', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+      // No `applied`/`attempts` in the mocked result — mirrors a plain
+      // rebooker mock that doesn't know about this lane at all.
+      apply.applyAutoDispatchMove.mockResolvedValue({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
+      await runAutoDispatch({ mode: 'apply' });
+      const changed = lastDecision('changed');
+      expect(changed.newPlacement).toMatchObject({ date: CAND_BIG.date, window_start: CAND_BIG.start_time });
+      expect(changed.routeMetrics.attempts).toBe(1);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+});
+
+// Codex r1 findings on the shared-model apply path (GATE_AUTO_DISPATCH_SHARED_MODEL).
+describe('shared-model apply path (Codex r1)', () => {
+  // Barely better than CURRENT — does not clear the move threshold.
+  const CAND_TINY_BASE = { is_current: false, detour_minutes: 38, stops_that_day: 3, technician_id: 't1', start_time: '09:00', capability_level: 'qualified', total_drive_minutes: 50 };
+  const PREFS = {
+    preferred_day_indexes: [], effective_time_window: null, preferred_time_window: null,
+    blackout: null, service_category: 'general', preferred_days: null, raw_snapshot: { note: 'snap' },
+  };
+  const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35 };
+
+  // PRRT_kwDOR3YQi86mP9cs: every candidate is scored before the cap, and the
+  // cap keeps the best TOTAL scores — not the first N in finder order.
+  test('rankedCandidates are capped by total score after every candidate is scored', async () => {
+    const weak = { ...CAND_TINY_BASE, date: '2026-08-12' };
+    const weak2 = { ...CAND_TINY_BASE, date: '2026-08-13' };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [weak, weak2, CAND_MODERATE, CAND_BIG], drops: {} });
+    const result = await _internals.evaluatePlacement(svc(), PREFS, { scoreCap: 1 }, CONFIG, '2026-06-20');
+    expect(result.kind).toBe('move');
+    expect(result.rankedCandidates).toEqual([CAND_BIG]); // the 4th in finder order, first by score
+  });
+
+  // PRRT_kwDOR3YQi86mP9ci: the orchestrator hands apply.js a re-evaluation hook.
+  test('apply.js receives a rescore hook that re-runs this visit\'s own evaluation', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG], drops: {} });
+      await runAutoDispatch({ mode: 'apply' });
+      const config = apply.applyAutoDispatchMove.mock.calls[0][3];
+      const callsBefore = candidateSlots.findValidCandidateSlots.mock.calls.length;
+      const again = await config.rescore();
+      expect(again.kind).toBe('move');
+      expect(candidateSlots.findValidCandidateSlots.mock.calls.length).toBe(callsBefore + 1);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  // PRRT_kwDOR3YQi86mPzgr: the failure audit describes the candidate tried LAST.
+  test('a failure after a fallback is audited as the last attempted candidate, with the attempt count', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE], drops: {} });
+      const refusal = Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+        code: 'SLOT_TAKEN', lastAttempted: CAND_MODERATE, attemptsTried: 2,
+      });
+      apply.applyAutoDispatchMove.mockRejectedValue(refusal);
+      await runAutoDispatch({ mode: 'apply' });
+      const failed = lastDecision('failed');
+      expect(failed.newPlacement).toMatchObject({ date: CAND_MODERATE.date, window_start: CAND_MODERATE.start_time });
+      expect(failed.routeMetrics.candidate_detour_minutes).toBe(CAND_MODERATE.detour_minutes);
+      expect(failed.routeMetrics.attempts).toBe(2);
+      expect(failed.error).toBe(refusal.message);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  // Codex pre-push P1: a retry's audit compares against the evaluation that
+  // authorized it, not the first evaluation's current placement.
+  test('a retry authorized by a re-evaluation is audited against THAT evaluation (success and failure)', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG], drops: {} });
+      const reCurrent = { ...CURRENT, detour_minutes: 12 };
+      const reEvaluation = { kind: 'move', current: reCurrent, currentScore: { total_score: 51.5 }, threshold: 15 };
+      apply.applyAutoDispatchMove.mockResolvedValueOnce({
+        ok: true, pre_status: 'confirmed', post_status: 'confirmed', applied: CAND_MODERATE, attempts: 2, evaluation: reEvaluation,
+      });
+      await runAutoDispatch({ mode: 'apply' });
+      const changed = lastDecision('changed');
+      expect(changed.scores.old).toBe(51.5);
+      expect(changed.routeMetrics.current_detour_minutes).toBe(12);
+
+      audit.logDecision.mockClear();
+      apply.applyAutoDispatchMove.mockRejectedValueOnce(Object.assign(new Error('taken'), {
+        code: 'SLOT_TAKEN', lastAttempted: CAND_MODERATE, attemptsTried: 2, lastEvaluation: reEvaluation,
+      }));
+      await runAutoDispatch({ mode: 'apply' });
+      const failed = lastDecision('failed');
+      expect(failed.scores.old).toBe(51.5);
+      expect(failed.routeMetrics.current_detour_minutes).toBe(12);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  // Codex r3 P1 (PRRT_kwDOR3YQi86mQlqy): an unreadable visit group is a
+  // no-change skip with an ids-only reason — never a move, never an ERROR row.
+  test('an unreadable visit group skips the visit: no move, GROUP_CONTEXT_UNAVAILABLE in the audit', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockRejectedValue(Object.assign(new Error('Visit group could not be read'), { code: 'GROUP_CONTEXT_UNAVAILABLE', skipEvaluation: true }));
+      const result = await _internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20');
+      expect(result).toMatchObject({ kind: 'no_change', reason_code: 'GROUP_CONTEXT_UNAVAILABLE' });
+
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 0, failed: 0 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      expect(lastDecision('no_change').reason_code).toBe('GROUP_CONTEXT_UNAVAILABLE');
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  // Codex r7 (PRRT_kwDOR3YQi86mRfE_): the same no-change skip for an
+  // unassigned visit whose day technician cannot be resolved.
+  test('an unresolved day technician skips the visit with CURRENT_DAY_TECH_UNRESOLVED', async () => {
+    candidateSlots.findValidCandidateSlots.mockRejectedValueOnce(Object.assign(new Error('No single assignable technician for an unassigned visit\'s day'), {
+      code: 'CURRENT_DAY_TECH_UNRESOLVED', skipEvaluation: true,
+    }));
+    const result = await _internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20');
+    expect(result).toMatchObject({ kind: 'no_change', reason_code: 'CURRENT_DAY_TECH_UNRESOLVED' });
+  });
+
+  test('any other slot-finder error still fails the visit as before', async () => {
+    candidateSlots.findValidCandidateSlots.mockRejectedValueOnce(new Error('db down'));
+    await expect(_internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20')).rejects.toThrow('db down');
+  });
+
+  // Codex pre-push P1 (staff control): a lock landing between attempts
+  // surfaces exactly like a first-attempt lock — no move, the guard's reason.
+  test('a visit locked between retry attempts is audited as the guard\'s STALE_PLACEMENT refusal, with no move', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE], drops: {} });
+      apply.applyAutoDispatchMove.mockRejectedValueOnce(Object.assign(new Error('Visit was locked/excluded from auto-dispatch after scoring'), { code: 'STALE_PLACEMENT' }));
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 0 });
+      const failed = lastDecision('failed');
+      expect(failed.reason_description).toBe('Visit was locked/excluded from auto-dispatch after scoring');
+      expect(failed.newPlacement).toMatchObject({ date: CAND_BIG.date, window_start: CAND_BIG.start_time }); // the fresh evaluation's row, as for a first-attempt lock
+      expect(lastDecision('changed')).toBeUndefined();
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  test('a failure whose error names no attempted candidate (gate off) keeps the fresh placement audit', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE], drops: {} });
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('taken'), { code: 'SLOT_TAKEN' }));
+      await runAutoDispatch({ mode: 'apply' });
+      const failed = lastDecision('failed');
+      expect(failed.newPlacement).toMatchObject({ date: CAND_BIG.date, window_start: CAND_BIG.start_time });
+      expect(failed.routeMetrics).not.toHaveProperty('attempts');
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
 });

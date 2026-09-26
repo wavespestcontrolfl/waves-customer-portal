@@ -2195,6 +2195,118 @@ function shiftClock(hhmm, deltaMin) {
   return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
 }
 
+// ---- per-member target windows (auto-dispatch shared model, 2026-09-26) --
+// moveVisitAsUnit's own derivation of each member's target window, factored
+// out unchanged so a read-only caller that must PREDICT where every member
+// lands (auto-dispatch's SLOT_TAKEN pre-filter) runs the SAME code.
+
+// The offset (minutes) every non-primary member shifts by: the requested new
+// start minus the anchor's current start; 0 when there is no time change (a
+// date-only move keeps each member's own window).
+function siblingShiftDeltaMinutes(anchorStart, requestedStart) {
+  return requestedStart && anchorStart ? (toMinutes(requestedStart) - toMinutes(anchorStart)) : 0;
+}
+
+// One clock bound shifted by `delta` minutes. A shift that would cross
+// midnight is flagged (`crossesMidnight`, value null) rather than wrapped —
+// shiftClock wraps modulo 24h, which would derive an "early-morning" window
+// on the SAME date, no longer one physical stop (codex r24 P2). A null bound
+// passes through unchanged.
+function shiftWindowBound(bound, delta) {
+  const base = toMinutes(bound);
+  if (base == null || !Number.isFinite(delta)) return { value: bound || null, crossesMidnight: false };
+  const total = base + delta;
+  if (total < 0 || total >= 1440) return { value: null, crossesMidnight: true };
+  return { value: shiftClock(bound, delta), crossesMidnight: false };
+}
+
+// A member's target bounds for a requested window `win` ({start, end}). The
+// tapped row takes the requested slot even when it was windowless (codex
+// r3); a windowed sibling shifts by the anchor offset through `shift`
+// (bound -> shifted bound; moveVisitAsUnit's throws on a midnight crossing);
+// a windowless sibling, or a date-only move, keeps its own window
+// (`shifted: false`).
+function memberTargetBounds(m, isPrimary, win, shift) {
+  if (!(win.start && (m.window_start || isPrimary))) {
+    return { start: m.window_start || null, end: m.window_end || null, shifted: false };
+  }
+  const start = isPrimary ? win.start : shift(m.window_start);
+  const end = isPrimary ? (win.end || (m.window_end ? shift(m.window_end) : null)) : shift(m.window_end);
+  return { start, end, shifted: true };
+}
+
+/**
+ * Every member's target window for a unit move of `primary` to window `win`
+ * on `newDateStr` — the planning moveVisitAsUnit runs before its first
+ * write, extracted unchanged so auto-dispatch's read-only prediction runs
+ * the same code. Throws the writer's own refusals, in member order:
+ *   - VISIT_WINDOWLESS_ANCHOR_MOVE_UNSUPPORTED: a new time with no anchor
+ *     (the tapped row's start, else the VISIT's canonical start — a
+ *     windowless tapped row is still a member of a windowed stop, local
+ *     codex audit) while a sibling has a window;
+ *   - VISIT_MEMBER_WINDOW_INVALID: a sibling shifted across midnight (codex
+ *     r24 P2), or a sibling window — shifted, or kept on a NEW date — that
+ *     fails the admin window rules (codex r4/r9/r11: dispatch validates only
+ *     the tapped window; rain-out and auto-dispatch validate none, and a
+ *     legacy :30 sibling must not ride its offset onto a new slot).
+ * Returns `{ id, isPrimary, start, end, shifted }` per member, in order.
+ */
+function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr }) {
+  const anchorStart = primary.window_start || visitWindowStart || null;
+  if (win.start && !anchorStart && members.some((m) => m.id !== primary.id && m.window_start)) {
+    throw Object.assign(new Error('Cannot move this stop to a new time from a service without a time window — move it from a grouped service that has one, or set this service\'s window first'), { statusCode: 409, code: 'VISIT_WINDOWLESS_ANCHOR_MOVE_UNSUPPORTED', isOperational: true });
+  }
+  const delta = siblingShiftDeltaMinutes(anchorStart, win.start);
+  const validateSibling = (m, start, end) => {
+    try {
+      require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: m.estimated_duration_minutes });
+    } catch (e) {
+      throw Object.assign(new Error(`Cannot move this stop: a grouped service's time is not allowed on the new slot — ${e.message}`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: m.id, isOperational: true });
+    }
+  };
+  const shiftInDay = (row, bound) => {
+    const { value, crossesMidnight } = shiftWindowBound(bound, delta);
+    if (crossesMidnight) {
+      throw Object.assign(new Error(`Cannot move this stop: a grouped service's time would cross midnight on the new slot (${bound} shifted by ${delta > 0 ? '+' : ''}${delta} min) — move it separately`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: row.id, isOperational: true });
+    }
+    return value;
+  };
+  return members.map((m) => {
+    const isPrimary = m.id === primary.id;
+    // The tapped row takes the requested slot even when it was windowless
+    // (codex r3); a windowless sibling stays windowless.
+    const bounds = memberTargetBounds(m, isPrimary, win, (bound) => shiftInDay(m, bound));
+    if (bounds.shifted) {
+      if (!isPrimary) validateSibling(m, bounds.start, bounds.end);
+    } else if (!isPrimary && m.window_start && dateOnly(m.scheduled_date) !== newDateStr) {
+      // Date-only move: the sibling keeps its own window on a NEW date.
+      validateSibling(m, bounds.start, bounds.end);
+    }
+    return { id: m.id, isPrimary, ...bounds };
+  });
+}
+
+/**
+ * Read-only prediction for auto-dispatch: planMemberTargets for moving
+ * `primaryId` to `requestedStart`-`requestedEnd` on `newDateStr`, with the
+ * writer's refusal returned instead of thrown. `members` carries each row's
+ * id, scheduled_date, window_start, window_end and estimated_duration_minutes
+ * (the primary included); `visitWindowStart` is the visit's canonical start.
+ * Returns `{ ok: true, targets }` or `{ ok: false, code }`.
+ */
+function predictMemberWindows({ members, primaryId, visitWindowStart, requestedStart, requestedEnd, newDateStr }) {
+  const primary = (members || []).find((m) => String(m.id) === String(primaryId));
+  if (!primary) return { ok: false, code: 'VISIT_PRIMARY_MISSING' };
+  try {
+    const targets = planMemberTargets({
+      members, primary, visitWindowStart, win: { start: requestedStart || null, end: requestedEnd || null }, newDateStr,
+    });
+    return { ok: true, targets };
+  } catch (err) {
+    return { ok: false, code: err.code || 'VISIT_MEMBER_WINDOW_INVALID' };
+  }
+}
+
 /**
  * Move a grouped row's WHOLE visit as one unit (R3): called by
  * SmartRebooker.reschedule / rescheduleSeries before their own work for a
@@ -2356,59 +2468,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: m.id });
           }
         }
-        // Sibling offset anchor: the tapped row's own start, else the VISIT's
-        // canonical start (a windowless tapped row is still a member of a
-        // windowed stop — local codex audit). No anchor at all with windowed
-        // siblings is ambiguous: refuse rather than leave siblings at the old
-        // time behind a moved anchor.
-        const anchorStart = primary.window_start || visit.window_start || null;
-        if (win.start && !anchorStart && members.some((m) => m.id !== primary.id && m.window_start)) {
-          throw Object.assign(new Error('Cannot move this stop to a new time from a service without a time window — move it from a grouped service that has one, or set this service\'s window first'), { statusCode: 409, code: 'VISIT_WINDOWLESS_ANCHOR_MOVE_UNSUPPORTED', isOperational: true });
-        }
-        const delta = win.start && anchorStart ? (toMinutes(win.start) - toMinutes(anchorStart)) : 0;
-        const validateSibling = (m, start, end) => {
-          try {
-            require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: m.estimated_duration_minutes });
-          } catch (e) {
-            throw Object.assign(new Error(`Cannot move this stop: a grouped service's time is not allowed on the new slot — ${e.message}`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: m.id, isOperational: true });
-          }
-        };
-        // A shifted bound must stay inside the target day (codex r24 P2):
-        // shiftClock wraps modulo 24h, so a positive offset pushing a late
-        // sibling past midnight would derive an "early-morning" window the
-        // admin rules accept — on the same date, no longer one physical stop.
-        const shiftInDay = (row, bound) => {
-          const base = toMinutes(bound);
-          if (base == null || !Number.isFinite(delta)) return bound || null;
-          const total = base + delta;
-          if (total < 0 || total >= 1440) {
-            throw Object.assign(new Error(`Cannot move this stop: a grouped service's time would cross midnight on the new slot (${bound} shifted by ${delta > 0 ? '+' : ''}${delta} min) — move it separately`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: row.id, isOperational: true });
-          }
-          return shiftClock(bound, delta);
-        };
-        const targets = members.map((m) => {
-          const isPrimary = m.id === primary.id;
-          let window = null;
-          let targetStart = m.window_start || null;
-          let targetEnd = m.window_end || null;
-          if (win.start && (m.window_start || isPrimary)) {
-            // The tapped row takes the requested slot even when it was
-            // windowless (codex r3); a windowless sibling stays windowless.
-            targetStart = isPrimary ? win.start : shiftInDay(m, m.window_start);
-            targetEnd = isPrimary ? (win.end || (m.window_end ? shiftInDay(m, m.window_end) : null)) : shiftInDay(m, m.window_end);
-            window = targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null };
-            // A DERIVED sibling window must pass the admin window rules (on
-            // the hour, ends by the day cutoff) BEFORE the first member
-            // write, for EVERY caller (codex r4/r9): dispatch validates only
-            // the tapped window; rain-out and auto-dispatch validate none —
-            // a legacy :30 sibling must not ride its offset onto a new slot.
-            if (!isPrimary) validateSibling(m, targetStart, targetEnd);
-          } else if (!isPrimary && m.window_start && dateOnly(m.scheduled_date) !== newDateStr) {
-            // Date-only move: the sibling keeps its own window, which now
-            // lands on a NEW date — a legacy off-hour window cannot ride
-            // onto it either (codex r11; same ruling update-details applies).
-            validateSibling(m, targetStart, targetEnd);
-          }
+        // Every member's target window, validated exactly as before the
+        // first write (planMemberTargets — shared with auto-dispatch's
+        // read-only prediction, so its pre-filter runs this same code).
+        const planned = planMemberTargets({ members, primary, visitWindowStart: visit.window_start, win, newDateStr });
+        const targets = members.map((m, index) => {
+          const { isPrimary, start: targetStart, end: targetEnd, shifted } = planned[index];
+          const window = shifted ? (targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null }) : null;
           const norm = (v) => (v ? String(v).slice(0, 5) : null);
           const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
           // No-op only when EVERY requested field already holds (codex r2):
@@ -3330,6 +3396,9 @@ module.exports = {
   assertRowMovableAlone,
   fanOutLiveTransition,
   moveVisitAsUnit,
+  // Read-only: moveVisitAsUnit's own member-window derivation, for
+  // auto-dispatch's SLOT_TAKEN pre-filter.
+  predictMemberWindows,
   claimReminderHoldInTx,
   releaseReminderHoldByToken,
   MOVE_HOLD_TTL_MS,
