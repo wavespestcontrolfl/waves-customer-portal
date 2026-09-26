@@ -5522,7 +5522,10 @@ async function sendExplicitPaymentReminderChannels({
     return { sent: true, termId: claimedTerm.id, complete: false };
   }
 
-  const anyDelivered = hadPriorDelivery || acceptedNow || result.deliveredNow.length > 0;
+  // Only THIS run's reach decides whether THIS run's credit increment stands:
+  // an earlier delivery quoted the pre-increment balance.
+  const reachedNow = acceptedNow || result.deliveredNow.length > 0;
+  const anyDelivered = hadPriorDelivery || reachedNow;
   if (result.deliveredNow.length) {
     for (const channel of result.deliveredNow) {
       await db('customer_interactions').insert({
@@ -5535,10 +5538,10 @@ async function sendExplicitPaymentReminderChannels({
     }
   }
 
-  // No customer-visible touch happened at all (this run or a prior one): the
-  // seam credit this run applied must not stay consumed — mirrors the legacy
-  // path's undelivered-touch reversal.
-  if (!anyDelivered) await reverseReminderCredit();
+  // Nothing from THIS run may have reached the customer: this run's seam
+  // credit must not stay consumed (a prior delivery quoted the balance before
+  // it) — mirrors the legacy path's undelivered-touch reversal.
+  if (!reachedNow) await reverseReminderCredit();
 
   if (result.complete) {
     // Every selected leg settled (delivered or terminally resolved) — stamp
@@ -5570,9 +5573,9 @@ async function sendExplicitPaymentReminderChannels({
 async function routeExplicitPaymentReminder(ctx) {
   let explicitChannels;
   try {
-    const { explicitBillingChannels } = require('./billing-delivery-channels');
-    const prefs = await db('notification_prefs').where({ customer_id: ctx.customer.id }).first();
-    explicitChannels = explicitBillingChannels(prefs || {}, 'billing');
+    // Account-level choice, stored on the primary profile.
+    const { accountBillingChannels } = require('./billing-delivery-channels');
+    explicitChannels = await accountBillingChannels(ctx.customer.id, 'billing', db);
   } catch (err) {
     logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${ctx.customer.id}: ${err.message}`);
     await ctx.reverseReminderCredit();
@@ -5861,21 +5864,24 @@ async function pendingExplicitEpisodeTerms({ today, daysOut, stageTerms }) {
   // A resume read failure only skips resumption today; it must never take
   // down the regular stage sends in the same scan.
   let candidates;
-  let prefs;
   try {
     candidates = await stageTerms(resumeDates);
-    if (!candidates.length) return [];
-    prefs = await db('notification_prefs')
-      .whereIn('customer_id', [...new Set(candidates.map((term) => term.customer_id))]);
   } catch (err) {
     logger.warn(`[annual-prepay] payment reminder resume scan skipped for the ${daysOut}-day stage: ${err.message}`);
     return [];
   }
-  const { explicitBillingChannels } = require('./billing-delivery-channels');
-  const explicitCustomers = new Set(prefs
-    .filter((row) => explicitBillingChannels(row, 'billing') !== null)
-    .map((row) => String(row.customer_id)));
-  return candidates.filter((term) => explicitCustomers.has(String(term.customer_id)));
+  // Account-level choice (primary profile); an unreadable one skips only
+  // that term's resumption today.
+  const { accountBillingChannels } = require('./billing-delivery-channels');
+  const resumable = [];
+  for (const term of candidates) {
+    try {
+      if (await accountBillingChannels(term.customer_id, 'billing', db)) resumable.push(term);
+    } catch (err) {
+      logger.warn(`[annual-prepay] resume skipped for term ${term.id}: billing channel choice unreadable (${err.message})`);
+    }
+  }
+  return resumable;
 }
 
 async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {

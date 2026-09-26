@@ -5,6 +5,17 @@
 // (event key, per-leg ledger row, replay-hold retry) against an in-memory
 // fake of the collections_contact_ledger table, so the assertions prove the
 // actual router-core contract rather than a mocked pass-through.
+// Account-level choice lookup: read the fixture's notification_prefs row
+// (primary-profile resolution is unit-tested in billing-delivery-channels).
+jest.mock('../services/billing-delivery-channels', () => {
+  const actual = jest.requireActual('../services/billing-delivery-channels');
+  return {
+    ...actual,
+    accountBillingChannels: jest.fn(async (customerId, category, knex) => actual.explicitBillingChannels(
+      (await knex('notification_prefs').where({ customer_id: customerId }).first()) || {}, category,
+    )),
+  };
+});
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -402,6 +413,24 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
     expect(reverseAppliedCredit).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: true });
+  });
+
+  test('a resumed episode whose earlier leg delivered reverses THIS run\'s fresh credit when nothing new reaches the customer', async () => {
+    // Text already delivered on an earlier day for this stage's episode.
+    global.__ledgerStore.push({
+      id: 'led-prior', customer_id: 'cust-1', channel: 'sms', purpose: 'balance_reminder',
+      source: 'annual_prepay_payment_reminder', occurred_at: new Date(), idempotency_key: 'prior',
+      metadata: { notificationEventKey: 'annual-prepay-payment:term-1:1', delivered: true },
+    });
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 25 });
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['sms', 'email'] } }));
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    // Text is never re-sent; the template-less Email settles; nothing new went out.
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 25 }));
     expect(result).toMatchObject({ sent: true });
   });
 });
