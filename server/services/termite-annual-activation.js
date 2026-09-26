@@ -545,15 +545,24 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
 // Oldest signature first, bounded. Countersigning is a record step, so this
 // never touches activation, billing, or scheduling.
 const COUNTERSIGN_REMINDER_WINDOW_MS = 23 * 60 * 60 * 1000;
+const COUNTERSIGN_REMINDER_EVENT = 'countersign_reminder_sent';
 
 async function remindPendingCountersignatures({ conn, limit, counts }) {
   try {
-    const pending = await conn('customer_contracts')
-      .where({ document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed' })
-      .whereNull('countersigned_at')
-      .whereRaw("signed_at < now() - interval '1 day'")
-      .orderBy('signed_at', 'asc')
-      .select('id', 'customer_id', 'signed_name', 'signed_at')
+    // Least-recently-reminded first, never-reminded ahead of all, then the
+    // oldest signature (codex #4842 r2 follow-up). The reminder's own
+    // contract event is the rotation marker, so a backlog larger than the
+    // limit cycles through instead of re-reminding the same oldest batch.
+    const lastReminded = conn('customer_contract_events as ev')
+      .max('ev.created_at')
+      .whereRaw('ev.contract_id = cc.id')
+      .where('ev.event_type', COUNTERSIGN_REMINDER_EVENT);
+    const pending = await conn('customer_contracts as cc')
+      .where({ 'cc.document_template_key': ANNUAL_TEMPLATE_KEY, 'cc.status': 'signed' })
+      .whereNull('cc.countersigned_at')
+      .whereRaw("cc.signed_at < now() - interval '1 day'")
+      .select('cc.id', 'cc.customer_id', 'cc.signed_name', 'cc.signed_at', lastReminded.as('last_reminded_at'))
+      .orderByRaw('last_reminded_at ASC NULLS FIRST, cc.signed_at ASC')
       .limit(limit);
     counts.countersignScanned = pending.length;
     const NotificationService = require('./notification-service');
@@ -571,7 +580,18 @@ async function remindPendingCountersignatures({ conn, limit, counts }) {
             metadata: { customerId: row.customer_id, contractId: row.id },
           },
         );
-        if (bell && !bell.deduped) counts.countersignReminded += 1;
+        if (bell && !bell.deduped) {
+          counts.countersignReminded += 1;
+          if (row.customer_id) {
+            await conn('customer_contract_events').insert({
+              contract_id: row.id,
+              customer_id: row.customer_id,
+              event_type: COUNTERSIGN_REMINDER_EVENT,
+              actor_type: 'system',
+              metadata: JSON.stringify({ notificationId: bell.id || null }),
+            });
+          }
+        }
       } catch (err) {
         logger.warn(`[termite-annual-activation] countersign reminder failed for contract ${row.id}: ${err.message}`);
       }

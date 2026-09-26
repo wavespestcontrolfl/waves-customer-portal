@@ -64,6 +64,16 @@ async function createScratchDb() {
     signed_name text,
     document_variables_snapshot jsonb
   )`);
+  // Countersign reminder rotation marker (customer FK omitted in this fixture).
+  await db.raw(`CREATE TABLE customer_contract_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    contract_id uuid NOT NULL REFERENCES customer_contracts(id) ON DELETE CASCADE,
+    customer_id uuid NOT NULL,
+    event_type varchar(60) NOT NULL,
+    actor_type varchar(30) NOT NULL DEFAULT 'system',
+    metadata jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`);
   await db.raw('CREATE TABLE payment_method_consents (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
   await db.raw(`CREATE TABLE scheduled_services (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -523,7 +533,7 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay: jest.fn(), refreshTermSnapshot: jest.fn() }));
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
-    return { sweep: () => reconcileTermiteAnnualActivations({ conn: db }), notifyAdmin, db };
+    return { sweep: (opts = {}) => reconcileTermiteAnnualActivations({ conn: db, ...opts }), notifyAdmin, db };
   }
 
   test('re-rings a signed annual agreement left un-countersigned past a day; never a countersigned, fresh, or other-template one', async () => {
@@ -557,5 +567,27 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
       dedupeWindowMs: 23 * 60 * 60 * 1000,
       link: '/admin/contracts?tab=requests&status=signed',
     });
+  });
+
+  test('a backlog larger than the limit rotates: least-recently-reminded first, each reminder records its event', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    const reminded = () => notifyAdmin.mock.calls
+      .map(([, , , opts]) => String(opts?.dedupeKey || ''))
+      .filter((key) => key.startsWith('termite-annual-countersign-reminder:'))
+      .map((key) => key.split(':').pop());
+    const [older] = await db('customer_contracts').insert({
+      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date(Date.now() - 5 * 86400000),
+    }).returning('*');
+    const [newer] = await db('customer_contracts').insert({
+      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date(Date.now() - 3 * 86400000),
+    }).returning('*');
+
+    await sweep({ limit: 1 });
+    await sweep({ limit: 1 });
+    await sweep({ limit: 1 });
+
+    expect(reminded()).toEqual([older.id, newer.id, older.id]);
+    const events = await db('customer_contract_events').where({ event_type: 'countersign_reminder_sent' });
+    expect(events).toHaveLength(3);
   });
 });
