@@ -1898,7 +1898,7 @@ const {
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
 const { LAWN_STRUCTURED_OBSERVATIONS } = require('../../shared/lawn-condition-findings');
-const { observationsForRoutineService } = require('../../shared/service-completion-observations');
+const { observationsForRoutineService, conflictingRoutineObservations } = require('../../shared/service-completion-observations');
 const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
 
 function completionStructuredObservationAllowlist({
@@ -1920,7 +1920,7 @@ function completionStructuredObservationAllowlist({
       routineFamily = 'lawn';
     } else if (!typedFindingsType && reportServiceLine === 'pest'
       && (!completionProfile?.completionMode || completionProfile.completionMode === 'service_report')
-      && completionProfile?.billingType !== 'one_time'
+      && (completionProfile?.serviceKey === 'pest_re_service' || completionProfile?.billingType !== 'one_time')
       && completionProfile?.category !== 'inspection') {
       routineFamily = 'recurring_pest';
     }
@@ -3671,7 +3671,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // inspection/deferred action is rejected beside other preset actions or
     // applied products — none of it may reach the immutable customer report
     // from a stale or direct API client (codex P2 r8 #3701 + local audit).
-    const structuredObservationConflict = validateSpecialtyClosureCombination(
+    const structuredObservationConflict = conflictingRoutineObservations(formObservations) || validateSpecialtyClosureCombination(
       resolvedSpecialtyServiceKey,
       {
         observations: formObservations,

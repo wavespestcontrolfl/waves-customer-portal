@@ -14,7 +14,21 @@ function observationsForRoutineService(family) {
     : EMPTY_OBSERVATIONS;
 }
 
+function conflictingRoutineObservations(observations = []) {
+  const selected = new Set(observations);
+  for (const scope of ['interior', 'exterior']) {
+    const labels = catalog.recurring_pest
+      .filter(([id]) => id === `no-live-${scope}` || id === `live-${scope}`)
+      .map(([, label]) => label);
+    if (labels.every((label) => selected.has(label))) {
+      return `Choose either no visible activity or visible activity for the inspected ${scope} areas.`;
+    }
+  }
+  return null;
+}
+
 module.exports = {
   ROUTINE_SERVICE_OBSERVATIONS,
   observationsForRoutineService,
+  conflictingRoutineObservations,
 };

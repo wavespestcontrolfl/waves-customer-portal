@@ -104,6 +104,23 @@ describe('customer-safe routine completion observations', () => {
     }).has(completionObservationCatalog.recurring_pest[0][1])).toBe(false);
   });
 
+  test('the pest re-service callback retains routine observations despite one-time billing', () => {
+    const allowed = completionStructuredObservationAllowlist({
+      reportServiceLine: 'pest',
+      completionProfile: { serviceKey: 'pest_re_service', billingType: 'one_time', completionMode: 'service_report' },
+    });
+    expect(allowed.has(completionObservationCatalog.recurring_pest[0][1])).toBe(true);
+  });
+
+  test.each(['interior', 'exterior'])('rejects opposite activity observations for the same %s scope', async (scope) => {
+    const observations = completionObservationCatalog.recurring_pest
+      .filter(([id]) => id === `no-live-${scope}` || id === `live-${scope}`)
+      .map(([, label]) => label);
+    const result = await complete({ structuredObservations: observations });
+    expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
+    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+  });
+
   test('the completion path rejects arbitrary text submitted as a routine structured observation', async () => {
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
 
