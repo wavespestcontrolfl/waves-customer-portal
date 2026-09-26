@@ -66,10 +66,11 @@ refuses a checkout that has a `.env` (application modules skip it under
 `WAVES_LOCAL_DEV=1`, but a module or script that calls `dotenv` itself
 would load provider keys from it), and takes extra `NAME=value` pairs, for example
 `sh .tmp/live-verify/qa-env.sh GATE_FOO=true node .tmp/live-verify/run.js`.
-With `--model-key` first, it also loads `.tmp/live-verify/model.env`
-(`chmod 600`, only `ANTHROPIC_API_KEY=` / `OPENAI_API_KEY=` lines) inside
-the launched shell, so the key never appears in a command line or shell
-history.
+With `--model-key` first, it also reads `.tmp/live-verify/model.env`
+(`chmod 600`, only `ANTHROPIC_API_KEY=` / `OPENAI_API_KEY=` token lines)
+inside the launched shell, so the key never appears in a command line or
+shell history. Neither file is sourced: values are read with `sed`, so a
+`$(...)` in either file is never executed.
 
 ```sh
 #!/bin/sh
@@ -77,19 +78,28 @@ set -eu
 for f in .env server/.env; do
   [ ! -e "$f" ] || { echo "refusing: $f exists and scripts can load it" >&2; exit 1; }
 done
-set -a; . ./.tmp/dev/database.env; set +a
-case "${WAVES_DATABASE_ENVIRONMENT:-}" in development|preview|test) ;;
+val() { sed -n "s/^$1=//p" "$2" | tail -n 1 | sed 's/^"\(.*\)"$/\1/'; }
+db=./.tmp/dev/database.env
+[ -f "$db" ] || { echo "refusing: missing $db" >&2; exit 1; }
+case "$(val WAVES_DATABASE_ENVIRONMENT "$db")" in development|preview|test) ;;
   *) echo "refusing: database.env is not development/preview/test" >&2; exit 1 ;; esac
+url=$(val DATABASE_URL "$db")
+case "$url" in postgres://*|postgresql://*) ;;
+  *) echo "refusing: DATABASE_URL is not a PostgreSQL URL" >&2; exit 1 ;; esac
 if [ "${1:-}" = "--model-key" ]; then
   shift
-  if grep -qvE '^((ANTHROPIC|OPENAI)_API_KEY=.*)?$' ./.tmp/live-verify/model.env; then
-    echo "refusing: model.env may hold only ANTHROPIC_API_KEY / OPENAI_API_KEY" >&2; exit 1
+  if grep -qvE '^((ANTHROPIC|OPENAI)_API_KEY=[A-Za-z0-9_-]+)?$' ./.tmp/live-verify/model.env; then
+    echo "refusing: model.env may hold only ANTHROPIC_API_KEY / OPENAI_API_KEY tokens" >&2; exit 1
   fi
-  set -- sh -c 'set -a; . ./.tmp/live-verify/model.env; set +a; exec env "$@"' sh "$@"
+  set -- sh -c 'k() { sed -n "s/^$1=//p" ./.tmp/live-verify/model.env | tail -n 1; }
+    a=$(k ANTHROPIC_API_KEY); o=$(k OPENAI_API_KEY)
+    [ -z "$a" ] || export ANTHROPIC_API_KEY="$a"
+    [ -z "$o" ] || export OPENAI_API_KEY="$o"
+    exec env "$@"' sh "$@"
 fi
 exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" \
   NODE_ENV=development WAVES_LOCAL_DEV=1 GATE_CRON_JOBS=false \
-  DATABASE_URL="$DATABASE_URL" "$@"
+  DATABASE_URL="$url" "$@"
 ```
 
 Run it from the worktree root after `qa:database`, so `DATABASE_URL` is
