@@ -168,7 +168,10 @@ async function processVendorInvoice(email, classification) {
   }
 
   // Create expense record
-  const amount = parsedInvoice?.total || parseFloat(classification.extracted?.invoice_amount) || 0;
+  // `??`, not `||`: a parsed total of 0 (a zero-total invoice or credit memo)
+  // is the extraction's answer, not a missing one — `||` fell through to the
+  // classifier's amount and created an expense for it (Codex r18 on #4884).
+  const amount = parsedInvoice?.total ?? (parseFloat(classification.extracted?.invoice_amount) || 0);
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
   const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
   const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;

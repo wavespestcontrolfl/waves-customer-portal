@@ -544,6 +544,27 @@ describe('fillCitationForm', () => {
     expect(log.find((a) => a[0] === 'fill')).toEqual(['fill', '#f', value === undefined ? '' : String(value)]);
   });
 
+  // Codex r18 on #4884: a detected form with an empty plan used to read as
+  // skipped/no_form, which the signup runner turns into a permanent 'skip'.
+  test('P3 (#4884): form_present with no actions is a retryable failure, not skipped/no_form', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [] }, {}),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('empty_plan');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined();
+  });
+
+  test('P3 (#4884): form_present:false with no actions is still skipped/no_form', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([]),
+      anthropic: fakeAnthropic({ form_present: false, blocked: null, actions: [] }, {}),
+    }));
+    expect(r).toMatchObject({ outcome: 'skipped', errorCode: 'no_form' });
+  });
+
   test('P3 (#4884): a check action needs no value (unaffected by the fill/select guard)', async () => {
     const log = [];
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({

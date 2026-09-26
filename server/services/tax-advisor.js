@@ -81,6 +81,30 @@ function taxDate(v) {
   return date.toISOString().slice(0, 10);
 }
 
+// The report row's typed header columns: report_date is a NOT NULL date,
+// period varchar(30), grade varchar(5). A present value that cannot go in its
+// column is replaced by storeReport's own default (today, "Week of …", "N/A")
+// and degrades the answer — an invalid date used to fail the whole report
+// insert after the call was accepted (Codex r18 on #4884). The normalized
+// values are written back so the stored row and the SMS agree.
+function taxReportPeriodDefault() {
+  return `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`;
+}
+function normalizeTaxReportHeader(report) {
+  let degraded = false;
+  const text = (v, max) => (typeof v === 'string' && v.trim() && v.trim().length <= max ? v.trim() : null);
+  const date = report.report_date == null ? null : taxDate(report.report_date);
+  if (report.report_date != null && !date) degraded = true;
+  report.report_date = date || etDateString();
+  const period = report.period == null ? null : text(report.period, 30);
+  if (report.period != null && !period) degraded = true;
+  report.period = period || taxReportPeriodDefault();
+  const grade = report.grade == null ? null : text(report.grade, 5);
+  if (report.grade != null && !grade) degraded = true;
+  report.grade = grade || 'N/A';
+  return degraded;
+}
+
 // Cleans the three alert lists in place; returns true when anything present
 // was off-contract (the caller fails the row but keeps the usable report).
 function normalizeTaxAlerts(report) {
@@ -278,9 +302,9 @@ Please search for current FL and federal tax changes, then provide your analysis
         logger.error('[TaxAdvisor] AI response had the wrong shape — using the fallback report');
         report = this.generateFallbackReport(analysisData);
         report.raw_ai_response = rawText;
-      } else if (parsedOk && normalizeTaxAlerts(report)) {
+      } else if (parsedOk && [normalizeTaxReportHeader(report), normalizeTaxAlerts(report)].some(Boolean)) {
         ledgerCallRejected(response, 'schema_invalid');
-        logger.warn('[TaxAdvisor] AI report had malformed alert entries — dropped/cleaned them');
+        logger.warn('[TaxAdvisor] AI report had malformed header fields or alert entries — cleaned them');
       }
 
       await this.storeReport(report, analysisData, rawText);
@@ -492,7 +516,7 @@ Please search for current FL and federal tax changes, then provide your analysis
     try {
       const [saved] = await db('tax_advisor_reports').insert({
         report_date: report.report_date || etDateString(),
-        period: report.period || `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`,
+        period: report.period || taxReportPeriodDefault(),
         grade: report.grade || 'N/A',
         executive_summary: report.executive_summary || '',
         financial_snapshot: JSON.stringify(report.financial_snapshot || {}),
@@ -601,4 +625,5 @@ Please search for current FL and federal tax changes, then provide your analysis
 module.exports = new TaxAdvisor();
 module.exports.isUsableTaxReport = isUsableTaxReport;
 module.exports.normalizeTaxAlerts = normalizeTaxAlerts;
+module.exports.normalizeTaxReportHeader = normalizeTaxReportHeader;
 module.exports.taxDate = taxDate;

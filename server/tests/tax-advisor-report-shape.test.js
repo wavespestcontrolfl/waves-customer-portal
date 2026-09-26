@@ -5,7 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({}));
 
-const { isUsableTaxReport, normalizeTaxAlerts, taxDate } = require('../services/tax-advisor');
+const { isUsableTaxReport, normalizeTaxAlerts, normalizeTaxReportHeader, taxDate } = require('../services/tax-advisor');
 
 describe('isUsableTaxReport', () => {
   test('accepts a report with a non-empty executive summary', () => {
@@ -83,5 +83,37 @@ describe('taxDate (date column value)', () => {
     ['', null],
   ])('%j → %j', (input, out) => {
     expect(taxDate(input)).toBe(out);
+  });
+});
+
+// Codex r18 on #4884: report_date is a NOT NULL date column (period
+// varchar(30), grade varchar(5)); "not-a-date" failed the whole report insert
+// after the call was accepted.
+describe('normalizeTaxReportHeader', () => {
+  test('on-contract header values are kept and not degraded', () => {
+    const report = { report_date: '2026-09-21', period: 'Week of Sep 21, 2026', grade: 'B' };
+    expect(normalizeTaxReportHeader(report)).toBe(false);
+    expect(report).toEqual({ report_date: '2026-09-21', period: 'Week of Sep 21, 2026', grade: 'B' });
+  });
+
+  test.each([
+    ['an invalid report_date', { report_date: 'not-a-date' }, 'report_date'],
+    ['a period longer than its column', { period: 'Week of September 21 through September 27, 2026' }, 'period'],
+    ['a word grade longer than its column', { grade: 'Excellent' }, 'grade'],
+    ['an object grade', { grade: { letter: 'A' } }, 'grade'],
+  ])('%s gets the stored default and degrades the answer', (_label, extra, field) => {
+    const report = { report_date: '2026-09-21', period: 'Week of Sep 21, 2026', grade: 'B', ...extra };
+    expect(normalizeTaxReportHeader(report)).toBe(true);
+    expect(typeof report[field]).toBe('string');
+    expect(report.report_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(report.grade.length).toBeLessThanOrEqual(5);
+    expect(report.period.length).toBeLessThanOrEqual(30);
+  });
+
+  test('absent header values take the defaults without degrading', () => {
+    const report = {};
+    expect(normalizeTaxReportHeader(report)).toBe(false);
+    expect(report.grade).toBe('N/A');
+    expect(report.report_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });

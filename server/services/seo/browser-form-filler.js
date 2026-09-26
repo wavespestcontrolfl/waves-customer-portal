@@ -208,7 +208,11 @@ function planShapeInvalid(plan) {
   // non-string value (object/number/array) is off-contract.
   if (plan.notes !== undefined && typeof plan.notes !== 'string') return true;
   // A blocked / no-form verdict is a legitimate answer; the caller stops there.
-  if (plan.blocked || !plan.form_present || !plan.actions.length) return false;
+  if (plan.blocked || !plan.form_present) return false;
+  // A form the model found but gave no plan for is not "no form": it used to
+  // read as skipped/no_form, which the signup runner turns into a permanent
+  // automation_policy 'skip' for the prospect (Codex r18 on #4884).
+  if (!plan.actions.length) return true;
   if (!plan.actions.every((a) => a && ALLOWED_ACTIONS.has(a.action))) return true;
   if (plan.actions.some((a) => (a.action === 'fill' || a.action === 'select') && !hasUsableValue(a))) return true;
   const last = plan.actions[plan.actions.length - 1];
@@ -369,7 +373,10 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       return { outcome: 'failed', errorCode: 'plan_invalid', screenshot: shot1, notes: 'malformed plan (blocked/form_present/actions)' };
     }
     if (plan.blocked) return { outcome: `blocked_${plan.blocked}`.replace('blocked_phone', 'blocked_phone_verification'), errorCode: `blocked_${plan.blocked}`, screenshot: shot1, notes: asNotes(plan.notes) };
-    if (!plan.form_present || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: asNotes(plan.notes) || 'no form' };
+    if (!plan.form_present) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: asNotes(plan.notes) || 'no form' };
+    // A detected form with no action plan is a failed (retryable) plan, not an
+    // absent form — `skipped` would park the prospect for good.
+    if (!plan.actions.length) return { outcome: 'failed', errorCode: 'empty_plan', screenshot: shot1, notes: 'form detected but no action plan' };
     // Every action must be a known type — an unexpected type (click/upload/etc.) signals
     // a plan we can't faithfully execute, so reject the whole plan rather than submit a
     // form with steps silently dropped.
