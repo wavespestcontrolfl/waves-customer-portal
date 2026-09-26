@@ -1371,15 +1371,14 @@ class RelayConversation {
         }
       }
       if (entry) this._playing.push(entry);
-      // P2-d (codex r3): a strict `false` means this line never reached
-      // Twilio — the transcript must never claim an undelivered line was
-      // heard. Distinct from the existing `[not played — caller
-      // interrupted]` copy `_syncPlayedEntry` renders elsewhere (this is not
-      // an interruption): set an honest text directly rather than routing
-      // through that shared, interruption-specific string. Test stubs
-      // return `undefined` (not `false`), so ordinary block-mode behavior
-      // is unchanged.
-      if (this._send(t) === false && entry) {
+      // P2-d (codex r3): on the stream renderer, a strict `false` means this
+      // line never reached Twilio — the transcript must never claim an
+      // undelivered line was heard. Distinct from the `[not played — caller
+      // interrupted]` copy `_syncPlayedEntry` renders (this is not an
+      // interruption). Scoped to `stream` so the default block renderer's
+      // transcript stays byte-identical to main.
+      const delivered = this._send(t);
+      if (delivered === false && entry && this.renderer === 'stream') {
         entry.notPlayed = true;
         entry.text = '[not played — send failed]';
       }

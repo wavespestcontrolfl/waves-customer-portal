@@ -1517,9 +1517,13 @@ describe('stream renderer — full round loop', () => {
 // copy). It must never record a transcript entry as spoken when its own
 // send comes back strictly undelivered.
 describe('say() — a failed send never claims an undelivered line was heard (P2-d)', () => {
+  afterEach(() => { delete process.env.VOICE_RELAY_RENDERER; });
+
   test('a strict `false` from _send marks the entry notPlayed with an honest, distinct text', () => {
+    process.env.VOICE_RELAY_RENDERER = 'stream';
     const send = jest.fn(() => false); // relay-server.js's real `send`: strict false = not delivered
     const convo = new RelayConversation({ callSid: 'CA-say-fail', from: '+19415551234', send });
+    expect(convo.renderer).toBe('stream');
 
     const spoken = 'Sorry, something went wrong. Let me get someone on the line.';
     const entry = convo.say(spoken);
@@ -1533,6 +1537,20 @@ describe('say() — a failed send never claims an undelivered line was heard (P2
     expect(entry.text).not.toBe('[not played — caller interrupted]');
     expect(entry.text).toMatch(/not played/);
     expect(convo._transcript.find((e) => e.role === 'agent')).toBe(entry);
+  });
+
+  test('block renderer: a strict `false` from _send leaves the transcript exactly as on main', () => {
+    delete process.env.VOICE_RELAY_RENDERER;
+    const send = jest.fn(() => false);
+    const convo = new RelayConversation({ callSid: 'CA-say-fail-block', from: '+19415551234', send });
+    expect(convo.renderer).toBe('block');
+
+    const spoken = 'Thanks for calling Waves Pest Control.';
+    const entry = convo.say(spoken);
+
+    expect(send).toHaveBeenCalledWith(spoken);
+    expect(entry.notPlayed).toBe(false);
+    expect(entry.text).toBe(spoken);
   });
 
   test('_send returning undefined (every existing test stub, and the constructor default) leaves say() unchanged', () => {
