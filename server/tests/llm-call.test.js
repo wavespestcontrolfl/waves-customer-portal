@@ -232,6 +232,50 @@ describe('callAnthropic prompt caching', () => {
     }));
   });
 
+  test("cacheTtl: '1h' sets the one-hour TTL; anything else is the default breakpoint", async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: FLAGSHIP, system: 'S', text: 'hi', cacheTtl: '1h' });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    await callAnthropic({ model: FLAGSHIP, system: 'S', text: 'hi', cacheTtl: '2h' });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].system[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].cacheTtl).toBeUndefined();
+  });
+
+  test('MODELS.ANTHROPIC_EFFORT pins output_config.effort next to a json_schema format (and alone without one)', async () => {
+    const MODELS = require('../config/models');
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    MODELS.ANTHROPIC_EFFORT = 'high';
+    try {
+      const schema = { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } };
+      await callAnthropic({ model: FLAGSHIP, system: 'S', text: 'hi', jsonMode: true, jsonSchema: schema });
+      const withSchema = mockAnthropicCreate.mock.calls.at(-1)[0].output_config;
+      expect(withSchema.effort).toBe('high');
+      expect(withSchema.format.type).toBe('json_schema');
+      await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
+    } finally {
+      delete MODELS.ANTHROPIC_EFFORT;
+    }
+    await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: false });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+  });
+
+  test('MODEL_ANTHROPIC_EFFORT accepts only the five API levels (a typo resolves to undefined, never a 400)', () => {
+    const load = (level) => {
+      let out;
+      jest.isolateModules(() => {
+        const saved = process.env.MODEL_ANTHROPIC_EFFORT;
+        process.env.MODEL_ANTHROPIC_EFFORT = level;
+        out = require('../config/models').ANTHROPIC_EFFORT;
+        if (saved === undefined) delete process.env.MODEL_ANTHROPIC_EFFORT; else process.env.MODEL_ANTHROPIC_EFFORT = saved;
+      });
+      return out;
+    };
+    expect(load('high')).toBe('high');
+    expect(load('xhigh')).toBe('xhigh');
+    expect(load('turbo')).toBeUndefined();
+  });
+
   test('no system → no system field on the request', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     await callAnthropic({ model: FLAGSHIP, text: 'hi' });

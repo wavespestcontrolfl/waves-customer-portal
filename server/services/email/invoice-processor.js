@@ -3,6 +3,9 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+// First TEXT block of a Message — a thinking block leads the content on
+// always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
+const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { taxPeriodFor } = require('../../utils/tax-period');
 
@@ -82,7 +85,7 @@ async function processVendorInvoice(email, classification) {
         }],
       });
 
-      parsedInvoice = parseClaudeJson(parseResponse.content[0].text);
+      parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
 
       if (parsedInvoice) {
         await db('email_attachments').where({ id: pdfAttachment.id }).update({

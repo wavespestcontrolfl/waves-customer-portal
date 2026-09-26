@@ -14,8 +14,13 @@ const MODELS = require('../config/models'); // adjust path
 // MODELS.DEEP / MODELS.FLAGSHIP / MODELS.WORKHORSE / MODELS.FAST / MODELS.VOICE / MODELS.VISION
 ```
 
-These are **quality tiers, not cost tiers** (owner directive: best model
-regardless of cost). Every tier is env-overridable (`MODEL_FLAGSHIP`, etc.)
+Tiers are **workload tiers** (registry header, directive 2026-07-16 and the
+2026-09-25 cost audit): the least-expensive model that is reliably strong for
+the lane, Opus reserved for work a human or a customer reads, Fable explicit
+only. The test for a lane: if nobody reads the output (a classifier, an
+extractor, a verifier whose verdict is consumed by code), it belongs on
+`fastStructured` / FAST / WORKHORSE, not `highStakes` / FLAGSHIP. Every tier
+is env-overridable (`MODEL_FLAGSHIP`, etc.)
 so a model swap is a Railway var flip, never a code hunt. A per-feature pin
 that can't use a tier still lives in `models.js` under the `MODEL_<NAME>`
 registry convention (see `LAWN_CHALLENGE`) — never in the service file.
@@ -37,6 +42,29 @@ never from docs, which go stale.
 | `FAST` | High-volume classification, tagging, signals |
 | `VOICE` | Customer-facing copy where warm/natural beats raw reasoning: SMS replies, service recaps, social posts. High-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site |
 | `VISION` | Image scoring, called with the SDK directly. No Anthropic call sends `temperature` (current models 400 on sampling controls); the Gemini scorer keeps its own |
+
+## 2b. Reading a Message — never `content[0]`
+
+Always-thinking models (Opus 5.5, Fable) put a `thinking` block ahead of the
+text block. Read the answer with `anthropicText(response)` from
+`services/llm/call.js` (first TEXT block) or `stripThinkingBlocks` from
+`deep.js` — never `content[0].text`. Tool loops push `response.content` back
+whole (thinking blocks included) so the next turn stays valid.
+
+Opus 5.5 readiness (2026-09-25): `MODEL_ANTHROPIC_EFFORT` pins
+`output_config.effort` for the adapter and the DEEP helper (5.5 defaults to
+`medium`, 4.8 to `high`); `thinking: { type: 'disabled' }` and forced
+`tool_choice` any/tool are 400s on 5.5 — only the two VOICE lanes send the
+former (VOICE is Sonnet) and nothing sends the latter. Flip order in the
+registry header.
+
+## 2c. Caching
+
+The adapter and the DEEP helper both put an ephemeral breakpoint on the
+system prompt. A lane whose prompt repeats on a cadence longer than five
+minutes passes `cacheTtl: '1h'` (the previsit brief does). Check
+`cached_input_tokens` in `llm_dispatch_log` before and after — prompts under
+the model's cacheable minimum (1024 tokens on Opus/Sonnet) never cache.
 
 ## 3. DEEP call sites — the helper is mandatory
 

@@ -52,7 +52,7 @@ const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../s
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
 const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
-const { dispatchWithFallback } = require('./llm/call');
+const { dispatchWithFallback, anthropicText } = require('./llm/call');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -7108,7 +7108,8 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
       // need a second one inside it.
     }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 });
 
-    return response.content[0]?.text?.trim() || null;
+    // First TEXT block — a thinking block leads the content on Opus 5.5.
+    return anthropicText(response).trim() || null;
   } catch (err) {
     logger.error(`[call-proc] Synopsis generation failed: ${err.message}`);
     return null;

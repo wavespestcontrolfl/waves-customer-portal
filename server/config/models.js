@@ -16,6 +16,19 @@
  * Option C (check what's new):
  *   Run `npm run models:check` to see current Anthropic model IDs.
  *
+ * ── Opus 5.5 flip order (2026-09-25 cost audit) ───────────────────
+ *
+ *   Opus 5.5 ($4/$20, cache reads $0.20) replaces Opus 4.8 ($5/$25/$0.50)
+ *   with the same tokenizer. Four things differ on the wire: thinking is
+ *   always on (thinking blocks precede the text block — every direct
+ *   caller reads text via anthropicText()/stripThinkingBlocks, never
+ *   content[0]); `thinking: { type: 'disabled' }` is a 400 (only the two
+ *   VOICE lanes send it, and VOICE is Sonnet); forced tool_choice any/tool
+ *   is a 400 (no caller sends one); the effort default is 'medium', not
+ *   'high' — set MODEL_ANTHROPIC_EFFORT=high with the flip to keep depth.
+ *   Flip MODEL_DEEP first (deep.js strips thinking + has an OpenAI backup),
+ *   watch a night of ledger rows, then FLAGSHIP / VISION / the Opus pins.
+ *
  * ── Tiers ─────────────────────────────────────────────────────────
  *
  *  These are workload tiers. Each points to the least-expensive model that is
@@ -58,6 +71,16 @@
  * issue never causes a gap. Managed agents stay on Anthropic. Call transcription
  * + extraction keep their own providers in call-recording-processor.js.
  */
+
+// Anthropic effort for adapter + DEEP-helper calls (output_config.effort).
+// Unset = the model's own default. Opus 4.8 defaults to 'high'; Opus 5.5
+// defaults to 'medium', so a tier flip to 5.5 quietly drops effort unless
+// this pins it. Only the five API levels are honored; anything else is
+// ignored with the default (never a 400 on a typo).
+const ANTHROPIC_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const ANTHROPIC_EFFORT = ANTHROPIC_EFFORT_LEVELS.has(process.env.MODEL_ANTHROPIC_EFFORT)
+  ? process.env.MODEL_ANTHROPIC_EFFORT
+  : undefined;
 
 // Code defaults for every env-overridable selector, in one place so the admin
 // switchboard can say what a selector returns to when its Railway override is
@@ -383,6 +406,7 @@ const TEXT_POLICIES = Object.freeze({
 });
 
 module.exports = {
+  ANTHROPIC_EFFORT,
   DEEP,
   EXTREME,
   FLAGSHIP,

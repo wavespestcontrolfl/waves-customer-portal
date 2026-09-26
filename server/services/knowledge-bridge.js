@@ -27,7 +27,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODEL = require('../config/models').FLAGSHIP;
 const { ROUTES } = require('../config/models');
-const { dispatch } = require('./llm/call');
+const { dispatch, anthropicText } = require('./llm/call');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -57,7 +57,8 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
-    return response.content?.[0]?.text || null;
+    // First TEXT block — a thinking block leads the content on Opus 5.5.
+    return anthropicText(response) || null;
   } catch (err) {
     logger.error(`[knowledge-bridge] Claude call failed: ${err.message}`);
     return null;

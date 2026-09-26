@@ -9,6 +9,9 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+// First TEXT block of a Message — a thinking block leads the content on
+// always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
+const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
@@ -436,7 +439,7 @@ Return ONLY the email body text, no subject line, no metadata.`
       }],
     });
 
-    const draft = msg.content[0]?.text || '';
+    const draft = anthropicText(msg);
 
     return {
       draft: true,

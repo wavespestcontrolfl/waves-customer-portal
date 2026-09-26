@@ -52,6 +52,42 @@ describe('createDeepMessage', () => {
     }));
   });
 
+  test('string system goes out as one text block with an ephemeral breakpoint (cacheTtl never reaches the wire)', async () => {
+    const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
+    await createDeepMessage(client, { max_tokens: 4096, system: 'SYS', cacheTtl: '1h', messages: [{ role: 'user', content: 'q' }] });
+    const req = client.messages.create.mock.calls[0][0];
+    expect(req.system).toEqual([{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral', ttl: '1h' } }]);
+    expect(req.cacheTtl).toBeUndefined();
+    expect(req.output_config).toBeUndefined();
+  });
+
+  test('a caller-placed cache_control on system blocks is left alone; blocks without one get the breakpoint on the last text block', async () => {
+    const { withSystemCache } = require('../services/llm/deep')._test;
+    const own = [{ type: 'text', text: 'a', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'b' }];
+    expect(withSystemCache({ system: own }).system).toBe(own);
+    const bare = [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }];
+    expect(withSystemCache({ system: bare }).system).toEqual([
+      { type: 'text', text: 'a' },
+      { type: 'text', text: 'b', cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(withSystemCache({ system: '' }).system).toBe('');
+    expect(withSystemCache({ messages: [] }).system).toBeUndefined();
+  });
+
+  test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on the raw path without clobbering a caller format', () => {
+    const MODELS = require('../config/models');
+    const { wireParams } = require('../services/llm/deep')._test;
+    MODELS.ANTHROPIC_EFFORT = 'high';
+    try {
+      const req = wireParams({ max_tokens: 10, messages: [], output_config: { format: { type: 'json_schema', schema: {} } } }, 'm');
+      expect(req.output_config).toEqual({ format: { type: 'json_schema', schema: {} }, effort: 'high' });
+      expect(req.model).toBe('m');
+    } finally {
+      delete MODELS.ANTHROPIC_EFFORT;
+    }
+    expect(wireParams({ max_tokens: 10, messages: [] }, 'm').output_config).toBeUndefined();
+  });
+
   test('respects an explicit params.model (per-feature env overrides)', async () => {
     const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
     await createDeepMessage(client, { model: 'custom-model', max_tokens: 100, messages: [] });

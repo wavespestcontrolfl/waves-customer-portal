@@ -68,12 +68,48 @@ async function createDeepMessage(client, { laneId, ...params } = {}, options = {
   return laneId ? agentContext.runInLane(laneId, run) : run();
 }
 
+// The raw path used to hand params to the SDK untouched, so the largest
+// prompts in the system (editorial review 12k, wiki compiler 12k, agronomic
+// wiki 8k, the fact-check and compliance gates 6k) ran with NO cache
+// breakpoint while the adapter (call.js) cached every system prompt. This
+// mirrors the adapter: the system prompt becomes one text block with an
+// ephemeral breakpoint. A caller that already placed its own cache_control
+// on any system block is left alone. Prompts under the model's cacheable
+// minimum are silently not cached — harmless.
+// Same two TTLs the adapter accepts (call.js cacheControl); kept local so
+// tests that mock ./call partially keep working.
+function cacheControl(cacheTtl) {
+  return cacheTtl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
+}
+
+function withSystemCache(params) {
+  const { system } = params;
+  if (typeof system === 'string' && system) {
+    return { ...params, system: [{ type: 'text', text: system, cache_control: cacheControl(params.cacheTtl) }] };
+  }
+  if (Array.isArray(system) && system.length && !system.some((b) => b?.cache_control)) {
+    const last = system.length - 1;
+    return { ...params, system: system.map((b, i) => (i === last && b?.type === 'text' ? { ...b, cache_control: cacheControl(params.cacheTtl) } : b)) };
+  }
+  return params;
+}
+
+// `cacheTtl` is a helper option, never a wire field; `output_config.effort`
+// follows the same registry selector the adapter honors, so an Opus 5.5 flip
+// (default effort 'medium') keeps DEEP lanes at the pinned depth.
+function wireParams(params, model) {
+  const { cacheTtl: _cacheTtl, ...rest } = withSystemCache(params);
+  const req = { ...rest, model };
+  if (MODELS.ANTHROPIC_EFFORT) req.output_config = { ...(rest.output_config || {}), effort: MODELS.ANTHROPIC_EFFORT };
+  return req;
+}
+
 async function createDeepMessageInChain(client, params) {
   const model = params.model || MODELS.DEEP;
   const startedAt = Date.now();
   let response;
   try {
-    response = await ledgerCall('anthropic', model, () => client.messages.create({ ...params, model }), {
+    response = await ledgerCall('anthropic', model, () => client.messages.create(wireParams(params, model)), {
       trace: { system: systemText(params.system) || null, prompt: messageText(params.messages) || null },
     });
   } catch (err) {
@@ -154,4 +190,4 @@ async function callOpenAIDeepFallback(params, timeoutMs) {
   };
 }
 
-module.exports = { createDeepMessage, stripThinkingBlocks, _test: { messageText, systemText, remainingBudget } };
+module.exports = { createDeepMessage, stripThinkingBlocks, _test: { messageText, systemText, remainingBudget, withSystemCache, wireParams } };

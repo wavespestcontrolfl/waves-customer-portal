@@ -26,7 +26,8 @@
  */
 
 const logger = require('../logger');
-const { PROVIDER } = require('../../config/models');
+const MODELS = require('../../config/models');
+const { PROVIDER } = MODELS;
 const agentContext = require('../agent-control/context');
 // Top-level (not lazy) so the ledger shares this module's agent-control
 // context instance; every use below is wrapped so it can never break a call.
@@ -501,7 +502,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
 // A payload `temperature` is read by the Gemini leg only. Current Anthropic
 // models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
 // this leg never forwards it.
-function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens }) {
+function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, cacheTtl }) {
   const content = [...withImageLabels(images, toAnthropicImage, (label) => ({ type: 'text', text: label })),
     ...documents.map((doc) => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data } }))];
   if (text) content.push({ type: 'text', text });
@@ -510,10 +511,22 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
   // system, so this caches both). Repeat callers with the same prompt reuse
   // it at ~0.1x input price; prompts under the model's cacheable minimum
   // are silently not cached — harmless.
-  if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+  // A caller whose prompt repeats on a cadence longer than five minutes
+  // (the previsit brief runs twice an hour) asks for the one-hour TTL;
+  // anything else is left at the default so the cheaper write applies.
+  if (system) req.system = [{ type: 'text', text: system, cache_control: cacheControl(cacheTtl) }];
   if (tools) req.tools = tools;
-  if (jsonMode && jsonSchema) req.output_config = { format: { type: 'json_schema', schema: anthropicSchema(jsonSchema) } };
+  const outputConfig = {};
+  if (jsonMode && jsonSchema) outputConfig.format = { type: 'json_schema', schema: anthropicSchema(jsonSchema) };
+  if (MODELS.ANTHROPIC_EFFORT) outputConfig.effort = MODELS.ANTHROPIC_EFFORT;
+  if (Object.keys(outputConfig).length) req.output_config = outputConfig;
   return req;
+}
+
+// The only two TTLs the API accepts. Anything else is the default 5-minute
+// breakpoint — a typo in a call site must never turn into a 400.
+function cacheControl(cacheTtl) {
+  return cacheTtl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
 }
 
 // Anthropic's structured-output grammar rejects array cardinality keywords
@@ -544,7 +557,7 @@ function anthropicVerdict(resp, maxTokens) {
   return 'anthropic_incomplete';
 }
 
-async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel } = {}) {
+async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, cacheTtl, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   // Ledger latency. With no budget the SDK keeps its default retries, so one
@@ -552,7 +565,7 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
   const t0 = nowMs();
   try {
     const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const req = anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens });
+    const req = anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, cacheTtl });
     // maxRetries:0 whenever a budget is supplied — the SDK's per-request
     // timeout applies to EACH attempt, so its default retry policy (2 retries)
     // could hold a caller for ~3x its ceiling. Callers with a timeoutMs budget
@@ -727,6 +740,7 @@ function recordDispatchOutcome(policy, outcome) {
 
 module.exports = {
   anthropicText,
+  cacheControl,
   anthropicSchema,
   // Exported so a caller reasoning about how long one pass can run reads the
   // dispatcher's REAL budget instead of mirroring the number (see
