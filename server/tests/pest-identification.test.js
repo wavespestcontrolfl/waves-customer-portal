@@ -107,6 +107,29 @@ describe('mergeModelResults', () => {
     expect(buildPestTeaser(contract).safety_flag).toBe(true);
   });
 
+  // Pre-push audit on #4865 r4: a split that doesn't include the other
+  // photo's species disputes it, and the disputed answer keeps only what all
+  // candidates share — inspection-first included.
+  test('a split without the winner disputes it and the report keeps only shared facts', () => {
+    const ghost = mergeModelResults(null, claude());
+    const carpenterFire = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude({ best_match: 'fire ant' }));
+    const identification = _test.aggregateIdentification([ghost, carpenterFire]);
+    expect(identification.contested).toBe(true);
+    const contract = buildPestReportContract({ ...ghost, identification });
+    expect(publicIdentificationLabel(contract).specificity).toBe('generic');
+    expect(contract.service.inspection_required).toBe(true);
+    expect(contract.safety.stinging).toBe(false);
+    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
+    expect(report.safety.stinging).toBe(false);
+    expect(report.recommendation.inspection_required).toBe(true);
+  });
+
+  test('a split that includes the winner stays an inconclusive photo, not a dispute', () => {
+    const ghost = mergeModelResults(null, claude());
+    const ghostFire = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
+    expect(_test.aggregateIdentification([ghost, ghostFire])).toMatchObject({ contested: false, confidence: 'moderate', shared: null });
+  });
+
   test('a split keeps inspection-first when either candidate needs it (carpenter ant vs ghost ant)', () => {
     const split = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
     const contract = buildPestReportContract({ ...split, identification: _test.aggregateIdentification([split]) });

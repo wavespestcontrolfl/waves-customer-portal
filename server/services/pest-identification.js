@@ -607,7 +607,7 @@ function mergeModelResults(openai, gemini) {
       if (a.match.group === b.match.group) {
         const category = a.match.category === b.match.category ? a.match.category : 'other';
         const shared = sharedFacts([entryFacts(a.match), entryFacts(b.match)]);
-        return { ...base, entry: null, group: a.match.group, shared, confidence: 'low', category, agreement: 'group' };
+        return { ...base, entry: null, group: a.match.group, candidates: [a.match, b.match], shared, confidence: 'low', category, agreement: 'group' };
       }
       const category = a.category === b.category ? a.category : 'other';
       return { ...base, entry: null, confidence: 'low', category, agreement: 'conflict' };
@@ -669,11 +669,11 @@ function aggregateIdentification(perPhoto) {
     const group = groups.length === 1
       && perPhoto.every((r) => r.group === groups[0] || (r.category === 'other' && r.agreement !== 'conflict'))
       ? groups[0] : null;
-    const sharedList = group ? perPhoto.filter((r) => r.group === group && r.shared).map((r) => r.shared) : [];
+    const groupCandidates = group ? candidateEntries(perPhoto.filter((r) => r.group === group)) : [];
     return {
       entry: null,
       group,
-      shared: sharedList.length ? sharedFacts(sharedList) : null,
+      shared: groupCandidates.length ? sharedFacts(groupCandidates.map(entryFacts)) : null,
       confidence: 'low',
       category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
       contested: false,
@@ -685,18 +685,37 @@ function aggregateIdentification(perPhoto) {
   const unmatched = perPhoto.filter((result) => !result.entry);
   // A photo whose two models disagreed disputes the winner too: an explicit
   // conflict is never read as an inconclusive photo (pre-push audit, #4865 r2).
+  // A group-only photo whose two candidates don't include the winner disputes
+  // it too (pre-push audit on #4865 r4).
   const contradicting = unmatched.some((result) => result.agreement === 'conflict'
     || result.category === 'not_a_pest'
     || (result.category !== 'other' && result.category !== winner.entry.category)
-    || (result.group && result.group !== winner.entry.group));
+    || (result.group && result.group !== winner.entry.group)
+    || (result.agreement === 'group' && !(result.candidates || []).some((entry) => entry.slug === winner.entry.slug)));
   const inconclusive = unmatched.length > 0 && !contradicting;
   const contested = ranked.length > 1 || contradicting;
+  // A disputed answer never publishes the winner's own facts: it carries only
+  // what every candidate species shares (inspection-first if any needs it).
+  const candidates = contested ? candidateEntries(perPhoto) : [];
   return {
     entry: winner.entry,
     confidence: (contested || inconclusive) ? lowerConfidenceOf(winner.best, 'moderate') : winner.best,
     category: winner.entry.category,
     contested,
+    shared: candidates.length > 1 ? sharedFacts(candidates.map(entryFacts)) : null,
   };
+}
+
+// Every library species any photo put forward: agreed/lone picks and both
+// sides of a same-group split. Unique by slug.
+function candidateEntries(perPhoto) {
+  const seen = new Map();
+  for (const result of perPhoto) {
+    for (const entry of [result.entry, ...(result.candidates || [])]) {
+      if (entry && !seen.has(entry.slug)) seen.set(entry.slug, entry);
+    }
+  }
+  return [...seen.values()];
 }
 
 /**
@@ -746,9 +765,10 @@ async function identifyPest(photos = []) {
 function buildPestReportContract(result) {
   const { identification, observations, distinguishing_features: features, alternate_slugs: alternates } = result;
   const item = identification.entry;
-  // A group-only answer carries the facts every candidate shares
-  // (sharedFacts); an unmatched one carries none.
-  const shared = !item && identification.shared ? identification.shared : null;
+  // A group-only or contested answer carries the facts every candidate
+  // shares (sharedFacts) instead of one disputed species' facts; an
+  // unmatched one carries none.
+  const shared = identification.shared || null;
   return {
     contract_version: 'pest_id_v1',
     identification: {
@@ -759,11 +779,13 @@ function buildPestReportContract(result) {
       confidence: identification.confidence,
       contested: !!identification.contested,
     },
-    safety: item ? item.safety : (shared ? shared.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false }),
-    urgency: item ? item.urgency : (shared ? shared.urgency : 'low'),
-    service: item
-      ? { line: item.service_line, key: item.service_key, label: item.service_label, inspection_required: item.inspection_required }
-      : ((shared && shared.service) || { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true }),
+    safety: shared ? shared.safety : (item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false }),
+    urgency: shared ? shared.urgency : (item ? item.urgency : 'low'),
+    service: shared
+      ? (shared.service || { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true })
+      : (item
+        ? { line: item.service_line, key: item.service_key, label: item.service_label, inspection_required: item.inspection_required }
+        : { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true }),
     observations,
     distinguishing_features: features,
     alternate_slugs: alternates,
@@ -833,7 +855,7 @@ function buildPublicPestReport(row = {}) {
 
   // No species entry: the contract's own flags (all false for an unmatched
   // answer; the shared ones for a group-only answer).
-  const safety = item ? item.safety : (contract.safety || { stinging: false, venomous: false, disease_vector: false, structural_threat: false });
+  const safety = item && !ident.contested ? item.safety : (contract.safety || { stinging: false, venomous: false, disease_vector: false, structural_threat: false });
   const contact = parseJson(row.contact_snapshot, {});
   const address = parseJson(row.address_snapshot, {});
   const firstName = contact.first_name
@@ -894,7 +916,7 @@ function buildPestTeaser(contract = {}) {
   const generic = item
     ? (GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category])
     : (GROUP_GENERIC[ident.group] || CATEGORY_GENERIC[category] || CATEGORY_GENERIC.other);
-  const teaserSafety = item ? item.safety : contract.safety;
+  const teaserSafety = item && !ident.contested ? item.safety : contract.safety;
   return {
     identified_teaser: `We identified ${generic}.`,
     identified_specific: Boolean(item && ident.confidence !== 'low'),
