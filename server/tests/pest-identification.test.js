@@ -146,7 +146,27 @@ describe('mergeModelResults', () => {
   test('a split that includes the winner stays an inconclusive photo, not a dispute', () => {
     const ghost = mergeModelResults(null, claude());
     const ghostFire = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    expect(_test.aggregateIdentification([ghost, ghostFire])).toMatchObject({ contested: false, confidence: 'moderate', shared: null });
+    expect(_test.aggregateIdentification([ghost, ghostFire])).toMatchObject({ contested: false, confidence: 'moderate' });
+  });
+
+  test('an inconclusive split still carries its inspection requirement (carpenter/ghost split + ghost photo)', () => {
+    const ghost = mergeModelResults(null, claude());
+    const carpenterGhost = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
+    const identification = _test.aggregateIdentification([ghost, carpenterGhost]);
+    expect(identification.contested).toBe(false);
+    const contract = buildPestReportContract({ ...ghost, identification });
+    expect(contract.service.inspection_required).toBe(true);
+  });
+
+  test('a clean winner with only a blurry extra photo keeps its own facts', () => {
+    const ghost = mergeModelResults(null, claude());
+    const blurry = mergeModelResults(null, claude({ best_match: 'unidentifiable', category: 'other', confidence: 'low' }));
+    const identification = _test.aggregateIdentification([ghost, blurry]);
+    const contract = buildPestReportContract({ ...ghost, identification });
+    const ghostEntry = _test.LIBRARY_BY_SLUG.get('ghost-ant');
+    expect(contract.safety).toEqual(ghostEntry.safety);
+    expect(contract.urgency).toBe(ghostEntry.urgency);
+    expect(contract.service).toMatchObject({ key: ghostEntry.service_key, inspection_required: ghostEntry.inspection_required });
   });
 
   test('a split keeps inspection-first when either candidate needs it (carpenter ant vs ghost ant)', () => {

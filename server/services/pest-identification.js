@@ -706,7 +706,10 @@ function aggregateIdentification(perPhoto) {
     confidence: (contested || inconclusive) ? lowerConfidenceOf(winner.best, 'moderate') : winner.best,
     category: winner.entry.category,
     contested,
-    shared: contested ? disputedFacts(perPhoto) : null,
+    // Any photo that wasn't a clean pick of a species (a split, a conflict,
+    // a blurry shot) sends the facts through disputedFacts; a blurry photo
+    // adds no candidates, so a clean winner's own facts come back unchanged.
+    shared: (contested || unmatched.length) ? disputedFacts(perPhoto) : null,
   };
 }
 
