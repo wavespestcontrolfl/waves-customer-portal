@@ -1551,7 +1551,7 @@ async function persistReplayChannelResultsIfNeeded(meta, ctx, channelResults, to
 // Stamp the channel(s) THIS replay's own dispatch actually accepted (never
 // the stale snapshot from when the row was queued).
 async function stampPartialFanoutDelivery(meta, channelResults) {
-  const legAccepted = (leg) => leg?.sent === true && leg?.deliveryOutcome === 'accepted';
+  const { legAccepted } = require('../invoice');
   const emailAccepted = legAccepted(channelResults.email);
   const smsOrAppAccepted = legAccepted(channelResults.sms) || legAccepted(channelResults.push);
   if (!emailAccepted && !smsOrAppAccepted) return { ok: true };
