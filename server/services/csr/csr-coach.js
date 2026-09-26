@@ -174,7 +174,10 @@ function csrPoint(v) {
 }
 function normalizePointDetails(raw, coreScore, rescueScore) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const details = {};
+  // A prototype-less map: the keys come from the model's JSON, where an own
+  // "__proto__" key would otherwise re-parent a plain object and let every
+  // omitted point resolve through it, passing the checks below.
+  const details = Object.create(null);
   for (const [key, value] of Object.entries(raw)) details[key.trim().toLowerCase().replace(/[\s-]+/g, '_')] = value;
   const out = {};
   let core = 0;

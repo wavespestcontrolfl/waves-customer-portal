@@ -191,3 +191,10 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore(missingTotal)).toBe(false);
   });
 });
+
+// Pre-push audit on #4884: an own "__proto__" key from JSON.parse must not
+// re-parent the key map and let omitted points resolve through it.
+test('point_details: a "__proto__" key cannot stand in for the real points', () => {
+  const polluted = JSON.parse(`{"__proto__": ${JSON.stringify(Object.fromEntries(CORE.map((k, i) => [k, i < 8 ? 1 : 0])))}}`);
+  expect(isUsableCsrScore({ ...GOOD, rescue_score: 0, total_score: 8, point_details: polluted })).toBe(false);
+});
