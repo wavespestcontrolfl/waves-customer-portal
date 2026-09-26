@@ -950,6 +950,16 @@ describe('normalizeIntakeResult', () => {
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
+  test('a follow-up with a curly apostrophe still keeps the emergency ("he’s getting worse")', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'He should be safe.', intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      'My son cannot breathe after the spray\nhe’s getting worse',
+      'he’s getting worse',
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
   test('an emergency in the active message keeps earlier ingestion evidence (Poison Control line)', () => {
     const out = normalizeIntakeResult(
       { reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false },
@@ -1806,5 +1816,22 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
     emergency(ctx);
     const ms = Number(process.hrtime.bigint() - started) / 1e6;
     expect(ms).toBeLessThan(50);
+  });
+
+  test('stays under budget for seeded random mixes of the matchers\' own vocabulary', () => {
+    const vocab = "my child dog ate swallowed the bait spray pesticide not no won't your pets safe after treatment until 4 PM re-enter inside outside hospital doctor now es seguro mascotas niños no molesta a sus después del tratamiento volver a entrar avoid dry was exposed to call 911 veterinary".split(' ');
+    let seed = 42;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const words = (n) => Array.from({ length: n }, () => vocab[Math.floor(rnd() * vocab.length)]).join(' ');
+    let worst = 0;
+    for (let k = 0; k < 40; k += 1) {
+      const msg = words(300).slice(0, 2000);
+      const ctx = [...Array.from({ length: 12 }, () => words(100).slice(0, 600)), msg].join('\n');
+      const started = process.hrtime.bigint();
+      normalize({ reply: words(100).slice(0, 600), intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
+      emergency(ctx);
+      worst = Math.max(worst, Number(process.hrtime.bigint() - started) / 1e6);
+    }
+    expect(worst).toBeLessThan(50);
   });
 });

@@ -570,7 +570,7 @@ function emergencyContextOf(contextText, activeMessage) {
   // the history too keeps earlier ingestion / pet evidence (Poison Control and
   // veterinary lines) — it can only add guidance, never remove it.
   if (looksLikeEmergency(foldTypography(activeMessage))) return contextText;
-  return FOLLOW_UP_RE.test(activeMessage) ? contextText : activeMessage;
+  return FOLLOW_UP_RE.test(foldTypography(activeMessage)) ? contextText : activeMessage;
 }
 
 function emergencyGuidance(result, contextText = '') {
