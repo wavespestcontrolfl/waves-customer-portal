@@ -504,23 +504,28 @@ function riskProfile(entry) {
   return [entry.inspection_required, stinging, venomous, structural, disease].map((flag) => (flag ? 1 : 0)).join('');
 }
 
+// The library alternates whose risk differs from the pick in any dimension:
+// an ant with a termite as the runner-up, a beneficial with a stinging insect.
+function riskyRunnerUps(result) {
+  const pickRisk = riskProfile(resolveLibraryMatch(result.best_match));
+  const seen = new Map();
+  for (const name of Array.isArray(result.alternates) ? result.alternates : []) {
+    if (typeof name !== 'string') continue;
+    const alternate = resolveLibraryMatch(name);
+    if (alternate && riskProfile(alternate) !== pickRisk) seen.set(alternate.slug, alternate);
+  }
+  return [...seen.values()];
+}
+
 // Unsure = the score is under the bar (with no usable score, anything short of
-// "high"). A sure answer still gets a second look when one of its own
-// alternates differs from the pick in any risk dimension: an ant with a
-// termite as the runner-up, a beneficial with a stinging insect.
+// "high"). A sure answer still gets a second look when it lists a runner-up
+// of different risk.
 function needsSecondLook(result) {
   const score = result.confidence_score;
   const sure = typeof score === 'number'
     ? score >= escalateBelow()
     : clampEnum(result.confidence, CONFIDENCES) === 'high';
-  if (!sure) return true;
-  const pickRisk = riskProfile(resolveLibraryMatch(result.best_match));
-  return (Array.isArray(result.alternates) ? result.alternates : [])
-    .filter((name) => typeof name === 'string')
-    .some((name) => {
-      const alternate = resolveLibraryMatch(name);
-      return !!alternate && riskProfile(alternate) !== pickRisk;
-    });
+  return !sure || riskyRunnerUps(result).length > 0;
 }
 
 const URGENCY_RANK = { low: 0, moderate: 1, high: 2 };
@@ -539,8 +544,11 @@ function sharedFacts(list) {
   // Inspection stays required if ANY candidate needs it: an unresolved
   // carpenter-ant/ghost-ant split must not skip the carpenter ant's
   // inspection-first path (Codex #4865 r4).
+  // An unresolved answer that needs an inspection is never auto-priced
+  // (Codex #4865 r6).
+  const inspection = sameService && list.some((facts) => facts.service.inspection_required);
   const service = sameService
-    ? { ...first.service, inspection_required: list.some((facts) => facts.service.inspection_required) }
+    ? { ...first.service, inspection_required: inspection, key: inspection ? null : first.service.key }
     : null;
   return { safety, urgency, service };
 }
@@ -573,7 +581,7 @@ function lowerConfidenceOf(a, b) {
  * one when Gemini was sure, or missed and OpenAI answered alone. Raw model
  * text is preserved only for the internal record, never for egress.
  */
-function mergeModelResults(openai, gemini) {
+function mergeModelResults(openai, gemini, { unresolved = [] } = {}) {
   const results = [openai, gemini].filter(Boolean);
   if (!results.length) return null;
 
@@ -634,8 +642,15 @@ function mergeModelResults(openai, gemini) {
     return { ...base, entry: null, confidence: 'low', category: notAPest ? 'not_a_pest' : category, agreement: 'unmatched' };
   }
 
-  // One model only (the other unavailable): downgrade its confidence.
+  // One model only (the other unavailable): downgrade its confidence. When
+  // the missing second look was asked for because of a risky runner-up, that
+  // runner-up is still a candidate: the pick is disputed, not confirmed.
   const only = resolved[0];
+  if (only.match && unresolved.length) {
+    const candidates = [only.match, ...unresolved.filter((entry) => entry.slug !== only.match.slug)];
+    const category = candidates.every((entry) => entry.category === only.match.category) ? only.match.category : 'other';
+    return { ...base, entry: null, candidates, confidence: 'low', category, agreement: 'conflict' };
+  }
   if (only.match) {
     return { ...base, entry: only.match, confidence: downgrade(only.confidence), category: only.match.category, agreement: 'single_model' };
   }
@@ -679,7 +694,7 @@ function aggregateIdentification(perPhoto) {
       group,
       shared: candidateEntries(perPhoto).length ? disputedFacts(perPhoto) : null,
       confidence: 'low',
-      category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
+      category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other' && c !== 'not_a_pest') || 'other'),
       contested: false,
     };
   }
@@ -718,7 +733,9 @@ function aggregateIdentification(perPhoto) {
 function namedFacts(entry, perPhoto) {
   const facts = entryFacts(entry);
   const inspection = candidateEntries(perPhoto).some((candidate) => candidate.inspection_required);
-  return { ...facts, service: { ...facts.service, inspection_required: facts.service.inspection_required || inspection } };
+  if (!inspection || facts.service.inspection_required) return facts;
+  // Another candidate needs an inspection: keep it, and don't auto-price.
+  return { ...facts, service: { ...facts.service, inspection_required: true, key: null } };
 }
 
 function disputedFacts(perPhoto) {
@@ -748,7 +765,10 @@ function candidateEntries(perPhoto) {
 async function analyzePhoto(base64Image, mimeType) {
   const gemini = await callGeminiVision(base64Image, mimeType);
   const openai = !gemini || needsSecondLook(gemini) ? await callOpenAIVision(base64Image, mimeType) : null;
-  return { openai, gemini };
+  // A second look asked for because of a risky runner-up, that never came
+  // back, leaves that runner-up unresolved (Codex #4865 r6).
+  const unresolved = gemini && !openai ? riskyRunnerUps(gemini) : [];
+  return { openai, gemini, unresolved };
 }
 
 /**
@@ -763,7 +783,7 @@ async function identifyPest(photos = []) {
   if (!usable.length) return { ok: false, reason: 'no_photos' };
 
   const analyses = await Promise.all(usable.map((photo) => analyzePhoto(photo.data, photo.mimeType || 'image/jpeg')));
-  const perPhoto = analyses.map(({ openai, gemini }) => mergeModelResults(openai, gemini)).filter(Boolean);
+  const perPhoto = analyses.map(({ openai, gemini, unresolved }) => mergeModelResults(openai, gemini, { unresolved })).filter(Boolean);
 
   if (!perPhoto.length) return { ok: false, reason: 'vision_unavailable' };
 
@@ -775,7 +795,9 @@ async function identifyPest(photos = []) {
     perPhoto,
     observations: [...new Set(perPhoto.flatMap((r) => r.observations))].slice(0, 6),
     distinguishing_features: [...new Set(perPhoto.flatMap((r) => r.distinguishing_features))].slice(0, 10),
-    alternate_slugs: [...new Set(perPhoto.flatMap((r) => r.alternate_slugs))].filter(
+    // Disputed candidates (both sides of a split or conflict) are the most
+    // useful differentials for staff (Codex #4865 r7).
+    alternate_slugs: [...new Set(perPhoto.flatMap((r) => [...(r.candidates || []).map((entry) => entry.slug), ...r.alternate_slugs]))].filter(
       (slug) => slug !== (identification.entry && identification.entry.slug),
     ).slice(0, 4),
   };
@@ -969,6 +991,7 @@ module.exports = {
     downgrade,
     aggregateIdentification,
     needsSecondLook,
+    riskyRunnerUps,
     LIBRARY_BY_SLUG,
     GROUP_GENERIC,
     CATEGORY_GENERIC,

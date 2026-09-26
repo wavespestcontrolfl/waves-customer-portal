@@ -160,13 +160,36 @@ describe('mergeModelResults', () => {
     expect(_test.aggregateIdentification([ghost, ghostFire])).toMatchObject({ contested: false, confidence: 'moderate' });
   });
 
-  test('an inconclusive split still carries its inspection requirement (carpenter/ghost split + ghost photo)', () => {
+  test('an inconclusive split still carries its inspection requirement, unpriced (carpenter/ghost split + ghost photo)', () => {
     const ghost = mergeModelResults(null, claude());
     const carpenterGhost = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
     const identification = _test.aggregateIdentification([ghost, carpenterGhost]);
     expect(identification.contested).toBe(false);
     const contract = buildPestReportContract({ ...ghost, identification });
-    expect(contract.service.inspection_required).toBe(true);
+    expect(contract.service).toMatchObject({ inspection_required: true, key: null });
+  });
+
+  test('a split that needs an inspection is never auto-priced (Codex #4865 r6)', () => {
+    const split = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
+    const contract = buildPestReportContract({ ...split, identification: _test.aggregateIdentification([split]) });
+    expect(contract.service).toMatchObject({ inspection_required: true, key: null });
+  });
+
+  test('a risky runner-up whose second look never came back keeps the pick disputed (Codex #4865 r6)', () => {
+    const gemini = claude({ alternates: ['subterranean termite'] });
+    const [termite] = _test.riskyRunnerUps(gemini);
+    expect(termite.slug).toBe('subterranean-termite');
+    const unresolved = mergeModelResults(null, gemini, { unresolved: [termite] });
+    expect(unresolved).toMatchObject({ entry: null, agreement: 'conflict', confidence: 'low' });
+    const contract = buildPestReportContract({ ...unresolved, identification: _test.aggregateIdentification([unresolved]) });
+    expect(publicIdentificationLabel(contract).specificity).toBe('generic');
+    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
+  });
+
+  test('a mixed no-vote batch is never "nothing to worry about" unless every photo says so (Codex #4865 r6)', () => {
+    const harmless = mergeModelResults(null, claude({ best_match: 'something harmless', category: 'not_a_pest', not_a_pest: true }));
+    const antSplit = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
+    expect(_test.aggregateIdentification([harmless, antSplit]).category).not.toBe('not_a_pest');
   });
 
   test('a named answer keeps its own species\' hazards (fire ant photo + fire/ghost split)', () => {

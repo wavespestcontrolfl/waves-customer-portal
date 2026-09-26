@@ -175,17 +175,27 @@ describe('analyzePhoto — Gemini first, ChatGPT only for a second look', () => 
     expect(result.openai).toMatchObject({ best_match: 'fire ant' });
   });
 
+  it('a risky runner-up whose second look fails is reported as unresolved', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, alternates: ['subterranean termite'] }));
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg');
+
+    expect(result.openai).toBeNull();
+    expect(result.unresolved.map((entry) => entry.slug)).toEqual(['subterranean-termite']);
+  });
+
   it('an OpenAI miss or an invalid OpenAI answer is null, never a result', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500, statusText: 'Internal Server Error' });
 
     mockDispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
-    expect(await analyzePhoto('base64photo', 'image/jpeg')).toEqual({ openai: null, gemini: null });
+    expect(await analyzePhoto('base64photo', 'image/jpeg')).toMatchObject({ openai: null, gemini: null });
 
     openaiAnswers({ best_match: 'fire ant' });
-    expect(await analyzePhoto('base64photo', 'image/jpeg')).toEqual({ openai: null, gemini: null });
+    expect(await analyzePhoto('base64photo', 'image/jpeg')).toMatchObject({ openai: null, gemini: null });
 
     mockDispatch.mockRejectedValue(new Error('socket hang up'));
-    expect(await analyzePhoto('base64photo', 'image/jpeg')).toEqual({ openai: null, gemini: null });
+    expect(await analyzePhoto('base64photo', 'image/jpeg')).toMatchObject({ openai: null, gemini: null });
   });
 });
 
@@ -298,5 +308,15 @@ describe('identifyPest — photos are read side by side', () => {
     expect(result.ok).toBe(true);
     expect(result.perPhoto.map((photo) => photo.entry && photo.entry.slug)).toEqual(['ghost-ant', 'bigheaded-ant']);
     expect(result.perPhoto[0].agreement).toBe('match');
+  });
+
+  it('a split between the models keeps both species as staff differentials (Codex #4865 r7)', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, confidence: 'moderate', confidence_score: 0.5 }));
+    openaiAnswers(OPENAI_ID);
+
+    const result = await identifyPest([{ data: 'one' }]);
+
+    expect(result.identification.entry).toBeNull();
+    expect(result.alternate_slugs).toEqual(expect.arrayContaining(['ghost-ant', 'fire-ant']));
   });
 });
