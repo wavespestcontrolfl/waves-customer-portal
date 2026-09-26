@@ -47,6 +47,9 @@ describe('custom action credential screening', () => {
     'Unlocked rear door using 2468',
     'Accessed garage with 2468',
     'rear gate 2468',
+    'rear gate #2468',
+    'rear gate *2468',
+    'rear gate A2468',
     'side gate: 2468',
     'Open side gate with 2468 in the morning',
     'Opened side gate with 2468 in the morning',
@@ -61,6 +64,7 @@ describe('custom action credential screening', () => {
     'Opened the gate onto 400 square feet of treated turf',
     'Opened the gate onto 400.5 square feet of treated turf',
     'Inspected the rear gate 120.5 feet from the lanai',
+    'Inspected gatehouse #2468 and treated 120 linear feet',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });

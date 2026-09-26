@@ -33,6 +33,9 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'Used gate code [redacted] for access',
     'Opened side gate with 2468',
     'rear gate 2468',
+    'rear gate #2468',
+    'rear gate *2468',
+    'rear gate A2468',
   ];
   const data = await buildReportV1Data({
     id: 'test-lawn-record', customer_id: 'test-property', service_line: 'lawn', service_type: 'Every 6 Weeks Lawn Care Service', service_date: '2026-09-05', status: 'completed',
@@ -50,6 +53,9 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'Used gate code [redacted] for access',
     'Opened side gate with 2468',
     'rear gate 2468',
+    'rear gate #2468',
+    'rear gate *2468',
+    'rear gate A2468',
   ]);
   expect(data.findings.map((item) => item.title)).toContain(finding);
   expect(data.findings.map((item) => item.title).join(' ')).not.toContain('Internal access');

@@ -342,6 +342,9 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
         'Used gate code [redacted] for access',
         'Opened side gate with 2468',
         'rear gate 2468',
+        'rear gate #2468',
+        'rear gate *2468',
+        'rear gate A2468',
       ],
     });
 
