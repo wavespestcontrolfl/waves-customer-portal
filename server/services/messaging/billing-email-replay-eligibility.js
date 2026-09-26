@@ -174,8 +174,9 @@ async function collectionsPolicyRefusal(meta, database) {
     purpose: meta.source_entry_point === 'balance_reminder_workflow' ? 'balance_reminder' : 'late_payment',
     logTag: 'billing-email-obligation-replay',
     excludeLedgerIds: await persistedLedgerExclusions(meta, database),
+    detail: true,
   });
-  return permitted ? null : refused('collections-policy-denied');
+  return permitted?.allowed === true ? null : refused('collections-policy-denied', permitted?.durable !== true);
 }
 
 async function billingEmailReplayEligible(meta, database = db) {

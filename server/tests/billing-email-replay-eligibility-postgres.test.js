@@ -5,7 +5,7 @@ jest.mock('../services/messaging/deferred-replay-registry', () => ({
   invoiceStillCollectible: jest.fn(async () => ({ eligible: true })),
 }));
 jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: () => async () => ({ ok: true }) }));
-jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn(async () => true) }));
+jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn(async () => ({ allowed: true, durable: false })) }));
 
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');

@@ -80,7 +80,7 @@ beforeEach(() => {
   getCardExpiryExemptions.mockResolvedValue({ customerIds: new Set(), chargeMethodIdsByCustomer: new Map() });
   invoiceStillCollectible.mockResolvedValue({ eligible: true });
   selfPayAtDispatch.mockReturnValue(async () => ({ ok: true }));
-  collectionsChannelPermitted.mockResolvedValue(true);
+  collectionsChannelPermitted.mockResolvedValue({ allowed: true, durable: false });
 });
 
 afterAll(() => jest.useRealTimers());
@@ -221,7 +221,7 @@ describe('collections-policy replay eligibility', () => {
       collections_sibling_ledger_ids: ['untrusted-id'] }, databaseWith({ collections_contact_ledger: ledger })))
       .resolves.toEqual({ eligible: true });
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
-      customerId, channel: 'email', purpose: 'late_payment', excludeLedgerIds: ['own-email', 'sibling-sms'],
+      customerId, channel: 'email', purpose: 'late_payment', excludeLedgerIds: ['own-email', 'sibling-sms'], detail: true,
     }));
   });
 
@@ -232,9 +232,16 @@ describe('collections-policy replay eligibility', () => {
     expect(collectionsChannelPermitted).not.toHaveBeenCalled();
 
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    collectionsChannelPermitted.mockResolvedValueOnce(false);
+    collectionsChannelPermitted.mockResolvedValueOnce({ allowed: false, durable: true });
     await expect(billingEmailReplayEligible(meta, database))
       .resolves.toEqual({ eligible: false, reason: 'collections-policy-denied', retryable: false });
+  });
+
+  test('keeps temporary policy denials retryable, including cooldowns and caught read failures', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    collectionsChannelPermitted.mockResolvedValueOnce({ allowed: false, durable: false });
+    await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
+      .resolves.toEqual({ eligible: false, reason: 'collections-policy-denied', retryable: true });
   });
 });
 
