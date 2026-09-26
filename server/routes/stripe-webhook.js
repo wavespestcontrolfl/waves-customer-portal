@@ -192,7 +192,10 @@ async function isCustomerInitiatedPaymentIntent(pi) {
 }
 
 async function sendBillingSms(customer, body, metadata = {}, { customerInitiated = false } = {}) {
-  if (!customer?.id) {
+  // ach_payment_processing is legacy-only (never routed by channel choice),
+  // so it still needs a phone; every other notice may route phone-less.
+  if (!customer?.id
+    || (!customer.phone && metadata.original_message_type === 'ach_payment_processing')) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
   const eventId = metadata.stripe_event_id || metadata.stripe_setup_intent_id

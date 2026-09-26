@@ -148,6 +148,12 @@ describe('sendBillingSms — phone-less customer contract', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('the legacy-only ACH processing acknowledgment still needs a phone', async () => {
+    const result = await sendBillingSms({ id: 'cust-1', phone: null }, 'body', { original_message_type: 'ach_payment_processing' });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a phone-less customer reaches the router with to: null, no identityTrustLevel, and a stamped billing category', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, channel: 'push' });
     const result = await sendBillingSms(
