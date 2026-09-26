@@ -28,7 +28,22 @@
 const fs = require('fs');
 const path = require('path');
 
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const dbFn = jest.fn();
+  // Codex round-7 P1/P2: recordDecision's own advisory lock
+  // (withParentDecisionLock) acquires a raw connection and its blocking
+  // pg_advisory_lock always resolves (never the 55P03 timeout path) —
+  // same pattern admin-customers-cancel-plan.test.js already uses for its
+  // own session-scoped advisory lock.
+  const lockConn = { query: jest.fn().mockResolvedValue({ rows: [] }) };
+  dbFn.client = {
+    locked: true,
+    lockConn,
+    acquireConnection: jest.fn(async () => lockConn),
+    releaseConnection: jest.fn(async () => {}),
+  };
+  return dbFn;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
@@ -597,8 +612,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       expect(WRITTEN_STATUSES).toContain(s);
       expect(LEGACY_ONLY_STATUSES).not.toContain(s);
     }
-    // Only two files write the status today. A third writer is a new move
-    // and belongs in the doc's "Where" column.
+    // Two files write the status today. termite-annual-renewal-charge.js
+    // (slice 6b) writes NO status directly — moves 14/15 both call the
+    // canonical recordDecision('renew'/'cancel') writer here in `R` instead
+    // of a parallel status write in `TR` (P2-1 fix). A third writer is a
+    // new move and belongs in the doc's "Where" column.
     const writerFiles = [...new Set(writes.map((w) => w.file))].sort();
     expect(writerFiles).toEqual([
       'server/routes/admin-invoices.js',
@@ -655,6 +673,13 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // Move 12: reverse-prepaid un-pay — undecided, non-cancelled only.
       { expr: "'payment_pending'", guards: ['where({ id: locked.annual_prepay_term_id })', "whereNull('renewal_decision')", "whereNotIn('status', ['cancelled', 'canceled'])"] },
     ]);
+
+    // termite-annual-renewal-charge.js writes NO status directly (P2-1):
+    // moves 14/15 both trigger the SAME recordDecision writer pinned above
+    // as moves 6/8, from inside `R`'s syncTermForInvoicePayment and `TR`'s
+    // own processGraceLapseForTerm respectively — neither is a literal
+    // `.update({ status })` chain on `annual_prepay_terms` in `TR` itself.
+    expect(statusWriteSites(read('server/services/termite-annual-renewal-charge.js'))).toEqual([]);
   });
 
   test('the doc names every stage in the CHECK, every write site, and the read-side grouping constants', () => {
@@ -717,11 +742,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(src).toContain("const PAYMENT_PENDING_STATUS = 'payment_pending';");
   });
 
-  test('the doc moves table has 13 rows with CHECK-valid targets and each row names its documented guard', () => {
+  test('the doc moves table has 15 rows with CHECK-valid targets and each row names its documented guard', () => {
     const doc = read(DOC);
     const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \|$/gm)]
       .map((m) => ({ n: Number(m[1]), from: m[2], to: m[3], trigger: m[4], where: m[5], guard: m[6] }));
-    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     const valid = new Set([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES]);
     for (const r of rows) {
       for (const s of r.to.matchAll(/`([a-z_]+)`/g)) expect(valid.has(s[1])).toBe(true);
@@ -743,6 +768,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
       13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+      14: { from: st(['active', 'renewal_pending']), to: st(['renewed']), where: "recordDecision('renew')" },
+      15: { from: st(['active', 'renewal_pending']), to: st(['cancelled']), where: "recordDecision('cancel')" },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -767,6 +794,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       11: 'dispute_suspended_at IS NOT NULL',
       12: "NOT IN ('cancelled','canceled')",
       13: 'renewal_decision IS NULL',
+      14: 'ACTIVE_STATUSES AND renewal_decision IS NULL',
+      15: 'ACTIVE_STATUSES AND renewal_decision IS NULL',
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });

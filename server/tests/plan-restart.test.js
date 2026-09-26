@@ -161,6 +161,13 @@ function builder(table) {
       orWhereNotNull: (col) => { push(true, (r) => r[norm(col)] != null); return sub; },
       whereIn: (col, vals) => { push(false, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
       orWhereIn: (col, vals) => { push(true, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
+      // coveredTermsAsOf's P2-4 termite grace-deadline check (a raw SQL
+      // GREATEST/INTERVAL expression) — vacuously true, same rationale as
+      // the top-level b.whereRaw below: no fixture here carries both
+      // renewed_from_term_id AND annual_plan_version on a payment_pending
+      // row, so the preceding whereNotNull gates already decide this
+      // branch before whereRaw's own value would matter.
+      whereRaw: () => { push(false, () => true); return sub; },
     };
     fn.call(sub);
     return (r) => parts.reduce((acc, p, i) => (i === 0 ? p.cond(r) : (p.or ? (acc || p.cond(r)) : (acc && p.cond(r)))), false);

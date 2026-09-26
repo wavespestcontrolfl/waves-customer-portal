@@ -42,9 +42,10 @@ overwritten in that window could then re-activate through move 2's
 ## Allowed moves
 
 `R` = `server/services/annual-prepay-renewals.js`, `AI` =
-`server/routes/admin-invoices.js`. Guards are the literal `WHERE` clauses on
-the `UPDATE`; an `UPDATE` whose guard misses is a no-op (race-safe,
-replay-idempotent), never an error.
+`server/routes/admin-invoices.js`, `TR` =
+`server/services/termite-annual-renewal-charge.js`. Guards are the literal
+`WHERE` clauses on the `UPDATE`; an `UPDATE` whose guard misses is a no-op
+(race-safe, replay-idempotent), never an error.
 
 | # | From | To | Trigger | Where | Guard |
 |---|---|---|---|---|---|
@@ -61,10 +62,21 @@ replay-idempotent), never an error.
 | 11 | `cancelled` **(a)** | `active` | Lost-dispute revival: the dispute-cancelled term's invoice is re-paid in dunning. Restores extension credits. | `R` `syncTermForInvoicePayment` | `status = 'cancelled' AND renewal_decision IS NULL AND dispute_suspended_at IS NOT NULL` |
 | 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared, and (ADMIN-BUG-R17) `customers.billing_mode` is reset to the recorded prior mode via `resetBillingModeAfterTermCancel`, pairing the demotion exactly like move 10's dispute-suspend does — the customer no longer stays stranded in `annual_prepay` (serviced free / no monthly dues) until the reopened invoice is actually repaid. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row — the only move that can touch a legacy row: move 9's upstream select is limited to `payment_pending`/`active`/`renewal_pending`. Code never writes the legacy names, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
 | 13 | `payment_pending` / `cancelled` (undecided) | `cancelled` **(a)** | Admin removes the annual-prepay flag from an invoice marked by mistake (`DELETE /:id/annual-prepay`). The invoice survives as an ordinary invoice, so the route refuses (409) whenever the cancel could double-bill: a decided term, a PAID prepay (`status IN ACTIVE_STATUSES` — refund it instead, owner ruling 2026-09-26), and a prepay a flow owns — born from an accepted estimate (`source_estimate_id`, whose card auto-charge job could still collect it), a switch-superseded marker or a setup-fee claim — void it instead. Otherwise it runs the SAME `cancelTermWithRestorations` pipeline as move 9 (ADMIN-BUG-R16): stamps cleared (`throwOnError`), covered visit invoices reopened with their reminders re-armed after commit, credits reversed, `customers.billing_mode` reset to the recorded prior mode; only non-terminal attached visits are detached. Re-marking the invoice later re-derives the status via move 1. | `R` `cancelTermWithRestorations`, called from `AI` `DELETE /:id/annual-prepay` | `renewal_decision IS NULL`; the route refuses `ACTIVE_STATUSES` first |
+| 14 | `active` / `renewal_pending` | `renewed` | Termite annual plan only (`annual_plan_version IS NOT NULL`), dark behind `GATE_TERMITE_ANNUAL_PLAN`: the renewal successor's OWN renewal invoice is genuinely paid — `syncTermForInvoicePayment`'s pending→active transition for a row carrying `renewed_from_term_id` calls `recordDecision('renew')` on the PARENT (`stampParentRenewedForSuccessor`). Deliberately NOT at mint (P2-1 fix, superseding the original slice-6b design below the table) — a minted-but-unpaid successor can still lapse (move 15), and deciding `renew` before that is known would leave a lapsed-and-cancelled successor sitting behind a parent already marked `renewed`. This reuses the SAME writer an operator's manual "renew" click uses (move 6) — it is not a new status-write site in `TR`. | `R` `syncTermForInvoicePayment` (calls `recordDecision('renew')`) | `where({ id: termId }) AND status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
+| 15 | `active` / `renewal_pending` | `cancelled` **(b)** | Termite annual plan only: the renewal successor's own payment grace deadline passes unpaid (its invoice was actually presented to the customer — see `TR`'s grace-lapse pass) — the successor's invoice voids (cascading the successor itself to `cancelled` **(a)** through move 9) and, in the SAME tick, `TR`'s `processGraceLapseForTerm` calls `recordDecision('cancel')` on the PARENT, recording the decided lapse. Reuses the SAME writer an operator's manual "cancel" click uses (move 8). | `TR` `processGraceLapseForTerm` (calls `recordDecision('cancel')`) | `where({ id: termId }) AND status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
 
 Everything not in the table is not a move. In particular there is **no**
 `renewed → *`, `switch_plan → *`, or `cancelled(b) → *` (other than move 13),
-and nothing ever writes `canceled` or `refunded`.
+and nothing ever writes `canceled` or `refunded`. Moves 14 and 15 are both
+automated *triggers* of the SAME `recordDecision` writer moves 6 and 8 use —
+neither is a new status-write site in `annual-prepay-renewals.js`, and
+neither reads or writes a row already carrying a `renewal_decision`
+(`recordDecision`'s own guard).
+
+`TR` = `server/services/termite-annual-renewal-charge.js`. Minting the
+renewal successor itself (`mintRenewalSuccessor`) writes NO status to the
+PARENT — see the module's own header for why (P2-1: mint only proposes a
+renewal; moves 14/15 above decide it once the outcome is actually known).
 
 ## Read-side groupings
 
@@ -95,6 +107,21 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   stamped.
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
   card-expiry exemptions, `getPaymentPendingCustomerIds`.
+- Termite-renewal grace coverage (owner ruling 2026-09-26, P2-4): a
+  `payment_pending` termite renewal SUCCESSOR (`renewed_from_term_id NOT
+  NULL AND annual_plan_version NOT NULL`) is ALSO covered — no status
+  change, no seeding — through `TERMITE_RENEWAL_GRACE_DAYS` from whichever
+  is later of its own `term_start` or `created_at` (ET date):
+  `termiteRenewalGraceDeadlineFor` / `termiteRenewalGraceDeadlineSql`, the
+  SAME cutoff `TR`'s grace-lapse pass voids on, so coverage and the lapse
+  can never disagree about the exact day. `coveredTermsAsOf`'s own
+  `reconcileCoveredTermsSweep` caller skips this shape (confirms the
+  invoice is ACTUALLY paid before running any settle/credit leg) — grace
+  coverage never seeds a coverage stamp or settles a completion as paid;
+  it only keeps `getActivelyCoveredCustomerIds` (and every other reader of
+  `coveredTermsAsOf`) from treating the customer as uncovered while the
+  grace period runs. Coverage ends the moment the lapse pass actually
+  voids the invoice (the existing cancelled-invoice exclusion takes over).
 
 ## Known residue (not fixed here)
 

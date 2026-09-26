@@ -73,7 +73,7 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
       if (name === 'where' && typeof args[0] === 'function') {
         const nested = [];
         const sub = {};
-        for (const m of ['where', 'orWhere', 'whereIn', 'orWhereIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull', 'whereNot', 'andWhere']) {
+        for (const m of ['where', 'orWhere', 'whereIn', 'orWhereIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull', 'whereNot', 'andWhere', 'whereRaw']) {
           sub[m] = (...a) => { if (typeof a[0] === 'function') a[0].call(sub, sub); nested.push([m, ...a]); return sub; };
         }
         args[0].call(sub, sub);
