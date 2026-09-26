@@ -64,6 +64,15 @@ beforeEach(() => {
 test('router requires an authenticated administrator', async () => {
   expect((await request('/api/admin/customer-geocodes')).status).toBe(401);
   expect((await request('/api/admin/customer-geocodes', { headers: { Authorization: 'Bearer tech' } })).status).toBe(403);
+  for (const [authorization, status] of [['', 401], ['Bearer tech', 403]]) {
+    const result = await request(`/api/admin/customer-geocodes/${CUSTOMER_ID}/resolve`, {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: 'rev-1', action: 'retry' }),
+    });
+    expect(result.status).toBe(status);
+  }
+  expect(actions.resolveCustomerGeocodeReview).not.toHaveBeenCalled();
 });
 
 test('dark gate makes GET inert and POST unavailable without service calls', async () => {
@@ -94,14 +103,28 @@ test('detail returns 404 for a missing customer', async () => {
 });
 
 test('verify_pin strictly requires confirmation, complete evidence and a complete address object', async () => {
-  const bad = await request(`/api/admin/customer-geocodes/${CUSTOMER_ID}/resolve`, {
-    method: 'POST', headers: admin, body: JSON.stringify({
-      revision: 'rev-1', action: 'verify_pin', latitude: 27.5, longitude: -82.5,
-      source: 'site_visit', evidence: 'Confirmed at the service location', confirmed: false,
-    }),
-  });
-  expect(bad.status).toBe(400);
-  expect(actions.resolveCustomerGeocodeReview).not.toHaveBeenCalled();
+  const valid = {
+    revision: 'rev-1', action: 'verify_pin', latitude: 27.5, longitude: -82.5,
+    address: { address_line1: '100 Test St', address_line2: '', city: 'Sarasota', state: 'FL', zip: '34236' },
+    source: 'site_visit', evidence: 'Confirmed at the service location', confirmed: true,
+  };
+  for (const patch of [
+    { confirmed: false },
+    { confirmed: 'true' },
+    { latitude: '27.5' },
+    { longitude: '-82.5' },
+    { evidence: ' ' },
+    { source: 'provider_guess' },
+    { address: { address_line1: '100 Test St' } },
+    { address: { ...valid.address, email: 'fixture@example.test' } },
+    { actorId: 'another-actor' },
+  ]) {
+    const bad = await request(`/api/admin/customer-geocodes/${CUSTOMER_ID}/resolve`, {
+      method: 'POST', headers: admin, body: JSON.stringify({ ...valid, ...patch }),
+    });
+    expect(bad.status).toBe(400);
+    expect(actions.resolveCustomerGeocodeReview).not.toHaveBeenCalled();
+  }
 
   const unknown = await request(`/api/admin/customer-geocodes/${CUSTOMER_ID}/resolve`, {
     method: 'POST', headers: admin, body: JSON.stringify({
