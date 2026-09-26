@@ -276,7 +276,7 @@ retained in admin code; see §14 for the current shell contract.
 
 **Props:** `variant`, `surface` (default `"customer"`), `fullWidthMobile`, `icon` + `iconPosition` (`"left"|"right"` default `"right"`), `as` (polymorphic — pass `"a"` for link CTAs), `className`, plus all native `<button>` / `<a>` props via spread.
 
-**In production on:** PublicBookingPage, ReviewPage, and RatePage.
+**In production on:** PublicBookingPage and RatePage (legacy `/review/:token` redirects to `/rate/:token`).
 
 ### FAB (bottom-right chat launcher)
 ```

@@ -259,7 +259,7 @@ After the code-only pass, a live render pass was run at 390×844 (Chromium, iPho
 ## PHASE 7 — COMPLIANCE
 
 **SMS / A2P 10DLC / TCPA**
-- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and the HELP template (opt-out-detector.js:46-49). **Update 2026-09-26:** HELP is now answered for compliance-eligible senders (`server/routes/twilio-webhook.js`), not yet for a first-contact number. The portal property-contacts UI now requires an explicit consent checkbox (automated texts, message frequency, data rates, STOP and HELP) before it saves a phone contact (`PortalPage.jsx`, `handlePropertyContactSave`); `/book` and referral capture still show no disclosure. Message frequency and "Msg & data rates may apply" still appear nowhere a customer opts in. (S1-3)
+- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and the HELP template (opt-out-detector.js:46-49). **Update 2026-09-26:** HELP is now answered for compliance-eligible senders (`server/routes/twilio-webhook.js`), not yet for a first-contact number. The portal property-contacts UI now requires an explicit consent checkbox (automated texts, message frequency, data rates, STOP and HELP) before it saves a phone contact (`PortalPage.jsx`, `handlePropertyContactSave`); `/book` and referral capture still show no disclosure, so message-frequency and "Msg & data rates may apply" language is still missing at those two capture points. (S1-3)
 - **No per-recipient consent ledger; web captures record nothing** — no timestamp/source/language capture for web/portal SMS consent; `messaging_audit_log` stores caller-asserted basis per send, not the opt-in event (audit.js:65-67). Call-originated consent IS durably evidenced (verbatim `sms_consent_quote` inside call-extraction blobs — call-recording-processor.js:4588-4590, schema :368-384) but isn't indexed per recipient. The codebase itself proves the team knows how to do this right: payment consent snapshots verbatim text + version + IP + UA (payment-method-consents.js:41-50). SMS never got that rigor as a ledger. (S1-2)
 - **STOP enforcement is real but architectural only at the wrapper layer** — `TwilioService.sendSMS` itself never checks suppression (twilio.js:320-535, provider call at 488); one live customer path bypasses the wrapper today (estimate-public.js:17013) and any future direct caller silently will too. (S2-4)
 - **No TCPA calling-window floor (8am-9pm local)** — quiet hours exist only when a customer personally set them, and only on the dispatcher path (notification-dispatcher.js:65-83); the canonical wrapper has no time-of-day validator (send-customer-message.js:153-164). Exposure in practice depends on cron timing, but no code prevents a night send. (S1-3)
@@ -357,7 +357,8 @@ Fix sketch: route this send through `sendCustomerMessage`; add a lint/contract c
 
 **Update 2026-09-26:** addressed — a flag-gated multi-service picker (pick up to 3, one visit,
 one arrival window) now renders on step 1 (`client/src/pages/PublicBookingPage.jsx:168, 189, 1017-1040`),
-behind `GATE_MULTI_SERVICE_BOOKING` (server confirms via `/booking/config`).
+behind `GATE_MULTI_SERVICE_BOOKING` (server confirms via `/booking/config`). The remaining
+work is the gate rollout; the Where/Repro/Fix sketch below are historical (pre-picker).
 
 Where: `client/src/pages/PublicBookingPage.jsx:93,100` (service from `?service=`, default `pest_control`); `SERVICES` catalog (15-23) never rendered as UI; step 1 is address-only (668-750); no `setService` call exists
 Repro: 1. Open bare `/book` (GBP button, typed URL). 2. You are booking Pest Control; nothing on any step lets you choose lawn/mosquito/termite/rodent. 3. Multi-service booking in one pass is impossible.
@@ -562,7 +563,7 @@ Fix sketch: increase the header surface's opacity (or add a solid scrim band) so
 6. **S2-4** Post-STOP send path bypassing suppression (estimate details packet)
 7. **S2-3** Login dead-end for phones not on file — locks customers out of all self-service
 8. **S2-2** Service-outline dead-end with raw HTTP status — prospect-facing lost-sale path
-9. **S3-2 + S3-1** `/book` shows no price and offers no service choice — the paid-traffic funnel's conversion ceiling
+9. **S3-2 + S3-1** `/book` shows no price and offers no service choice — the paid-traffic funnel's conversion ceiling (2026-09-26: the S3-1 picker now exists behind `GATE_MULTI_SERVICE_BOOKING`; S3-1 remaining work is the gate rollout)
 10. **S3-16 + S3-15** Recurring-billing edge recovery (SCA mislabel; lost-webhook reconciliation) — small counts, but each is a paying member drifting toward pause/dunning
 
 ## UNVERIFIED
@@ -582,8 +583,8 @@ Fix sketch: increase the header surface's opacity (or add a solid scrim band) so
 
 ## THREE FIXES THAT MOVE BOOKED REVENUE MOST IN ONE DAY
 
-1. **Put "Pay now" links where balances are (S2-1).** Wire the existing `/pay/:token` checkout into the dashboard tile, Billing header, and failed-payment banner, and return a retry action after card update. Everything needed already exists server-side; this converts every in-app balance-due session and failed-payment recovery into same-day collections instead of a wait for the cron or a phone call.
-2. **Give `/book` a service picker with "from $X/visit" pricing (S3-1 + S3-2).** The SERVICES catalog with descriptions is already written and never rendered; per-visit engine pricing already exists. One screen + one price line removes the two biggest silent bounces in the paid-traffic funnel — booking the wrong-service default, and handing over a phone number for an unpriced visit.
+1. **Put "Pay now" links where balances are (S2-1).** (2026-09-26: shipped behind `GATE_PORTAL_PAY_NOW`; see the S2-1 update.) Wire the existing `/pay/:token` checkout into the dashboard tile, Billing header, and failed-payment banner, and return a retry action after card update. Everything needed already exists server-side; this converts every in-app balance-due session and failed-payment recovery into same-day collections instead of a wait for the cron or a phone call.
+2. **Give `/book` a service picker with "from $X/visit" pricing (S3-1 + S3-2).** (2026-09-26: the picker has since shipped behind `GATE_MULTI_SERVICE_BOOKING`; the price line is still open.) At audit time the SERVICES catalog with descriptions was already written but never rendered; per-visit engine pricing already exists. One screen + one price line removes the two biggest silent bounces in the paid-traffic funnel — booking the wrong-service default, and handing over a phone number for an unpriced visit.
 3. **Un-dead-end the two prospect-facing terminal states (S2-2 + S2-3).** Phone + retry on the service-outline error card, and "that number may not be on file — call us" after repeated failed logins. Both are copy-plus-one-conditional changes that recover sessions currently ending in a technical wall — the cheapest lost-sale patches in this report.
 
 ---
