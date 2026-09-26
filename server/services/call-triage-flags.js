@@ -1614,12 +1614,24 @@ function parseSpokenSlot(normalizedSentence) {
 // Either bound may be "noon"/"midnight" instead of a number (both
 // documented v11 prompt examples: "between 10 and noon tomorrow", "between
 // noon and 1 today") — collapsed to the literal word, which parseSpokenSlot
-// already reads as 12 pm/12 am.
+// already reads as 12 pm/12 am. Either bound may also carry a minute
+// (codex #4919 round-3 P1): normalizeCommitmentText turns "6:00"/"6:30" into
+// "6 00"/"6 30" (the colon is stripped like every other punctuation), so a
+// bound is an hour, an OPTIONAL two-digit minute, then an optional period —
+// without the minute group, "between 6:00 and 9:00 PM" never matched at all
+// (an unrelated "00"/"30" token sat where the pattern expected "and"/"to").
+// The minute rides through the collapse verbatim: parseSpokenSlot's own time
+// regex already tolerates an optional " 00" the same way, so an on-the-hour
+// ":00" bound (the only kind `confirmed_start_at` is ever stamped at — the
+// window_start owner rule) still binds; any other minute ("6:30") collapses
+// structurally too but then correctly fails to bind downstream (no
+// NUMBER_RUN_SHAPES entry explains an [hour, non-zero-minute] run), same as
+// before this fix for a quote that was never a legitimate on-the-hour slot.
 const RANGE_RE = new RegExp(
-  '\\bbetween (?:(?<b1h>\\d{1,2})(?: (?<b1p>am|pm))?|(?<b1w>noon|midnight)) and '
-  + '(?:(?<b2h>\\d{1,2})(?: (?<b2p>am|pm))?|(?<b2w>noon|midnight))\\b'
-  + '|\\b(?:(?<c1h>\\d{1,2})(?: (?<c1p>am|pm))?|(?<c1w>noon|midnight)) to '
-  + '(?:(?<c2h>\\d{1,2})(?: (?<c2p>am|pm))?|(?<c2w>noon|midnight))\\b',
+  '\\bbetween (?:(?<b1h>\\d{1,2})(?: (?<b1mm>\\d{2}))?(?: (?<b1p>am|pm))?|(?<b1w>noon|midnight)) and '
+  + '(?:(?<b2h>\\d{1,2})(?: (?<b2mm>\\d{2}))?(?: (?<b2p>am|pm))?|(?<b2w>noon|midnight))\\b'
+  + '|\\b(?:(?<c1h>\\d{1,2})(?: (?<c1mm>\\d{2}))?(?: (?<c1p>am|pm))?|(?<c1w>noon|midnight)) to '
+  + '(?:(?<c2h>\\d{1,2})(?: (?<c2mm>\\d{2}))?(?: (?<c2p>am|pm))?|(?<c2w>noon|midnight))\\b',
 );
 // The FIRST bound's period, when it states none itself, is resolved from
 // the SECOND bound (codex review round P1: "between 8 and 10 pm" is 8-10
@@ -1656,6 +1668,7 @@ function collapseRangeToFirstBound(ns) {
     replacement = wordBound;
   } else {
     const hour = betweenBranch ? g.b1h : g.c1h;
+    const minute = betweenBranch ? g.b1mm : g.c1mm;
     const explicitPeriod = betweenBranch ? g.b1p : g.c1p;
     const endClock24 = secondBoundClock24(
       betweenBranch ? g.b2w : g.c2w,
@@ -1666,7 +1679,7 @@ function collapseRangeToFirstBound(ns) {
       || resolveRangeStartPeriod(hour, endClock24)
       || inferPeriodFromBusinessHours(Number(hour), ns);
     if (!period) return ns;
-    replacement = `${hour} ${period}`;
+    replacement = minute ? `${hour} ${minute} ${period}` : `${hour} ${period}`;
   }
   return `${ns.slice(0, m.index)}${replacement}${ns.slice(m.index + m[0].length)}`;
 }

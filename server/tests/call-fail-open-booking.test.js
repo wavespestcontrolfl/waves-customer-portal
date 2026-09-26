@@ -2290,6 +2290,17 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     ['We will be there tomorrow Sunday at 6 pm.', '2026-08-02T18:00:00-04:00', false],
     // Two relative-day words stated together is the same conflict.
     ['We will be there today and tomorrow at 6 pm.', '2026-07-30T18:00:00-04:00', false],
+    // codex #4919 round-3 P1 (:1622): normalizeCommitmentText turns "6:00"
+    // into "6 00" (the colon is stripped like every other punctuation) —
+    // RANGE_RE must accept that minute-formatted bound or the range never
+    // collapses at all.
+    ['We will be there Sunday between 6:00 and 9:00 PM.', '2026-08-02T18:00:00-04:00', true],
+    // The range still collapses structurally with a NON-zero minute, but
+    // correctly fails to bind downstream — confirmed_start_at is never
+    // stamped off the hour (window_start owner rule), so a ":30" first
+    // bound was never a legitimate slot in the first place.
+    ['We will be there Sunday 6:30 to 9.', '2026-08-02T18:00:00-04:00', false],
+    ['We will be there Sunday 6:30 to 9.', '2026-08-02T18:30:00-04:00', false],
   ])('ARRIVAL WINDOW / relative-day binding — %s @ %s → %s', (sentence, startAt, expected) => {
     const ns = normalizeCommitmentText(sentence);
     expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);

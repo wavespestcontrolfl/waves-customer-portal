@@ -55,8 +55,26 @@ function callStartedAt(row) {
   return new Date(created.getTime() - callDurationSeconds(row) * 1000);
 }
 
-/** When the call ENDED (start + duration). Null if the start is unknown. */
+/**
+ * When the call ENDED. Start + duration — EXCEPT a bridged inbound call
+ * (codex #4919 round-3 P1): created_at is ring time, but Twilio's
+ * `bridged_at` is when the conversation actually began, and duration_seconds
+ * measures FROM the bridge, not from ring. Adding duration to
+ * callStartedAt()'s ring-time start would UNDERSTATE the true end by the
+ * whole ring delay on a call that rang a while before pickup. This mirrors
+ * call-commitments.js's own callEndedAt for the bridged case exactly (same
+ * two duplicated definitions this module doesn't yet fully unify with —
+ * that one's non-bridged branches key on call DIRECTION rather than this
+ * module's metadata.source signal, a wider reconciliation left for its own
+ * change). callStartedAt() itself stays ring-time-anchored regardless —
+ * the SLA "how long did the caller wait" clock this module's docblock
+ * describes needs ring time, not the bridge.
+ */
 function callEndedAt(row) {
+  if (row?.bridged_at) {
+    const bridged = new Date(row.bridged_at);
+    if (!Number.isNaN(bridged.getTime())) return new Date(bridged.getTime() + callDurationSeconds(row) * 1000);
+  }
   const started = callStartedAt(row);
   if (!started) return null;
   return new Date(started.getTime() + callDurationSeconds(row) * 1000);

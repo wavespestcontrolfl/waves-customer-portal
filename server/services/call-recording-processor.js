@@ -29,7 +29,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
-const { callEndedAt } = require('../utils/call-timeline');
+const { callStartedAt, callEndedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
@@ -3312,7 +3312,6 @@ async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {},
 // pending call that sat through a multi-day outage waited multi-day days,
 // and erasing that is the exact bug this change exists to fix.
 function leadFirstContactAt(call, { reprocessOfProcessed = false } = {}) {
-  const { callStartedAt } = require('../utils/call-timeline');
   const callAt = callStartedAt(call);
   if (!callAt) return new Date();
   if (!reprocessOfProcessed) return callAt;
@@ -8639,7 +8638,14 @@ const CallRecordingProcessor = {
     let extracted;
     try {
       const extractStartedAt = Date.now();
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
+      // call-timeline's callStartedAt(), not the raw column (codex #4919
+      // round-3 P1): a status_callback/recording-recovery row's created_at
+      // is already POST-call, so the prompt's "today" anchor and the V2
+      // extraction below, and canAutoRoute's slot-binding dayDiff further
+      // down, must all resolve relative days ("tonight"/"tomorrow") from
+      // the SAME normalized call-start instant or they can disagree by a
+      // day on a call that lands after midnight.
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call), knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
       stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
@@ -8687,7 +8693,7 @@ const CallRecordingProcessor = {
       try {
         const v2StartedAt = Date.now();
         v2Result = await extractCallDataV2(transcription, contactPhone, {
-          callStartedAt: call.created_at,
+          callStartedAt: callStartedAt(call),
           callId: call.id,
           bookableServiceNames,
           knownCaller,
@@ -9572,8 +9578,10 @@ const CallRecordingProcessor = {
             // until this companion gate flips (see feature-gates.js).
             transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
             // Slot binding needs the call time: a spoken weekday only names a
-            // unique date within the 7 days after the call.
-            callStartedAt: call.created_at,
+            // unique date within the 7 days after the call. call-timeline's
+            // callStartedAt(), not created_at (codex #4919 round-3 P1) — see
+            // the extraction call site above for why.
+            callStartedAt: callStartedAt(call),
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -15278,7 +15286,18 @@ const CallRecordingProcessor = {
               // / window / service rather than left stale on a plain
               // .ignore() — same lock + merge the enforce-mode fallback
               // below applies (codex #4919 r1 P1).
-              if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
+              // Keyed on the EFFECTIVE enforce state, not DRIVES_ROUTING
+              // alone (codex #4919 round-3 P1): DRIVES_ROUTING=true with
+              // CALL_EXTRACTION_V2_ENABLED=false is documented at boot as
+              // bare legacy V1 routing — v2ApprovedExtraction never gets
+              // set (see its gate above), so the enforce-mode fallback a
+              // few hundred lines below (guarded on `v2ApprovedExtraction`)
+              // never fires either, and a plain `!DRIVES_ROUTING` check here
+              // would skip this branch too, leaving NO card at all. Same
+              // `DRIVES_ROUTING && V2_ENABLED` boot already computes and
+              // every other "are we really in enforce mode" site in this
+              // file (e.g. `enforceModeActive` below) reuses.
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
                 try {
                   await db.transaction(async (ttrx) => {
                     await lockTriageCall(ttrx, call.id);
@@ -18735,7 +18754,11 @@ const CallRecordingProcessor = {
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
-          callStartedAt: call.created_at,
+          // call-timeline's callStartedAt(), not created_at (codex #4919
+          // round-3 P1) — same normalized anchor as the live enforce path
+          // above and the extraction prompt, so a post-call fallback row
+          // never resolves a relative day one day late here alone.
+          callStartedAt: callStartedAt(call),
         });
         // Same on-file satisfaction the live merge point applies to its card set.
         if (routingResult?.onFileAddressSatisfiedFlags?.length) {

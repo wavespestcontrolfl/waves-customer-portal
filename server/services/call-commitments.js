@@ -1138,6 +1138,14 @@ function leadIdsOf(call) {
 // ring time, so their end is created_at + duration; bridged rows end at
 // bridge + duration; other rows (recovered outbound, inserted near the end
 // by status callbacks) end at created_at.
+// codex #4919 round-3 P1: `server/utils/call-timeline.js` keeps its OWN
+// callEndedAt (used by call-recording-processor.js's stale-start guard and
+// the stall watchdog's recordingReadyAt), which now also adds bridged_at —
+// this is a second, independently-evolved definition of the same concept,
+// keyed on call DIRECTION here vs that module's metadata.source signal for
+// its non-bridged branches. Not unified in this change (this file's other
+// non-bridged behavior is load-bearing for promise matching and untouched
+// here); a future pass could still fold both into call-timeline.js's.
 function callEndedAt(call) {
   const created = call?.created_at ? new Date(call.created_at) : null;
   if (!created || Number.isNaN(created.getTime())) return null;
