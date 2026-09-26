@@ -465,15 +465,16 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     await trx('invoices').where({ id: prepayInvoiceId }).update({ status: 'sent', paid_at: null });
     await trx('annual_prepay_terms').where({ id: term.id }).update({ status: 'payment_pending' });
 
-    // Simulate reopenAnnualPrepayCoveredInvoicesForTerm's own per-invoice
-    // try/catch swallowing a failure: it returns cleanly with nothing
-    // reopened, exactly as it would after logging a per-row warn.
+    // The cancel runs the reopen strict, so a per-invoice failure throws
+    // (invoice-reopen-covered-strict.test.js); simulate that throw.
     const InvoiceService = require('../services/invoice');
-    const spy = jest.spyOn(InvoiceService, 'reopenAnnualPrepayCoveredInvoicesForTerm').mockResolvedValueOnce(0);
+    const spy = jest.spyOn(InvoiceService, 'reopenAnnualPrepayCoveredInvoicesForTerm')
+      .mockRejectedValueOnce(new Error('covered invoice reopen failed: synthetic'));
     try {
       const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
       expect(res.status).toBe(500);
       expect(res.body.error).toMatch(/reopen failed/);
+      expect(spy).toHaveBeenCalledWith(term.id, expect.anything(), { strict: true });
     } finally {
       spy.mockRestore();
     }
@@ -481,5 +482,34 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await trx('annual_prepay_terms').where({ id: term.id }).first('status')).status).toBe('payment_pending');
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(term.id);
     expect((await trx('invoices').where({ id: coveredInvoiceId }).first('status')).status).toBe('prepaid');
+  });
+
+  // A reverse-prepaid demotion stamps dispute_suspended_at, the marker
+  // syncTermForInvoicePayment uses to revive a cancelled term when its
+  // prepay invoice is paid. Once the flag is removed, the invoice is an
+  // ordinary one; paying it later must not bring annual coverage back.
+  test('after reversal and flag removal, paying the invoice as an ordinary one never revives the term', async () => {
+    const customerId = await customer({ billing_mode: null, account_credits: 400 });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending',
+      term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const invoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: invoiceId });
+
+    expect((await request('POST', `/${invoiceId}/apply-credit`, { note: 'synthetic' })).status).toBe(200);
+    expect((await request('POST', `/${invoiceId}/reverse-prepaid`, { note: 'synthetic' })).status).toBe(200);
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('dispute_suspended_at')).dispute_suspended_at).not.toBeNull();
+
+    const removed = await request('DELETE', `/${invoiceId}/annual-prepay`);
+    expect(removed.status).toBe(200);
+    const cancelled = await trx('annual_prepay_terms').where({ id: termId }).first('status', 'dispute_suspended_at');
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.dispute_suspended_at).toBeNull();
+
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(invoiceId, trx);
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('cancelled');
   });
 });

@@ -2944,39 +2944,14 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
       // clear; best-effort (never blocks the cancel), and never reopens a
       // cash-paid invoice.
       try {
-        await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(updated.id, t);
+        // strict under throwOnError: a per-invoice reopen failure throws
+        // (ADMIN-BUG-R17-FINDING-2) instead of being logged inside the
+        // helper, so an explicit operator cancel never commits with an
+        // invoice still covered by the dead term.
+        await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(updated.id, t, { strict: throwOnError });
       } catch (err) {
         if (throwOnError) throw err;
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${updated.id}: ${err.message}`);
-      }
-      // reopenAnnualPrepayCoveredInvoicesForTerm swallows PER-INVOICE update
-      // failures internally (its own try/catch logs + continues to the next
-      // row) rather than surfacing them through a throw or its return value
-      // (ADMIN-BUG-R17-FINDING-2) — a strict caller (an explicit operator
-      // cancel that must never half-complete) can't trust a clean return
-      // above to mean every covered invoice actually reopened. Verify the
-      // goal state instead: any invoice still wearing this now-cancelled
-      // term's coverage marker, still 'prepaid', with no cash settlement of
-      // its own (the SAME exemption reopenAnnualPrepayCoveredInvoicesForTerm
-      // checks before it attempts a reopen) means THAT invoice's reopen
-      // attempt failed. Refuse rather than let the cancel commit with the
-      // term dead and that invoice phantom-covered by it.
-      if (throwOnError) {
-        const stillCovered = await t('invoices')
-          .where({ annual_prepay_covered_term_id: updated.id, status: 'prepaid' })
-          .whereNull('payment_recorded_at')
-          .select('id');
-        const stuckIds = [];
-        for (const row of stillCovered) {
-          const paidPayment = await t('payments')
-            .whereIn('status', ['paid', 'processing'])
-            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [row.id])
-            .first('id');
-          if (!paidPayment) stuckIds.push(row.id);
-        }
-        if (stuckIds.length) {
-          throw new Error(`Term ${updated.id} cancel refused — covered invoice reopen failed for invoice id(s) ${stuckIds.join(', ')}`);
-        }
       }
       // And claw back the pending-window completion credits this term
       // issued — a full cancel would otherwise refund those slices twice

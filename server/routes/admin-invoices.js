@@ -2493,6 +2493,20 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           .whereNotIn('status', Array.from(AnnualPrepayRenewals.PREPAID_UPDATE_EXCLUDED_STATUSES))
           .update({ annual_prepay_term_id: null, updated_at: new Date() });
       }
+      // This invoice stops being an annual prepay here. A cancelled term
+      // still carrying dispute_suspended_at (a lost dispute, or a
+      // reverse-prepaid demotion) is revivable: syncTermForInvoicePayment
+      // brings it back when its prepay invoice is paid. Paying this invoice
+      // later as an ordinary one must never restore annual coverage, so clear
+      // the marker on its cancelled terms. Column-guarded like the stamps.
+      const termCols = await AnnualPrepayRenewals.annualPrepayColumns(trx);
+      if (termCols.dispute_suspended_at) {
+        await trx('annual_prepay_terms')
+          .where({ prepay_invoice_id: locked.id })
+          .whereIn('status', ['cancelled', 'canceled'])
+          .whereNotNull('dispute_suspended_at')
+          .update({ dispute_suspended_at: null, updated_at: new Date() });
+      }
       return null;
     });
 

@@ -9800,7 +9800,11 @@ const InvoiceService = {
     return restored;
   },
 
-  async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db) {
+  // strict: an operator action that must never half-complete (the admin
+  // remove-flag cancel) gets a per-invoice failure thrown instead of logged,
+  // so its transaction rolls back whole. Every other caller keeps the
+  // best-effort reopen.
+  async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db, { strict = false } = {}) {
     if (!termId) return 0;
     let reopened = 0;
     const reopenedIds = [];
@@ -9832,6 +9836,7 @@ const InvoiceService = {
           reopenedIds.push(inv.id);
         }
       } catch (err) {
+        if (strict) throw err;
         logger.warn(`[invoice] annual-prepay coverage reopen skipped for ${inv.invoice_number || inv.id}: ${err.message}`);
       }
     }
