@@ -151,24 +151,13 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   //    drafts and voids. Date math anchored to ET so the boundary doesn't
   //    drift at midnight UTC.
   try {
-    // Same population as the AR aging this card opens (Billing Recovery ←
-    // getOutstandingBalances): a positive amount due after applied credit,
-    // internal/test customers excluded — so the count never exceeds what
-    // the page lists.
     const overdue60 = await db('invoices')
-      .leftJoin('customers as c', 'invoices.customer_id', 'c.id')
-      .whereNull('invoices.paid_at')
-      .whereNotIn('invoices.status', ['draft', 'void'])
-      .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > 0')
-      .whereRaw("invoices.due_date < ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '60 days')")
-      .modify((qb) => {
-        if (INTERNAL_TEST_CUSTOMERS.length) {
-          qb.whereNotIn(db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"), INTERNAL_TEST_CUSTOMERS);
-        }
-      })
+      .whereNull('paid_at')
+      .whereNotIn('status', ['draft', 'void'])
+      .whereRaw("due_date < ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '60 days')")
       .select(
         db.raw('COUNT(*) as count'),
-        db.raw('SUM(GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0)) as amount'),
+        db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as amount'),
       ).first();
     const count = parseInt(overdue60?.count || 0);
     if (count > 0) {
@@ -178,9 +167,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         count,
         amount: parseFloat(overdue60.amount || 0),
         label: `${count} invoice${count === 1 ? '' : 's'} 60+ days overdue`,
-        // Not the invoice list's Overdue filter: it drops statuses this
-        // paid_at-based count keeps, so it could open short of the count.
-        href: '/admin/billing-recovery',
+        href: '/admin/invoices',
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] ar_overdue_60: ${err.message}`); }
