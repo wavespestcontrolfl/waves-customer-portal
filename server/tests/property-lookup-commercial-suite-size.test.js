@@ -77,7 +77,7 @@ describe('buildEnrichedProfile stashes a candidate but never leaks building sqft
 
   test('a suite already stamped on the record (persisted by a prior fresh lookup) is reused synchronously — no candidate at all', () => {
     const stamp = {
-      value: 1400, source: 'license_seats', confidence: 'medium',
+      value: 1400, source: 'license_seats', confidence: 'medium', unitKey: '102',
       businessName: 'Test Taco Shop', evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }], seats: 25,
     };
     const profile = buildEnrichedProfile(
@@ -92,7 +92,7 @@ describe('buildEnrichedProfile stashes a candidate but never leaks building sqft
   });
 
   test('a stamped office_retail plaza reconciles to restaurant synchronously, same as a fresh resolution', () => {
-    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop' };
+    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop', unitKey: '102' };
     const profile = buildEnrichedProfile(
       plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
     );
@@ -137,7 +137,7 @@ describe('applyCommercialSuiteSize — the async resolution', () => {
   });
 
   test('a profile whose suite was already resolved via a persisted stamp never calls the resolver either — zero network on reuse', async () => {
-    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop' };
+    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop', unitKey: '102' };
     const profile = buildEnrichedProfile(
       plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
     );
@@ -177,5 +177,23 @@ describe('a tech-verified sqft outranks the suite resolver', () => {
     const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS);
     expect(profile.homeSqFt).toBe(1650);
     expect(profile._commercialSuiteCandidate).toBeNull();
+  });
+});
+
+describe('a cached suite stamp is reused only for the unit it sized', () => {
+  test('a stamp from #104 is not reused for #102 — the resolver runs again', () => {
+    const stamp = { value: 2200, source: 'license_seats', businessName: 'Other Shop', unitKey: '104' };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+    );
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile._commercialSuiteCandidate).toEqual(expect.objectContaining({ buildingSqft: 46031 }));
+  });
+  test('an untagged legacy stamp is not reused', () => {
+    const stamp = { value: 2200, source: 'license_seats' };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+    );
+    expect(profile._commercialSuiteCandidate).not.toBeNull();
   });
 });

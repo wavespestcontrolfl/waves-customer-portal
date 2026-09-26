@@ -14,7 +14,9 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 
-const DEFAULT_TIMEOUT_MS = 30000;
+// Bounded well under the fresh lookup's own budget: with a cold DBPR
+// download (15s, once a day) the suite leg adds at most ~35s.
+const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_SEARCHES = 5;
 const MIN_ACCEPTABLE_SQFT = 300;
 const MAX_ACCEPTABLE_SQFT = 20000;

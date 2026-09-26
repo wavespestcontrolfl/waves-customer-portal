@@ -898,7 +898,10 @@ async function performPropertyLookupCore(address, options = {}) {
   // every later cache hit from upgrading to a license/listing size until
   // the row expires.
   if (PERSISTED_SUITE_SIZE_SOURCES.has(result.enriched?.suiteSize?.source) && result.propertyRecord) {
-    result.propertyRecord._commercialSuiteSize = result.enriched.suiteSize;
+    // Tagged with the unit it sized: a cached row can be served for another
+    // unit of the same record (aggregate rows), and one bay's size must
+    // never be reused for its neighbor.
+    result.propertyRecord._commercialSuiteSize = { ...result.enriched.suiteSize, unitKey: suiteUnitKey(address) };
   }
 
   // Clean up internal fields before sending to client
@@ -1744,7 +1747,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     if (suiteSubpremiseSignal && suitePartBuildingEvidence && !sqftVerified) {
       const commercialSuiteBuildingSqft = rc?.squareFootage || null;
       const stamp = rc?._commercialSuiteSize;
-      if (stamp && Number(stamp.value) > 0) {
+      if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)) {
         resolvedCommercialSuiteSize = stamp;
       } else {
         commercialSuiteCandidate = {
@@ -2495,6 +2498,20 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
 // (see buildResultFromCachedLookup) — the DBPR leg is cheap once its 24h
 // in-process cache is warm, but a multi-second web-search call on every
 // cache hit would defeat the point of caching.
+// The unit an address names, compared designator-free ("Unit 102" ===
+// "#102"). Null when the address names no unit.
+function suiteUnitKey(address) {
+  try {
+    const { parseRawAddress, splitStreetLineUnitParts } = require('../utils/address-normalizer');
+    const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
+    const parsed = parseRawAddress(address) || {};
+    const { unit } = splitStreetLineUnitParts(parsed.line1 || address || '');
+    return normalizeUnitValue(unit);
+  } catch {
+    return null;
+  }
+}
+
 const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats', 'commercial_listing']);
 
 async function applyCommercialSuiteSize(profile, opts = {}) {

@@ -83,7 +83,7 @@ test('a persisting run (default) stamps the SAME suite size onto the cached prop
   // The exact object saveLookup serializes (JSON.stringify(record) in the
   // real implementation) carries the stamp — a cache hit of this address
   // can reuse it with zero network calls.
-  expect(savedResult.propertyRecord._commercialSuiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats' }));
+  expect(savedResult.propertyRecord._commercialSuiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats', unitKey: '102' }));
 });
 
 test('a type-default guess is NOT pinned to the cache row, so a later lookup can upgrade it', async () => {

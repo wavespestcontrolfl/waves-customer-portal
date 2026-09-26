@@ -398,6 +398,7 @@ module.exports = {
   normalizeStreetName,
   parseAddressLine,
   matchDbprRow,
+  normalizeUnitValue,
   seatsToSqft,
   resolveViaDbprLicense,
   loadDistrictRows,
