@@ -56,6 +56,32 @@ describe('resolveLibraryMatch', () => {
   });
 });
 
+describe('an unresolved risky runner-up (owner ruling 2026-09-26)', () => {
+  const pick = (over = {}) => ({ best_match: 'ghost ant', alternates: ['subterranean termite'], category: 'insect', confidence: 'high', confidence_score: 0.95, distinguishing_features: ['pale legs'], not_a_pest: false, observations: 'small pale ants', ...over });
+
+  test('a second look that never came back leaves the photo unresolved, never a named species', () => {
+    const gemini = pick();
+    const unresolved = _test.riskyRunnerUps(gemini);
+    expect(unresolved.map((entry) => entry.slug)).toEqual(['subterranean-termite']);
+    const photo = _test.resolvePhoto({ openai: null, gemini, unresolved });
+    expect(photo).toMatchObject({ entry: null, confidence: 'low', agreement: 'unresolved' });
+    expect(photo.alternate_slugs).toEqual(expect.arrayContaining(['ghost-ant', 'subterranean-termite']));
+  });
+
+  test('one unresolved photo makes the whole upload a generic, inspection-first consultation', () => {
+    const clean = mergeModelResults(null, pick({ alternates: [] }));
+    const open = _test.resolvePhoto({ openai: null, gemini: pick(), unresolved: _test.riskyRunnerUps(pick()) });
+    const identification = _test.aggregateIdentification([clean, open]);
+    expect(identification).toMatchObject({ entry: null, unresolved: true });
+    const contract = buildPestReportContract({ ...clean, identification });
+    expect(publicIdentificationLabel(contract).specificity).toBe('generic');
+    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
+    expect(contract.urgency).toBe('moderate');
+    expect(contract.safety).toEqual({ stinging: false, venomous: false, disease_vector: false, structural_threat: false });
+    expect(buildPestTeaser(contract)).toMatchObject({ identified_specific: false, safety_flag: false });
+  });
+});
+
 describe('mergeModelResults', () => {
   const claude = (over = {}) => ({ best_match: 'ghost ant', alternates: [], category: 'insect', confidence: 'high', distinguishing_features: ['pale legs'], not_a_pest: false, observations: 'small pale ants trailing', ...over });
 
@@ -66,200 +92,11 @@ describe('mergeModelResults', () => {
     expect(merged.agreement).toBe('match');
   });
 
-  test('same-group disagreement keeps ONLY the group at low confidence, no species entry', () => {
+  test('same-group disagreement keeps the group at low confidence', () => {
     const merged = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    expect(merged.entry).toBeNull();
-    expect(merged.group).toBe('ants');
-    expect(merged.category).toBe('insect');
+    expect(merged.entry.group).toBe('ants');
     expect(merged.confidence).toBe('low');
     expect(merged.agreement).toBe('group');
-  });
-
-  // Codex #4865 r1: a ghost-ant/fire-ant split between Gemini and OpenAI must
-  // not publish either species' safety flags, urgency or service.
-  test('a same-group split reaches egress as the group only, with no disputed species facts', () => {
-    const merged = mergeModelResults(claude({ confidence: 'moderate' }), claude({ best_match: 'fire ant', confidence: 'high' }));
-    const contract = buildPestReportContract({ ...merged, identification: _test.aggregateIdentification([merged]) });
-    expect(contract.identification).toMatchObject({ slug: null, group: 'ants', category: 'insect', confidence: 'low' });
-    // Only what both ants share: fire ant's sting is not claimed, the lower
-    // urgency stands, and both route to the same general pest service.
-    expect(contract.safety).toEqual({ stinging: false, venomous: false, disease_vector: false, structural_threat: false });
-    expect(contract.urgency).toBe('moderate');
-    expect(contract.service).toMatchObject({ line: 'pest', key: 'pest', inspection_required: false });
-    expect(publicIdentificationLabel(contract)).toEqual({ label: 'an ant species', hedged: true, specificity: 'generic' });
-    expect(buildPestTeaser(contract)).toMatchObject({ identified_teaser: 'We identified an ant species.', identified_specific: false, safety_flag: false });
-  });
-
-  // Codex #4865 r3: a split between two species of a hazardous group keeps
-  // every hazard they share instead of reading as "no emergency".
-  test('a termite split keeps the shared structural hazard, urgency and inspection-first service', () => {
-    const split = mergeModelResults(claude({ best_match: 'subterranean termite' }), claude({ best_match: 'drywood termite' }));
-    expect(split).toMatchObject({ entry: null, group: 'termites', agreement: 'group' });
-    const contract = buildPestReportContract({ ...split, identification: _test.aggregateIdentification([split]) });
-    expect(contract.safety.structural_threat).toBe(true);
-    expect(contract.urgency).toBe('high');
-    expect(contract.service).toMatchObject({ line: 'termite', key: null, inspection_required: true });
-    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
-    expect(report.identified.label).toBe('signs consistent with termite activity');
-    expect(report.safety.structural_threat).toBe(true);
-    expect(report.next_step).not.toMatch(/No emergency/);
-    expect(report.recommendation.note).toMatch(/termite activity/);
-    expect(buildPestTeaser(contract).safety_flag).toBe(true);
-  });
-
-  // Pre-push audit on #4865 r4: a split that doesn't include the other
-  // photo's species disputes it, and the disputed answer keeps only what all
-  // candidates share — inspection-first included.
-  test('a split without the winner disputes it and the report keeps only shared facts', () => {
-    const ghost = mergeModelResults(null, claude());
-    const carpenterFire = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude({ best_match: 'fire ant' }));
-    const identification = _test.aggregateIdentification([ghost, carpenterFire]);
-    expect(identification.contested).toBe(true);
-    const contract = buildPestReportContract({ ...ghost, identification });
-    expect(publicIdentificationLabel(contract).specificity).toBe('generic');
-    expect(contract.service.inspection_required).toBe(true);
-    expect(contract.safety.stinging).toBe(false);
-    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
-    expect(report.safety.stinging).toBe(false);
-    expect(report.recommendation.inspection_required).toBe(true);
-  });
-
-  test('a cross-group conflict photo keeps both candidates, so the dispute falls back to inspection-first', () => {
-    const ghost = mergeModelResults(null, claude());
-    const antVsTermite = mergeModelResults(claude({ best_match: 'subterranean termite' }), claude());
-    expect(antVsTermite).toMatchObject({ agreement: 'conflict', entry: null });
-    const identification = _test.aggregateIdentification([ghost, antVsTermite]);
-    expect(identification.contested).toBe(true);
-    const contract = buildPestReportContract({ ...ghost, identification });
-    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
-    expect(contract.safety.structural_threat).toBe(false);
-  });
-
-  test('a conflict with an unlisted name leaves the service unknown: inspection-first consultation', () => {
-    const ghost = mergeModelResults(null, claude());
-    const ghostVsUnlisted = mergeModelResults(claude({ best_match: 'white-footed ant' }), claude());
-    const identification = _test.aggregateIdentification([ghost, ghostVsUnlisted]);
-    const contract = buildPestReportContract({ ...ghost, identification });
-    expect(contract.service).toMatchObject({ label: 'Pest Consultation', key: null, inspection_required: true });
-  });
-
-  test('a lone cross-group conflict keeps the facts its candidates share (Codex #4865 r5)', () => {
-    const antVsTermite = mergeModelResults(claude({ best_match: 'subterranean termite' }), claude());
-    const identification = _test.aggregateIdentification([antVsTermite]);
-    expect(identification).toMatchObject({ entry: null, group: null });
-    const contract = buildPestReportContract({ ...antVsTermite, identification });
-    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
-    expect(contract.urgency).toBe('moderate');
-    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
-    expect(report.next_step).not.toMatch(/No emergency/);
-  });
-
-  test('a split that includes the winner stays an inconclusive photo, not a dispute', () => {
-    const ghost = mergeModelResults(null, claude());
-    const ghostFire = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    expect(_test.aggregateIdentification([ghost, ghostFire])).toMatchObject({ contested: false, confidence: 'moderate' });
-  });
-
-  test('an inconclusive split still carries its inspection requirement, unpriced (carpenter/ghost split + ghost photo)', () => {
-    const ghost = mergeModelResults(null, claude());
-    const carpenterGhost = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
-    const identification = _test.aggregateIdentification([ghost, carpenterGhost]);
-    expect(identification.contested).toBe(false);
-    const contract = buildPestReportContract({ ...ghost, identification });
-    expect(contract.service).toMatchObject({ inspection_required: true, key: null });
-  });
-
-  test('a split that needs an inspection is never auto-priced (Codex #4865 r6)', () => {
-    const split = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
-    const contract = buildPestReportContract({ ...split, identification: _test.aggregateIdentification([split]) });
-    expect(contract.service).toMatchObject({ inspection_required: true, key: null });
-  });
-
-  test('a risky runner-up whose second look never came back keeps the pick disputed (Codex #4865 r6)', () => {
-    const gemini = claude({ alternates: ['subterranean termite'] });
-    const [termite] = _test.riskyRunnerUps(gemini);
-    expect(termite.slug).toBe('subterranean-termite');
-    const unresolved = mergeModelResults(null, gemini, { unresolved: [termite] });
-    expect(unresolved).toMatchObject({ entry: null, agreement: 'conflict', confidence: 'low' });
-    const contract = buildPestReportContract({ ...unresolved, identification: _test.aggregateIdentification([unresolved]) });
-    expect(publicIdentificationLabel(contract).specificity).toBe('generic');
-    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
-  });
-
-  test('a mixed no-vote batch is never "nothing to worry about" unless every photo says so (Codex #4865 r6)', () => {
-    const harmless = mergeModelResults(null, claude({ best_match: 'something harmless', category: 'not_a_pest', not_a_pest: true }));
-    const antSplit = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    expect(_test.aggregateIdentification([harmless, antSplit]).category).not.toBe('not_a_pest');
-  });
-
-  test('a named answer keeps its own species\' hazards (fire ant photo + fire/ghost split)', () => {
-    const fire = mergeModelResults(null, claude({ best_match: 'fire ant' }));
-    const fireGhost = mergeModelResults(claude({ best_match: 'fire ant' }), claude());
-    const identification = _test.aggregateIdentification([fire, fireGhost]);
-    expect(identification.contested).toBe(false);
-    const contract = buildPestReportContract({ ...fire, identification });
-    expect(publicIdentificationLabel(contract).specificity).toBe('named');
-    expect(contract.safety.stinging).toBe(true);
-    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
-    expect(report.safety.stinging).toBe(true);
-    expect(buildPestTeaser(contract).safety_flag).toBe(true);
-  });
-
-  test('a clean winner with only a blurry extra photo keeps its own facts', () => {
-    const ghost = mergeModelResults(null, claude());
-    const blurry = mergeModelResults(null, claude({ best_match: 'unidentifiable', category: 'other', confidence: 'low' }));
-    const identification = _test.aggregateIdentification([ghost, blurry]);
-    const contract = buildPestReportContract({ ...ghost, identification });
-    const ghostEntry = _test.LIBRARY_BY_SLUG.get('ghost-ant');
-    expect(contract.safety).toEqual(ghostEntry.safety);
-    expect(contract.urgency).toBe(ghostEntry.urgency);
-    expect(contract.service).toMatchObject({ key: ghostEntry.service_key, inspection_required: ghostEntry.inspection_required });
-  });
-
-  test('a split keeps inspection-first when either candidate needs it (carpenter ant vs ghost ant)', () => {
-    const split = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
-    const contract = buildPestReportContract({ ...split, identification: _test.aggregateIdentification([split]) });
-    expect(contract.service).toMatchObject({ line: 'pest', inspection_required: true });
-  });
-
-  test('two stinging species keep the sting; photos of different pairs keep only what all share', () => {
-    const wasps = mergeModelResults(claude({ best_match: 'paper wasp' }), claude({ best_match: 'yellowjacket' }));
-    expect(buildPestReportContract({ ...wasps, identification: _test.aggregateIdentification([wasps]) }).safety.stinging).toBe(true);
-    const ghostFire = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    const ghostBighead = mergeModelResults(claude(), claude({ best_match: 'bigheaded ant' }));
-    const identification = _test.aggregateIdentification([ghostFire, ghostBighead]);
-    expect(identification.group).toBe('ants');
-    expect(identification.shared.safety.stinging).toBe(false);
-  });
-
-  test('a group survives cross-photo aggregation only when every photo agrees on it', () => {
-    const split = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    const blurry = { entry: null, group: undefined, confidence: 'low', category: 'other' };
-    const roachSplit = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'german cockroach' }));
-    expect(_test.aggregateIdentification([split, blurry]).group).toBe('ants');
-    expect(_test.aggregateIdentification([split, roachSplit]).group).toBeNull();
-    // A cross-group model conflict is a disagreement, not a blurry photo.
-    const roachSpiderConflict = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'wolf spider', category: 'arachnid' }));
-    expect(roachSpiderConflict).toMatchObject({ agreement: 'conflict', category: 'other' });
-    expect(_test.aggregateIdentification([split, roachSpiderConflict]).group).toBeNull();
-  });
-
-  test('a photo whose two models disagreed disputes a species winner from another photo', () => {
-    const ghost = mergeModelResults(null, claude());
-    const ghostVsUnlisted = mergeModelResults(claude({ best_match: 'white-footed ant' }), claude({ confidence: 'moderate' }));
-    expect(ghostVsUnlisted.agreement).toBe('conflict');
-    const identification = _test.aggregateIdentification([ghost, ghostVsUnlisted]);
-    expect(identification.contested).toBe(true);
-    const contract = buildPestReportContract({ ...ghost, identification });
-    expect(publicIdentificationLabel(contract)).toMatchObject({ label: 'an ant species', specificity: 'generic' });
-  });
-
-  test('a group-only photo from another group disputes a species winner', () => {
-    const ghost = mergeModelResults(null, claude());
-    const roachSplit = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'german cockroach' }));
-    const antSplit = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    expect(_test.aggregateIdentification([ghost, roachSplit]).contested).toBe(true);
-    expect(_test.aggregateIdentification([ghost, antSplit])).toMatchObject({ contested: false, confidence: 'moderate' });
   });
 
   test('cross-group disagreement collapses to category-generic', () => {

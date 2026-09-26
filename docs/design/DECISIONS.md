@@ -2599,9 +2599,12 @@ assessments, the customer app) each photo is read by Gemini, and the same
 photo goes to OpenAI only when Gemini misses, scores its own answer below
 `PHOTO_ID_ESCALATE_BELOW` (default 0.80), or names a runner-up whose risk
 differs from its pick (an ant with a termite, a beneficial with a stinging
-insect). Providers run sequentially per photo; photos run side by side. Two
-answers merge under the existing rule: agreement keeps the lower confidence,
-a disagreement keeps only the shared group or category, and a lone answer is
-downgraded a notch. It supersedes the 2026-09-24 "Claude only when Gemini
+insect). Providers run sequentially per photo; photos run side by side. The
+second look's answer decides ("hand it to ChatGPT"): when both models name
+the same species the agreement keeps the lower confidence, otherwise the
+second look is the lone answer, downgraded a notch as every lone answer is.
+A second look requested for a risky runner-up that never comes back leaves
+the upload unresolved: no species is named and the report is a generic,
+inspection-first consultation. It supersedes the 2026-09-24 "Claude only when Gemini
 returns nothing" rule for this lane only; lawn and tree & shrub scoring keep
 it until they move to the photo ID v2 engine.

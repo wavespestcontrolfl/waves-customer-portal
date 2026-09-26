@@ -5,9 +5,10 @@
  * pest-identifier funnel, the SMS photo triage, the admin assessment view and
  * the customer app. Owner ruling 2026-09-26 (TEXT_POLICIES.photoIdVision):
  * each photo goes to Gemini 3.8 Flash first; when Gemini misses, is unsure
- * (confidence_score below PHOTO_ID_ESCALATE_BELOW, default 0.80) or names a
- * pest whose risky look-alike it also lists, the same photo goes to ChatGPT's
- * best vision model (OPENAI_FRONTIER). Sequential, never parallel, no Claude.
+ * (confidence_score below PHOTO_ID_ESCALATE_BELOW, default 0.80) or lists a
+ * runner-up of different risk, the same photo is handed to ChatGPT's best
+ * vision model (OPENAI_FRONTIER), whose answer decides. Sequential, never
+ * parallel, no Claude.
  *
  * Trust model mirrors the lawn diagnostic stack:
  *  - Model output NEVER reaches a prospect directly. Every customer-facing
@@ -16,15 +17,17 @@
  *  - Confidence gates naming: only a high-confidence, library-matched,
  *    model-agreeing ID names a pest plainly; moderate reads "likely", low
  *    reads as a category ("an ant species") with an in-person confirm. A
- *    single-model result (Gemini alone, or OpenAI alone after a Gemini miss)
- *    always goes through mergeModelResults' single_model path, which
- *    downgrades confidence a notch — so one model alone can never read "high".
+ *    lone answer (Gemini when sure, or the second look when Gemini wasn't)
+ *    goes through mergeModelResults' single_model path, which downgrades
+ *    confidence a notch — so one model alone can never read "high".
+ *  - A second look asked for because of a risky runner-up that never came
+ *    back leaves the photo unresolved: the whole result is a generic,
+ *    inspection-first consultation.
  *  - Termite/WDO photo ID is SUGGESTIVE ONLY: the library forces
  *    inspection_required and copy that routes to a free inspection. Photo ID
  *    must never read like a WDO inspection finding.
  *
- * Vision does NOT route through llm/deep.js (DEEP is text-only lanes).
- */
+ * Vision does NOT route through llm/deep.js (DEEP is text-only lanes). */
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
@@ -375,7 +378,7 @@ Rules:
 - Never invent species not plausible in Florida.`;
 
 // Codex P1 class (#4730 r1, lawn-assessment): a parseable but empty response
-// (`{}`) is still a truthy object and would skip the escalation. Require
+// (`{}`) is still a truthy object and would skip the second look. Require
 // the three fields the merge actually reads before accepting a model's answer.
 function isValidPestIdentification(parsed) {
   if (!parsed || typeof parsed !== 'object') return false;
@@ -483,12 +486,8 @@ async function callGeminiVision(base64Image, mimeType) {
 
 const CONFIDENCE_RANK = { low: 0, moderate: 1, high: 2 };
 
-// The prompt's sentinel for a photo too blurry, dark or distant to read, plus
-// the plain variants a model uses for it. Anything else is a named answer.
-const UNIDENTIFIABLE_ANSWERS = new Set(['unidentifiable', 'unknown', 'unclear', 'not identifiable', 'cannot identify']);
-
 // Owner ruling 2026-09-26: a Gemini answer scored below this goes to ChatGPT's
-// best vision model too. Read per call; a missing or bad value means 0.80.
+// best vision model. Read per call; a missing or bad value means 0.80.
 const DEFAULT_ESCALATE_BELOW = 0.8;
 
 function escalateBelow() {
@@ -497,7 +496,7 @@ function escalateBelow() {
 }
 
 // Each risk dimension separately, so two hazards of different kinds (fire ant
-// vs termite) still read as a different risk (Codex #4865 r3).
+// vs termite) still read as a different risk.
 function riskProfile(entry) {
   if (!entry) return 'none';
   const { stinging, venomous, structural_threat: structural, disease_vector: disease } = entry.safety;
@@ -528,39 +527,6 @@ function needsSecondLook(result) {
   return !sure || riskyRunnerUps(result).length > 0;
 }
 
-const URGENCY_RANK = { low: 0, moderate: 1, high: 2 };
-
-// What stays true whichever of the candidates it really is: a safety flag
-// only if every candidate has it, the lowest urgency, and the service only
-// when every candidate routes to the same one (inspection-first if any is). A group-only answer carries
-// these instead of one disputed species' facts (Codex #4865 r3).
-function sharedFacts(list) {
-  const [first] = list;
-  const safety = {};
-  for (const key of Object.keys(first.safety)) safety[key] = list.every((facts) => !!facts.safety[key]);
-  const urgency = list.reduce((lowest, facts) => (URGENCY_RANK[facts.urgency] < URGENCY_RANK[lowest] ? facts.urgency : lowest), first.urgency);
-  const sameService = first.service && list.every((facts) => facts.service
-    && facts.service.line === first.service.line && facts.service.key === first.service.key && facts.service.label === first.service.label);
-  // Inspection stays required if ANY candidate needs it: an unresolved
-  // carpenter-ant/ghost-ant split must not skip the carpenter ant's
-  // inspection-first path (Codex #4865 r4).
-  // An unresolved answer that needs an inspection is never auto-priced
-  // (Codex #4865 r6).
-  const inspection = sameService && list.some((facts) => facts.service.inspection_required);
-  const service = sameService
-    ? { ...first.service, inspection_required: inspection, key: inspection ? null : first.service.key }
-    : null;
-  return { safety, urgency, service };
-}
-
-function entryFacts(entry) {
-  return {
-    safety: entry.safety,
-    urgency: entry.urgency,
-    service: { line: entry.service_line, key: entry.service_key, label: entry.service_label, inspection_required: entry.inspection_required },
-  };
-}
-
 function downgrade(confidence) {
   const rank = Math.max(0, (CONFIDENCE_RANK[confidence] ?? 0) - 1);
   return CONFIDENCES[rank];
@@ -576,13 +542,15 @@ function lowerConfidenceOf(a, b) {
  * Merge one photo's model result(s) into a single per-photo identification.
  * Agreement (same library slug) keeps the ID at the models' LOWER confidence;
  * one-model-only results are downgraded a notch; slug disagreement collapses
- * to the shared group, or a category-level result, at low confidence. Two
- * results arrive when Gemini answered but needed a second look (analyzePhoto);
- * one when Gemini was sure, or missed and OpenAI answered alone. Raw model
- * text is preserved only for the internal record, never for egress.
+ * to a category-level result at low confidence. resolvePhoto only hands this
+ * two results when both models named the same library species — otherwise
+ * one decisive answer — so the single_model and match branches are the live
+ * paths; the disagreement branches are kept for this function's own shape and
+ * any direct caller that passes both. Raw model text is preserved only for
+ * the internal record, never for egress.
  */
-function mergeModelResults(openai, gemini, { unresolved = [] } = {}) {
-  const results = [openai, gemini].filter(Boolean);
+function mergeModelResults(secondLook, gemini) {
+  const results = [secondLook, gemini].filter(Boolean);
   if (!results.length) return null;
 
   const resolved = results.map((r) => ({
@@ -608,49 +576,26 @@ function mergeModelResults(openai, gemini, { unresolved = [] } = {}) {
       return { ...base, entry: a.match, confidence: lowerConfidenceOf(a.confidence, b.confidence), category: a.match.category, agreement: 'match' };
     }
     if (a.match && b.match) {
-      // Same group (e.g. two different ant species) keeps ONLY the group: no
-      // species entry, so neither disputed species' safety flags, urgency or
-      // service reach the report (Codex #4865 r1). Different groups entirely
-      // collapse to category-generic.
+      // Same group (e.g. two different ant species) keeps the group at reduced
+      // confidence; different groups entirely collapse to category-generic.
       if (a.match.group === b.match.group) {
-        const category = a.match.category === b.match.category ? a.match.category : 'other';
-        const shared = sharedFacts([entryFacts(a.match), entryFacts(b.match)]);
-        return { ...base, entry: null, group: a.match.group, candidates: [a.match, b.match], shared, confidence: 'low', category, agreement: 'group' };
+        const preferred = CONFIDENCE_RANK[a.confidence] >= CONFIDENCE_RANK[b.confidence] ? a.match : b.match;
+        return { ...base, entry: preferred, confidence: 'low', category: preferred.category, agreement: 'group' };
       }
       const category = a.category === b.category ? a.category : 'other';
-      return { ...base, entry: null, candidates: [a.match, b.match], confidence: 'low', category, agreement: 'conflict' };
+      return { ...base, entry: null, confidence: 'low', category, agreement: 'conflict' };
     }
     const single = a.match ? a : (b.match ? b : null);
     if (single) {
-      // One model named a library species, the other did not. Only the
-      // prompt's explicit "unidentifiable" answer leaves that species
-      // standing; any named alternative, a not-a-pest call or another
-      // category disagrees with it and collapses like any conflict
-      // (Codex #4865 r2 + pre-push audit).
-      const other = single === a ? b : a;
-      if (UNIDENTIFIABLE_ANSWERS.has(normalizeName(other.raw.best_match))) {
-        return { ...base, entry: single.match, confidence: downgrade(single.confidence), category: single.match.category, agreement: 'single_model' };
-      }
-      const otherCategory = other.notAPest ? 'not_a_pest' : other.category;
-      const category = otherCategory === single.match.category ? otherCategory : 'other';
-      // The other side named something outside the library: an unknown
-      // candidate, so no service can be derived from the known one alone.
-      return { ...base, entry: null, candidates: [single.match], unknownCandidate: true, confidence: 'low', category, agreement: 'conflict' };
+      return { ...base, entry: single.match, confidence: downgrade(single.confidence), category: single.match.category, agreement: 'single_model' };
     }
     const category = a.category === b.category ? a.category : 'other';
     const notAPest = a.notAPest && b.notAPest;
     return { ...base, entry: null, confidence: 'low', category: notAPest ? 'not_a_pest' : category, agreement: 'unmatched' };
   }
 
-  // One model only (the other unavailable): downgrade its confidence. When
-  // the missing second look was asked for because of a risky runner-up, that
-  // runner-up is still a candidate: the pick is disputed, not confirmed.
+  // One model only (the other unavailable): downgrade its confidence.
   const only = resolved[0];
-  if (only.match && unresolved.length) {
-    const candidates = [only.match, ...unresolved.filter((entry) => entry.slug !== only.match.slug)];
-    const category = candidates.every((entry) => entry.category === only.match.category) ? only.match.category : 'other';
-    return { ...base, entry: null, candidates, confidence: 'low', category, agreement: 'conflict' };
-  }
   if (only.match) {
     return { ...base, entry: only.match, confidence: downgrade(only.confidence), category: only.match.category, agreement: 'single_model' };
   }
@@ -668,6 +613,14 @@ function mergeModelResults(openai, gemini, { unresolved = [] } = {}) {
  * plainly-named species.
  */
 function aggregateIdentification(perPhoto) {
+  // A photo whose risky runner-up was never ruled out leaves the whole upload
+  // unresolved: no species is named and the report is the generic,
+  // inspection-first consultation (buildPestReportContract).
+  const open = perPhoto.find((result) => result.agreement === 'unresolved');
+  if (open) {
+    return { entry: null, confidence: 'low', category: open.category, contested: true, unresolved: true };
+  }
+
   const votes = new Map();
   for (const result of perPhoto) {
     if (!result.entry) continue;
@@ -680,21 +633,10 @@ function aggregateIdentification(perPhoto) {
   if (!votes.size) {
     const categories = perPhoto.map((r) => r.category);
     const notAPest = categories.every((c) => c === 'not_a_pest');
-    // A group survives only when every photo agrees on it (or showed nothing
-    // usable): two models that split on the species still agree it's an ant.
-    const groups = [...new Set(perPhoto.map((r) => r.group).filter(Boolean))];
-    const group = groups.length === 1
-      && perPhoto.every((r) => r.group === groups[0] || (r.category === 'other' && r.agreement !== 'conflict'))
-      ? groups[0] : null;
-    // No agreed species anywhere: every species the photos put forward (both
-    // sides of a split or a cross-group conflict) still decides the facts,
-    // so an ant/termite conflict keeps inspection-first (Codex #4865 r5).
     return {
       entry: null,
-      group,
-      shared: candidateEntries(perPhoto).length ? disputedFacts(perPhoto) : null,
       confidence: 'low',
-      category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other' && c !== 'not_a_pest') || 'other'),
+      category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
       contested: false,
     };
   }
@@ -702,88 +644,67 @@ function aggregateIdentification(perPhoto) {
   const ranked = [...votes.values()].sort((x, y) => y.count - x.count || CONFIDENCE_RANK[y.best] - CONFIDENCE_RANK[x.best]);
   const winner = ranked[0];
   const unmatched = perPhoto.filter((result) => !result.entry);
-  // A photo whose two models disagreed disputes the winner too: an explicit
-  // conflict is never read as an inconclusive photo (pre-push audit, #4865 r2).
-  // A group-only photo whose two candidates don't include the winner disputes
-  // it too (pre-push audit on #4865 r4).
-  const contradicting = unmatched.some((result) => result.agreement === 'conflict'
-    || result.category === 'not_a_pest'
-    || (result.category !== 'other' && result.category !== winner.entry.category)
-    || (result.group && result.group !== winner.entry.group)
-    || (result.agreement === 'group' && !(result.candidates || []).some((entry) => entry.slug === winner.entry.slug)));
+  const contradicting = unmatched.some((result) => result.category === 'not_a_pest'
+    || (result.category !== 'other' && result.category !== winner.entry.category));
   const inconclusive = unmatched.length > 0 && !contradicting;
   const contested = ranked.length > 1 || contradicting;
-  // A disputed answer never publishes the winner's own facts: it carries only
-  // what every candidate species shares (inspection-first if any needs it),
-  // including both sides of every split or conflict. When any photo's models
-  // disagreed with an unlisted name, the service is unknown and falls back to
-  // the inspection-first consultation.
   return {
     entry: winner.entry,
     confidence: (contested || inconclusive) ? lowerConfidenceOf(winner.best, 'moderate') : winner.best,
     category: winner.entry.category,
     contested,
-    // A contested answer is published generically, so it carries only what
-    // every candidate shares. A named answer keeps its own species' facts,
-    // but an inspection-first candidate in any photo keeps the inspection.
-    shared: contested ? disputedFacts(perPhoto) : (unmatched.length ? namedFacts(winner.entry, perPhoto) : null),
   };
-}
-
-function namedFacts(entry, perPhoto) {
-  const facts = entryFacts(entry);
-  const inspection = candidateEntries(perPhoto).some((candidate) => candidate.inspection_required);
-  if (!inspection || facts.service.inspection_required) return facts;
-  // Another candidate needs an inspection: keep it, and don't auto-price.
-  return { ...facts, service: { ...facts.service, inspection_required: true, key: null } };
-}
-
-function disputedFacts(perPhoto) {
-  const known = candidateEntries(perPhoto);
-  const facts = sharedFacts(known.map(entryFacts));
-  return perPhoto.some((result) => result.unknownCandidate) ? { ...facts, service: null } : facts;
-}
-
-// Every library species any photo put forward: agreed/lone picks and both
-// sides of a same-group split. Unique by slug.
-function candidateEntries(perPhoto) {
-  const seen = new Map();
-  for (const result of perPhoto) {
-    for (const entry of [result.entry, ...(result.candidates || [])]) {
-      if (entry && !seen.has(entry.slug)) seen.set(entry.slug, entry);
-    }
-  }
-  return [...seen.values()];
 }
 
 /**
  * Analyze one photo — Gemini first; ChatGPT's best vision model second, only
  * when Gemini missed or needsSecondLook says so (owner ruling 2026-09-26).
- * Returns { openai, gemini } with an unused side null — the pair
- * mergeModelResults takes.
+ * `unresolved` lists the risky runner-ups a second look was asked to settle
+ * but couldn't, because it never came back.
  */
 async function analyzePhoto(base64Image, mimeType) {
   const gemini = await callGeminiVision(base64Image, mimeType);
   const openai = !gemini || needsSecondLook(gemini) ? await callOpenAIVision(base64Image, mimeType) : null;
-  // A second look asked for because of a risky runner-up, that never came
-  // back, leaves that runner-up unresolved (Codex #4865 r6).
   const unresolved = gemini && !openai ? riskyRunnerUps(gemini) : [];
   return { openai, gemini, unresolved };
 }
 
 /**
+ * One decisive read per photo. When both models named the same library
+ * species the agreement stands; otherwise the second look's answer decides,
+ * as a lone answer (downgraded a notch). With no second look, Gemini's answer
+ * is the lone answer — unless it left a risky runner-up unresolved, which
+ * marks the photo 'unresolved'.
+ */
+function resolvePhoto({ openai, gemini, unresolved = [] }) {
+  if (openai && gemini) {
+    const second = resolveLibraryMatch(openai.best_match);
+    const first = resolveLibraryMatch(gemini.best_match);
+    return second && first && second.slug === first.slug
+      ? mergeModelResults(openai, gemini)
+      : mergeModelResults(openai, null);
+  }
+  if (openai) return mergeModelResults(openai, null);
+  if (!gemini) return null;
+  const lone = mergeModelResults(null, gemini);
+  if (!unresolved.length) return lone;
+  const differentials = [lone.entry && lone.entry.slug, ...unresolved.map((entry) => entry.slug), ...lone.alternate_slugs];
+  return { ...lone, entry: null, confidence: 'low', agreement: 'unresolved', alternate_slugs: [...new Set(differentials.filter(Boolean))] };
+}
+
+/**
  * Identify from a set of photos (the funnel sends 1–5 of the same subject).
- * Per-photo Gemini-first vision with the OpenAI second look, then a
- * cross-photo vote: the most-supported library entry wins; cross-photo
- * disagreement caps confidence at moderate. Photos are independent reads and
- * run side by side, so one photo's escalation doesn't delay the others.
+ * Per-photo Gemini-first vision with the second look, then a cross-photo
+ * vote: the most-supported library entry wins; cross-photo disagreement caps
+ * confidence at moderate. Photos are independent reads and run side by side,
+ * so one photo's second look doesn't delay the others.
  */
 async function identifyPest(photos = []) {
   const usable = photos.filter((p) => p && p.data);
   if (!usable.length) return { ok: false, reason: 'no_photos' };
 
   const analyses = await Promise.all(usable.map((photo) => analyzePhoto(photo.data, photo.mimeType || 'image/jpeg')));
-  const perPhoto = analyses.map(({ openai, gemini, unresolved }) => mergeModelResults(openai, gemini, { unresolved })).filter(Boolean);
+  const perPhoto = analyses.map(resolvePhoto).filter(Boolean);
 
   if (!perPhoto.length) return { ok: false, reason: 'vision_unavailable' };
 
@@ -795,9 +716,7 @@ async function identifyPest(photos = []) {
     perPhoto,
     observations: [...new Set(perPhoto.flatMap((r) => r.observations))].slice(0, 6),
     distinguishing_features: [...new Set(perPhoto.flatMap((r) => r.distinguishing_features))].slice(0, 10),
-    // Disputed candidates (both sides of a split or conflict) are the most
-    // useful differentials for staff (Codex #4865 r7).
-    alternate_slugs: [...new Set(perPhoto.flatMap((r) => [...(r.candidates || []).map((entry) => entry.slug), ...r.alternate_slugs]))].filter(
+    alternate_slugs: [...new Set(perPhoto.flatMap((r) => r.alternate_slugs))].filter(
       (slug) => slug !== (identification.entry && identification.entry.slug),
     ).slice(0, 4),
   };
@@ -808,27 +727,22 @@ async function identifyPest(photos = []) {
 function buildPestReportContract(result) {
   const { identification, observations, distinguishing_features: features, alternate_slugs: alternates } = result;
   const item = identification.entry;
-  // A group-only or contested answer carries the facts every candidate
-  // shares (sharedFacts) instead of one disputed species' facts; an
-  // unmatched one carries none.
-  const shared = identification.shared || null;
   return {
     contract_version: 'pest_id_v1',
     identification: {
       slug: item ? item.slug : null,
       label: item ? item.label : null,
-      group: item ? item.group : (identification.group || null),
+      group: item ? item.group : null,
       category: identification.category,
       confidence: identification.confidence,
       contested: !!identification.contested,
     },
-    safety: shared ? shared.safety : (item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false }),
-    urgency: shared ? shared.urgency : (item ? item.urgency : 'low'),
-    service: shared
-      ? (shared.service || { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true })
-      : (item
-        ? { line: item.service_line, key: item.service_key, label: item.service_label, inspection_required: item.inspection_required }
-        : { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true }),
+    safety: item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false },
+    // An unresolved upload is not "no emergency": a risky runner-up is still open.
+    urgency: item ? item.urgency : (identification.unresolved ? 'moderate' : 'low'),
+    service: item
+      ? { line: item.service_line, key: item.service_key, label: item.service_label, inspection_required: item.inspection_required }
+      : { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true },
     observations,
     distinguishing_features: features,
     alternate_slugs: alternates,
@@ -853,7 +767,7 @@ function publicIdentificationLabel(contract) {
   const ident = (contract && contract.identification) || {};
   const item = ident.slug ? LIBRARY_BY_SLUG.get(ident.slug) : null;
   if (!item) {
-    return { label: GROUP_GENERIC[ident.group] || CATEGORY_GENERIC[ident.category] || CATEGORY_GENERIC.other, hedged: true, specificity: 'generic' };
+    return { label: CATEGORY_GENERIC[ident.category] || CATEGORY_GENERIC.other, hedged: true, specificity: 'generic' };
   }
   // Conflicting cross-photo IDs never name a species, whatever the confidence.
   if (ident.contested) {
@@ -896,12 +810,7 @@ function buildPublicPestReport(row = {}) {
   const service = contract.service || {};
   const notAPest = ident.category === 'not_a_pest' || (item && item.category === 'not_a_pest');
 
-  // No species entry: the contract's own flags (all false for an unmatched
-  // answer; the shared ones for a group-only answer).
-  // The contract's own facts: the named species' for a named answer, the
-  // shared ones for a disputed or group-only answer. Older contracts stored
-  // the same values, so the library entry is only a fallback.
-  const safety = contract.safety || (item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false });
+  const safety = item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false };
   const contact = parseJson(row.contact_snapshot, {});
   const address = parseJson(row.address_snapshot, {});
   const firstName = contact.first_name
@@ -961,14 +870,13 @@ function buildPestTeaser(contract = {}) {
   const category = clampEnum(ident.category, CATEGORIES, 'other');
   const generic = item
     ? (GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category])
-    : (GROUP_GENERIC[ident.group] || CATEGORY_GENERIC[category] || CATEGORY_GENERIC.other);
-  const teaserSafety = contract.safety || (item ? item.safety : null);
+    : (CATEGORY_GENERIC[category] || CATEGORY_GENERIC.other);
   return {
     identified_teaser: `We identified ${generic}.`,
     identified_specific: Boolean(item && ident.confidence !== 'low'),
     category,
     urgency,
-    safety_flag: Boolean(teaserSafety && (teaserSafety.venomous || teaserSafety.stinging || teaserSafety.structural_threat || teaserSafety.disease_vector)),
+    safety_flag: Boolean(item && (item.safety.venomous || item.safety.stinging || item.safety.structural_threat || item.safety.disease_vector)),
   };
 }
 
@@ -992,6 +900,7 @@ module.exports = {
     aggregateIdentification,
     needsSecondLook,
     riskyRunnerUps,
+    resolvePhoto,
     LIBRARY_BY_SLUG,
     GROUP_GENERIC,
     CATEGORY_GENERIC,

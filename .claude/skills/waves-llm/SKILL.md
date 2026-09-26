@@ -159,8 +159,10 @@ a provider issue never causes a gap:
   the same photo goes to ChatGPT's best vision model (`OPENAI_FRONTIER`)
   when Gemini misses, scores itself under `PHOTO_ID_ESCALATE_BELOW` (default
   0.80), or lists a runner-up of different risk. Sequential per photo, no
-  Claude leg. Two answers merge through `mergeModelResults` (agreement keeps
-  the lower confidence; a lone answer is downgraded a notch).
+  Claude leg. The second look's answer decides (`resolvePhoto`): an agreement
+  on the same species keeps the lower confidence, otherwise it is the lone
+  answer (downgraded a notch); a risky runner-up whose second look never
+  came back makes the upload an inspection-first consultation.
   **Estimate-image ruling 2026-09-25:** `satellite-analyzer.js` and
   `property-lookup-v2.js` use `TEXT_POLICIES.estimateVision`: Gemini 3.8 Flash
   first, GPT-6 Sol only when Gemini fails or its output is invalid. No Claude,

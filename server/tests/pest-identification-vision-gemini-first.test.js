@@ -1,11 +1,13 @@
 // Owner ruling 2026-09-26 (TEXT_POLICIES.photoIdVision): pest identification
-// runs Gemini 3.8 Flash first. The same photo goes to ChatGPT's best vision
-// model (OPENAI_FRONTIER) only when Gemini misses (HTTP error / empty /
+// runs Gemini 3.8 Flash first. The same photo is handed to ChatGPT's best
+// vision model (OPENAI_FRONTIER) only when Gemini misses (HTTP error / empty /
 // unparseable / incomplete), is unsure (confidence_score under
 // PHOTO_ID_ESCALATE_BELOW, default 0.80), or lists a runner-up whose risk
-// differs from its pick. Never Claude, never both providers at once. A lone
-// result still goes through mergeModelResults' single_model downgrade, so one
-// model alone can never read "high".
+// differs from its pick — and then the second look's answer decides (an
+// agreement on the same species keeps the lower confidence). Never Claude,
+// never both providers at once. A lone answer still goes through
+// mergeModelResults' single_model downgrade, so one model alone can never
+// read "high".
 
 process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-gemini-key';
 
@@ -18,7 +20,7 @@ jest.mock('../services/llm/call', () => ({
 }));
 
 const MODELS = require('../config/models');
-const { analyzePhoto, mergeModelResults, identifyPest } = require('../services/pest-identification');
+const { analyzePhoto, mergeModelResults, identifyPest, _test } = require('../services/pest-identification');
 
 const GEMINI_ID = {
   best_match: 'ghost ant', alternates: [], category: 'insect', confidence: 'high', confidence_score: 0.92,
@@ -199,47 +201,32 @@ describe('analyzePhoto — Gemini first, ChatGPT only for a second look', () => 
   });
 });
 
-describe('merging the ladder\'s results', () => {
+describe('resolvePhoto — one decisive answer per photo', () => {
   it('a lone Gemini answer downgrades a notch, never "high"', () => {
-    const merged = mergeModelResults(null, { ...GEMINI_ID, confidence: 'high' });
-    expect(merged.agreement).toBe('single_model');
-    expect(merged.confidence).toBe('moderate');
+    const photo = _test.resolvePhoto({ openai: null, gemini: { ...GEMINI_ID, confidence: 'high' }, unresolved: [] });
+    expect(photo).toMatchObject({ agreement: 'single_model', confidence: 'moderate' });
   });
 
-  it('a lone OpenAI answer after a Gemini miss downgrades the same way', () => {
-    const merged = mergeModelResults({ ...OPENAI_ID, confidence: 'high' }, null);
-    expect(merged.agreement).toBe('single_model');
-    expect(merged.confidence).toBe('moderate');
+  it('when the models name the same species, the agreement keeps the lower confidence', () => {
+    const photo = _test.resolvePhoto({ openai: { ...GEMINI_ID, confidence: 'high' }, gemini: { ...GEMINI_ID, confidence: 'moderate' } });
+    expect(photo).toMatchObject({ agreement: 'match', confidence: 'moderate' });
+    expect(photo.entry.slug).toBe('ghost-ant');
   });
 
-  it('an unsure Gemini answer that OpenAI confirms keeps the lower confidence, without the single-model downgrade', () => {
-    const merged = mergeModelResults({ ...GEMINI_ID, confidence: 'high' }, { ...GEMINI_ID, confidence: 'moderate' });
-    expect(merged.agreement).toBe('match');
-    expect(merged.confidence).toBe('moderate');
+  it('when they differ, the second look decides, as a lone answer', () => {
+    const photo = _test.resolvePhoto({ openai: OPENAI_ID, gemini: { ...GEMINI_ID, confidence: 'moderate' } });
+    expect(photo).toMatchObject({ agreement: 'single_model', confidence: 'moderate' });
+    expect(photo.entry.slug).toBe('fire-ant');
   });
 
-  it.each([
-    ['names something outside the library', { ...OPENAI_ID, best_match: 'white-footed ant' }, 'insect'],
-    ['calls it not a pest', { ...OPENAI_ID, best_match: 'march fly', category: 'not_a_pest', not_a_pest: true }, 'other'],
-    ['puts it in another category', { ...OPENAI_ID, best_match: 'springtail', category: 'other', confidence: 'moderate' }, 'other'],
-    ['names an alternative even at low confidence', { ...OPENAI_ID, best_match: 'springtail', category: 'other', confidence: 'low' }, 'other'],
-  ])('a second look that %s disagrees: no species survives', (_label, openai, category) => {
-    const merged = mergeModelResults(openai, { ...GEMINI_ID, confidence: 'moderate' });
-    expect(merged).toMatchObject({ entry: null, confidence: 'low', category, agreement: 'conflict' });
+  it('an "unidentifiable" second look decides too: nothing is named', () => {
+    const photo = _test.resolvePhoto({ openai: { ...OPENAI_ID, best_match: 'unidentifiable', category: 'other', confidence: 'low' }, gemini: GEMINI_ID });
+    expect(photo.entry).toBeNull();
   });
 
-  it('an inconclusive second look leaves the named species, downgraded as a lone answer', () => {
-    const unidentifiable = { ...OPENAI_ID, best_match: 'unidentifiable', category: 'other', confidence: 'low' };
-    expect(mergeModelResults(unidentifiable, GEMINI_ID)).toMatchObject({ agreement: 'single_model', confidence: 'moderate' });
-    expect(mergeModelResults(unidentifiable, GEMINI_ID).entry.slug).toBe('ghost-ant');
-  });
-
-  it('two different species of one group keep only the group, at low confidence', () => {
-    const merged = mergeModelResults(OPENAI_ID, { ...GEMINI_ID, confidence: 'moderate' });
-    expect(merged.agreement).toBe('group');
-    expect(merged.entry).toBeNull();
-    expect(merged.group).toBe('ants');
-    expect(merged.confidence).toBe('low');
+  it('after a Gemini miss, the second look is the lone answer', () => {
+    const photo = _test.resolvePhoto({ openai: { ...OPENAI_ID, confidence: 'high' }, gemini: null });
+    expect(photo).toMatchObject({ agreement: 'single_model', confidence: 'moderate' });
   });
 });
 
@@ -310,13 +297,23 @@ describe('identifyPest — photos are read side by side', () => {
     expect(result.perPhoto[0].agreement).toBe('match');
   });
 
-  it('a split between the models keeps both species as staff differentials (Codex #4865 r7)', async () => {
+  it('an unsure Gemini answer that the second look overrules reports the second look\'s species', async () => {
     global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, confidence: 'moderate', confidence_score: 0.5 }));
-    openaiAnswers(OPENAI_ID);
+    openaiAnswers({ ...OPENAI_ID, confidence: 'high' });
 
     const result = await identifyPest([{ data: 'one' }]);
 
-    expect(result.identification.entry).toBeNull();
-    expect(result.alternate_slugs).toEqual(expect.arrayContaining(['ghost-ant', 'fire-ant']));
+    expect(result.identification.entry.slug).toBe('fire-ant');
+    expect(result.identification.confidence).toBe('moderate');
+  });
+
+  it('a risky runner-up with a failed second look makes the upload unresolved', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, alternates: ['subterranean termite'] }));
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
+
+    const result = await identifyPest([{ data: 'one' }]);
+
+    expect(result.identification).toMatchObject({ entry: null, unresolved: true });
+    expect(result.alternate_slugs).toEqual(expect.arrayContaining(['ghost-ant', 'subterranean-termite']));
   });
 });
