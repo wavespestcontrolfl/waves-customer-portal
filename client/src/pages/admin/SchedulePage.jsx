@@ -310,6 +310,24 @@ export function labelsPresentInMarkerNotes(notes, labels) {
     markerValues.has(String(label || "").trim().toLowerCase())
   ));
 }
+// The completion route reads [Protocol] / [Protocol optional] / [Action]
+// marker lines back out of the technician notes as completed actions, so a
+// label dropped at submit must leave the submitted notes too. Only the
+// markers for `labels` go; every other line (a free-typed action included)
+// stays.
+function withoutProtocolMarkerLines(notes, labels) {
+  const drop = new Set((Array.isArray(labels) ? labels : [])
+    .map((label) => String(label || "").trim().toLowerCase())
+    .filter(Boolean));
+  if (!drop.size) return notes;
+  return String(notes || "")
+    .split("\n")
+    .filter((line) => {
+      const match = line.trim().match(/^\[(?:protocol|protocol optional|action)\]\s*(.+)$/i);
+      return !match || !drop.has(match[1].trim().toLowerCase());
+    })
+    .join("\n");
+}
 // Specialty preset actions carry a default scope, but the treated areas say
 // where the work actually happened: when every classified area sits on one
 // side (shared/treatment-area-scopes.json), the action follows it, so an
@@ -17165,6 +17183,16 @@ export function CompletionPanel({
                     (action.label || action.note || action.raw || "") === label,
                 )),
       );
+      // The route merges the notes' [Protocol] markers back into the
+      // completed actions, so a stale month label's marker leaves the
+      // submitted notes with it. Its product rows stay: they are the
+      // application record, each with its own remove control.
+      const staleMonthProtocolLabels = monthKeyedProtocolList
+        ? activeSelectedLabels(selectedProtocolActionLabels).filter(
+            (label) => !reportProtocolActions.includes(label),
+          )
+        : [];
+      const submittedNotes = withoutProtocolMarkerLines(notes, staleMonthProtocolLabels);
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
@@ -17219,7 +17247,7 @@ export function CompletionPanel({
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
-        technicianNotes: notes,
+        technicianNotes: submittedNotes,
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
@@ -17277,7 +17305,7 @@ export function CompletionPanel({
               // Don't fall back to the hidden customerRecap state (auto-generated /
               // restored, never reviewed) — use the tech's note or the typed notes.
               customerNote:
-                treeShrubCloseout.customerNote || notes || "",
+                treeShrubCloseout.customerNote || submittedNotes || "",
             }
           : null,
         oneTimeRecapOnly,

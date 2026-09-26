@@ -172,7 +172,7 @@ it('drops a tree & shrub protocol action restored from a draft saved for another
   completionActions = { programKey: 'tree_shrub', visit: { visit: 5, month: 'May' }, actions: [{ id: 'may-palm', label: 'May palm fertilizer', note: 'May palm fertilizer', raw: 'May palm fertilizer' }] };
   localStorage.setItem(`waves_completion_draft_${shrubs.id}`, JSON.stringify({
     serviceId: shrubs.id, savedAt: Date.now(), visitOutcome: 'incomplete',
-    notes: '[Protocol] April palm fertilizer\n[Protocol] May palm fertilizer',
+    notes: '[Protocol] April palm fertilizer\n[Protocol] May palm fertilizer\n[Protocol] Pruned dead fronds',
     selectedProtocolActionLabels: ['April palm fertilizer', 'May palm fertilizer'],
   }));
   render(<CompletionPanel service={shrubs} products={[]} onClose={() => {}} onSubmit={submit} />);
@@ -181,7 +181,12 @@ it('drops a tree & shrub protocol action restored from a draft saved for another
   expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions') && url.includes('month=May'))).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: /mark visit incomplete/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
-  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual(['May palm fertilizer']);
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted).toEqual(['May palm fertilizer']);
+  // The route reads [Protocol] markers back out of the notes: the stale
+  // April marker leaves with its label; the tech's own typed line stays.
+  expect(body.technicianNotes).toBe('[Protocol] May palm fertilizer\n[Protocol] Pruned dead fronds');
+  expect(body.treeShrubCompletion.customerNote).not.toContain('April');
 });
 
 
