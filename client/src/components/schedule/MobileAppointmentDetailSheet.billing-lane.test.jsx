@@ -275,6 +275,31 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     expect(screen.getAllByText(/Covered by invoice WPC-2026-0505/i).length).toBeGreaterThan(0);
   });
 
+  // Codex pre-push P1: a legacy customer with NO explicit billing_mode still
+  // gets the monthlyRate fallback from the Charge Now mint endpoint's OWN
+  // gate (resolveScheduledServiceCharge checks the RAW billing_mode column,
+  // which is falsy here, not the inferred lane) — the preview must match
+  // that, or it understates what completing/charging the visit will bill.
+  it('keeps the monthlyRate fallback for an INFERRED (legacy, no explicit billing_mode) lane', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: null,
+          monthlyRate: 74.7,
+          billingLane: {
+            mode: 'per_visit',
+            source: 'inferred',
+            monthlyRate: 74.7,
+            prediction: { kind: 'invoice', amount: 74.7, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getAllByText(/\$74\.70/).length).toBeGreaterThan(0);
+  });
+
   it('does not fall back to monthlyRate for a non-monthly-membership lane even without sibling coverage', () => {
     render(
       <MobileAppointmentDetailSheet
