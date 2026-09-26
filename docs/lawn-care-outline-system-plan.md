@@ -1051,7 +1051,9 @@ POST   /api/admin/service-outlines/:id/send
 There is no `/templates`, `/validate`, or generic `PATCH /:id` route.
 
 Product/fact routes: there is no dedicated `product-public-facts` API. Product facts are
-managed through the general admin inventory/product-catalog routes instead.
+managed through two admin inventory routes (`server/routes/admin-inventory.js`, mounted at
+`/api/admin/inventory`): `GET /api/admin/inventory/lawn-outline-facts` and
+`PATCH /api/admin/inventory/lawn-outline-facts/:id`.
 
 Public API routes (as built, `server/routes/service-outlines-public.js`, mounted at `/api/service-outlines`):
 

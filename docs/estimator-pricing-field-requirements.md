@@ -54,7 +54,7 @@ Same property fields as §1 (the price is `max($199, round(quarterly base × 2.2
 |---|---|---|---|---|---|
 | Treatable lawn sq ft | yes — bracket lookup (`lookupLawnBracket`) | UI-A (`measuredTurfSf`, number + slider; `TURF_CONFIRMATION_REQUIRED` 400 when a whole-lawn service has no manual turf), UI-P (lot-derived), AI/LEAD (lot × 0.68 fallback, `turfBasis: lotFallback`, LOW confidence) | UI-A: negative → dropped silently to the AI/lot estimate; 0 accepted and priced (audit run: 0 sf → $45.33/app, no flag) | lot-derived turf with `FIELD_VERIFY_TURF_SQFT` (review) | 0/negative fail closed; lot-derived turf always parks (it does on the LEAD path) |
 | Grass track | yes (4 bracket tables) | UI-A, AI, LEAD (default st_augustine) | unknown string → st_augustine + `unknown_grass_type_priced_st_augustine` | default track | keep; require on UI-A |
-| Cadence (6/9/12) | yes | UI-A (menu no longer offers 4), AI (`tier`), LEAD (default enhanced 9x) | `lawnFreq=4` / `tier=basic` → **enhanced 9x silently** (`resolveLawnTier`) | 9x default | reject 4x or add a 4x column (catalog still sells `lawn_care_quarterly`) |
+| Cadence (sold for new quotes: 9/12; 6x hidden since 2026-09-24, 4x retired) | yes | UI-A (menu no longer offers 4), AI (`tier`), LEAD (default enhanced 9x) | `lawnFreq=4` / `tier=basic` → **enhanced 9x silently** (`resolveLawnTier`) | 9x default | reject 4x or add a 4x column (catalog still sells `lawn_care_quarterly`) |
 | Bermuda suppression | optional adder (+$15 + $2/1,000 sf per app) | UI-A (st_augustine only; gate on in prod) | fail-closed when the gate or knobs are invalid | — | keep |
 | Route density | cost model only | — | — | DENSE (5 min) | expose as a knob or measure |
 | Inventory fields | none read | — | — | `LAWN_MATERIAL_BUDGETS` hand-derived (`packages/lawn-cost-floor/index.js:54-59`) | derive budgets from `lawn_protocol_products` × catalog cost per window, automatically |
@@ -74,10 +74,10 @@ One-time lawn additionally needs `treatmentType` (fert/weed/pest/fungicide multi
 | Palm size / height / method | not modeled in T&S (only in `palm_injection`) | — | — | — | owner decision: add palm size to the routine reserve when armed |
 | Shrub count / shrub size | **not modeled** (density enum only) | — | — | — | owner decision |
 | Access difficulty | yes (0/8/15 min) | UI-P/AI (`access`); **Fixed in v4.8** (INP-004, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now collects and forwards it | enum | easy | done (v4.8) |
-| Tier (4/6/9) | yes | UI-P/AI; **Fixed in v4.8** (INP-004, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now forwards the selected tier instead of hardcoding `standard` | enum | standard | done (v4.8) |
+| Tier (sold for new quotes: 6/9; 4x Light retired 2026-09-24) | yes | UI-P/AI; **Fixed in v4.8** (INP-004, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now forwards the selected tier instead of hardcoding `standard` | enum | standard | done (v4.8) |
 | Initial vs maintenance | not modeled (no corrective/initial visit) | — | — | — | owner decision |
 | Inventory | none read (June-2026 catalog prices baked into `materialModel`) | — | — | — | re-derive from catalog |
-| Protocol | `protocols.json` T&S (6 visits); pricing sells 4/6/9 | — | — | — | align protocol cadence with sold cadence |
+| Protocol | `protocols.json` T&S (6 visits); pricing sells 6/9 (4x Light retired 2026-09-24) | — | — | — | align protocol cadence with sold cadence |
 
 ## 5. Palm injection (`palm_injection`)
 
@@ -147,7 +147,7 @@ Required: offer key (single vs 2-visit package), `fleaComplexity` (light/moderat
 
 ## 14. Stinging insects (`stinging`)
 
-Required: species, tier (1–4), removal option; optional aggressiveness/height/confined. **Fixed:** UI-A now collects species, scope tier and removal (`EstimateToolViewV2.jsx:3574-3576, 6669, 6678`; `property-lookup-v2.js` `translateV2CallToV1Input`); the paper-wasp/tier-2/no-removal defaults apply only when a field is left blank.
+Required: species, tier (1–4), removal option; optional aggressiveness/height/confined. **Fixed:** UI-A now collects species, scope tier and removal (`EstimateToolViewV2.jsx` `stingSpecies` / `stingTier` / `stingRemoval`; `property-lookup-v2.js` `translateV2CallToV1Input`); the paper-wasp/tier-2/no-removal defaults apply only when a field is left blank.
 
 ## 15. Lawn specialty (`plugging`, `top_dressing`, `dethatching`)
 
