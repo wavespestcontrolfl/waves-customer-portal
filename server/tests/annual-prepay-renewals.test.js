@@ -2370,6 +2370,16 @@ describe('annual prepay renewal helpers', () => {
     expect(secondQuery.update).not.toHaveBeenCalled();
   });
 
+  test('a termite SMS that returns sent:false with an UNCERTAIN handoff keeps its claim when the email also fails (never an immediate re-text)', async () => {
+    pinTermiteToday();
+    const { term, secondQuery } = termiteNoticeHarness();
+    sendCustomerMessage.mockResolvedValue({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_TIMEOUT' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: false });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: false });
+    expect(secondQuery.update).not.toHaveBeenCalled();
+  });
+
   test('a LATE 45-day catch-up (under 45 days to term_end) goes to notice_45_late_sent_at, never the 45-day witness, and bells staff', async () => {
     pinTermiteToday();
     const { term, secondQuery } = termiteNoticeHarness({ termEnd: '2026-11-03' }); // 38 days out

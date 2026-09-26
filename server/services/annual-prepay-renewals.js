@@ -5712,7 +5712,12 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     if (!smsResult.sent) {
       const failure = smsResult.code || smsResult.reason;
       logger.warn(`[annual-prepay] renewal SMS blocked/failed for term ${claimedTerm.id}: ${failure || 'unknown'}`);
-      return deliverByEmail(failure || 'send_failed');
+      // A termite rung's `sent:false` can still be an UNCERTAIN provider
+      // handoff (deliveryOutcome 'uncertain') — the text may have reached the
+      // customer, so keep the claim (TTL governs any retry) instead of
+      // releasing it for an immediate re-send if the email also fails.
+      const uncertain = termiteRung && classifyDeliveryCertainty(smsResult) === 'unknown' && smsResult.deliveryOutcome === 'uncertain';
+      return deliverByEmail(failure || 'send_failed', { keepClaim: uncertain });
     }
 
     // A termite notice is a legal renewal-notice witness: `sent: true` is
