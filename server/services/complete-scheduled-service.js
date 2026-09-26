@@ -1898,7 +1898,34 @@ const {
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
 const { LAWN_STRUCTURED_OBSERVATIONS } = require('../../shared/lawn-condition-findings');
+const { observationsForRoutineService } = require('../../shared/service-completion-observations');
 const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
+
+function completionStructuredObservationAllowlist({
+  reportServiceLine,
+  typedFindingsType = null,
+  resolvedSpecialtyServiceKey = null,
+}) {
+  const legacyObservations = reportServiceLine === 'lawn' && !typedFindingsType
+    ? LAWN_STRUCTURED_OBSERVATIONS
+    : observationsForSpecialtyService(resolvedSpecialtyServiceKey);
+  let routineFamily = null;
+  if (!resolvedSpecialtyServiceKey) {
+    if (reportServiceLine === 'tree_shrub' && (!typedFindingsType || typedFindingsType === 'tree_shrub')) {
+      // Recurring Tree & Shrub uses the typed findings form and the governed
+      // routine observation picker together. Other typed lanes stay isolated.
+      routineFamily = 'tree_shrub';
+    } else if (!typedFindingsType && reportServiceLine === 'lawn') {
+      routineFamily = 'lawn';
+    } else if (!typedFindingsType && reportServiceLine === 'pest') {
+      routineFamily = 'recurring_pest';
+    }
+  }
+  return new Set([
+    ...legacyObservations,
+    ...observationsForRoutineService(routineFamily),
+  ]);
+}
 
 // Whether to capture application conditions (weather snapshot) for the
 // service_record at completion time (extracted for unit testing).
@@ -3607,11 +3634,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // lane; a keyless legacy row resolved by display name may still complete
     // with the dynamic actions its older client offered.
     const explicitSpecialtyLane = Boolean(specialtyServiceKey({ serviceKey: completionProfile?.serviceKey }));
-    const allowedStructuredObservations = new Set(
-      reportServiceLine === 'lawn' && !typedFindingsType
-        ? LAWN_STRUCTURED_OBSERVATIONS
-        : observationsForSpecialtyService(resolvedSpecialtyServiceKey),
-    );
+    const allowedStructuredObservations = completionStructuredObservationAllowlist({
+      reportServiceLine,
+      typedFindingsType,
+      resolvedSpecialtyServiceKey,
+    });
     // New clients separate controlled dropdown values from free text. For an
     // older specialty client that lacks that field, recover only exact values
     // from this service lane's server-owned allowlist; arbitrary form text and
@@ -13352,6 +13379,7 @@ module.exports = {
   reportV1InvoiceBodyCarriesPayLink,
   completionUsesReportLane,
   completionSmsWithheldForMissingReportToken,
+  completionStructuredObservationAllowlist,
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
   parseCompletionReviewDelayMinutes,

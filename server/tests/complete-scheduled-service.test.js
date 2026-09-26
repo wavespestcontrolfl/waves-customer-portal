@@ -24,13 +24,16 @@ jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(
 
 const db = require('../models/db');
 const attempts = require('../services/completion-attempts');
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const {
   completeScheduledService,
   deliveryUnverifiedProviderOutcome,
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,
   definiteRejectionMarkerFromAttemptError,
+  completionStructuredObservationAllowlist,
 } = require('../services/complete-scheduled-service');
+const completionObservationCatalog = require('../../shared/service-completion-observations.json');
 const { etDateString } = require('../utils/datetime-et');
 
 const SERVICE_ID = '00000000-0000-4000-8000-000000000101';
@@ -60,6 +63,87 @@ beforeEach(() => {
 
 const complete = (body = {}, overrides = {}) => completeScheduledService({
   serviceId: SERVICE_ID, body, actor, ...overrides,
+});
+
+describe('customer-safe routine completion observations', () => {
+  test.each([
+    ['lawn', 'lawn'],
+    ['tree_shrub', 'tree_shrub'],
+    ['pest', 'recurring_pest'],
+  ])('accepts the shared %s catalog and rejects arbitrary text', (serviceLine, family) => {
+    const allowed = completionStructuredObservationAllowlist({ reportServiceLine: serviceLine });
+    expect(allowed.has(completionObservationCatalog[family][0][1])).toBe(true);
+    expect(allowed.has('Technician-only custom note.')).toBe(false);
+  });
+
+  test('keeps the typed tree-and-shrub routine vocabulary without widening other typed or specialty closeouts', () => {
+    expect(completionStructuredObservationAllowlist({
+      reportServiceLine: 'tree_shrub',
+      typedFindingsType: 'tree_shrub',
+    }).has(completionObservationCatalog.tree_shrub[0][1])).toBe(true);
+    for (const typedFindingsType of ['one_time_pest_treatment', 'rodent_trapping']) {
+      expect(completionStructuredObservationAllowlist({
+        reportServiceLine: 'pest',
+        typedFindingsType,
+      }).has(completionObservationCatalog.recurring_pest[0][1])).toBe(false);
+    }
+    expect(completionStructuredObservationAllowlist({
+      reportServiceLine: 'pest',
+      resolvedSpecialtyServiceKey: 'mud_dauber_removal',
+    }).has(completionObservationCatalog.recurring_pest[0][1])).toBe(false);
+  });
+
+  test('the completion path rejects arbitrary text submitted as a routine structured observation', async () => {
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+
+    const result = await complete({ structuredObservations: ['Technician-only custom note.'] });
+
+    expect(result).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
+  });
+
+  test('the completion path rejects a routine observation on typed and specialty closeouts', async () => {
+    const routineObservation = completionObservationCatalog.recurring_pest[0][1];
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
+      findingsType: 'one_time_pest_treatment',
+      serviceKey: 'one_time_pest_treatment',
+    });
+    const typedResult = await complete({
+      structuredObservations: [routineObservation],
+      structuredFindings: {
+        type: 'one_time_pest_treatment',
+        values: { activity_level: 'None observed', work_completed: ['Inspection / identification only'] },
+      },
+    });
+    expect(typedResult).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
+
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'mud_dauber_removal' });
+    const specialtyResult = await complete({ structuredObservations: [routineObservation] });
+    expect(specialtyResult).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
+  });
+
+  test('the real typed tree-and-shrub completion profile accepts its routine observation vocabulary', async () => {
+    service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
+      findingsType: 'tree_shrub',
+      serviceKey: 'tree_shrub_6week',
+      completionMode: 'service_report',
+      deliveryMode: 'auto_send',
+    });
+
+    const result = await complete({
+      structuredObservations: [completionObservationCatalog.tree_shrub[0][1]],
+      structuredFindings: {
+        type: 'tree_shrub',
+        values: { plant_groups: ['Shrubs'], landscape_condition: 'Good' },
+      },
+      nextStepChips: ['Continue Tree & Shrub program'],
+    });
+
+    expect(result.body?.code).not.toBe('invalid_structured_observation');
+    expect(result).toMatchObject({ status: 400, body: { code: 'tree_shrub_typed_compliance' } });
+  });
 });
 
 test.each([
