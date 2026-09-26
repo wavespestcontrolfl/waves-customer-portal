@@ -532,8 +532,19 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   // the retake starts empty rather than resurrecting the saved photos.
   // Respects the existing 3-photo limit: at the limit, the banner tells the
   // customer to remove one first instead of silently doing nothing.
+  //
+  // A history-sourced retake also clears note/location: openHistoryItem
+  // never touches them, so a note typed on an EARLIER, unrelated photos-step
+  // visit (picker -> photos -> Back -> a history item) would otherwise still
+  // be sitting in state and ride along into this new submission (Codex
+  // round-0 P1). A live retake is the same identification's own note, so it
+  // stays.
   const handleRetakePhoto = (nextPhoto) => {
     setSubmitError('');
+    if (resultSource === 'history') {
+      setNote('');
+      setLocation('');
+    }
     setRetakeBanner({ ask: nextPhoto?.ask || '', full: photos.length >= PHOTO_LIMIT });
     setStep('photos');
   };

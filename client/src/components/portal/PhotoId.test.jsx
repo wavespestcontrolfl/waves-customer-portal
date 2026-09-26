@@ -788,6 +788,55 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getAllByRole('img')).toHaveLength(3);
   });
 
+  it('a history-sourced retake clears an unrelated note/location left over from an earlier, abandoned photos-step visit (Codex round-0 P1)', async () => {
+    api.getPhotoIds.mockResolvedValue({
+      items: [{ id: 'h1', type: 'pest', created_at: '2026-09-25T00:00:00Z', headline: 'Ants', next_step_kind: 'unclear' }],
+    });
+    api.getPhotoId.mockResolvedValueOnce({
+      id: 'h1', type: 'pest', created_at: '2026-09-25T00:00:00Z',
+      result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'ants', wording: 'group_only', headline: 'Looks like an ant', subhead: null },
+        group: { id: 'ants', label: 'Ants', generic: 'an ant' }, entry: null, evidence: {}, candidates: [],
+        next_photo: { ask: 'A close-up from the side would settle it.', why: 'y' }, referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'x' },
+      photos: [],
+    });
+    render(<Harness />);
+
+    // Start a DIFFERENT, abandoned photos-step visit — note/location entered
+    // but never identified — then back out to the picker.
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(screen.getByPlaceholderText('Anything else worth mentioning?'), {
+      target: { value: 'Found near the garage' },
+    });
+    fireEvent.change(screen.getByLabelText('Where on the property (optional)'), { target: { value: 'garage_lanai' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    // Now open the unrelated history item and retake its next photo.
+    fireEvent.click(await screen.findByText('Ants'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Take this photo' }));
+
+    expect(await screen.findByText('A close-up from the side would settle it.')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Anything else worth mentioning?')).toHaveValue('');
+    expect(screen.getByLabelText('Where on the property (optional)')).toHaveValue('');
+
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'h1-retake', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {}, v2: null, next_step: { kind: 'none', title: 'Fine', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+    const [, payload] = api.createPhotoId.mock.calls[0];
+    expect(payload.note).toBeUndefined();
+    expect(payload.location).toBeUndefined();
+  });
+
   it('a referral next_step renders the referral text and a Done button, with no request CTA', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     render(<Harness />);
