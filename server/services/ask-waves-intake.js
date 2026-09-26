@@ -282,7 +282,7 @@ function looksSpanish(text) {
   // (a proper noun like "El Niño") is not evidence.
   if (/[¿¡]/.test(t)) return true;
   // A Spanish-only claim word identifies a short reply on its own ("Es inocuo.").
-  if (/(?:^|[^\p{L}])(?:inocu[oa]s?|inofensiv[oa]s?|segur[oa]s?|peligros[oa]s?|t[oó]xic[oa]s?|nocivo[s]?)(?![\p{L}])/iu.test(t) && !/\b(?:toxic|safe)\b/i.test(t)) return true;
+  if (/(?:^|[^\p{L}])(?:inocu[oa]s?|inofensiv[oa]s?|segur[oa]s?|peligros[oa]s?|t[oó]xic[oa]s?|nociv[oa]s?|aprobad[oa]s?|aprob[oó]|avalad[oa]s?|autorizad[oa]s?)(?![\p{L}])/iu.test(t) && !/\b(?:toxic|safe)\b/i.test(t)) return true;
   const words = new Set((t.match(SPANISH_WORD_RE) || []).map((w) => w.toLowerCase()));
   words.delete('el');
   return words.size >= 2;
@@ -320,7 +320,7 @@ const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|ly|ty)?|harmless|gentle|non-?toxic|ris
 // dangerous wasp nests at height" is not a claim.
 const HAZARD_FILLER = '(?:(?:a|an|any|much|real|serious|significant|health|to|your|you|for|the|be|pose|poses|cause|causes|bring|of|at|all|known|major|big|present|presents|create|creates|result|results|in|produce|produces|carry|carries|involve|involves|lead|leads)\\s+){0,3}';
 const NEGATED_HAZARD_RE = new RegExp(`\\b(?:no|zero|not|never|without|poses?\\s+no|presents?\\s+no|free\\s+(?:of|from)|won['’]?t|will\\s+not|doesn['’]?t|does\\s+not|isn['’]?t|is\\s+not|aren['’]?t|are\\s+not|can['’]?t|cannot|shouldn['’]?t|should\\s+not)\\s+${HAZARD_FILLER}(?:harm\\w*|hurt\\w*|danger\\w*|hazard\\w*|threat\\w*|risk\\w*|toxic\\w*|poison\\w*|affect\\w*|ill(?:ness(?:es)?)?|sick(?:ness)?|health\\s+(?:problems?|issues?|risks?|effects?|concerns?|hazards?)|diseases?|side[-\\s]?effects?|adverse\\s+(?:effects?|reactions?|health\\s+effects?)|adverse\\w*|injur\\w*)\\b`, 'i');
-const NEGATED_HAZARD_ES_RE = /\b(?:no|sin|ning[uú]n|ninguna|cero|nunca|libre\s+de)\s+(?:(?:hay|representa|representan|causa|causan|produce|producen|provoca|provocan|genera|generan|tiene|tienen|es|son|un|una|ning[uú]n|ninguna|mayor|gran|alg[uú]n|alguna|para|a|la|el|los|las|su|sus|le|les|hace|hacen)\s+){0,3}(?:peligr\w*|riesgos?|da[ñn]\w*|t[oó]xic\w*|afect\w*|venen\w*|enfermedad\w*|problemas?\s+de\s+salud|efectos?\s+secundarios|efectos?\s+adversos|reacciones\s+adversas)\b/i;
+const NEGATED_HAZARD_ES_RE = /\b(?:no|sin|ning[uú]n|ninguna|cero|nunca|libre\s+de)\s+(?:(?:hay|representa|representan|causa|causan|produce|producen|provoca|provocan|genera|generan|tiene|tienen|es|son|un|una|ning[uú]n|ninguna|mayor|gran|alg[uú]n|alguna|para|a|la|el|los|las|su|sus|le|les|hace|hacen)\s+){0,3}(?:peligr\w*|riesgos?|da[ñn]\w*|t[oó]xic\w*|afect\w*|venen\w*|nociv\w*|perjudicial\w*|da[ñn]in[oa]s?|enfermedad\w*|problemas?\s+de\s+salud|efectos?\s+secundarios|efectos?\s+adversos|reacciones\s+adversas)\b/i;
 // Any negated action aimed at a person, pet or the home is a no-harm
 // guarantee, whatever the verb ("won't bother your pets", "will not irritate
 // kids", "no les hará daño") — listing harm verbs one by one never ended.
@@ -338,8 +338,11 @@ const SUBJECT_FIRST_NO_HARM_RE = new RegExp(`\\b${SAFETY_SUBJECT_WORDS}\\s+(?:(?
 // Idiomatic no-worry assurances ("nothing to worry about", "no need to
 // worry", "no hay de qué preocuparse").
 const NO_WORRY_RE = /\b(?:nothing\s+to\s+worry|no\s+need\s+to\s+worry|no\s+reason\s+to\s+worry|(?:don'?t|do\s+not|won'?t|will\s+not|never)\s+(?:have|need)\s+to\s+worry|(?:don'?t|do\s+not)\s+worry\s+about\s+(?:your|the)|no\s+worries\s+(?:about|for|with)|worry[-\s]free|nada\s+de\s+qu[eé]\s+preocupar\w*|no\s+(?:hay\s+(?:de\s+qu[eé]|que|por\s+qu[eé])|tiene\s+(?:que|por\s+qu[eé])|necesita)\s+preocupar\w*|sin\s+(?:ninguna\s+)?preocupaci[oó]n)/i;
+// "It won't do your pets any harm" — the negated-action rule skips "do", so
+// the do-harm idiom is its own shape.
+const DO_HARM_RE = /\b(?:won'?t|will\s+not|wouldn'?t|doesn'?t|does\s+not|don'?t|do\s+not|can'?t|cannot|never)\s+do\s+(?:\w+\s+){0,3}?(?:any\s+|no\s+)?(?:harm|damage)\b/i;
 function safetyClaimIn(text) {
-  return POSITIVE_SAFETY_RE.test(text) || NEGATED_ACTION_ON_SUBJECT_RE.test(text) || NOMINAL_NO_IMPACT_RE.test(text) || FINE_AROUND_SUBJECT_RE.test(text) || SUBJECT_FIRST_NO_HARM_RE.test(text) || NO_WORRY_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
+  return POSITIVE_SAFETY_RE.test(text) || NEGATED_ACTION_ON_SUBJECT_RE.test(text) || NOMINAL_NO_IMPACT_RE.test(text) || FINE_AROUND_SUBJECT_RE.test(text) || SUBJECT_FIRST_NO_HARM_RE.test(text) || NO_WORRY_RE.test(text) || DO_HARM_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
 }
 // Model typography (non-breaking / Unicode hyphens, curly quotes, NBSP) is
 // folded to ASCII once, before any matcher runs — "non‑toxic" (U+2011) must
@@ -390,7 +393,8 @@ const ACCESS_SIGNAL_RE = new RegExp([
 // direct regulatory answer, not a claim: negated approval wording is removed
 // before the check, so any remaining affirmative approval still flags.
 const NEGATED_APPROVAL_RE = /\b(?:doesn'?t|didn'?t|don'?t|does\s+not|did\s+not|do\s+not|won'?t|will\s+not|not|never|isn'?t|aren'?t|wasn'?t|weren'?t|hasn'?t|haven'?t|has\s+not|have\s+not|is\s+not|are\s+not|no\s+(?:est[aá]n?|ha|han|fue)|nunca)\s+(?:been\s+|sido\s+|ever\s+)?(?:(?:by\s+the\s+)?(?:epa|e\.p\.a\.?)[-\s]+)?(?:approv\w*|endors\w*|certif\w*|sanction\w*|authoriz\w*|aprob\w*|avalad\w*|autoriz\w*)/gi;
-const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t.replace(NEGATED_APPROVAL_RE, ' ')) };
+const QUANTIFIED_DENIAL_RE = /\b(?:no|none\s+of\s+(?:the|our|these)|ning[uú]n|ninguna)\s+(?:pesticid\w*|products?|chemicals?|insecticid\w*|treatments?|herbicid\w*|productos?|qu[ií]mic\w*|tratamientos?|pesticidas?)?\s*(?:is|are|was|were|has\s+been|have\s+been|est[aá]n?|es|son|ha\s+sido)\s+(?:\w+\s+){0,2}?(?:(?:by\s+the\s+)?(?:epa|e\.p\.a\.?)[-\s]+)?(?:approv\w*|endors\w*|certif\w*|aprob\w*|avalad\w*|autoriz\w*)/gi;
+const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t.replace(NEGATED_APPROVAL_RE, ' ').replace(QUANTIFIED_DENIAL_RE, ' ')) };
 
 
 
@@ -441,7 +445,8 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
     while ((m = re.exec(sentence))) {
       const { tight } = durationWindow(sentence, m.index, m[0].length);
       // "waiting 30 minutes" / "espere 30 minutos" is itself a timing instruction.
-      if (/\bwait(?:ing|s)?\b|\besper\w*/i.test(tight)) return true;
+      if (/\bwait(?:ing|s)?\b|\besper\w*/i.test(tight) && treatmentContext
+        && !SCHEDULING_DURATION_RE.test(tight) && !/\b(?:call\w*|dispatch\w*|refund\w*|repl(?:y|ies)|respon\w*|email\w*|texts?|payments?|invoices?|charges?|confirm\w*)\b/i.test(tight)) return true;
       if (SCHEDULING_DURATION_RE.test(tight) || GENERIC_LENGTH_RE.test(tight)) continue;
       if (treatmentContext) return true;
     }
@@ -450,6 +455,7 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
 }
 
 const AFFIRMATION_RE = /^\W*(?:yes|yeah|yep|yup|absolutely|sure|of\s+course|definitely|correct|certainly|indeed|totally|exactly|that'?s\s+(?:right|correct)|you\s+(?:can|may|bet)|s[ií]|claro|por\s+supuesto|exact[oa]|correct[oa]|desde\s+luego|as[ií]\s+es|puede)(?![a-zñáéíóú])/i;
+const POLARITY_START_RE = /^\W*(?:yes|yeah|yep|yup|no|nope|nah|not|never|none|nothing|absolutely|sure|of\s+course|definitely|certainly|correct|totally|it\s+(?:is|isn'?t|won'?t|will\s+not|can'?t|cannot|doesn'?t|does\s+not|shouldn'?t)|they\s+(?:are|aren'?t|won'?t|can'?t|cannot|don'?t)|s[ií]|claro|nada|nunca|tampoco|para\s+nada|en\s+absoluto)(?![a-zñáéíóú])/i;
 const HARM_QUESTION_RE = /\b(?:safe(?:ly|ty)?|harm\w*|hurt\w*|toxic|poison\w*|danger\w*|risk\w*|affect\w*|irritat\w*|bother\w*|sick|segur\w*|peligr\w*|t[oó]xic\w*|da[ñn]\w*|riesgo\w*|afect\w*|molest\w*|irrit\w*|inocu\w*|inofensiv\w*)(?![a-zñáéíóú])/i;
 const SAFETY_QUESTION_RE = /\b(?:safe(?:ly|ty)?|harm\w*|hurt\w*|toxic|poison\w*|danger\w*|risk\w*|okay|ok|fine|alright|affect\w*|segur\w*|peligr\w*|t[oó]xic\w*|da[ñn]\w*|riesgo\w*|afect\w*|inocu\w*|inofensiv\w*)(?![a-zñáéíóú])/i;
 // A terse reply takes its claim from the visitor's active question.
@@ -463,8 +469,13 @@ function terseClaim(t, activeMessage) {
   // "Tomorrow.") to an active harm or physical-access question is itself the
   // claim — polarity words never ended, so length decides.
   const physicalActive = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
-  if (t.split(/\s+/).filter(Boolean).length <= 6
-    && (HARM_QUESTION_RE.test(activeMessage) || ACCESS_SIGNAL_RE.test(physicalActive) || ACCESS_TOPIC_RE.test(physicalActive))) return true;
+  // A short answer needs a yes/no or time shape — "They can deliver a painful
+  // bite." answering "Are black widows dangerous?" is pest education.
+  if (t.split(/\s+/).filter(Boolean).length <= 6) {
+    if (HARM_QUESTION_RE.test(activeMessage) && POLARITY_START_RE.test(t)) return true;
+    if ((ACCESS_SIGNAL_RE.test(physicalActive) || ACCESS_TOPIC_RE.test(physicalActive))
+      && (POLARITY_START_RE.test(t) || CLOCK_TIME_RE.test(t) || DURATION_RE.test(t) || ANY_TIME_FIGURE_RE.test(t))) return true;
+  }
   return false;
 }
 
@@ -514,7 +525,7 @@ const VET_DIRECTION_RE = /\b(?:seek|get|find|obtain|needs?)\s+(?:\w+\s+){0,2}?(?
 // comió…"), or the agent of a passive exposure ("eaten by my dog") — not a
 // mere mention ("after a dog bite", "walking my dog when a wasp stung me").
 const PET_WORD = '(?:birds?|parrots?|parakeets?|rabbits?|bunn(?:y|ies)|hamsters?|guinea\\s+pigs?|ferrets?|horses?|tortoises?|turtles?|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|p[aá]jar\\w*|aves?|loros?|conejos?|caballos?|tortugas?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\\w*)';
-const PET_PATIENT_RE = new RegExp(`\\b${PET_WORD}(?:\\s+(?:and|y)\\s+(?:i|me|we|yo|my\\s+\\w+|mi\\s+\\w+))?\\s+(?:(?:just|also|both|all|may|might|has|have|had|is|was|were|got|seems?|probably|se|le|ha|est[aá]|fue|ambos)\\s+){0,3}(?:swallow\\w*|ingest\\w*|ate|eaten|eating|drank|drinking|lick\\w*|chew\\w*|consum\\w*|tast\\w*|inhal\\w*|breath\\w*|got\\s+into|stung|bit(?:ten)?|swell\\w*|swoll\\w*|vomit\\w*|throw\\w*\\s+up|seiz\\w*|drool\\w*|sick|collaps\\w*|shak\\w*|trag\\w*|comi[oó]|vomit\\w*|picad[oa]|mordid[oa]|enferm\\w*|hinchad[oa])(?![a-zñáéíóú])|\\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten|drunk|chewed|licked|consumed|tasted|inhaled|comid[oa]s?|ingerid[oa]s?|tragad[oa]s?|inhalad[oa]s?)\\b[^.?!\\n]{0,30}?\\b(?:by|por)\\s+(?:(?:my|our|the|mi|su|el|la)\\s+)?${PET_WORD}\\b|\\b${PET_WORD}'?s?\\s+(?:eyes?|mouth|skin|face|paws?|nose)\\b`, 'i');
+const PET_PATIENT_RE = new RegExp(`\\b${PET_WORD}(?:\\s+(?:and|y)\\s+(?:i|me|we|yo|my\\s+\\w+|mi\\s+\\w+))?\\s+(?:(?:just|also|both|all|may|might|has|have|had|is|was|were|got|seems?|probably|se|le|ha|est[aá]|fue|ambos)\\s+){0,3}(?:swallow\\w*|ingest\\w*|ate|eaten|eating|drank|drinking|lick\\w*|chew\\w*|consum\\w*|tast\\w*|inhal\\w*|breath\\w*|got\\s+into|stung|bitten|(?<=(?:was|got|been|is)\\s)bit|swell\\w*|swoll\\w*|vomit\\w*|throw\\w*\\s+up|seiz\\w*|drool\\w*|sick|collaps\\w*|shak\\w*|trag\\w*|comi[oó]|vomit\\w*|picad[oa]|mordid[oa]|enferm\\w*|hinchad[oa])(?![a-zñáéíóú])|\\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten|drunk|chewed|licked|consumed|tasted|inhaled|comid[oa]s?|ingerid[oa]s?|tragad[oa]s?|inhalad[oa]s?)\\b[^.?!\\n]{0,30}?\\b(?:by|por)\\s+(?:(?:my|our|the|mi|su|el|la)\\s+)?${PET_WORD}\\b|\\b${PET_WORD}'?s?\\s+(?:eyes?|mouth|skin|face|paws?|nose)\\b`, 'i');
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:(?<!(?:animal|pet)\s)poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
 const POISON_CONTROL_LINE = ' If someone swallowed or breathed in a product, or got it in their eyes or on their skin, call Poison Control at 1-800-222-1222. / Si alguien ingirió o inhaló un producto, o le cayó en los ojos o la piel, llame a Control de Envenenamientos al 1-800-222-1222.';

@@ -235,6 +235,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['This treatment does not present any danger to children.', ''],
     ["This pesticide doesn't present a threat to your pets.", ''],
     ['Our spray will not create any risk for your family.', ''],
+    ["It won't do your pets any harm.", ''],
+    ["This won't do any harm to children.", ''],
+    ['El pesticida no es nocivo para mascotas.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -432,6 +435,17 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     const out = scrubUnsafeClaims({ reply: 'This product may not be safe during pregnancy; consult your doctor before use.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok while pregnant?');
     expect(out.reply).toMatch(/label directions/);
     expect(out.intent).toBe('question');
+  });
+
+  test('"My dog bit me" adds no vet copy', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My dog bit me and now my hand is swelling');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toMatch(/veterinarian/);
+  });
+
+  test.each(['La EPA aprobó el producto.', 'Aprobado por EPA.'])('a short Spanish EPA claim gets the Spanish replacement: %s', (reply) => {
+    expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'EPA?').reply)
+      .toMatch(/instrucciones de la etiqueta/);
   });
 
   test('"bitten by my dog" adds no vet copy (the dog is the agent, not the patient)', () => {
@@ -736,6 +750,11 @@ describe('normalizeIntakeResult', () => {
     ['You may re-enter once your technician confirms the product is dry.', ''],
     ['We will return in two weeks for the follow-up.', ''],
     ['We place dry bait in 2 stations.', 'How do you treat for roaches?'],
+    ['They can deliver a painful bite.', 'Are black widows dangerous?'],
+    ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
+    ['Please wait 30 minutes for our dispatcher to call you back.', ''],
+    ['Please wait 2 business days for the refund to appear.', ''],
+    ['No pesticide is EPA-approved; the EPA registers pesticides.', ''],
     ["The EPA doesn't approve pesticides; it registers them.", ''],
     ["The EPA didn't approve this product; it is EPA-registered.", ''],
     ['This product is not EPA-approved; it is EPA-registered.', ''],
