@@ -427,6 +427,16 @@ function buildTurfRequestProfile(baseProfile, form) {
   return profile;
 }
 
+// Services sized off the home (pest, cockroach, one-time pest, bed bug,
+// flea) fall back to a 2,000 sq ft house when no home size reaches the
+// engine, and mark that line footprintWasDefaulted. A PRICED line carrying
+// the mark is a guess at the customer's price; a quote-required line is not
+// a price, so it passes.
+function linesPricedOnGuessedHomeSize(result) {
+  return [...(result?.recurring?.services || []), ...(result?.oneTime?.items || [])]
+    .filter((line) => line?.footprintWasDefaulted === true && !line.quoteRequired);
+}
+
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
   try {
     const data = await response.clone().json();
@@ -3783,6 +3793,17 @@ export default function EstimateToolViewV2({
         setForm((f) => ({ ...f, termiteOwnership: "own" }));
         setEstimate(null);
         alert("The server did not price this quote as a station rental (the rental option is off or not priceable for this configuration). The form has been reset to purchased stations — generate again to see the purchase quote.");
+        return null;
+      }
+
+      // The pre-flight gate above only stops a quote with NO home and NO lot
+      // size. A lot alone still prices home-sized services at the engine's
+      // 2,000 sq ft default — refuse that result until Home Sq Ft is entered.
+      const guessedLines = linesPricedOnGuessedHomeSize(result);
+      if (guessedLines.length > 0) {
+        setEstimate(null);
+        const names = [...new Set(guessedLines.map((line) => line.name || line.service))].join(", ");
+        alert(`Enter home sq ft. ${names} ${guessedLines.length === 1 ? "is" : "are"} priced by the home's size, and without it the price is a guess at a 2,000 sq ft house.`);
         return null;
       }
 
