@@ -881,7 +881,12 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // the row back at once (Codex #4816 r21).
   // Least recently stamped first, so a re-scan inside the commit grace never
   // holds back a row whose event has not been seen at all.
-  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
+  // The unseen-activity scan runs ONCE per candidate row (a LATERAL join)
+  // and is reused by the filter, the backoff override and the watermark,
+  // instead of being re-evaluated in each.
+  const eventRows = await openRows()
+    .joinRaw(`CROSS JOIN LATERAL (SELECT ${UNSEEN_VISIT_ACTIVITY} AS unseen_at) ev`, tickBound)
+    .whereNotNull('ev.unseen_at')
     // A stored failure reached for another owner (sms_context.customer_id is
     // rewritten with every persisted verdict) says nothing about the current
     // owner's evidence: a merge or undo lifts the backoff (Codex #4816 r32).
@@ -890,13 +895,13 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       // Newer than what the failed attempt read: the same commit-grace cap
       // as the watermark, so a visit write that began before that attempt
       // but committed after it still counts (Codex #4816 r30).
-      .orWhereRaw(`${UNSEEN_VISIT_ACTIVITY} > COALESCE((cc.sms_context->>'event_attempted_through')::timestamptz,
-        ${RETRY_AFTER_SQL} - make_interval(secs => ?))`, [...tickBound, PROVIDER_RETRY_MS / 1000]))
+      .orWhereRaw(`ev.unseen_at > COALESCE((cc.sms_context->>'event_attempted_through')::timestamptz,
+        ${RETRY_AFTER_SQL} - make_interval(secs => ?))`, [PROVIDER_RETRY_MS / 1000]))
     // A deferred row keeps its event but moves behind rows not yet tried, so
     // repeated deferrals cannot hold the page prefix (Codex #4816 r28).
     .orderByRaw(`GREATEST(${EVENT_SEEN_AT}, (cc.sms_context->>'event_attempted_at')::timestamptz) ASC NULLS FIRST, cc.id`).limit(PAGE)
-    .select('cc.*', 's.customer_id as event_customer_id', conn.raw(`LEAST(${UNSEEN_VISIT_ACTIVITY}, ?::timestamptz)::text AS event_seen_through`,
-      [...tickBound, new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
+    .select('cc.*', 's.customer_id as event_customer_id', conn.raw('LEAST(ev.unseen_at, ?::timestamptz)::text AS event_seen_through',
+      [new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
   const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at, event_customer_id: customerId }) => [id, { at, customerId }]));
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
