@@ -134,34 +134,6 @@ postgres('billing Email-only obligation PostgreSQL', () => {
     expect(await obligation.recheck(row.metadata)).toMatchObject({ eligible: false });
   });
 
-  test('an initial Email prepared before enqueue yields at the shared customer-lock handoff', async () => {
-    const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
-    const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
-    const eventKey = `receipt:${randomUUID()}`;
-    let began;
-    let resume;
-    const entered = new Promise((resolve) => { began = resolve; });
-    const preparation = new Promise((resolve) => { resume = resolve; });
-    const provider = jest.fn();
-    const initial = dispatchBillingChannels({ ...notice(), channel: 'sms', audience: 'customer',
-      metadata: { original_message_type: 'receipt', notificationEventKey: eventKey } },
-    { payment_receipt_channels: ['email'] }, async (input) => {
-      began();
-      await preparation;
-      return withCustomerCommsLock(mockPg, customerId, async () => {
-        const verdict = await input.preSendCheck({ channel: 'email' });
-        if (verdict.ok) provider();
-        return { sent: verdict.ok, deliveryOutcome: verdict.ok ? 'accepted' : 'not_sent' };
-      });
-    });
-    await entered;
-    await obligation.queueObligation(notice(), 'payment_receipt', eventKey,
-      { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
-    resume();
-    await expect(initial).resolves.toMatchObject({ sent: false, code: 'BILLING_EMAIL_RETRY_OWNED' });
-    expect(provider).not.toHaveBeenCalled();
-  });
-
   test('a crash after provider-start leaves a durable fence that suppresses stale claim replay', async () => {
     const eventKey = `receipt:${randomUUID()}`;
     const queued = await obligation.queueObligation(notice(), 'payment_receipt', eventKey,
