@@ -344,6 +344,7 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // AGENTS.md: an LLM proposes intent, it never picks a price/size field).
 const COMMERCIAL_SUITE_SOURCE_LABELS = {
   license_seats: "state restaurant license",
+  verified: "tech-verified measurement",
   suite_type_default: "typical size for this business type",
 };
 

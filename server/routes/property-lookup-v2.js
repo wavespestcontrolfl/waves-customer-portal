@@ -1812,10 +1812,29 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // suite path stands down and the verified figure stays the size.
     const sqftVerified = rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
       || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'));
-    if (suiteSubpremiseSignal && suitePartBuildingEvidence && !sqftVerified) {
-      const commercialSuiteBuildingSqft = rc?.squareFootage || null;
+    // A non-aggregated commercial CONDO is its own county folio: its
+    // squareFootage already measures this unit, not the building — the same
+    // per-unit exemption the engine's applyUnitScopeToPropertyFacts applies.
+    const ownUnitFolio = shadowIsCondoRecord({
+      aggregated: rc?._parcel?.aggregated === true,
+      propertyType: rc?.propertyType,
+      landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+    });
+    if (suiteSubpremiseSignal && suitePartBuildingEvidence && !ownUnitFolio) {
+      const commercialSuiteBuildingSqft = sqftVerified ? null : (rc?.squareFootage || null);
       const stamp = rc?._commercialSuiteSize;
-      if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)
+      if (sqftVerified && Number(rc?.squareFootage) > 0) {
+        // A tech-verified size is a field measurement of THIS suite: it wins
+        // over every resolver guess (no resolver runs), but the profile stays
+        // suite-scoped — the verified area is the footprint, never re-derived
+        // from the building's story count.
+        resolvedCommercialSuiteSize = {
+          value: Number(rc.squareFootage),
+          source: 'verified',
+          confidence: 'high',
+          evidence: [{ source: 'verified', detail: 'tech-verified suite size' }],
+        };
+      } else if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)
         && commercialSuiteSizeStampIsFresh(stamp)) {
         resolvedCommercialSuiteSize = stamp;
       } else {

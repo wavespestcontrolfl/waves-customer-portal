@@ -275,6 +275,22 @@ describe('a tech-verified sqft outranks the suite resolver', () => {
     const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     expect(profile.homeSqFt).toBe(1650);
     expect(profile._commercialSuiteCandidate).toBeNull();
+    // Still suite-scoped: the verified area is the footprint, never
+    // re-derived from the building's story count downstream.
+    expect(profile.suiteSize).toEqual(expect.objectContaining({ value: 1650, source: 'verified' }));
+    expect(profile.footprint).toBe(1650);
+  });
+
+  test('a non-aggregated commercial condo keeps its own county folio measurement', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 1850,
+      propertyType: 'Commercial Condo',
+      _parcel: { landUseDescription: 'Commercial Condominium (1900)' },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    expect(profile.homeSqFt).toBe(1850);
+    expect(profile._commercialSuiteCandidate).toBeNull();
+    expect(profile.suiteSize == null).toBe(true);
   });
 });
 
