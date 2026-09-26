@@ -25,16 +25,10 @@ const { toE164 } = require('../../../utils/phone');
 // switch (sms_enabled on notification_prefs) that catches the common
 // opt-out case even when this phone-keyed messaging_suppression read comes
 // back UNKNOWN, so checkSuppression is allowed to fail OPEN for it. Push
-// (App) and billing Email have no such independent phone-suppression
-// signal of their own — the billing email authority's own suppression
-// recheck (billing-channel-email-authority.js) only consults the
-// email-template suppression store, never manual_dnc / opt_out, both of
-// which live ONLY here, keyed on phone. A transient read failure on either
-// non-SMS leg must therefore fail CLOSED exactly like push already does,
-// or a DB blip lets a manual_dnc / opt-out recipient through on the App or
-// Email leg while SMS stays protected. Every place this module (or a
-// caller) decides whether a leg may proceed on unverified suppression
-// state should route through this one predicate.
+// (App) and billing Email have no independent phone-suppression signal, so
+// their provider-boundary checks use this predicate and fail CLOSED on an
+// unknown read. Otherwise a DB blip could let a manual_dnc / opt-out
+// recipient through on either non-SMS leg while SMS stays protected.
 const SUPPRESSION_RETRY_MS = 5 * 60 * 1000;
 
 function requiresVerifiedSuppression(channel) {

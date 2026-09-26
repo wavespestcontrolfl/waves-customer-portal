@@ -119,13 +119,21 @@ test('a temporary eligibility failure stays on the bounded retry schedule withou
   expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });
 
-test('revoking Email at the authority boundary terminally stops the stored Email', async () => {
+test('changing the selected billing channel defers the stored Email for retry', async () => {
   authority.dispatchUnderBillingEmailAuthority.mockImplementation(async (options) => {
-    options.state.boundaryBlock = { code: 'BILLING_EMAIL_NOT_SELECTED', reason: 'Email is no longer selected' };
+    options.state.boundaryBlock = {
+      code: 'BILLING_PREFERENCES_CHANGED', reason: 'Email is not selected for this billing category',
+      deferred: true, retryable: true,
+    };
     return { ok: false };
   });
-  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true });
+  const outcome = await retryOne(storedMessage());
+  expect(outcome).toMatchObject({ sent: false, error: { code: 'BILLING_PREFERENCES_CHANGED' } });
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'failed', provider_retry_next_at: expect.any(Date), provider_retry_exhausted_at: null,
+  }));
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });
 
 test('billing templates lacking a supported receipt source cannot use generic replay', async () => {
