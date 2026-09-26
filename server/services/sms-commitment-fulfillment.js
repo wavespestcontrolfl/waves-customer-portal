@@ -135,6 +135,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
   const customerId = message.customer_id;
   const peer = message.direction === 'inbound' ? message.from_phone : message.to_phone;
+  // A paid payments row linked to the invoice aliased pinv (metadata or a
+  // shared PaymentIntent), not payer-billed, settled after the request.
+  const settledPaymentFor = (q) => q.from('payments as p').where('p.status', 'paid')
+    .whereRaw("COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''")
+    .whereRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) > ?", [after])
+    .whereRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) <= ?", [now])
+    .whereRaw("(p.metadata::jsonb ->> 'invoice_id' = pinv.id::text OR p.metadata::jsonb ->> 'waves_invoice_id' = pinv.id::text"
+      + ' OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pinv.stripe_payment_intent_id))');
   const sources = {
     // codex #4331 P2 (structural pass): an unresolved review-ask reservation
     // must not read as fulfillment evidence for an unrelated commitment.
@@ -204,16 +212,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       conn('invoices as pinv').where({ 'pinv.customer_id': customerId }).whereNull('pinv.payer_id')
         .where('pinv.paid_at', '>', after).where('pinv.paid_at', '<=', now)
         .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
-        .whereExists(function paymentForThisInvoice() {
-          this.select(conn.raw('1')).from('payments as p').where('p.status', 'paid')
-            .whereRaw("COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''")
-            .whereRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) > ?", [after])
-            .whereRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) <= ?", [now])
-            .whereRaw("(p.metadata::jsonb ->> 'invoice_id' = pinv.id::text OR p.metadata::jsonb ->> 'waves_invoice_id' = pinv.id::text"
-              + ' OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pinv.stripe_payment_intent_id))');
-        })
+        .whereExists(function paymentForThisInvoice() { settledPaymentFor(this.select(conn.raw('1'))); })
         .orderBy('pinv.paid_at', 'desc').limit(LIMIT + 1)
-        .select('pinv.id', 'pinv.title', 'pinv.invoice_number', 'pinv.paid_at', 'pinv_visit.property_id as property_id'),
+        // The payments row that settled it rides along: revalidation locks
+        // it too, because a dispute reverses payments.status before it
+        // touches the invoice (pre-push audit, rule 8).
+        .select('pinv.id', 'pinv.title', 'pinv.invoice_number', 'pinv.paid_at', 'pinv_visit.property_id as property_id',
+          conn.raw(`(${settledPaymentFor(conn.select('p.id')).orderByRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) DESC").limit(1).toQuery()}) as payment_id`)),
       // Off-gateway money recorded by staff (cash/check/Zelle/Venmo
       // prepayments from admin-customers.js POST /:id/credits) lands only in
       // the payments ledger, with no invoice link and no receipt text (rule
@@ -245,7 +250,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
         .where('created_at', '>', after).where('created_at', '<=', now)
         .orderBy('created_at', 'desc').limit(LIMIT + 1)
-        .select('id', 'status', 'message_type', 'message_body', 'created_at',
+        .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
+          conn.raw("(sms_log.metadata->>'providerAccepted') = 'true' as provider_accepted"),
+          conn.raw("(sms_log.metadata->>'channel') = 'push' as push_channel"),
           conn.raw("sms_log.metadata->>'property_id' as property_id")),
       // A truncated leg here still lands in the combined array below, so its
       // own overflow always trips the shared LIMIT check the generic loop
@@ -573,6 +580,7 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
     ? linkedEstimate(witness, commitment, evidence.records) : null;
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
     ...(linked ? { linked_record_type: 'estimate', linked_record_id: linked.id } : {}),
+    ...(witness.payment_source === 'invoice' && witness.payment_id ? { linked_record_type: 'payment_row', linked_record_id: witness.payment_id } : {}),
     // Revalidation (below) needs to know which table a 'payment' record_id
     // actually lives in (undefined, so dropped from JSON, for other types).
     payment_source: witness.payment_source,
@@ -619,7 +627,9 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
     // means a racing refund/void/chargeback either loses this row to us or
     // leaves us nothing to hold — never a fulfilled verdict grounded on
     // reversed money (rule 8, Codex #4816 r13 P1).
-    payment: { invoice: 'invoices', ledger: 'payments', sms: 'sms_log' }[verdict.payment_source] };
+    payment: { invoice: 'invoices', ledger: 'payments', sms: 'sms_log' }[verdict.payment_source],
+    // The settling payments row behind an invoice-source payment (linked).
+    payment_row: 'payments' };
   const table = tables[verdict.record_type];
   if (!table || !verdict.record_id || !verdict.evidence_hash) return false;
   // Customer/source locks are already held. Estimate writers lock estimate
@@ -691,7 +701,7 @@ async function checkSmsFulfillment(commitment, evidence, { eventOnly = false } =
     const { message_body: _smsBody, transcription: _callBody, body_text: _emailBody,
       text_snapshot: _deliveryBody, from_phone: _fromPhone, push_channel: _pushChannel, provider_accepted: _accepted,
       description: _ledgerNote, ...record } = row;
-    const appPush = row.type === 'sms' ? { app_push_accepted: smsDelivered(row) && row.status === 'sent' } : {};
+    const appPush = row.type === 'sms' || row.payment_source === 'sms' ? { app_push_accepted: smsDelivered(row) && row.status === 'sent' } : {};
     return { ...record, ...appPush, text: smsText.get(row.ref) ?? row.text };
   });
   // Only an admissible record can ground a fulfilled verdict; say which, so

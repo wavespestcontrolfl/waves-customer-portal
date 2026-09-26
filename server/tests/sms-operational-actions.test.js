@@ -1311,6 +1311,17 @@ describe('R2 payment evidence (owner ruling 2026-09-25): a payment receipt or pa
     expect(prompt).toContain('"witness_refs":["payment:sms-1"]');
   });
 
+  test('pre-push rule 7: an accepted App-push receipt reaches the provider with app_push_accepted, never its phone number', async () => {
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    const receipt = { id: 'sms-9', ref: 'payment:sms-9', type: 'payment', payment_source: 'sms', status: 'sent', message_type: 'receipt',
+      from_phone: 'push', provider_accepted: true, push_channel: true, created_at: '2040-03-10T16:00:00Z', text: 'Payment received, thank you.' };
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment(commitment, { records: [receipt], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
+    expect(prompt).toContain('"app_push_accepted":true');
+    expect(prompt).not.toContain('from_phone');
+  });
+
   test('rule 9: a ledger note (payments.description) never reaches the provider unscrubbed, and never rides twice under a raw key', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const note = 'Zelle prepayment — card 4242 4242 4242 4242 CVV 123';

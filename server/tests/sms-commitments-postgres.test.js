@@ -1947,6 +1947,38 @@ postgres('SMS commitments on PostgreSQL', () => {
     });
   });
 
+  test('R2 rule 8: an invoice-source payment locks its settling payments row; a dispute holding or reversing it fails the close', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0802',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after }).returning('id');
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
+    expect(witness).toMatchObject({ id: invoice.id, payment_id: payment.id });
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', linked_record_type: 'payment_row', linked_record_id: payment.id });
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    await mockPg.transaction(async (trx) => {
+      expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(true);
+    });
+    // A dispute holding the payments row (it updates payments before the invoice): no wait, no close.
+    const disputer = await mockPg.transaction();
+    try {
+      await disputer('payments').where({ id: payment.id }).forUpdate().first('id');
+      await mockPg.transaction(async (trx) => {
+        expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(false);
+      });
+    } finally { await disputer.rollback(); }
+    // The dispute commits the reversal: the reread evidence no longer matches.
+    await mockPg('payments').where({ id: payment.id }).update({ status: 'disputed' });
+    await mockPg.transaction(async (trx) => {
+      expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(false);
+    });
+  });
+
   test('R2 rule 10: an invoice paid on an Eastern evening reads as that Eastern day, not the next UTC day', async () => {
     const at = new Date(Math.max(message.created_at.getTime() + 1000, Date.parse('2026-01-01T00:00:00Z')));
     // 9:30 PM Eastern on the day after the text is already the next UTC day.
