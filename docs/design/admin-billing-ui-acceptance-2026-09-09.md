@@ -8,7 +8,7 @@ First bounded expansion of the approved [Admin UI contract](admin-ui-consistency
 - Branch: `codex/admin-ui-contract-billing-20260909`.
 - Foundation base: `0c6337adc683d14ce046a3b391dafa7e248dd2fe` from the referenced device-preview checkout.
 - Declared scope: `BillingRecoveryPage`, `PayersPage`, `PayerDetailSheet`, `PayerArAgingDialog`.
-- Two shared presentation corrections are included: `AdminCommandHeader` uses 22px phone titles for its workspace variant; `ui-section-tab` supplies its 54px control token so the global touch rule cannot shrink tabs inside a dialog. Legacy headers retain their scale. Shell layout, navigation registry, Customer 360, estimate and Tech workflow files stay with their existing workstreams. No repository-wide style replacement.
+- Two shared presentation corrections are included: `AdminCommandHeader` uses 22px phone titles for its workspace variant; `ui-section-tab` supplies its 54px control token so the global touch rule cannot shrink tabs inside a dialog. Legacy headers retain their scale. Shell layout, navigation registry, Customer 360, estimate and Tech workflow files stay with their existing workstreams. No repository-wide style replacement. (**Update 2026-09-26:** `#4714`, 2026-09-24, now sets command-header titles to 18px under 768px; see `client/src/styles/ui-workspace.css`.)
 - Non-UI discoveries live in the separate [bug register](../audits/admin-ui-non-ui-bugs.md).
 
 ## Inventory recorded before implementation

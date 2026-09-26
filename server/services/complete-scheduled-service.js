@@ -8681,7 +8681,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   'Setup fee never invoiced — historic first visit billed without it',
                   `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.`,
                   {
-                    link: `/admin/customers/${svc.customer_id}`,
+                    link: `/admin/customers?customerId=${svc.customer_id}`,
                     bell: true,
                     metadata: {
                       dedupeKey: setupFeeDedupeKey,
@@ -9148,7 +9148,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             'billing',
             `Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}`,
             alertBody,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/invoices?invoice=${terminalCompletionInvoice.id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
           return true;
@@ -9456,7 +9456,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             'billing',
             'Completed first visit needs manual billing — setup fee was never invoiced',
             alertBody,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('unminted-setup-fee notification insert failed');
           return true;
@@ -9527,7 +9527,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             `A completed recurring visit for a monthly-membership customer carried a $${Number(svc.estimated_price).toFixed(2)} per-visit price${svc.create_invoice_on_complete ? " and the series' create-invoice default" : ''}. Membership dues cover plan visits, so NO invoice was cut. If this series is actually a separately billable add-on, bill this visit manually and KEEP its per-visit price — every visit in the series will complete uninvoiced the same way, so bill each manually or roll the add-on into the customer's monthly rate.`,
             // bell: false — billing FYI, not a money failure; silenced under
             // GATE_ADMIN_BELL_POLICY even though category 'billing' rings.
-            { link: `/admin/customers/${svc.customer_id}`, bell: false, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: false, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
         });
       } catch (e) { logger.warn(`[dispatch] dues-covered review alert failed: ${e.message}`); }
@@ -10653,7 +10653,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               'Completion invoice needs review — a post-mint step failed',
               `The completion for ${visitLabel} committed and invoice ${liveNow.invoice_number || liveNow.id} exists, but a later invoicing step failed. Review that invoice on the customer page before it is sent — do NOT create a second invoice for this visit.`,
               {
-                link: `/admin/customers/${svc.customer_id}`,
+                link: `/admin/customers?customerId=${svc.customer_id}`,
                 bell: true,
                 dedupeKey: `live_invoice_postmint_failed:${svc.id}`,
                 trx,
@@ -10671,7 +10671,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               'Completion invoice not created — bill this visit by hand',
               `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons or setup fee.`,
               {
-                link: `/admin/customers/${svc.customer_id}`,
+                link: `/admin/customers?customerId=${svc.customer_id}`,
                 bell: true,
                 dedupeKey: `live_invoice_mint_failed:${svc.id}`,
                 trx,
@@ -10935,7 +10935,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             extendedAutopayCharge
               ? `A completed visit has an invoice but no accepted amount on file to cap the auto-charge against (no visit price and no membership rate). Auto Pay was NOT charged — review and bill manually or stamp the amount.`
               : `A completed visit has an invoice but no per-application amount on file to cap the auto-charge against. Auto Pay was NOT charged — review and bill manually or stamp the amount.`,
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal } },
+            { link: `/admin/invoices?invoice=${invoice.id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal } },
           );
         } catch (e) { logger.warn(`[dispatch] uncapped-charge review alert failed: ${e.message}`); }
       } else if (netInvoiceSubtotal > capCeiling + 0.005) {
@@ -10945,7 +10945,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             'billing',
             'Auto Pay charge above accepted amount — review',
             `A completed visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the accepted ${extendedAutopayCharge ? 'per-visit/membership' : 'per-application'} amount ($${acceptedPerVisit.toFixed(2)}). Auto Pay was NOT charged — review and bill manually or adjust the invoice.`,
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal: netInvoiceSubtotal, acceptedPerVisit } },
+            { link: `/admin/invoices?invoice=${invoice.id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal: netInvoiceSubtotal, acceptedPerVisit } },
           );
         } catch (e) { logger.warn(`[dispatch] above-quote review alert failed: ${e.message}`); }
       } else {
@@ -11238,7 +11238,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               'Card hold not charged — backfilled completion',
               'A stale visit was closed out as a backdated backfill, so its saved-card hold was NOT charged. Review the visit and charge or release the hold manually.',
               {
-                link: liveHold.customer_id ? `/admin/customers/${liveHold.customer_id}` : '/admin/dispatch',
+                link: liveHold.customer_id ? `/admin/customers?customerId=${liveHold.customer_id}` : '/admin/dispatch',
                 metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, holdId: liveHold.id, source: 'backfill_completion' },
               },
             );

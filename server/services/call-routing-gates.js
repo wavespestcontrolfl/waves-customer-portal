@@ -345,8 +345,18 @@ function checkTcpaConsent(extraction, opts = {}) {
 // directions), so a force-reprocess of an outbound call can move from
 // review to auto-route and must write a fresh decision row. (v2-1.44.0 is
 // the lender/realtor WDO arranger contract, #4890.)
-const V2_DECISION_VERSION = 'v2-1.45.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0'];
+// v2-1.47.0 (codex #4890 post-merge review P1, follow-up to the v2-1.44.0
+// arranger contract): isWdoInspectionRequest now requires INSPECTION/report
+// identity and rejects any treat/tent/fumigate/bait/Termidor/remediation
+// wording on specific_service_name, failing closed on anything ambiguous —
+// a lender/realtor call the model itself labels "WDO Treatment Service" no
+// longer clears caller_not_authorized. MORE RESTRICTIVE (a force-reprocess
+// of such a treatment-shaped call can move from auto-route back to review
+// and must write a fresh decision row); an actual WDO-inspection arranger
+// call is unaffected. (v2-1.46.0 is reserved by #4919, in review at the
+// time of this change.)
+const V2_DECISION_VERSION = 'v2-1.47.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0', 'v2-1.47.0'];
 
 function buildRouteDecision({
   callLogId,
@@ -521,6 +531,11 @@ const SCHEDULING_PAYLOAD_FLAGS = new Set([
   // processor's booking hold), so it carries the ask the booking must
   // answer before the sweep may close it (pre-push audit P1 on #4666).
   'on_file_house_number_conflict',
+  // The lender/realtor WDO-arranger slot elapsed before the in-transaction
+  // insert (call-recording-processor's arrangerSlotElapsed recheck) — the
+  // office needs the agreed time it can no longer book (codex #4890
+  // post-merge review P2).
+  'arranger_slot_elapsed_pre_insert',
 ]);
 
 // Address-review cards carry the address the call NAMED, snapshotted at
@@ -656,6 +671,11 @@ function buildTriageItem({
     // qualifying live coverage of its own (multi-property account — the
     // account-level lane grant does not extend to an uncovered rental).
     reservice_property_uncovered: 'time_ambiguous',
+    // The lender/realtor WDO-arranger's agreed slot elapsed before the
+    // in-transaction insert — same review lane as the other scheduling
+    // holds; the office re-books the agreed appointment (codex #4890
+    // post-merge review P2).
+    arranger_slot_elapsed_pre_insert: 'time_ambiguous',
     // Several live bookings plausibly match the call (same service line
     // within a day of the discussed date) — a human picks which one the
     // call belongs to instead of the AI inserting a duplicate.
