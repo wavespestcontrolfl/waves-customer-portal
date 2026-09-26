@@ -166,6 +166,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'La EPA aprobó nuestros productos.',
     'The treatment dries in 30min.',
     'Keep the kids inside for 2hrs after the spray.',
+    'Keep pets off the lawn for one day after treatment.',
+    'The spray dries in 60 seconds.',
+    'Mantenga a los niños fuera por un día después del tratamiento.',
   ])('active/dashed EPA claims and glued duration units are replaced: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }, 'Is the treatment okay for my family?').reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
