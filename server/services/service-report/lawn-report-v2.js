@@ -516,7 +516,7 @@ function buildAftercare(applications) {
     [watering] = productNotes;
     evidenceSource = 'product_instruction';
   } else if (waterInRequired === true) {
-    watering = 'Today’s application is recorded as requiring water-in; the exact amount and timing are not recorded in this report.';
+    watering = 'Today’s application is recorded as requiring water-in; the exact amount and timing are not recorded in this report. Confirm the directions with your technician before changing irrigation.';
     evidenceSource = 'irrigation_requirement';
     needsReview = true;
   } else {
@@ -695,6 +695,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // back to the past-tense wavesAction ("Applied a fungicide…") under the client's
   // "What Waves will do next" label read as a tense error. Cards without a plan hide the row.
   const realCustomerAction = topIssue ? (topIssue.customerAction || null) : null;
+  const hasCustomerTask = issues.some((issue) => Boolean(issue.customerAction));
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
@@ -718,7 +719,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     wavesNext,
     customerAction: realCustomerAction,
     // An older assessment's missing moisture cause is not an all-clear.
-    noActionNeeded: !realCustomerAction && drySignal !== null,
+    noActionNeeded: !hasCustomerTask && drySignal !== null,
   };
 
   // (Season-aware dormancy guard is applied above — before diagnosis/insights/snapshot

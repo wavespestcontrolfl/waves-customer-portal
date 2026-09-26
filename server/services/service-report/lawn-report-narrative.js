@@ -221,7 +221,10 @@ function mergeNarrative(v2, out) {
     const v = safeText(cats[d.key], d.explanation || d.customerExplanation);
     return { ...d, explanation: v, customerExplanation: v };
   });
-  if (next.water) next.water.explanation = safeWaterText(out.water, next.water.explanation);
+  // Without an approved weekly plan, the deterministic explanation deliberately
+  // keeps irrigation changes neutral. Model prose cannot add a watering change
+  // that the report's evidence does not authorize.
+  if (next.water?.weekPlan?.title) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
   if (next.mowing && next.mowing.measuredHeightInches != null) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);

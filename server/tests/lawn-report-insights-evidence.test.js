@@ -64,6 +64,7 @@ describe('lawn water evidence boundaries', () => {
       needsReview: true,
     });
     expect(requirementOnly.watering).not.toMatch(/24 hours|normal watering|inch|minute/i);
+    expect(requirementOnly.watering).toMatch(/Confirm the directions with your technician/i);
 
     expect(buildAftercare([
       { product: { irrigation_notes: 'Water after service.' } },
@@ -96,6 +97,7 @@ describe('lawn water evidence boundaries', () => {
     });
     expect(missing.insights.find((card) => card.category === 'water').customerAction)
       .toMatch(/exact amount and timing are not recorded/i);
+    expect(missing.aftercare.watering).toMatch(/Confirm the directions with your technician/i);
 
     const recorded = buildLawnReportV2({
       lawnAssessment: surplusAssessment,

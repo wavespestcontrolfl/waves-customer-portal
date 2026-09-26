@@ -22,7 +22,7 @@ const SURPLUS_CUSTOMER_ACTION = {
   'with_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report; confirm that instruction before following the weekly plan.',
   'without_plan:not_required': 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
   'without_plan:recorded': 'Today’s application requires water-in; use the recorded product directions. No upcoming watering plan is recorded on this report.',
-  'without_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report.',
+  'without_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report; confirm the directions with your technician before changing irrigation.',
 };
 
 const DAMP_CUSTOMER_ACTION = {
