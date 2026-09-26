@@ -45,6 +45,16 @@ describe('gate on', () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1', 'inv-2'], denialReasons: [] });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
     expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'sms', purpose: 'late_payment' }));
+    expect(ContactPolicy.evaluate.mock.calls[0][1]).not.toHaveProperty('database');
+  });
+
+  test('forwards an explicitly held database without changing the default call', async () => {
+    const heldDatabase = jest.fn();
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({
+      ...BASE, invoiceId: 'inv-1', database: heldDatabase,
+    })).resolves.toBe(true);
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ database: heldDatabase }));
   });
 
   test('denied verdict blocks even for an eligible invoice', async () => {
@@ -91,9 +101,13 @@ describe('collectionsChannelVerdict', () => {
 
   test('gate on: allowed and denied verdicts both surface the eligible set', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const heldDatabase = jest.fn();
     ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
-    expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
+    expect(await collectionsChannelVerdict({
+      customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder', database: heldDatabase,
+    }))
       .toEqual({ permitted: true, eligibleInvoiceIds: ['inv-1'] });
+    expect(ContactPolicy.evaluate.mock.calls[0][1]).toEqual(expect.objectContaining({ database: heldDatabase }));
     ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, eligibleInvoiceIds: ['inv-1'], denialReasons: ['contact_within_24h'] });
     expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
       .toEqual({ permitted: false, eligibleInvoiceIds: ['inv-1'] });
