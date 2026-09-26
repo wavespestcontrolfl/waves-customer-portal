@@ -2178,9 +2178,9 @@ class PinnedAssessmentUnavailable extends Error {
 //
 // Bumping this orphans lawn PDFs rendered under an older strategy so they
 // regenerate once. Non-lawn records return '' and are untouched: no
-// fleet-wide bust. Bump it whenever the way a lawn render RESOLVES ITS INPUTS
-// changes, not when those inputs' content changes — content is already covered
-// by the hash.
+// fleet-wide bust. Bump it whenever input resolution or deterministic lawn
+// rendering changes in a way the input hash cannot detect. Changes to the
+// hashed input content itself need no strategy bump.
 //
 // p1 → p2: the week's weather is now FROZEN at first render. A PDF cached
 // before that keeps the pre-freeze rainfall forever while /data freezes and
@@ -2194,7 +2194,9 @@ class PinnedAssessmentUnavailable extends Error {
 // p5: before/after pairing is Front-only; close-up / trouble photos never
 // pair or fill the fallback (owner ruling 2026-09-24). PDFs rendered under
 // the old any-zone pairing must not be reused.
-const LAWN_RENDER_STRATEGY = 'p5';
+// p6: grounded insight/action copy and provenance framing changed. PDFs cached
+// under p5 can retain superseded customer claims after /data is corrected.
+const LAWN_RENDER_STRATEGY = 'p6';
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);

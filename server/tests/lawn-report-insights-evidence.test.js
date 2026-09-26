@@ -20,7 +20,67 @@ function assessment(overrides = {}) {
   };
 }
 
-describe('lawn water evidence boundaries', () => {
+function allText(value, out = []) {
+  if (typeof value === 'string') out.push(value);
+  else if (Array.isArray(value)) value.forEach((item) => allText(item, out));
+  else if (value && typeof value === 'object') Object.values(value).forEach((item) => allText(item, out));
+  return out.join(' ');
+}
+
+describe('lawn insight evidence boundaries', () => {
+  test('weed severity does not invent a trend or spot work', () => {
+    const categories = [{ key: 'weed_pressure', status: 'needs_attention' }];
+    const withoutApplication = buildLawnInsightCards({ categories })[0];
+    expect(withoutApplication.headline).toBe('Weed pressure needs attention');
+    expect(withoutApplication.wavesAction).toBe('');
+    expect(withoutApplication.customerAction).toBe('');
+    expect(withoutApplication.nextVisitPlan).toBe('');
+    expect(allText(withoutApplication)).not.toMatch(/climbing|spot-treated|built it into the plan/i);
+
+    const broadcast = buildLawnInsightCards({
+      categories,
+      treatmentKinds: ['herbicide'],
+      treatmentProducts: [{ kind: 'herbicide', method: 'broadcast_spray' }],
+    })[0];
+    expect(broadcast.wavesAction).toMatch(/recorded broadcast method/i);
+    expect(broadcast.wavesAction).not.toMatch(/spot/i);
+    expect(broadcast.provenance).toEqual({
+      findingSource: 'photo_signal',
+      actionSource: 'recorded_application',
+      planSource: null,
+    });
+  });
+
+  test('a customer concern remains attributed and does not become an inspection', () => {
+    const card = buildLawnInsightCards({ customerConcern: 'New browning after the prior visit.' })
+      .find((item) => item.category === 'customer_concern');
+    expect(card.confidence).toBe('customer_reported');
+    expect(card.whatWeSaw).toMatch(/^You mentioned:/);
+    expect(allText(card)).not.toMatch(/checked|inspected|looked into|follow up on it/i);
+    expect(card.provenance).toEqual({ findingSource: 'customer', actionSource: null, planSource: null });
+  });
+
+  test('photo stress stays a signal without fabricated completed or future work', () => {
+    const cards = buildLawnInsightCards({
+      categories: [
+        { key: 'damage_disease_signals', status: 'needs_attention' },
+        { key: 'coverage', label: 'Coverage', status: 'watch' },
+      ],
+    });
+
+    expect(cards.map((card) => card.category)).toEqual(['damage', 'coverage']);
+    for (const card of cards) {
+      expect(card.wavesAction).toBe('');
+      expect(card.nextVisitPlan).toBe('');
+      expect(card.provenance.findingSource).toBe('photo_signal');
+    }
+    expect(cards[1]).toMatchObject({ status: 'watch' });
+    expect(cards[1].whatWeSaw).toMatch(/coverage is below the healthy range/i);
+    const overlaid = mergeNarrative({ insights: cards }, { insights: cards.map(() => ({ wavesAction: 'We inspected and treated the affected area.' })) });
+    expect(overlaid.insights.map((card) => card.wavesAction)).toEqual(['', '']);
+    expect(groundingFacts({ insights: cards }, {}).insights[0]).toMatchObject({ wavesAction: '', provenance: { actionSource: null } });
+  });
+
   test('water cards separate historical estimates, photo signals, and approved plans', () => {
     const noPlan = buildLawnInsightCards({ water: { status: 'deficit' } })[0];
     expect(noPlan.customerAction).toMatch(/No upcoming watering plan is recorded/i);
@@ -43,17 +103,135 @@ describe('lawn water evidence boundaries', () => {
     });
   });
 
-  test('the narrative overlay cannot invent completed work for a water estimate', () => {
-    const cards = buildLawnInsightCards({ water: { status: 'deficit' } });
-    const overlaid = mergeNarrative(
-      { insights: cards },
-      { insights: [{ wavesAction: 'We inspected and adjusted the irrigation today.' }] },
-    );
-    expect(overlaid.insights[0].wavesAction).toBe('');
-    expect(groundingFacts({ insights: cards }, {}).insights[0]).toMatchObject({
-      wavesAction: '',
-      provenance: { findingSource: 'calculated_estimate', actionSource: null },
+  test('an overall all-clear requires assessed healthy categories', () => {
+    const unassessed = buildLawnInsightCards({})[0];
+    expect(unassessed).toMatchObject({ category: 'overall', status: 'tracking' });
+    expect(allText(unassessed)).not.toMatch(/good shape|responding well|completed/i);
+
+    const healthy = buildLawnInsightCards({
+      categories: [
+        { key: 'coverage', status: 'healthy' },
+        { key: 'color_vigor', status: 'strong' },
+        { key: 'weed_pressure', status: 'healthy' },
+      ],
+      treatmentKinds: ['fertilizer'],
+      treatmentProducts: [{ kind: 'fertilizer' }],
+    })[0];
+    expect(healthy).toMatchObject({ status: 'healthy', headline: 'Your lawn is in good shape' });
+    expect(healthy.wavesAction).toMatch(/fertilizer application was recorded/i);
+    expect(healthy.nextVisitPlan).toBe('');
+    expect(healthy.provenance.actionSource).toBe('recorded_application');
+  });
+
+  test('the hero stays neutral when category evidence cannot verify a healthy overall score', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: assessment({ scores: { overallScore: 92, season: 'peak' } }),
     });
+
+    expect(report.insights).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: 'overall', status: 'tracking' }),
+    ]));
+    expect(report.snapshot.statusHeadline).toBe('Lawn health tracked');
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.snapshot.statusHeadline).not.toMatch(/healthy|great/i);
+    expect(report.smsSummary).not.toMatch(/No action needed/i);
+  });
+
+  test('an unsupported issue cannot become a covered no-action state', () => {
+    const report = buildLawnReportV2({ lawnAssessment: assessment() });
+    const weed = report.insights.find((card) => card.category === 'weeds');
+
+    expect(weed).toMatchObject({ wavesAction: '', customerAction: '', nextVisitPlan: '' });
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.smsSummary).not.toMatch(/No action needed/i);
+  });
+
+  test('every reported issue needs supported ownership before no-action reassurance', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: assessment({
+        scores: {
+          turfDensity: 35, weedSuppression: 60, colorHealth: 86,
+          stressDamage: 90, fungusControl: 92, overallScore: 65, season: 'peak',
+        },
+      }),
+      applications: [{ product: { name: 'Synthetic Fertilizer', category: 'fertilizer' } }],
+    });
+    expect(report.insights.slice(0, 2)).toEqual([
+      expect.objectContaining({ category: 'coverage', provenance: expect.objectContaining({ actionSource: 'recorded_application' }) }),
+      expect.objectContaining({ category: 'weeds', provenance: expect.objectContaining({ actionSource: null }) }),
+    ]);
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.smsSummary).not.toMatch(/No action needed/i);
+  });
+
+  test('the real report carries recorded method and scope provenance into insights', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: assessment(),
+      applications: [{
+        product: {
+          name: 'Synthetic Weed Control', category: 'herbicide',
+          service_report_summary: 'Reviewed weed-control role.', facts_approved: true,
+        },
+        method: 'broadcast_spray', methodInferred: false,
+        methodSource: 'recorded_application',
+        applicationArea: 'Front lawn', areaValue: 4200, areaUnit: 'sqft',
+      }],
+    });
+
+    expect(report.treatment.products[0]).toMatchObject({
+      method: 'broadcast_spray', methodSource: 'recorded_application',
+      applicationArea: 'Front lawn', applicationAreaSource: 'recorded_application',
+      area: '4200 sqft', purposeSource: 'approved_product_fact',
+    });
+    expect(groundingFacts(report, {}).treatment.products[0]).toMatchObject({
+      applicationArea: 'Front lawn',
+      applicationAreaSource: 'recorded_application',
+      area: '4200 sqft',
+      method: 'broadcast_spray',
+      methodSource: 'recorded_application',
+      purposeSource: 'approved_product_fact',
+    });
+    const weed = report.insights.find((card) => card.category === 'weeds');
+    expect(weed.wavesAction).toMatch(/recorded broadcast method/i);
+    expect(weed.provenance.actionSource).toBe('recorded_application');
+
+    const inferred = buildLawnReportV2({
+      lawnAssessment: assessment(),
+      applications: [{
+        product: {
+          name: 'Synthetic Weed Control', category: 'herbicide',
+          service_report_summary: 'Unapproved diagnostic claim.', facts_approved: false,
+        },
+        method: 'spot_treatment', methodInferred: true,
+      }],
+    });
+    expect(inferred.treatment.products[0]).toMatchObject({
+      method: null, inferredMethod: 'spot_treatment',
+      methodSource: 'category_inference', purposeSource: 'category_heuristic',
+    });
+    expect(inferred.treatment.products[0].whatItDoes).not.toMatch(/diagnostic claim/i);
+    expect(inferred.insights.find((card) => card.category === 'weeds').wavesAction)
+      .not.toMatch(/spot/i);
+
+    const ambiguousPersisted = buildLawnReportV2({
+      lawnAssessment: assessment(),
+      applications: [{
+        id: 'product-1',
+        product: { name: 'Synthetic Weed Control', category: 'herbicide' },
+        // Exact persisted report-data shape after completion inferred and saved
+        // the method: the non-null column makes methodInferred false even though
+        // no technician provenance survived persistence.
+        method: 'spot_treatment', methodInferred: false, methodLabel: 'spot treatment',
+        applicationArea: 'Front lawn', areaValue: 4200, areaUnit: 'sqft',
+      }],
+    });
+    expect(ambiguousPersisted.treatment.products[0]).toMatchObject({
+      method: null,
+      inferredMethod: 'spot_treatment',
+      methodSource: 'unverified_persisted_method',
+    });
+    expect(ambiguousPersisted.insights.find((card) => card.category === 'weeds').wavesAction)
+      .not.toMatch(/spot/i);
   });
 
   test('aftercare distinguishes recorded, missing, conflicting, and incomplete evidence', () => {
@@ -69,20 +247,11 @@ describe('lawn water evidence boundaries', () => {
     expect(buildAftercare([
       { product: { irrigation_notes: 'Water after service.' } },
       { product: { irrigation_notes: 'Do not water after service.' } },
-    ])).toMatchObject({
-      watering: expect.stringMatching(/Confirm the directions/),
-      evidenceSource: 'conflicting_product_instructions',
-      needsReview: true,
-    });
+    ])).toMatchObject({ watering: expect.stringMatching(/Confirm the directions/), evidenceSource: 'conflicting_product_instructions', needsReview: true });
     expect(buildAftercare([
       { product: { irrigation_required: true, reentry_text: 'Keep people and pets away until dry.' } },
       { product: { irrigation_notes: 'Do not water after service.' } },
-    ])).toMatchObject({
-      watering: expect.stringMatching(/Confirm the directions/),
-      reentry: 'Keep people and pets away until dry.',
-      evidenceSource: 'incomplete_product_instructions',
-      needsReview: true,
-    });
+    ])).toMatchObject({ watering: expect.stringMatching(/Confirm the directions/), reentry: 'Keep people and pets away until dry.', evidenceSource: 'incomplete_product_instructions', needsReview: true });
 
     const surplusAssessment = assessment({
       waterContext: {

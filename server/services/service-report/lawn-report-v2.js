@@ -25,6 +25,16 @@ const { photoZoneLabel } = require('../lawn-visit-input');
 // Accepts both the FINAL report applications shape ({ product: { name, category,
 // active_ingredient, service_report_summary, ... }, targets, ... }) and the raw
 // service_products shape ({ product_name, active_ingredient, approved_report_product_facts }).
+const PRODUCT_PURPOSES = [
+  { pattern: /fung|azoxy|propiconazole|thiophanate/, kind: 'fungicide', tag: 'fungus protection', fallback: 'supports management of labeled turf diseases' },
+  { pattern: /pre.?emerg|prodiamine|dithiopyr|pendimethalin/, kind: 'pre_emergent', tag: 'weed prevention', fallback: 'supports prevention of susceptible weeds' },
+  { pattern: /herb|weed|celsius|atrazine|2,?4-?d|metsulfuron|halosulfuron|sedgehammer|sulfentrazone|iodosulfuron|dicamba/, kind: 'herbicide', tag: 'weed control', fallback: 'supports control of labeled weeds' },
+  { pattern: /insect|bifenthrin|imidacloprid|chinch|grub|dinotefuran|clothianidin/, kind: 'insecticide', tag: 'pest control', fallback: 'supports control of labeled turf insects' },
+  { pattern: /iron|micro|biostim|humic|kelp|seaweed/, kind: 'supplement', tag: 'color support', fallback: 'provides general color and stress support' },
+  { pattern: /fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/, kind: 'fertilizer', tag: 'color & growth', fallback: 'provides nutrients as part of the lawn program' },
+];
+const firstValue = (...values) => values.find((value) => value !== undefined && value !== null && value !== '') ?? null;
+
 function classifyProduct(app = {}) {
   const p = app.product || {};
   const facts = app.approved_report_product_facts || {};
@@ -32,17 +42,19 @@ function classifyProduct(app = {}) {
   const ai = p.active_ingredient || app.active_ingredient || facts.activeIngredient || '';
   const name = p.name || app.product_name || facts.name || '';
   const hay = `${category} ${ai} ${name}`.toLowerCase();
-  let kind = 'other';
-  let tag = 'lawn treatment';
-  let fallback = 'applied as part of today’s lawn program';
-  if (/fung|azoxy|propiconazole|thiophanate/.test(hay)) { kind = 'fungicide'; tag = 'fungus protection'; fallback = 'helps protect turf where fungus pressure or wet conditions call for it'; }
-  else if (/pre.?emerg|prodiamine|dithiopyr|pendimethalin/.test(hay)) { kind = 'pre_emergent'; tag = 'weed prevention'; fallback = 'a pre-emergent that stops weeds before they sprout'; }
-  else if (/herb|weed|celsius|atrazine|2,?4-?d|metsulfuron|halosulfuron|sedgehammer|sulfentrazone|iodosulfuron|dicamba/.test(hay)) { kind = 'herbicide'; tag = 'weed control'; fallback = 'targets actively growing weeds'; }
-  else if (/insect|bifenthrin|imidacloprid|chinch|grub|dinotefuran|clothianidin/.test(hay)) { kind = 'insecticide'; tag = 'pest control'; fallback = 'targets turf-damaging insects'; }
-  else if (/iron|micro|biostim|humic|kelp|seaweed/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'supports color and stress tolerance'; }
-  else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'feeds the lawn to support density, color, and recovery'; }
-  const whatItDoes = p.service_report_summary || p.public_summary || facts.serviceReportSummary || facts.publicSummary || fallback;
-  return { kind, tag, whatItDoes };
+  const { kind, tag, fallback } = PRODUCT_PURPOSES.find(({ pattern }) => pattern.test(hay))
+    || { kind: 'other', tag: 'lawn treatment', fallback: 'applied as part of today’s lawn program' };
+  // Catalog prose is customer-facing only after report-data's approval gate.
+  const approvedFacts = [p.facts_approved === true, Object.keys(facts).length > 0].includes(true);
+  const approvedSummary = approvedFacts
+    ? (facts.serviceReportSummary || facts.publicSummary || p.service_report_summary || p.public_summary)
+    : null;
+  return {
+    kind,
+    tag,
+    whatItDoes: approvedSummary || fallback,
+    purposeSource: approvedSummary ? 'approved_product_fact' : 'category_heuristic',
+  };
 }
 
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -53,26 +65,45 @@ const uniq = (arr) => [...new Set(arr.filter(Boolean))];
 // actual treatment, not just the photo scores.
 function buildTreatment({ applications = [], actions = [] } = {}) {
   const products = (applications || []).map((app) => {
-    const p = app.product || {};
-    const facts = app.approved_report_product_facts || {};
-    const name = p.name || app.product_name || facts.name || null;
+    const { product: p = {}, approved_report_product_facts: facts = {} } = app;
+    const name = firstValue(p.name, app.product_name, facts.name);
     if (!name) return null;
     const cls = classifyProduct(app);
     const targets = Array.isArray(app.targets) ? app.targets.filter(Boolean) : [];
     const areaVal = app.areaValue ?? app.area_value;
-    const areaUnit = app.areaUnit || app.area_unit;
+    const areaUnit = firstValue(app.areaUnit, app.area_unit);
     const area = areaVal && areaUnit ? `${areaVal} ${areaUnit}` : null;
+    const applicationMethod = firstValue(app.applicationMethod, app.application_method, app.method);
+    // Persisted inferred defaults and technician-entered methods share the same
+    // service_products column. Only an affirmative provenance marker can turn
+    // that value into completed-method copy.
+    const recordedMethod = [
+      app.applicationMethodSource,
+      app.application_method_source,
+      app.methodSource,
+    ].includes('recorded_application');
+    const methodSource = !applicationMethod
+      ? null
+      : (recordedMethod ? 'recorded_application'
+        : (app.methodInferred === true ? 'category_inference' : 'unverified_persisted_method'));
+    const applicationArea = firstValue(app.applicationArea, app.application_area, app.area);
     return {
       name,
-      activeIngredient: p.active_ingredient || app.active_ingredient || facts.activeIngredient || null,
+      activeIngredient: firstValue(p.active_ingredient, app.active_ingredient, facts.activeIngredient),
       kind: cls.kind,
       whatItDoes: cls.whatItDoes,
+      purposeSource: cls.purposeSource,
       targets,
       area,
+      applicationArea,
+      applicationAreaSource: applicationArea ? 'recorded_application' : null,
       // app.method is the normalized field on persisted service_products
       // payloads (codex P2 2026-07-22) — without it drench/injection context
-      // never reached the narrative for stored reports.
-      method: app.applicationMethod || app.application_method || app.method || null,
+      // never reached the narrative for stored reports. Inferred methods remain
+      // metadata and cannot become a completed-method claim.
+      method: methodSource === 'recorded_application' ? applicationMethod : null,
+      inferredMethod: methodSource !== 'recorded_application' ? applicationMethod : null,
+      methodSource,
     };
   }).filter(Boolean);
 
@@ -379,10 +410,11 @@ function buildSmsSummary(snapshot, grassLabel) {
 
 // Headline is driven by the most severe insight (what the customer should act on),
 // falling back to the overall band when nothing needs attention.
-function statusHeadline(overallStatus, topIssue) {
+function statusHeadline(overallStatus, topIssue, overallHealthVerified = true) {
   const topic = topIssue ? ISSUE_TOPIC[topIssue.category] : null;
   if (topIssue && topIssue.status === 'needs_attention') return topic ? `Needs attention — ${topic}` : 'Needs attention this visit';
   if (topIssue && topIssue.status === 'watch') return topic ? `Stable — watching ${topic}` : 'Stable — a couple of things to watch';
+  if (!overallHealthVerified) return 'Lawn health tracked';
   if (overallStatus === 'strong') return 'Looking great';
   if (overallStatus === 'healthy') return 'Looking healthy';
   return 'Lawn health tracked';
@@ -636,6 +668,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
+  const insightTreatment = treatment || {};
+
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
   const aftercare = buildAftercare(applications);
@@ -653,7 +687,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     mowing,
     grassLabel,
     customerConcern,
-    treatmentKinds: treatment ? treatment.kinds : [],
+    treatmentKinds: insightTreatment.kinds,
+    treatmentProducts: insightTreatment.products,
     waterInRequired: aftercare.waterInRequired === true,
     waterInInstructionRecorded: ['product_instruction'].includes(aftercare.evidenceSource),
   });
@@ -677,6 +712,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const status = scoreStatus(overallScore);
   const issues = insights.filter((i) => i.status === 'needs_attention' || i.status === 'watch');
   const topIssue = issues[0] || null;
+  const overallInsightStatus = insights
+    .filter((insight) => insight.category === 'overall')
+    .map((insight) => insight.status)[0];
+  const overallHealthVerified = overallInsightStatus !== 'tracking';
 
   // "Why 68": name the category dragging the score down, reassure on the rest.
   // Only the DISPLAYED categories — the Water/Coverage card is hidden (its score
@@ -697,6 +736,21 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const realCustomerAction = topIssue ? (topIssue.customerAction || null) : null;
   const hasCustomerTask = issues.some((issue) => Boolean(issue.customerAction));
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
+  const issueOwnership = issues.map((issue) => {
+    const provenance = issue.provenance || {};
+    const ownedEvidence = [
+      [issue.wavesAction, provenance.actionSource],
+      [issue.nextVisitPlan, provenance.planSource],
+    ];
+    return ownedEvidence.some((evidence) => evidence.every(Boolean));
+  });
+  const wavesOwnsEveryIssue = [issues.length, ...issueOwnership].every(Boolean);
+  const noIssueNeedsAction = [!topIssue, overallHealthVerified].every(Boolean);
+  const noActionNeeded = [
+    !hasCustomerTask,
+    drySignal !== null,
+    [noIssueNeedsAction, wavesOwnsEveryIssue].includes(true),
+  ].every(Boolean);
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
@@ -706,7 +760,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const snapshot = {
     overallScore,
     status,
-    statusHeadline: statusHeadline(status, topIssue),
+    statusHeadline: statusHeadline(status, topIssue, overallHealthVerified),
     scoreExplanation,
     rootCause,
     seasonalNote,
@@ -719,7 +773,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     wavesNext,
     customerAction: realCustomerAction,
     // An older assessment's missing moisture cause is not an all-clear.
-    noActionNeeded: !hasCustomerTask && drySignal !== null,
+    noActionNeeded,
   };
 
   // (Season-aware dormancy guard is applied above — before diagnosis/insights/snapshot

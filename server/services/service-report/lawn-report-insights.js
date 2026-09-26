@@ -31,6 +31,26 @@ const DAMP_CUSTOMER_ACTION = {
   'with_plan:recorded': 'Today’s application requires water-in; use the recorded product directions first, then follow this week’s watering plan below.',
 };
 
+const COVERAGE_PRESENTATION = {
+  true: { status: 'needs_attention', headline: 'Coverage or color needs attention' },
+  false: { status: 'watch', headline: 'Coverage or color is worth watching' },
+};
+
+const OVERALL_PRESENTATION = {
+  true: {
+    status: 'healthy',
+    headline: 'Your lawn is in good shape',
+    whatWeSaw: 'The assessed lawn-health categories are in healthy ranges today.',
+    whyItMatters: 'The current assessment supports continued routine care.',
+  },
+  false: {
+    status: 'tracking',
+    headline: 'Current lawn condition recorded',
+    whatWeSaw: 'Today’s assessment recorded the current lawn-health categories without establishing an all-clear.',
+    whyItMatters: 'The current readings provide a baseline for future comparison.',
+  },
+};
+
 function catByKey(categories, key) {
   return (categories || []).find((c) => c.key === key) || null;
 }
@@ -51,12 +71,16 @@ function buildLawnInsightCards({
   grassLabel = 'lawn',
   customerConcern = '',
   treatmentKinds = [],
+  treatmentProducts = [],
   waterInRequired = false,
   waterInInstructionRecorded = false,
 } = {}) {
   const cards = [];
   const kinds = Array.isArray(treatmentKinds) ? treatmentKinds : [];
+  const products = Array.isArray(treatmentProducts) ? treatmentProducts : [];
   const has = (kind) => kinds.includes(kind);
+  const productOfKind = (kind) => products.find((product) => product && product.kind === kind) || null;
+  const productCount = products.length;
   const provenance = (findingSource, actionSource = null, planSource = null) => ({
     findingSource,
     actionSource,
@@ -167,15 +191,23 @@ function buildLawnInsightCards({
   if (weed && (weed.status === 'watch' || weed.status === 'needs_attention')) {
     cards.push({
       category: 'weeds', status: weed.status, confidence: 'ai_supported',
-      headline: weed.status === 'needs_attention' ? 'Weed pressure is climbing' : 'A little weed activity to keep ahead of',
+      headline: weed.status === 'needs_attention' ? 'Weed pressure needs attention' : 'A little weed activity to keep ahead of',
       whatWeSaw: 'Weeds competing with the turf in places.',
       whyItMatters: 'Weeds spread fastest when the turf is thin or stressed.',
-      wavesAction: has('pre_emergent')
-        ? 'Applied a pre-emergent to stop new weeds and built follow-up into the plan.'
-        : has('herbicide')
-          ? 'Spot-treated the weeds with a targeted herbicide and built it into the plan.'
-          : 'Spot-treated where appropriate and built it into the plan.',
-      nextVisitPlan: 'Reassess weed pressure next visit.',
+      wavesAction: (() => {
+        const preventive = productOfKind('pre_emergent');
+        if (preventive) return 'A preventive weed treatment was recorded for today’s service.';
+        const herbicide = productOfKind('herbicide');
+        if (!herbicide) return '';
+        if (herbicide.method === 'spot_treatment') return 'A weed-control treatment was applied using the recorded spot-treatment method.';
+        if (herbicide.method === 'broadcast_spray') return 'A weed-control treatment was applied using the recorded broadcast method.';
+        return 'A weed-control treatment was recorded for today’s service.';
+      })(),
+      nextVisitPlan: '',
+      provenance: provenance(
+        'photo_signal',
+        has('pre_emergent') || has('herbicide') ? 'recorded_application' : null,
+      ),
     });
   }
 
@@ -187,25 +219,39 @@ function buildLawnInsightCards({
       headline: 'A few stress patterns to monitor',
       whatWeSaw: 'Some stress patterns in the turf that we want to keep an eye on.',
       whyItMatters: 'Catching patterns early lets us confirm the cause before it spreads.',
-      wavesAction: 'Documented the areas for comparison next visit.',
-      nextVisitPlan: 'Recheck these areas next visit to confirm what’s driving them.',
+      wavesAction: '',
+      nextVisitPlan: '',
+      provenance: provenance('photo_signal', null, null),
     });
   }
 
   // ── Coverage / color recovery ──────────────────────────────────────────────────
   const coverage = catByKey(categories, 'coverage');
   const color = catByKey(categories, 'color_vigor');
-  const weakGrowth = [coverage, color].filter((c) => c && c.status === 'needs_attention');
+  const weakGrowth = [coverage, color].filter(
+    (c) => c && ['watch', 'needs_attention'].includes(c.status),
+  );
   if (weakGrowth.length) {
+    const needsAttention = weakGrowth.some((c) => c.status === 'needs_attention');
+    const coveragePresentation = COVERAGE_PRESENTATION[needsAttention];
+    const labels = weakGrowth.map((c) => String(c.label || '').toLowerCase()).filter(Boolean);
+    const finding = labels.length
+      ? `${labels.join(' and ')} ${labels.length === 1 ? 'is' : 'are'} below the healthy range in the current assessment.`
+      : 'The current assessment shows coverage or color below the healthy range.';
+    const hasGrowthApplication = has('fertilizer') || has('supplement');
     cards.push({
-      category: 'coverage', status: 'watch', confidence: 'ai_supported',
-      headline: 'Some thinning and uneven color',
-      whatWeSaw: 'Coverage and color are down in places, mostly where the lawn is most stressed.',
+      category: 'coverage', status: coveragePresentation.status, confidence: 'ai_supported',
+      headline: coveragePresentation.headline,
+      whatWeSaw: finding,
       whyItMatters: 'Turf weakens when it can’t recover between stresses.',
-      wavesAction: has('fertilizer') || has('supplement')
-        ? 'Fed the lawn to support density and color recovery, and shifted the program accordingly.'
-        : 'Shifted the program toward density and color recovery.',
-      nextVisitPlan: 'Recheck density and color next visit.',
+      wavesAction: hasGrowthApplication
+        ? 'A nutrient or color-support application was recorded for today’s service.'
+        : '',
+      nextVisitPlan: '',
+      provenance: provenance(
+        'photo_signal',
+        hasGrowthApplication ? 'recorded_application' : null,
+      ),
     });
   }
 
@@ -221,34 +267,55 @@ function buildLawnInsightCards({
         : 'Tall mowing can shade the base of the turf and hold moisture.',
       wavesAction: 'Logged the height for your file — we don’t mow, so this is a heads-up.',
       customerAction: short ? 'Raise the mower one setting.' : 'Lower the mower one setting.',
-      nextVisitPlan: 'Re-measure the height of cut next visit.',
+      nextVisitPlan: '',
+      provenance: provenance('measured', 'measurement_record', null),
     });
   }
 
   // ── Customer concern (acknowledge, never confirm a cause) ──────────────────────
   if (String(customerConcern || '').trim()) {
     cards.push({
-      category: 'customer_concern', status: 'watch', confidence: 'tech_confirmed',
-      headline: 'We looked into what you flagged',
-      whatWeSaw: `You mentioned: “${String(customerConcern).trim()}”. We checked it during the visit.`,
-      whyItMatters: 'We want what you noticed tracked on the report, not lost.',
-      wavesAction: 'Noted it on this visit and built any follow-up into the plan.',
-      nextVisitPlan: 'Follow up on it next visit.',
+      category: 'customer_concern', status: 'watch', confidence: 'customer_reported',
+      headline: 'Your concern is recorded',
+      whatWeSaw: `You mentioned: “${String(customerConcern).trim()}”.`,
+      whyItMatters: 'This keeps your concern visible alongside the recorded visit findings.',
+      wavesAction: '',
+      nextVisitPlan: '',
+      provenance: provenance('customer', null, null),
     });
   }
 
   // ── Reassurance when nothing needs attention ───────────────────────────────────
   if (!cards.length) {
+    const assessedCategories = (categories || []).filter((category) => category && category.key !== 'water_moisture_stress');
+    const verifiedHealthy = assessedCategories.length > 0
+      && assessedCategories.every((category) => ['healthy', 'strong'].includes(category.status));
+    const overallPresentation = OVERALL_PRESENTATION[verifiedHealthy];
     cards.push({
-      category: 'overall', status: 'healthy', confidence: 'ai_supported',
-      headline: 'Your lawn is in good shape',
-      whatWeSaw: 'Coverage, color, and weed control all look healthy today.',
-      whyItMatters: 'Your lawn is responding well to the program.',
+      category: 'overall', status: overallPresentation.status, confidence: 'ai_supported',
+      headline: overallPresentation.headline,
+      whatWeSaw: overallPresentation.whatWeSaw,
+      whyItMatters: overallPresentation.whyItMatters,
       wavesAction: has('fertilizer')
-        ? 'Applied today’s scheduled feeding and documented the visit.'
-        : 'Completed today’s scheduled treatment and documented the visit.',
-      nextVisitPlan: 'Keep the program steady and keep tracking each visit.',
+        ? 'A fertilizer application was recorded for today’s service.'
+        : (productCount ? 'Today’s application was recorded on this report.' : ''),
+      nextVisitPlan: '',
+      provenance: provenance(
+        'current_assessment',
+        productCount ? 'recorded_application' : null,
+        null,
+      ),
     });
+  }
+
+  // Keep the deterministic fallback aligned with the narrative adapter: action
+  // ownership is explicit, and unsupported fields are empty strings rather
+  // than omitted keys a later mapper might feel compelled to fill.
+  const contentFields = ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'];
+  for (const card of cards) {
+    for (const field of contentFields) {
+      if (typeof card[field] !== 'string') card[field] = '';
+    }
   }
 
   // Priority: worst status first, then a stable category order.

@@ -6,7 +6,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LawnTrends, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
+import { LawnInsightCards, LawnTrends, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
 import { ScoreRing as TreeShrubScoreRing } from '../treeShrubV2/TreeShrubReportV2';
 import { MeterSvg, TrendChip } from '../GaugePrimitives';
 
@@ -181,6 +181,25 @@ describe('GaugePrimitives honesty guards', () => {
   it('MeterSvg treats an empty-string score as not-yet-available, not a real 0', () => {
     render(<MeterSvg score="" label={null} />);
     expect(screen.getByRole('img', { name: /score not yet available/i })).toBeInTheDocument();
+  });
+});
+
+describe('LawnInsightCards evidence framing', () => {
+  it('presents a customer concern as customer-reported evidence, not a technician finding', () => {
+    render(<LawnInsightCards insights={[{
+      category: 'customer_concern',
+      status: 'watch',
+      priority: 1,
+      headline: 'Your concern is recorded',
+      whatWeSaw: 'You mentioned thinning near the driveway.',
+      confidence: 'customer_reported',
+    }]} />);
+
+    expect(screen.getByText('Reported by you')).toBeInTheDocument();
+    expect(screen.getByText('What you reported:')).toBeInTheDocument();
+    expect(screen.getByText('Today’s Priorities & Action Plan')).toBeInTheDocument();
+    expect(screen.getByText(/Today’s key items/)).toBeInTheDocument();
+    expect(screen.queryByText(/Your technician’s key findings/)).toBeNull();
   });
 });
 
