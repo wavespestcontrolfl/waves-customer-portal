@@ -4,7 +4,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const ContactLedger = require('./collections/contact-ledger');
 const { readStoredBillingReplayContext } = require('./email-template-library');
-const BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX = 'Billing email terminal refusal: ';
 
 function replayContext(message) {
   try {
@@ -65,11 +64,6 @@ function hasAcceptedEvidence(message) {
   return !!(message?.sent_at || message?.delivered_at || message?.opened_at || message?.clicked_at);
 }
 
-function hasTerminalRefusalEvidence(message) {
-  return message?.status === 'blocked' && !!message.provider_retry_exhausted_at
-    && String(message.error_message || '').startsWith(BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX);
-}
-
 function metadataOf(row) {
   if (typeof row?.metadata !== 'string') return row?.metadata || {};
   try { return JSON.parse(row.metadata) || {}; } catch { return {}; }
@@ -93,17 +87,11 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
     const byLedgerId = new Map(candidates.map((row) => [String(row.id), row]));
     const repaired = new Set();
     for (const message of messages) {
-      const accepted = hasAcceptedEvidence(message);
-      const terminal = hasTerminalRefusalEvidence(message);
-      if (!accepted && !terminal) continue;
+      if (!hasAcceptedEvidence(message)) continue;
       const context = replayContext(message);
       const candidate = context && byLedgerId.get(String(context.collections_ledger_id));
       if (!candidate) continue;
-      if (accepted) {
-        if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
-      } else {
-        await resolveBillingEmailReservationRefusal(message, database);
-      }
+      if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
     }
     return repaired;
   } catch (err) {
@@ -113,7 +101,6 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
 }
 
 module.exports = {
-  BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX,
   hasAcceptedEvidence,
   markBillingEmailReservationDelivered,
   resolveBillingEmailReservationRefusal,

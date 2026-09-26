@@ -43,9 +43,6 @@ function message(replay, overrides = {}) {
     categories: JSON.stringify(['billing']),
     provider_message_id: null,
     provider_handoff_phase: null,
-    status: null,
-    error_message: null,
-    provider_retry_exhausted_at: null,
     sent_at: null,
     delivered_at: null,
     opened_at: null,
@@ -103,8 +100,6 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
       table.string('provider_message_id');
       table.string('provider_handoff_phase');
       table.string('status');
-      table.text('error_message');
-      table.timestamp('provider_retry_exhausted_at', { useTz: true });
       table.timestamp('sent_at', { useTz: true });
       table.timestamp('delivered_at', { useTz: true });
       table.timestamp('opened_at', { useTz: true });
@@ -202,45 +197,27 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
       .resolves.toMatchObject({ status: 'delivered', delivered_at: expect.any(Date) });
   });
 
-  test('progress repairs accepted and terminal evidence while unknown attempts stay held', async () => {
+  test('progress repair trusts accepted timestamps, never provider id or started phase alone', async () => {
     const customerId = randomUUID();
     const invoiceId = randomUUID();
     const acceptedEvent = `late-payment:${invoiceId}:accepted`;
     const unknownEvent = `late-payment:${invoiceId}:unknown`;
-    const terminalEvent = `late-payment:${invoiceId}:terminal`;
     const accepted = ledger({ customerId, invoiceId, eventKey: acceptedEvent });
     const unknown = ledger({ customerId, invoiceId, eventKey: unknownEvent });
-    const terminal = ledger({ customerId, invoiceId, eventKey: terminalEvent });
-    const sibling = ledger({ customerId, invoiceId, eventKey: terminalEvent, channel: 'sms' });
-    await mockDatabase('collections_contact_ledger').insert([accepted, unknown, terminal, sibling]);
+    const sibling = ledger({ customerId, invoiceId, eventKey: acceptedEvent, channel: 'sms' });
+    await mockDatabase('collections_contact_ledger').insert([accepted, unknown, sibling]);
     await mockDatabase('email_messages').insert([
-      message(context({ customerId, invoiceId, eventKey: acceptedEvent, ledgerId: accepted.id }), {
-        sent_at: new Date(), status: 'blocked', provider_retry_exhausted_at: new Date(),
-        error_message: `${Reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}stale`,
-      }),
+      message(context({ customerId, invoiceId, eventKey: acceptedEvent, ledgerId: accepted.id }), { sent_at: new Date() }),
       message(context({ customerId, invoiceId, eventKey: unknownEvent, ledgerId: unknown.id }), {
-        status: 'blocked', error_message: `${Reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}temporary`,
-      }),
-      message(context({ customerId, invoiceId, eventKey: terminalEvent, ledgerId: terminal.id }), {
-        status: 'blocked', provider_retry_exhausted_at: new Date(),
-        error_message: `${Reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}ineligible`,
+        provider_message_id: 'provider-only', provider_handoff_phase: 'started',
       }),
     ]);
 
-    const first = await require('../services/billing-reminder-delivery')
-      .reminderProgress(customerId, 'late_payment_checker', ['email']);
-    expect(first.find((event) => event.metadata.notificationEventKey === acceptedEvent).complete).toBe(true);
-    expect(first.find((event) => event.metadata.notificationEventKey === terminalEvent).complete).toBe(false);
-    const second = await require('../services/billing-reminder-delivery')
-      .reminderProgress(customerId, 'late_payment_checker', ['email']);
-    expect(second.find((event) => event.metadata.notificationEventKey === terminalEvent).complete).toBe(true);
-    const rows = await mockDatabase('collections_contact_ledger')
-      .whereIn('id', [accepted.id, unknown.id, terminal.id, sibling.id]);
+    const repaired = await Reservation.repairAcceptedBillingEmailReservations([accepted, unknown, sibling], mockDatabase);
+    expect(repaired).toEqual(new Set([accepted.id]));
+    const rows = await mockDatabase('collections_contact_ledger').whereIn('id', [accepted.id, unknown.id, sibling.id]);
     expect(rows.find((row) => row.id === accepted.id).metadata.delivered).toBe(true);
     expect(rows.find((row) => row.id === unknown.id).metadata.delivered).toBeUndefined();
-    expect(rows.find((row) => row.id === terminal.id).metadata).toMatchObject({ resolved: true });
-    expect(rows.find((row) => row.id === terminal.id).metadata.delivered).toBeUndefined();
     expect(rows.find((row) => row.id === sibling.id).metadata.delivered).toBeUndefined();
-    expect(rows.find((row) => row.id === sibling.id).metadata.resolved).toBeUndefined();
   });
 });
