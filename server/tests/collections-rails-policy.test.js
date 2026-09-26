@@ -118,6 +118,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_COLLECTIONS_POLICY;
   db.transaction = jest.fn(async (fn) => fn(db));
+  // The email hand-off takes the customer-comms advisory lock (trx.raw).
+  db.raw = jest.fn(async () => ({ rows: [] }));
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   // clearAllMocks keeps per-test mockResolvedValue overrides — re-pin defaults.
   sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });

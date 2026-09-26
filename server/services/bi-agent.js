@@ -277,7 +277,19 @@ const BIAgent = {
     notify('starting', 'Creating BI session...');
 
     const session = await apiCallWithinDeadline('POST', '/sessions', {
-      agent: BI_AGENT_ID,
+      // The session runs BI_AGENT_CONFIG as checked in (model, system prompt,
+      // tools), not whatever the registered agent object last had synced:
+      // agent_with_overrides replaces those fields for this session only, so
+      // a prompt or tool change ships with its deploy and needs no separate
+      // agent update (Codex #4885 P1). The registered agent stays the base the
+      // session is traced to (its id and version remain on the session).
+      agent: {
+        type: 'agent_with_overrides',
+        id: BI_AGENT_ID,
+        model: BI_AGENT_CONFIG.model,
+        system: BI_AGENT_CONFIG.system,
+        tools: BI_AGENT_CONFIG.tools,
+      },
       environment_id: BI_AGENT_ENVIRONMENT_ID,
     }, 'new session', deadline);
     const sessionId = session.id;
