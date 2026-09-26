@@ -1004,21 +1004,26 @@ function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
 // ("Great, see you Sunday at noon.") — closed commitment vocabulary plus
 // slot binding — so "Sunday at noon is off." holds. The routine closers
 // "No, that's all." / "Nope, that's it." are not rejections.
-const CALLER_CLOSER_NEGATION_RE = /(?:^| )(?:no|nope|nah)(?: (?:that s|that is) (?:all|it)(?: thanks| thank you)*)(?= |$)/g;
+const CALLER_CLOSER_NEGATION_RE = /(?:^| )(?:no|nope|nah)(?: (?:that s|that is) (?:all|it)(?: (?:thanks|thank you|so much|very much|bye))*)(?= |$)/g;
 // Caller-voiced deferrals and the people a caller defers to — "I need to
 // ask my husband first.", "Let me run it by my landlord." A caller naming
 // one of these after the commitment holds the call (fail closed).
+// Phrase-anchored, never bare party nouns or ambiguous verbs: "I am the
+// owner", "Please stop by the side gate", "You can pass through the gate"
+// are routine caller lines.
 const CALLER_CAVEAT_TERMS = [
-  ' ask my ', ' check with ', ' talk to my ', ' talk with my ', ' run it by ', ' run this by ',
+  ' ask my ', ' ask the ', ' check with ', ' talk to my ', ' talk with my ', ' talk to the ',
+  ' run it by ', ' run this by ', ' see what my ', ' see what the ',
   ' get back to you ', ' think about it ', ' let you know ',
-  ' husband ', ' wife ', ' landlord ', ' boss ', ' partner ', ' property manager ', ' owner ',
   // Codex round 26, P1 (:1015): direct refusals ("I decline.", "I have to
   // pass.") and price/interest walk-aways.
-  ' decline ', ' declining ', ' pass ', ' refuse ', ' forget it ', ' forget about it ', ' skip ',
-  ' hold off ', ' not interested ', ' no thanks ', ' no thank you ', ' rather ',
+  ' decline ', ' declining ', ' refuse ', ' forget it ', ' forget about it ',
+  ' i ll pass ', ' i will pass ', ' have to pass ', ' going to pass ', ' gonna pass ', ' pass on ',
+  ' hold off ', ' not interested ', ' no thanks ', ' no thank you ', ' i d rather ', ' rather not ',
   ' too expensive ', ' too much ', ' afford ', ' pricey ', ' shop around ', ' other quotes ',
-  ' compare ', ' go with someone else ', ' someone else ', ' changed my mind ', ' change my mind ',
-  ' don t want ', ' do not want ', ' stop ',
+  ' go with someone else ', ' use someone else ', ' hire someone else ',
+  ' changed my mind ', ' change my mind ', ' don t want ', ' do not want ',
+  ' stop the service ', ' skip it ', ' skip this ',
 ];
 function laterCallerSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   const ns = sentence.ns.replace(CALLER_CLOSER_NEGATION_RE, ' ').trim();

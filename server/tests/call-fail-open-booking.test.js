@@ -1735,6 +1735,9 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     "Caller: Great, see you Sunday at noon.",
     "Caller: No, that's all, thank you.",
     "Caller: Perfect, thanks so much. Bye.",
+    "Caller: No, that's all, thanks so much.",
+    "Caller: Please stop by the side gate.",
+    "Caller: You can pass through the gate.",
   ])('Codex round-26: a later caller acknowledgement or closer still grounds — %s', (later) => {
     const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
