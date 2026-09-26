@@ -31,6 +31,8 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
     ['Bora-Care', [], [charge('bora_care', 'Bora-Care Wood Treatment', 800)]],
     ['recurring termite bait', [{ name: 'Termite Bait Monitoring', mo: 45 }], []],
     ['recurring foam named only by its wording', [{ name: 'Foam Treatment Recurring', mo: 60 }], []],
+    ['termite bait mixed into a lawn label', [{ name: 'Lawn Care and Termite Bait Monitoring', mo: 80 }], []],
+    ['termite bait mixed into a mosquito label', [{ name: 'Mosquito and Termite Bait Monitoring', mo: 80 }], []],
   ])('termite work: %s', (_, recurring, oneTime) => {
     expect(serviceMixMakesNoGuaranteeClaim(recurring, oneTime)).toBe(true);
   });
@@ -75,6 +77,22 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
     const pestOnly = { ...estData, proposal: { ...estData.proposal, buildings: [{ name: 'Building A', lineItems: [{ description: 'Monthly Pest Control' }] }] } };
     expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(pestOnly), guaranteeProposalRows(pestOnly))).toBe(false);
     expect(guaranteeProposalRows({ proposal: { programs: [{ name: 'Termite Bait Program' }] } })).toEqual([{ name: 'Termite Bait Program', service: null }]);
+  });
+
+  test('authored corrective work participates in the same fail-closed guarantee decision', () => {
+    const estData = {
+      proposal: {
+        enabled: true,
+        programs: [{ name: 'Quarterly Pest Program', service: 'pest' }],
+        correctiveWork: [{ label: 'Pre-Slab Termiticide Treatment', service: 'pre_slab_termiticide' }],
+      },
+    };
+    const rows = guaranteeProposalRows(estData);
+    expect(rows).toEqual([
+      { name: 'Quarterly Pest Program', service: 'pest' },
+      { name: 'Pre-Slab Termiticide Treatment', service: 'pre_slab_termiticide' },
+    ]);
+    expect(serviceMixMakesNoGuaranteeClaim([], rows)).toBe(true);
   });
 
   test('nothing classifiable at all makes no guarantee', () => {

@@ -4858,6 +4858,7 @@ export function ServiceSection({
   waveGuardTier,
   afterPrice = null,
   showGetServiceCta = false,
+  noGuarantee = false,
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
@@ -5322,6 +5323,7 @@ export function ServiceSection({
               Array.isArray(section.memberKeys) && section.memberKeys.length
                 ? section.memberKeys
                 : [section.key || section.label],
+              { noGuarantee },
             )}
           />
         ) : null}
@@ -8173,6 +8175,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                   : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
+                noGuarantee={noGuaranteeClaims}
                 // Glass removes the customize section everywhere — including
                 // this accepted read-only recap (owner directive; the booked
                 // add-ons still price into the totals shown).
@@ -8347,7 +8350,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
               code in prod (glass active for all categories) and contradicted
               the standing dedupe ruling. */}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { noGuarantee: noGuaranteeClaims })} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             // Tier-aware fee state on the plan-level card too (codex r24 P2):

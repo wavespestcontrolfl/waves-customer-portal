@@ -1,12 +1,18 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import EstimateViewPage, { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
-afterEach(() => cleanup());
+vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'mixed-termite-token' }) }));
+vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }));
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe('regulated certificate estimate surfaces', () => {
   it('detects a pre-slab line inside a mixed pest estimate', () => {
@@ -55,6 +61,32 @@ describe('ServiceSection', () => {
     included: [{ key: 'service', label: 'Recurring service' }],
     addOns: [{ key: 'interior_spray', label: 'Interior spraying', preChecked: true }],
   };
+
+  it('uses guarantee-free approval microcopy when the server marks a mixed estimate noGuaranteeClaims', () => {
+    const section = {
+      key: 'pest_control',
+      label: 'Pest Control',
+      isRecurring: true,
+      isPest: true,
+      frequencies: [baseFrequency],
+      copy: { priceWording: {} },
+    };
+    const props = {
+      section,
+      selectedFrequencyKey: 'standard',
+      selectedAddOns: new Set(),
+      onFrequencyChange: vi.fn(),
+      onAddOnToggle: vi.fn(),
+      renderFlags: { showPestRecurringAddOns: false, showWaveGuardTierUi: false },
+      showGetServiceCta: true,
+    };
+    const { rerender } = render(<ServiceSection {...props} />);
+    expect(screen.getByText(/money-back guarantee/i)).toBeInTheDocument();
+
+    rerender(<ServiceSection {...props} noGuarantee />);
+    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/licensed & insured · no pressure/i)).toBeInTheDocument();
+  });
 
   it('hides the frequency slider when a section has one frequency', () => {
     render(
@@ -401,6 +433,76 @@ describe('ServiceSection', () => {
 
     expect(screen.getByText('Quote required')).toBeInTheDocument();
     expect(screen.getByText('Commercial pest requires manual quote or commercial pilot pricing.')).toBeInTheDocument();
+  });
+});
+
+describe('mixed-estimate approval microcopy', () => {
+  it('uses the server no-guarantee decision for the plan-level CTA beside one-time termite work', async () => {
+    const frequency = {
+      key: 'standard',
+      label: 'Standard',
+      monthly: 50,
+      annual: 600,
+      included: [{ key: 'service', label: 'Recurring service' }],
+      addOns: [],
+    };
+    const services = [
+      {
+        key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true,
+        frequencies: [frequency], copy: { priceWording: {} },
+      },
+      {
+        key: 'lawn_care', label: 'Lawn Care', isRecurring: true, isPest: false,
+        frequencies: [{ ...frequency, monthly: 80, annual: 960 }], copy: { priceWording: {} },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Mixed Service Way',
+          serviceCategory: 'bundle',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'recurring',
+          isOneTimeOnly: false,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          acceptedServiceMode: null,
+          acceptedFrequencyKey: null,
+          noGuaranteeClaims: true,
+        },
+        pricing: {
+          services,
+          askChips: [],
+          oneTimeBreakdown: {
+            total: 1200,
+            items: [{ service: 'termite_trenching', label: 'Termite Trenching', amount: 1200, kind: 'charge' }],
+          },
+          defaultServiceMode: 'recurring',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<EstimateViewPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Termite Trenching')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Licensed & insured · No pressure — approve when you’re ready')).toBeInTheDocument();
+    expect(screen.queryByText(/Satisfaction guaranteed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
   });
 });
 

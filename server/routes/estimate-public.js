@@ -19936,8 +19936,9 @@ function guaranteeRecurringRows(estData) {
 }
 
 // An authored proposal's own rows are its customer-visible scope
-// (acceptanceTermsApplyTo reads the same containers): building line items
-// and programs, classified like one-time rows by their names. Codex #4982 r4.
+// (acceptanceTermsApplyTo reads the same containers): building line items,
+// programs, and corrective work, classified like one-time rows by their
+// names. Codex #4982 r4.
 function guaranteeProposalRows(estData) {
   const proposal = estData?.proposal && typeof estData.proposal === 'object' ? estData.proposal : null;
   if (!proposal) return [];
@@ -19949,14 +19950,25 @@ function guaranteeProposalRows(estData) {
   return [
     ...list(proposal.buildings).flatMap((b) => list(b?.lineItems)).map(asRow),
     ...list(proposal.programs).map(asRow),
+    ...list(proposal.correctiveWork).map(asRow),
   ];
 }
 
 function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = []) {
   const { detectServiceCategory } = require('../utils/service-normalizer');
-  const namedTermite = (row = {}) => detectServiceCategory(
-    [row.key, row.service, row.name, row.label, row.displayName].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
-  ) === 'termite';
+  const namedTermite = (row = {}) => {
+    const name = [row.key, row.service, row.name, row.label, row.displayName]
+      .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
+    // detectServiceCategory returns one primary category, with lawn and
+    // mosquito taking precedence. Scan explicit termite identities too so a
+    // combined label cannot hide its termite scope. Foam stays narrow: these
+    // are the established drill/recurring forms, never rodent foam sealing.
+    const explicitTermite = /\btermites?\b|\bwdo\b|wood destroying|\bpre\s*slab\b|\btermiticide\b|\btermidor\b|\bbora\s*care\b|\btrelona\b/;
+    const termiteFoam = /foam\s*drill|drill\s*(?:and\s*)?foam|recurring\s*(?:termite\s*)?foam|foam\s*recurring/;
+    return detectServiceCategory(name) === 'termite'
+      || explicitTermite.test(name)
+      || termiteFoam.test(name);
+  };
   let classified = 0;
   for (const svc of (Array.isArray(recurringServices) ? recurringServices : [])) {
     if (!svc || typeof svc !== 'object') continue;

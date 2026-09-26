@@ -501,7 +501,8 @@ export function glassCtaMicroFor(serviceCategory) {
 // A CTA that covers termite work, or a service the page can't classify (it
 // might be termite), never carries a guarantee: the same rule as the
 // server's estimateMakesNoGuaranteeClaim.
-export function glassCtaMicroForKeys(keys) {
+export function glassCtaMicroForKeys(keys, { noGuarantee = false } = {}) {
+  if (noGuarantee) return NO_GUARANTEE_CTA_MICRO;
   const list = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
   if (!list.length) return NO_GUARANTEE_CTA_MICRO;
   const slugs = list.map((key) => glassServiceSlug(String(key)));

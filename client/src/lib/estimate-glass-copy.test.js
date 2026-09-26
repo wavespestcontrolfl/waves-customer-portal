@@ -170,6 +170,11 @@ describe('termite work never carries a guarantee (owner ruling; server estimateM
     expect(glassCtaMicroForKeys(['rodent'])).toMatch(/Satisfaction guaranteed/);
     expect(glassCtaMicroForKeys(['pest_control', 'rodent_bait'])).toMatch(/Satisfaction guaranteed/);
   });
+
+  it('the server noGuaranteeClaims decision overrides otherwise guaranteed recurring keys', () => {
+    expect(glassCtaMicroForKeys(['pest_control'], { noGuarantee: true })).not.toMatch(/guarantee|callbacks/i);
+    expect(glassCtaMicroForKeys(['pest_control'], { noGuarantee: true })).toMatch(/Licensed & insured/);
+  });
 });
 
 describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring estimate)', () => {
