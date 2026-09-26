@@ -2687,6 +2687,21 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect(bellBody()).toContain('another termite annual plan');
     });
 
+    test('a caller-supplied transaction (not yet committed) never raises the durable task — reported so the caller raises it after commit', async () => {
+      const callerTrx = Object.assign((...args) => db(...args), { isTransaction: true });
+      setDbQueues({
+        annual_prepay_terms: [query({ first: anchored }), query({ returning: [{ ...anchored, status: 'cancelled', renewal_decision: 'cancel' }] })],
+        activity_log: [query()],
+        customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+      });
+      const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
+        customerId: 'cust-1', termId: 'term-1', today: '2026-09-26', conn: callerTrx,
+      });
+      expect(result.ok).toBe(true);
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(result.retrieval).toEqual({ raised: false, reason: 'caller_transaction' });
+    });
+
     test('a task failure never fails the committed decline — the bell says to create it by hand', async () => {
       raiseTermiteRetrievalTask.mockRejectedValueOnce(new Error('notifications down'));
       const result = await freshDecline(anchored);

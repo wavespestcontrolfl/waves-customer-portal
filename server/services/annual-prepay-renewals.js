@@ -5938,6 +5938,13 @@ function declineResultFromRow(term, { alreadyDeclined }) {
 // already committed.
 async function raiseDeclineRetrievalTask(result, customerId, conn) {
   if (result.awaitsInstallation) return { raised: false, reason: 'not_installed' };
+  // raiseTermiteRetrievalTask writes on its own connection. Only raise it
+  // when THIS call owned (and so has already committed) the decline — a
+  // caller-supplied transaction may still roll back, and a durable
+  // retrieval task must never reference a decline that never happened.
+  // Such a caller gets retrieval:{raised:false, reason:'caller_transaction'}
+  // and raises the task itself after its own commit.
+  if (conn !== db) return { raised: false, reason: 'caller_transaction' };
   try {
     // Another live termite annual term (a second property) may still need
     // stations on this account — an automatic "pull the stations" task
@@ -5977,6 +5984,7 @@ function retrievalSentence(retrieval, termEndLabel) {
       return `This customer has another termite annual plan, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
     case 'failed':
     case 'not_raised':
+    case 'caller_transaction':
       return `The station-retrieval task could not be raised — create it by hand for after ${termEndLabel}.`;
     default:
       return '';
@@ -6173,6 +6181,9 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
   const retrieval = result.alreadyDeclined ? null : await raiseDeclineRetrievalTask(result, customerId, conn);
   await ringTermiteAnnualDeclineBell(result, customerId, conn, retrieval);
   const { supersededRenew, ...publicResult } = result;
+  // An internal caller that supplied its own transaction must raise the
+  // retrieval task itself once it commits — tell it so.
+  if (retrieval?.reason === 'caller_transaction') return { ...publicResult, retrieval };
   return publicResult;
 }
 
