@@ -71,6 +71,8 @@ test('each selected App and Email leg is dispatched explicitly with its own bill
         notificationEventKey: expect.stringMatching(/^autopay-pre-charge:cust-1:\d{4}-\d{2}-\d{2}$/),
       }) });
     expect(typeof input.preDispatchCheck).toBe('function');
+    // The queued Email owner's eligibility recheck needs the charge date.
+    expect(input.metadata.charge_date).toBe(input.metadata.notificationEventKey.split(':').pop());
   }
   expect(calls[0].metadata.appOnly).toBe(true);
   expect(calls[1].metadata.appOnly).toBeUndefined();

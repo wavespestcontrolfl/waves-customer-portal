@@ -55,6 +55,8 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
           ...sendInput.metadata,
           billingDeliveryCategory: 'billing',
           notificationEventKey: eventKey,
+          // The queued Email owner re-checks eligibility against this date.
+          charge_date: chargeDate,
           billingDeliveryLeg: channel,
           ...(channel === 'push' ? { appOnly: true } : {}),
         },
