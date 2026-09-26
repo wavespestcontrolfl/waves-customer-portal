@@ -320,9 +320,14 @@ maybeDescribe('call_commitments (live Postgres)', () => {
   });
 
   test('a same-customer visit fulfils schedule_visit only when someone booked it — a generated series child never does', async () => {
-    const call = await db('call_log').where({ id: callId }).first();
     const [cust] = await db('customers').insert({ first_name: 'Series', phone: '+15555550177' }).returning('id');
     cleanup.customerIds.push(cust.id);
+    // Its own call: the shared fixture call already has a visit linked to it.
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '7'.repeat(30) + 's1', direction: 'inbound', from_phone: '+15555550177', to_phone: OUR_NUMBER,
+      status: 'completed', customer_id: cust.id, created_at: new Date(Date.now() - 10 * 60 * 1000),
+    }).returning('*');
+    cleanup.callIds.push(call.id);
     const [parent] = await db('scheduled_services').insert({ scheduled_date: '2026-09-01', service_type: 'General Pest Control', status: 'completed', customer_id: cust.id, created_at: new Date(call.created_at.getTime() - 7 * 24 * 60 * 60 * 1000) }).returning('id');
     cleanup.visitIds.push(parent.id);
     // The nightly top-up's child of an existing series, created after the call.
@@ -737,10 +742,12 @@ maybeDescribe('call_commitments (live Postgres)', () => {
 
     // activeSince (the one-hour follow-up pager): only promises made, dated
     // or snoozed since then — the 10-day-old call's undated report drops out.
+    // (Backdate the old call's promise row to when that call was processed.)
+    await db('call_commitments').where({ call_log_id: oldCall }).update({ created_at: new Date(Date.now() - 10 * 24 * 3600 * 1000) });
     const recent = await cc.listOpenCommitments(db, { party: 'waves', customerId: cust.id, activeSince: new Date(Date.now() - 2 * 24 * 3600 * 1000) });
-    expect(recent.map((r) => r.description).sort()).toEqual(['due tomorrow', 'stated overdue']);
+    expect(recent.map((r) => r.description).sort()).toEqual(['due tomorrow', 'relay reuse', 'stated overdue']);
     // …and each row carries every field followup-sla-watcher reads.
-    for (const r of recent) {
+    for (const r of recent.filter((x) => x.call_log_id === newCall)) {
       expect(r).toEqual(expect.objectContaining({
         id: expect.anything(), call_log_id: newCall, party: 'waves', status: 'open', source: expect.any(String),
         human_state: null, updated_at: expect.anything(), direction: 'inbound', from_phone: '+15555550188',
