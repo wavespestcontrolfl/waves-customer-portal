@@ -257,11 +257,24 @@ describe('deferred-replay registry', () => {
   test.each([
     ['a partial refund amount', { status: 'paid', refund_amount: '12.50' }],
     ['a pending refund', { status: 'paid', refund_amount: 0, refund_status: 'pending' }],
+    ['a succeeded refund', { status: 'paid', refund_amount: null, refund_status: 'succeeded' }],
   ])('billing receipt replay suppresses after %s on a still-paid payment', async (_label, payment) => {
     db.mockReturnValueOnce(firstChain(payment));
     expect(await recheckDeferredReplay('billing_receipt_deferred', {
       payment_id: 'pay-1', customer_id: 'cust-1',
     })).toEqual({ eligible: false, reason: 'payment-refunded' });
+  });
+
+  test.each([
+    ['never refunded (NULL refund columns)', { status: 'paid', refund_amount: null, refund_status: null }],
+    ['a failed refund that returned nothing', { status: 'paid', refund_amount: 0, refund_status: 'failed' }],
+    ['a canceled refund', { status: 'paid', refund_amount: '0.00', refund_status: 'canceled' }],
+  ])('billing receipt replay stays eligible when %s', async (_label, payment) => {
+    db.mockReturnValueOnce(firstChain(payment));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1', deleted_at: null }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: true });
   });
 
   test('billing receipt replay suppresses for a deleted customer', async () => {

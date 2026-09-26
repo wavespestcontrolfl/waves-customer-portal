@@ -681,7 +681,10 @@ const REGISTRY = {
         // refund_amount / refund_status (stripe.js refund paths). Any refund
         // activity makes the frozen full-charge receipt wrong (Codex r1 on
         // #4951), so suppress it.
-        if (Number(payment.refund_amount || 0) > 0 || payment.refund_status) {
+        // refund_status has no default (NULL until a refund exists) and holds
+        // Stripe's refund status; a failed or canceled refund returned nothing.
+        if (Number(payment.refund_amount || 0) > 0
+          || ['pending', 'requires_action', 'succeeded'].includes(payment.refund_status)) {
           return { eligible: false, reason: 'payment-refunded' };
         }
         const customer = await db('customers').where({ id: meta.customer_id }).first();
