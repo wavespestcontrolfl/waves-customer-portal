@@ -82,35 +82,6 @@ export function homeSqFtIsUnverifiedPlatMedian(form, enrichedProfile) {
   return median !== null && Number(form.homeSqFt) === median;
 }
 
-// Measurement boxes the tool fills itself (flag = "auto-derived, not typed").
-const AUTO_DERIVED_TERMITE_MEASUREMENTS = [
-  ["termiteFootprintSqFt", "_termiteFootprintAuto"],
-  ["trenchingPerimeterLF", "_trenchingPerimeterAuto"],
-  ["boracareSqft", "_boracareSqftAuto"],
-  ["preslabSqft", "_preslabSqftAuto"],
-];
-
-/**
- * Reopening a saved estimate restores its form from the stored inputs, but
- * one saved before unit scope existed has no `_unitLookup` flag and may
- * carry a termite measurement auto-derived from one unit's interior area.
- * The priced profile it was saved with is the authority: seed the flag from
- * it and clear only AUTO-derived values — a typed measurement is the
- * operator's and stays (codex r4 P1 #4862).
- */
-export function applyEngineProfileUnitScope(form, engineProfile) {
-  const unitLookup = !!engineProfile?.residentialUnitLookup;
-  const next = { ...form, _unitLookup: unitLookup };
-  if (!unitLookup) return next;
-  for (const [key, autoFlag] of AUTO_DERIVED_TERMITE_MEASUREMENTS) {
-    if (next[autoFlag]) {
-      next[key] = "";
-      next[autoFlag] = false;
-    }
-  }
-  return next;
-}
-
 // Measurements belong to the property, regardless of whether its address
 // changes through typing, Places, a customer selection, or an incoming lead.
 // Service selections and contact/linkage fields belong to the estimate.

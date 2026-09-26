@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, applyEngineProfileUnitScope } from "./lookupPrefill";
+import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian } from "./lookupPrefill";
 
 describe("palm-count prefill gate", () => {
   it("prefills a server-trusted count", () => {
@@ -84,28 +84,5 @@ describe("plat-median prefill never saves as tech-verified", () => {
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980", _homeSqFtEdited: false }, { ...VACANT_WITH_MEDIAN, homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980" }, { homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian(null, VACANT_WITH_MEDIAN)).toBe(false);
-  });
-});
-
-describe("reopened estimate unit scope (codex r4 P1 #4862)", () => {
-  const legacyUnitInputs = {
-    termiteFootprintSqFt: "725", _termiteFootprintAuto: true,
-    trenchingPerimeterLF: "140", _trenchingPerimeterAuto: false,
-  };
-
-  it("seeds the unit flag from the priced profile and clears only auto-derived termite values", () => {
-    const next = applyEngineProfileUnitScope(legacyUnitInputs, { residentialUnitLookup: { wholePropertyCategory: "RESIDENTIAL" } });
-    expect(next._unitLookup).toBe(true);
-    expect(next.termiteFootprintSqFt).toBe("");
-    expect(next._termiteFootprintAuto).toBe(false);
-    // A typed measurement is the operator's — it stays.
-    expect(next.trenchingPerimeterLF).toBe("140");
-  });
-
-  it("leaves a whole-home estimate's measurements alone", () => {
-    const next = applyEngineProfileUnitScope(legacyUnitInputs, { residentialUnitLookup: null });
-    expect(next._unitLookup).toBe(false);
-    expect(next.termiteFootprintSqFt).toBe("725");
-    expect(applyEngineProfileUnitScope({ _unitLookup: true }, null)._unitLookup).toBe(false);
   });
 });

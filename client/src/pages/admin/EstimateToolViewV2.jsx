@@ -45,7 +45,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
-import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, applyEngineProfileUnitScope } from "../../lib/lookupPrefill";
+import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -425,6 +425,13 @@ function buildTurfRequestProfile(baseProfile, form) {
   profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
   profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
   return profile;
+}
+
+// One unit inside a building (a unit-address lookup), for as long as the
+// form still types it a condo — staff correcting the type to a whole
+// structure takes it out of unit scope (codex r5 P2 #4862).
+function isUnitScopedForm(form) {
+  return !!form?._unitLookup && /^condo/i.test(String(form?.propertyType || ""));
 }
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
@@ -1699,7 +1706,7 @@ export default function EstimateToolViewV2({
   };
 
   function formFromEditSource(d) {
-    return applyEngineProfileUnitScope({
+    return {
           ...buildDefaultEstimateForm(),
           ...(d.inputs || {}),
           // A saved retired T&S program (4x light) is seeded as 6x so the
@@ -1728,7 +1735,7 @@ export default function EstimateToolViewV2({
           // and the revise PUT sends form.notes back verbatim; seeding ""
           // would erase them on a service-only edit.
           notes: d.notes || "",
-        }, d.engineProfile);
+        };
   }
 
   // ── Edit mode: reopen an existing estimate for in-place revision ──
@@ -2166,7 +2173,7 @@ export default function EstimateToolViewV2({
           return f;
         // A unit lookup has no footprint to derive at all — no Stories
         // edit supplies one (pre-push codex P1 #4862).
-        if (f._unitLookup) return f;
+        if (isUnitScopedForm(f)) return f;
         const upd = {};
         if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
           upd.termiteFootprintSqFt = String(fp);
@@ -3493,7 +3500,7 @@ export default function EstimateToolViewV2({
         trenchingConcreteLF,
         trenchingDirtLF,
         trenchingConcretePct,
-        trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint,
+        trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint && !isUnitScopedForm(form),
         trenchingProductKey: form.trenchingProductKey || "taurus_sc",
         trenchingApplicationRate: form.trenchingApplicationRate || "standard",
         trenchingDepthFt: form.trenchingDepthFt || "0.5",
@@ -4291,7 +4298,7 @@ export default function EstimateToolViewV2({
       : null,
     form.svcTrenching &&
       !parsePositiveNumber(form.trenchingPerimeterLF) &&
-      !form.trenchingEstimateFromFootprint
+      !(form.trenchingEstimateFromFootprint && !isUnitScopedForm(form))
       ? "Trenching needs measured perimeter LF before pricing."
       : null,
     form.svcBoracare && !parsePositiveNumber(form.boracareSqft) && !parsePositiveNumber(form.boracareSurfaceLinearFt)
@@ -6266,10 +6273,18 @@ export default function EstimateToolViewV2({
                           />
                         </Field>
                       </div>
-                      <CheckboxV2
-                        k="trenchingEstimateFromFootprint"
-                        label="Estimate trenching perimeter from footprint"
-                      />
+                      {isUnitScopedForm(form) ? (
+                        // A unit's area is interior floor space — there is no
+                        // footprint to estimate a perimeter from (codex r5 P2).
+                        <div className="text-14 text-zinc-600 leading-snug mb-1">
+                          One unit in a building: enter the measured perimeter LF.
+                        </div>
+                      ) : (
+                        <CheckboxV2
+                          k="trenchingEstimateFromFootprint"
+                          label="Estimate trenching perimeter from footprint"
+                        />
+                      )}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
                         label="Label rate and trench depth confirmed"

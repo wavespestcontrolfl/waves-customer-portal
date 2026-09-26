@@ -1493,6 +1493,10 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(trench.requiresMeasurement).toBe(true);
     expect(trench.price).toBeNull();
 
+    // Staff correcting the unit to a whole structure takes it out of unit
+    // scope — footprint derivation resumes (codex r5 P2).
+    expect(translateV2CallToV1Input({ ...profile, propertyType: 'Townhome' }, ['TERMITE_BAIT'], {}).unitScoped).toBeUndefined();
+
     // A whole-home lookup keeps deriving both, exactly as before.
     const home = calculatePropertyProfile(translateV2CallToV1Input(
       buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, bare), ['TERMITE_BAIT'], {},
@@ -1549,6 +1553,9 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(profile.residentialUnitLookup).not.toBeNull();
     expect(profile.stories).toBe(1);
     expect(profile.pool).not.toBe('POSSIBLE');
+    // Satellite proved the building is stacked, not that the record's area
+    // is one unit's — the sqft is dropped and asked for (codex r5 P1).
+    expect(profile.homeSqFt).toBe(0);
     // The satellite type's "is this really a condo?" ask survives the
     // one-flag dedupe, merged into the unit flag (codex r3 P2).
     const typeFlags = profile.fieldVerifyFlags.filter((f) => f.field === 'propertyType');

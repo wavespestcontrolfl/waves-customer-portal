@@ -1683,7 +1683,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // the whole small building (codex r1 P1).
   const condoParcelUnits = verifiedUnitCountOf(rc)
     ?? Math.max(Number(trustedUnitCount(rc)) || 0, Number(rc?._parcel?.residentialUnits) || 0);
-  const unitSqFtKept = residentialCondoUnitLookup && !rc?._parcel?.aggregated && condoParcelUnits < 2;
+  // …and only when the RECORD typed it a condo. A type promoted from a
+  // STACKED satellite read (now, or on a cached row) says the building is
+  // stacked, never that the record's area is one unit's (codex r5 P1).
+  const condoTypeFromSatellite = !!earlyAppliedVisionType
+    || rc?._propertyTypeSource === 'satellite'
+    || String(rc?._fieldEvidence?.propertyType?.sourceType || '').toLowerCase() === 'satellite';
+  const unitSqFtKept = residentialCondoUnitLookup && !condoTypeFromSatellite
+    && !rc?._parcel?.aggregated && condoParcelUnits < 2;
   const unitLookup = residentialUnitLookup || residentialCondoUnitLookup;
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
   const commercialProfile = category === 'COMMERCIAL';
@@ -4689,7 +4696,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // still sizes recurring pest, but it is interior floor space — never a
     // slab, attic, or exterior perimeter — so the termite pricers withhold
     // every DERIVED footprint and require a measurement (codex r3 P1 #4862).
-    unitScoped: p.residentialUnitLookup ? true : undefined,
+    // Follows the PRICED type: staff correcting a unit to a whole structure
+    // (townhome, single family) takes it out of unit scope (codex r5 P2).
+    unitScoped: p.residentialUnitLookup && (v1PropertyType === 'condo_ground' || v1PropertyType === 'condo_upper')
+      ? true : undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,
