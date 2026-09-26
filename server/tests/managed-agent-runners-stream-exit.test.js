@@ -412,6 +412,72 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(recorded().failure).toBeTruthy();
   });
 
+  it('a session-creation POST that stalls ends at the deadline (session_timeout), never hanging run()', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))));
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
+    expect(mockRecordSessionUsage).not.toHaveBeenCalled(); // no session, nothing to bill
+  });
+
+  it('a repeated request for a tool use id already answered is not executed again', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      idle('requires_action', ['tool-1']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.toolsExecuted).toEqual(['get_revenue_snapshot']);
+  });
+
+  it('the owner SMS is sent at most once per briefing — a second request is answered as skipped', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => (name === 'send_briefing_sms' ? { sent: true } : { ok: true }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-2', 'send_briefing_sms'),
+      idle('requires_action', ['tool-2']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.smsSent).toBe(true);
+    const second = postsSent().flatMap(p => p.body.events || []).find(e => e.custom_tool_use_id === 'tool-2');
+    expect(JSON.parse(second.content[0].text)).toMatchObject({ skipped: true });
+  });
+
+  it('a blocked SMS does not count as sent — the agent may retry it', async () => {
+    mockExecuteBITool
+      .mockResolvedValueOnce({ sent: false, blocked: true })
+      .mockResolvedValueOnce({ sent: true });
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-2', 'send_briefing_sms'),
+      idle('requires_action', ['tool-2']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(2);
+    expect(result.smsSent).toBe(true);
+  });
+
+  it('a session that asks for more than 30 tool calls is stopped (max_tool_calls)', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    const ids = Array.from({ length: 31 }, (_, i) => `tool-${i}`);
+    global.fetch = fetchFor([
+      ...ids.map(id => customToolUse(id, 'get_revenue_snapshot')),
+      idle('requires_action', ids),
+      { event: 'done', data: {} },
+    ]);
+    await load(path).run({ skipSMS: true });
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(30);
+    expect(recorded()).toMatchObject({ failure: 'max_tool_calls' });
+  });
+
   it('an idle with retries_exhausted is a failed run (session_idle_retries_exhausted)', async () => {
     global.fetch = fetchFor([text('partial'), idle('retries_exhausted'), text('never read')]);
     await load(path).run({ skipSMS: true });

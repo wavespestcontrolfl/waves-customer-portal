@@ -86,16 +86,20 @@ function remainingMs(sessionId, deadline) {
   return remaining;
 }
 
-// Every events POST is bounded by the run's deadline too: a stalled request
-// must not keep run() pending past it.
-async function sendSessionEvents(sessionId, events, deadline) {
+// Every API request — session creation included — is bounded by the run's
+// deadline: a stalled request must not keep run() pending past it.
+async function apiCallWithinDeadline(method, path, body, sessionId, deadline) {
   const signal = AbortSignal.timeout(remainingMs(sessionId, deadline));
   try {
-    return await apiCall('POST', `/sessions/${sessionId}/events`, { events }, signal);
+    return await apiCall(method, path, body, signal);
   } catch (err) {
     if (signal.aborted) throw deadlineError(sessionId, deadline);
     throw err;
   }
+}
+
+function sendSessionEvents(sessionId, events, deadline) {
+  return apiCallWithinDeadline('POST', `/sessions/${sessionId}/events`, { events }, sessionId, deadline);
 }
 
 // A local tool call cannot be cancelled, but the run stops waiting for it at
@@ -152,6 +156,45 @@ async function openSessionStream(sessionId, deadline) {
   return { res, timer, controller };
 }
 
+// One classification per frame, carrying everything the run loop acts on.
+// The JSON `type` is authoritative: the SSE `event:` line may be absent, and
+// readSessionFrames then reports 'message'.
+function classifyFrame(event, data) {
+  const type = data?.type || event;
+  if (type === 'agent.message' || event === 'assistant' || event === 'text') return { kind: 'text' };
+  if (type === 'agent.custom_tool_use') return { kind: 'tool_use' };
+  if (type === 'session.status_idle') {
+    const stop = stopReasonFromEvent(data);
+    if (stop?.type === 'requires_action') return { kind: 'requires_action', eventIds: stop.event_ids || [] };
+    if (stop?.type === 'end_turn') return { kind: 'end' };
+    // retries_exhausted, budget_reached, or an unknown stop reason
+    return { kind: 'failed', failure: `session_idle_${stop?.type || 'unknown'}` };
+  }
+  if (isSessionTerminal(event, data)) return { kind: 'end' };
+  if (isSessionError(event) || type === 'session.error' || type === 'error') {
+    return { kind: 'failed', failure: 'session_error_event', detail: JSON.stringify(data) };
+  }
+  return { kind: 'other' };
+}
+
+function frameText(data) {
+  const blocks = Array.isArray(data?.content) ? data.content : [];
+  return (data?.text || '') + blocks.filter(b => b?.type === 'text').map(b => b.text).join('');
+}
+
+// Whatever the agent asks, one briefing run makes at most MAX_TOOL_CALLS tool
+// calls, runs a tool use id once, and completes each side-effecting tool (the
+// SMS to the owner, the saved report) at most once — a looping session must
+// not text the owner repeatedly or stack duplicate reports. A side effect
+// counts as done only when it actually happened.
+const MAX_TOOL_CALLS = 30;
+const SIDE_EFFECT_DONE = {
+  send_briefing_sms: (result) => result?.sent === true,
+  save_weekly_report: (result) => Boolean(result) && !result.error,
+};
+// Run failures that are recorded on the ledger rather than thrown.
+const RECORDED_FAILURES = new Set(['session_timeout', 'max_tool_calls']);
+
 // Executes every pending custom tool use a requires_action idle names, then
 // replies to ALL of them in ONE POST (the protocol requires the whole batch
 // in a single events call, not one per tool). An id with no pending entry is
@@ -165,8 +208,8 @@ async function runRequiresActionBatch(sessionId, deadline, eventIds, pendingCust
       logger.error(`[bi-agent] Missing pending custom tool use for required event ${toolUseId}`);
       continue;
     }
-    const { toolResult, threw } = await executeToolUse(pending.toolName, pending.toolInput);
     pendingCustomToolUses.delete(toolUseId);
+    const { toolResult, threw } = await executeToolUse(toolUseId, pending.toolName, pending.toolInput);
     toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, threw));
   }
   if (toolResultEvents.length) await sendSessionEvents(sessionId, toolResultEvents, deadline);
@@ -194,6 +237,7 @@ const BIAgent = {
     if (!BI_AGENT_ENVIRONMENT_ID) throw new Error('Missing BI_AGENT_ENVIRONMENT_ID (or ANTHROPIC_ENVIRONMENT_ID)');
 
     const startTime = Date.now();
+    const deadline = startTime + resolveTimeoutMs();
     const notify = opts.onProgress || (() => {});
 
     let prompt = 'Run the Monday morning business intelligence briefing. Pull all metrics, analyze trends, identify anomalies, send the SMS to Adam, and save the full report.';
@@ -201,14 +245,14 @@ const BIAgent = {
 
     notify('starting', 'Creating BI session...');
 
-    const session = await apiCall('POST', '/sessions', {
+    const session = await apiCallWithinDeadline('POST', '/sessions', {
       agent: BI_AGENT_ID,
       environment_id: BI_AGENT_ENVIRONMENT_ID,
-    });
+    }, 'new session', deadline);
     const sessionId = session.id;
     logger.info(`[bi-agent] Session ${sessionId}`);
     let report = '';
-    let toolsExecuted = [];
+    const toolsExecuted = [];
     let smsSent = false;
 
     // Call ledger (never throws): one session row with the session's token
@@ -222,89 +266,68 @@ const BIAgent = {
     // The run's own end — the ledger's usage GET after it is observability
     // time, not agent time, and stays out of the reported duration.
     let runEndedAt = null;
-    let streamTimer = null;
-    let streamController = null;
-    const deadline = Date.now() + resolveTimeoutMs();
+    let stream = null;
+
+    const pendingCustomToolUses = new Map();
+    const resolvedToolUseIds = new Set();
+    const completedSideEffects = new Set();
+    let toolCalls = 0;
+
+    const registerToolUse = (event, data) => {
+      const toolUseId = toolUseIdFromEvent(data);
+      if (!toolUseId) {
+        // Tool inputs can carry customer names (the briefing names at-risk
+        // customers) — log identifiers only, never the event body.
+        logger.error(`[bi-agent] Tool ${data?.name || '(unknown)'} (${data?.type || event}) missing tool use id in session ${sessionId}`);
+        return;
+      }
+      if (resolvedToolUseIds.has(toolUseId)) return; // a repeated request for a call already answered
+      pendingCustomToolUses.set(toolUseId, { toolName: data.name, toolInput: data.input || {} });
+    };
+
+    const executeToolUse = async (toolUseId, toolName, toolInput) => {
+      remainingMs(sessionId, deadline); // no tool starts after the deadline
+      resolvedToolUseIds.add(toolUseId);
+      if (++toolCalls > MAX_TOOL_CALLS) {
+        throw Object.assign(new Error(`session ${sessionId} exceeded ${MAX_TOOL_CALLS} tool calls`), { code: 'max_tool_calls' });
+      }
+      if (completedSideEffects.has(toolName)) {
+        return { toolResult: { skipped: true, reason: `${toolName} already completed in this briefing` }, threw: false };
+      }
+      notify('pulling', `Tool: ${toolName}`);
+      logger.info(`[bi-agent] Tool: ${toolName}`);
+
+      let toolResult;
+      let threw = false;
+      try {
+        toolResult = await withinDeadline(executeBITool(toolName, toolInput), sessionId, deadline);
+      } catch (err) {
+        if (err?.code === 'session_timeout') throw err;
+        toolResult = { error: `Tool failed: ${err.message}` };
+        threw = true;
+        logger.error(`[bi-agent] Tool ${toolName} error: ${err.message}`);
+      }
+      if (!threw && SIDE_EFFECT_DONE[toolName]?.(toolResult)) completedSideEffects.add(toolName);
+      if (toolName === 'send_briefing_sms' && toolResult?.sent) smsSent = true;
+      toolsExecuted.push(toolName);
+      return { toolResult, threw };
+    };
 
     try {
       // Open the stream BEFORE the kickoff — the stream does not replay
       // events emitted before it opened.
-      const { res: streamRes, timer, controller } = await openSessionStream(sessionId, deadline);
-      streamTimer = timer;
-      streamController = controller;
-
+      stream = await openSessionStream(sessionId, deadline);
       await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)], deadline);
 
-      const pendingCustomToolUses = new Map();
-
-      const executeToolUse = async (toolName, toolInput) => {
-        remainingMs(sessionId, deadline); // no tool starts after the deadline
-        notify('pulling', `Tool: ${toolName}`);
-        logger.info(`[bi-agent] Tool: ${toolName}`);
-
-        let toolResult;
-        let threw = false;
-        try {
-          toolResult = await withinDeadline(executeBITool(toolName, toolInput), sessionId, deadline);
-          if (toolName === 'send_briefing_sms' && toolResult.sent) smsSent = true;
-        } catch (err) {
-          if (err?.code === 'session_timeout') throw err;
-          toolResult = { error: `Tool failed: ${err.message}` };
-          threw = true;
-          logger.error(`[bi-agent] Tool ${toolName} error: ${err.message}`);
-        }
-
-        toolsExecuted.push(toolName);
-        return { toolResult, threw };
-      };
-
-      for await (const { event, data } of readStreamFrames(sessionId, streamRes, deadline)) {
-        // Agent text arrives as `agent.message` (content blocks); the SSE
-        // `event:` line may be absent, so the JSON `type` is authoritative.
-        if (event === 'assistant' || event === 'text' || event === 'agent.message' || data?.type === 'agent.message') {
-          if (data.text) report += data.text;
-          if (data.content) { for (const b of data.content) { if (b.type === 'text') report += b.text; } }
-        }
-
-        const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
-        if (isCustomToolUse) {
-          const toolName = data.name;
-          const toolInput = data.input || {};
-          const toolUseId = toolUseIdFromEvent(data);
-          if (!toolUseId) {
-            // Tool inputs can carry customer names (the briefing names at-risk
-            // customers) — log identifiers only, never the event body.
-            logger.error(`[bi-agent] Tool ${toolName || '(unknown)'} (${data?.type || event}) missing tool use id in session ${sessionId}`);
-            continue;
-          }
-          pendingCustomToolUses.set(toolUseId, { toolName, toolInput });
-        }
-
-        const isIdle = event === 'session.status_idle' || data?.type === 'session.status_idle';
-        if (isIdle) {
-          const stopReason = stopReasonFromEvent(data);
-          const stopType = stopReason?.type;
-
-          if (stopType === 'requires_action') {
-            await runRequiresActionBatch(sessionId, deadline, stopReason?.event_ids || [], pendingCustomToolUses, executeToolUse);
-            continue;
-          }
-
-          if (stopType !== 'end_turn') {
-            // requires_action and end_turn are the only non-terminal-failure
-            // idle reasons; retries_exhausted, budget_reached, or an unknown
-            // stop reason are a failed run.
-            failure = `session_idle_${stopType || 'unknown'}`;
-            logger.error(`[bi-agent] Session ${sessionId} idle with stop reason ${stopType || '(none)'}: ${failure}`);
-            break;
-          }
-          // stopType === 'end_turn' falls through to isSessionTerminal below.
-        }
-
-        if (isSessionTerminal(event, data)) { sessionEnded = true; break; }
-        if (isSessionError(event) || data?.type === 'session.error' || data?.type === 'error') {
-          logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`);
-          failure = 'session_error_event';
+      for await (const { event, data } of readStreamFrames(sessionId, stream.res, deadline)) {
+        const frame = classifyFrame(event, data);
+        if (frame.kind === 'text') report += frameText(data);
+        else if (frame.kind === 'tool_use') registerToolUse(event, data);
+        else if (frame.kind === 'requires_action') await runRequiresActionBatch(sessionId, deadline, frame.eventIds, pendingCustomToolUses, executeToolUse);
+        else if (frame.kind === 'end') { sessionEnded = true; break; }
+        else if (frame.kind === 'failed') {
+          logger.error(`[bi-agent] Session ${sessionId} failed: ${frame.failure} ${frame.detail || ''}`);
+          failure = frame.failure;
           break;
         }
       }
@@ -313,19 +336,20 @@ const BIAgent = {
       if (!failure && !sessionEnded) { logger.error(`[bi-agent] Stream ended without a terminal event for session ${sessionId}`); failure = 'session_stream_eof'; }
 
     } catch (err) {
-      if (err && err.code === 'session_timeout') {
-        logger.error(`[bi-agent] ${err.message}`);
-        failure = 'session_timeout';
-      } else {
+      if (!RECORDED_FAILURES.has(err?.code)) {
         failure = err;
         throw err;
       }
+      logger.error(`[bi-agent] ${err.message}`);
+      failure = err.code;
     } finally {
-      if (streamTimer) clearTimeout(streamTimer);
       // Close the SSE connection on every exit — including a kickoff POST
       // that failed before the stream was ever read (a no-op once the reader
       // has already finished).
-      streamController?.abort();
+      if (stream) {
+        clearTimeout(stream.timer);
+        stream.controller.abort();
+      }
       runEndedAt = Date.now();
       await recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
