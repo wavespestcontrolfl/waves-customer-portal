@@ -334,7 +334,10 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
           lat: 27.45, lng: -82.45, zone: 'legacy',
         } },
       }),
-      visitRow(linkedId, { property_id: PRIMARY_ID, lat: 27.45, lng: -82.45, route_order: 5 }),
+      visitRow(linkedId, {
+        property_id: PRIMARY_ID, service_address_line1: '999 Stale Lane',
+        lat: 27.45, lng: -82.45, route_order: 5,
+      }),
       visitRow(independentId, { lat: 27.45, lng: -82.45, route_order: 6 }),
     ]);
 
