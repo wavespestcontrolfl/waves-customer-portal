@@ -618,8 +618,14 @@ describe('explicit billing channel combinations', () => {
     for (const channels of [[], ['carrier_pigeon']]) {
       const result = await dispatchBillingChannels(input, { payment_receipt_channels: channels }, sendLeg);
       expect(sendLeg).not.toHaveBeenCalled();
-      expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', channelResults: {} });
+      expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', channelResults: {},
+        code: 'NO_BILLING_CHANNEL_SELECTED' });
     }
+    // Email selected but owned by the caller's own sender stays CHANNEL_EMAIL_ONLY,
+    // which invoice.js relies on to send that email itself.
+    await expect(dispatchBillingChannels({ ...input, hasEmailLeg: true }, { payment_receipt_channels: ['email'] }, sendLeg))
+      .resolves.toMatchObject({ code: 'CHANNEL_EMAIL_ONLY' });
+    expect(sendLeg).not.toHaveBeenCalled();
   });
 
   test.each([['push'], ['email', 'push']])('unavailable App never creates an unselected text: %j', async (...channels) => {
