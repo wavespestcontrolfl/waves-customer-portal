@@ -85,6 +85,26 @@ describe('writer-agent-config HARD PUBLISH GATES section', () => {
       expect(system).toContain(token);
     }
   });
+
+  // Related-post link lane (owner audit 2026-09-26: 115/278 blog posts link
+  // to no other post) — writer-agent-config must tell the writer these are
+  // real allowed link targets it should actually use, with a minimum, never
+  // an invented one.
+  test('RELATED POSTS rule: at least 3 natural links, never required to use all, never a guessed blog slug', () => {
+    expect(system).toContain('voice_constraints.related_posts');
+    expect(system).toMatch(/RELATED POSTS/);
+    expect(system).toMatch(/AT LEAST 3 of them/);
+    expect(system).toMatch(/never required to use all of them/);
+    expect(system).toMatch(/never a\s+bare "click here"/);
+    expect(system).toMatch(/ONLY source of blog-post links/);
+  });
+
+  test('UNKNOWN_INTERNAL_ROUTE checklist entry and the closed-set enumeration both cite related_posts as an allowed source', () => {
+    const gateSection = system.slice(system.indexOf('[UNKNOWN_INTERNAL_ROUTE]'), system.indexOf('[OFF_FOOTPRINT_CITY_CLAIM]'));
+    expect(gateSection).toContain('voice_constraints.related_posts');
+    const closedSetSection = system.slice(system.indexOf('INTERNAL LINK TARGETS are a CLOSED set'), system.indexOf('RELATED POSTS ('));
+    expect(closedSetSection).toContain('voice_constraints.related_posts');
+  });
 });
 
 describe('single-source-of-truth drift guards (prompt values come from the gate modules)', () => {

@@ -15,6 +15,7 @@ const {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkRelatedPostsLinked,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkNoRawMarkdownTables,
@@ -420,6 +421,43 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     expect(checkNoRawMarkdownTables({ body: '<ComparisonTable columns={["a","b"]} rows={[{ label: "x", values: ["y"] }]} />' }).ok).toBe(true);
     expect(checkNoRawMarkdownTables({ body: 'Choose either|or — both work.\n\n---\n\nNext section.' }).ok).toBe(true);
     expect(checkNoRawMarkdownTables({ body: '' }).ok).toBe(true);
+  });
+  // Owner rule 2026-09-26 (related-post link lane): SOFT + weight 0 — see
+  // PAGE_TYPE_CHECKS['supporting-blog'] in content-quality-gate.js. Never
+  // blocks and never moves total_score; it only appears in soft_failures.
+  test('related posts linked (soft, weight 0)', () => {
+    const relatedPosts = [
+      { title: 'A', path: '/termite/a/', keyword: 'a' },
+      { title: 'B', path: '/termite/b/', keyword: 'b' },
+      { title: 'C', path: '/termite/c/', keyword: 'c' },
+      { title: 'D', path: '/termite/d/', keyword: 'd' },
+    ];
+    // No related_posts on the brief at all — passes trivially.
+    expect(checkRelatedPostsLinked({ body: 'no links here' }, {}).ok).toBe(true);
+    expect(checkRelatedPostsLinked({ body: 'no links here' }, { voice_constraints: {} }).ok).toBe(true);
+    // Fewer than 3 linked — soft fail, reason names the count.
+    const two = checkRelatedPostsLinked(
+      { body: 'See [A](/termite/a/) and [B](/termite/b/).' },
+      { voice_constraints: { related_posts: relatedPosts } }
+    );
+    expect(two.ok).toBe(false);
+    expect(two.reason).toBe('only_2_related_post_links');
+    // 3+ linked — passes.
+    expect(checkRelatedPostsLinked(
+      { body: 'See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).' },
+      { voice_constraints: { related_posts: relatedPosts } }
+    ).ok).toBe(true);
+    // The check is weight 0: an evaluate() run with <3 linked never loses
+    // score or blocks, only surfaces in soft_failures.
+    const withMiss = evaluate(
+      fullDraft({ body: 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.' }),
+      brief({ page_type: 'supporting-blog', voice_constraints: { related_posts: relatedPosts } }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(withMiss.checks.related_posts_linked.ok).toBe(false);
+    expect(withMiss.soft_failures.some((f) => f.name === 'related_posts_linked')).toBe(true);
+    expect(withMiss.total_score).toBe(51); // unchanged from the no-related_posts case — weight 0
+    expect(withMiss.hard_failures).toEqual([]);
   });
   test('voice match', () => {
     const body = 'Your sandy soil and afternoon storms create perfect conditions. You should protect your home. Your yard matters. You need this. Your call.';

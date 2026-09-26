@@ -156,6 +156,17 @@ const PAGE_TYPE_CHECKS = {
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
+    // SOFT + weight 0 by design (owner rule 2026-09-26, related-post link
+    // lane), same posture as blog_meta_soft_cta below: the brief's
+    // voice_constraints.related_posts is an allowance, not a checklist like
+    // internal_links_to_add, so a draft that skips it (topic genuinely has
+    // no natural related-link moment, or the brief carries no related_posts
+    // at all) must never lose a whole autonomous run over it OR shift the
+    // page type's score/threshold math for every OTHER supporting-blog
+    // draft. It surfaces in soft_failures for review, nothing more. Passes
+    // trivially (ok:true, contributing nothing either way) when the brief
+    // carries no related_posts.
+    { name: 'related_posts_linked', weight: 0, evaluate: checkRelatedPostsLinked },
     // Owner rule 2026-07-29: blog metas carry NO phone and nothing salesy.
     // Weight 0 hard gate — without it a freshly authored blog meta bypassed
     // the metadata-lane check entirely. The soft-CTA ending was demoted out
@@ -1020,6 +1031,26 @@ function checkFaqSectionPresent(draft, brief) {
   return { ok: true };
 }
 
+// SOFT check (see PAGE_TYPE_CHECKS['supporting-blog'] above): counts links
+// to the brief's voice_constraints.related_posts allowance (related-posts.js)
+// — the writer prompt asks for at least 3 natural in-text links to them.
+// Plain substring match on each candidate's path, same style as
+// checkHubLinkPresent's body.includes(h). No related_posts on the brief
+// (older/non-blog briefs, or a topic with no candidates) passes trivially —
+// this check exists to nudge, never to park a run that had no allowance
+// to use in the first place.
+function checkRelatedPostsLinked(draft, brief) {
+  const related = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
+  if (!related.length) return { ok: true, reason: 'no_related_posts_on_brief' };
+  const body = String(draft.body || '');
+  let linked = 0;
+  for (const post of related) {
+    const p = String(post?.path || '').trim();
+    if (p && body.includes(p)) linked++;
+  }
+  return linked >= 3 ? { ok: true } : { ok: false, reason: `only_${linked}_related_post_links` };
+}
+
 // Raw markdown pipe table detector — delegates to the single-source
 // predicate in content-guardrails (hasRawMarkdownTable), which also
 // enforces the rule on the manual publishAstro lane, so the two
@@ -1239,6 +1270,7 @@ module.exports._internals = {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkRelatedPostsLinked,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,

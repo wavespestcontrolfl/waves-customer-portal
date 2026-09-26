@@ -454,6 +454,87 @@ describe('_composeBrief customer signal context', () => {
   });
 });
 
+// Owner audit 2026-09-26: 115/278 blog posts link to no other post because
+// the writer's closed internal-link set never included any blog post.
+// related-posts.js computes the allowance; content-brief-builder carries it
+// on the brief (voice_constraints.related_posts — no content_briefs column
+// exists for it, so it rides the same jsonb field operator_brief already
+// uses) for supporting-blog briefs only.
+describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
+  const baseArgs = (over = {}) => ({
+    opportunity: { id: 'opp-1', page_url: null, query: 'termite swarmers', city: 'Bradenton', service: 'termite', bucket: 'customer_need', signal_metadata: {} },
+    signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+    decision: {
+      page_type: 'supporting-blog',
+      action_type: 'new_supporting_blog',
+      final_score: 80,
+      score_breakdown: {},
+      human_review_required: false,
+      human_review_reason: null,
+      router_notes: null,
+    },
+    existingBriefVersions: 0,
+    ...over,
+  });
+
+  test('a supporting-blog brief carries the related_posts list under voice_constraints', () => {
+    const relatedPosts = [
+      { title: 'Termite Bait Stations Explained', path: '/termite/bait-stations/', keyword: 'termite bait stations' },
+      { title: 'Subterranean vs Drywood Termites', path: '/termite/subterranean-vs-drywood/', keyword: 'subterranean vs drywood termites' },
+    ];
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({ relatedPosts }));
+    expect(brief.voice_constraints.related_posts).toEqual(relatedPosts);
+  });
+
+  test('an empty related_posts list adds no key (brief shape unchanged for topics with no candidates)', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({ relatedPosts: [] }));
+    expect(brief.voice_constraints.related_posts).toBeUndefined();
+  });
+
+  test('non-supporting-blog page types never carry related_posts even if passed', () => {
+    const relatedPosts = [{ title: 'X', path: '/x/', keyword: 'x' }];
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      decision: { page_type: 'city-service', action_type: 'create_or_refresh_city_service_page', final_score: 80, score_breakdown: {}, human_review_required: false, human_review_reason: null, router_notes: null },
+      relatedPosts,
+    }));
+    expect(brief.voice_constraints.related_posts).toBeUndefined();
+  });
+
+  test('related_posts coexists with an operator_brief / retry_directives already on voice_constraints', () => {
+    const relatedPosts = [{ title: 'X', path: '/x/', keyword: 'x' }];
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      opportunity: { id: 'opp-1', page_url: null, query: 'termite swarmers', city: 'Bradenton', service: 'termite', bucket: 'customer_need', signal_metadata: { gate_retry: { code: 'UNKNOWN_INTERNAL_ROUTE', attempt: 1 } } },
+      relatedPosts,
+    }));
+    expect(brief.voice_constraints.related_posts).toEqual(relatedPosts);
+    expect(brief.voice_constraints.retry_directives).toBeDefined();
+  });
+});
+
+describe('_loadRelatedPosts gating', () => {
+  test('skips the DB lookup entirely for a non-supporting-blog decision', async () => {
+    const builder = new ContentBriefBuilder();
+    const out = await builder._loadRelatedPosts({ id: 'opp-1' }, { page_type: 'city-service' });
+    expect(out).toEqual([]);
+  });
+
+  test('calls the selector with the opportunity signal for a supporting-blog decision', async () => {
+    const selector = require('../services/content/related-posts');
+    const spy = jest.spyOn(selector, 'getRelatedPostsForBrief').mockResolvedValue([{ title: 'X', path: '/x/', keyword: 'x' }]);
+    const builder = new ContentBriefBuilder();
+    const opportunity = { id: 'opp-1', query: 'termite swarmers', service: 'termite', city: 'Bradenton', page_url: '/existing/', signal_metadata: {} };
+    const out = await builder._loadRelatedPosts(opportunity, { page_type: 'supporting-blog' });
+    expect(out).toEqual([{ title: 'X', path: '/x/', keyword: 'x' }]);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({
+      keyword: 'termite swarmers',
+      service: 'termite',
+      city: 'Bradenton',
+      excludePath: '/existing/',
+    }));
+    spy.mockRestore();
+  });
+});
+
 describe('nextWeekday9amET', () => {
   test('returns a Date in the future', () => {
     const next = nextWeekday9amET();
