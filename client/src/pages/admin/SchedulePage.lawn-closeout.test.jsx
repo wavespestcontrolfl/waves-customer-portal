@@ -109,7 +109,7 @@ it('keeps commercial lawn visits on their existing completion form when choices 
   completionChoicesEnabled = true;
   techTipsAvailable = false;
   render(<CompletionPanel
-    service={{ ...service, id: 'commercial-lawn', serviceType: 'Commercial Turf Treatment Program', completionProfile: { serviceKey: 'commercial_lawn', requiresProducts: false } }}
+    service={{ ...service, id: 'commercial-lawn', serviceType: 'Lawn Care', completionProfile: { serviceKey: 'lawn', requiresProducts: false }, waveguardTier: 'Commercial' }}
     products={catalog}
     onClose={() => {}}
     onSubmit={submit}
@@ -122,7 +122,6 @@ it('keeps commercial lawn visits on their existing completion form when choices 
 
 it('shows gated history as a suggestion and records only choices the technician selects', async () => {
   completionChoicesEnabled = true;
-  techTipsAvailable = false;
   previousRecommendations = [{
     text: 'Homeowner: continue checking the repaired irrigation zone.',
     serviceDate: '2026-08-20',
@@ -131,6 +130,7 @@ it('shows gated history as a suggestion and records only choices the technician 
   mount();
   await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe('15'));
 
+  expect(screen.getByPlaceholderText('Search tips…')).toBeTruthy();
   expect(screen.queryByLabelText('Selected recommendations')).toBeNull();
   const actionSearch = screen.getByRole('combobox', { name: 'Search completed actions' });
   fireEvent.change(actionSearch, { target: { value: 'Inspected the serviced turf areas.' } });
@@ -150,6 +150,27 @@ it('shows gated history as a suggestion and records only choices the technician 
   expect(body.protocolActionsCompleted).toContain('Inspected the serviced turf areas.');
   expect(body.observations).toContain('Custom lawn observation.');
   expect(body.recommendations).toEqual(['Homeowner: continue checking the repaired irrigation zone.']);
+});
+
+it('records interior treatment scope for a searchable pest application', async () => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  render(<CompletionPanel
+    service={{ ...service, id: 'pest-choice', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', requiresProducts: false }, waveguardTier: null }}
+    products={[]}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+
+  const action = 'Completed the documented crack-and-crevice treatment.';
+  const search = await screen.findByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(search, { target: { value: action } });
+  fireEvent.click(await screen.findByRole('option', { name: action }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionScopesCompleted).toContainEqual({
+    label: action, scope: 'interior', treatmentApplied: true,
+  });
 });
 
 it('removes a gated completed action from both selection state and marker notes before submit', async () => {
@@ -1010,6 +1031,9 @@ it('a plan refresh that changes the products drops an untouched generated report
   fireEvent.change(notes, { target: { value: 'Hand notes before generating.' } });
   fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
   await waitFor(() => expect(notes.value).toContain('Applied the old products.'));
+  const generated = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(generated.products[0]).toMatchObject({ applicationMethod: 'broadcast_spray', applicationArea: 'Front yard, Back yard, Side yards', areaUnit: 'sqft' });
+  expect(String(generated.products[0].areaValue)).toBe('5000');
   withdrawDefaults = true;
   fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
   await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());

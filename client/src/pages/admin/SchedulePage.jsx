@@ -10543,6 +10543,7 @@ function serviceLineFromType(serviceType = "") {
 }
 
 function isCommercialServiceIdentity(service = {}) {
+  if (String(service.waveguardTier || "").trim().toLowerCase() === "commercial") return true;
   return String([
     service.service_type, service.serviceType, service.type,
     service.service_key, service.serviceKey, service.service_name,
@@ -15898,6 +15899,12 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
+        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationArea:
+          p.applicationArea ||
+          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+        areaValue: p.areaValue ?? null,
+        areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",
@@ -19178,7 +19185,7 @@ export function CompletionPanel({
                 freeze during photo analysis (codex r9): they're the vision
                 prompt's context on basic completions, and captions returned
                 against a stale snapshot would persist under the photos. */}
-            {techTipsAvailable && (!completionChoiceFamily || selectedTipIds.length > 0 || customTip.trim()) && (
+            {techTipsAvailable && (
               <Field label="Tips from your tech">
                 <TechTipPicker
                   library={techTips}
@@ -21618,7 +21625,7 @@ export function CompletionPanel({
             {/* Frozen while an AI draft is in flight (codex P2) — mirrors
                 the mobile variant. Observations also freeze during photo
                 analysis (codex r9): they're the vision prompt's context. */}
-            {techTipsAvailable && (!completionChoiceFamily || selectedTipIds.length > 0 || customTip.trim()) && (
+            {techTipsAvailable && (
               <div style={{ marginBottom: 12 }}>
                 <label style={labelStyle}>Tips from your tech</label>{" "}
                 <TechTipPicker

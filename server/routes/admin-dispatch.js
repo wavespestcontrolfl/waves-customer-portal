@@ -303,8 +303,7 @@ function recommendationTextsFromRecord(record = {}) {
   const snapshot = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
     ? serviceData.typedReportSnapshot : null;
   const texts = [
-    ...recommendationTextValues(structured.recommendations),
-    ...recommendationTextValues(snapshot?.recommendations),
+    ...recommendationTextValues(structured.formRecommendations),
     ...recommendationTextValues(snapshot?.nextStepChips),
   ];
   const values = snapshot?.values && typeof snapshot.values === 'object' && !Array.isArray(snapshot.values)

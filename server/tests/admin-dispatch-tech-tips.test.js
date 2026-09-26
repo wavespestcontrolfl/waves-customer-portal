@@ -224,20 +224,23 @@ describe('GET /:serviceId/tech-tips', () => {
     const recommendationRows = [
       {
         id: 'future', scheduled_service_id: 'future-svc', service_line: 'mosquito', service_date: '2026-08-16',
-        structured_notes: { recommendations: ['Future recommendation'] },
+        structured_notes: { formRecommendations: ['Future recommendation'] },
       },
       {
         id: 'current-record', scheduled_service_id: 'svc-1', service_line: 'mosquito', service_date: '2026-08-15',
-        structured_notes: { recommendations: ['Current visit recommendation'] },
+        structured_notes: { formRecommendations: ['Current visit recommendation'] },
       },
       {
         id: 'rec-1', scheduled_service_id: 'old-1', service_line: 'mosquito', service_date: '2026-08-01',
         technician_notes: 'Raw notes must never be mined for recommendations.',
-        structured_notes: { recommendations: ['Drain standing water weekly', 'Trim dense foliage', 'Drain standing water weekly'] },
+        structured_notes: {
+          formRecommendations: ['Drain standing water weekly', 'Trim dense foliage', 'Drain standing water weekly'],
+          recommendations: ['Internal tagged next step'],
+        },
       },
       {
         id: 'wrong-line', scheduled_service_id: 'old-lawn', service_line: 'lawn', service_date: '2026-07-30',
-        structured_notes: { recommendations: ['Wrong service line'] },
+        structured_notes: { formRecommendations: ['Wrong service line'] },
       },
       {
         id: 'rec-2', scheduled_service_id: 'old-2', service_type: 'Mosquito Treatment', service_date: '2026-07-15',
@@ -250,11 +253,11 @@ describe('GET /:serviceId/tech-tips', () => {
       },
       {
         id: 'rec-3', scheduled_service_id: null, service_line: 'mosquito', service_date: new Date('2026-06-20T00:00:00.000Z'),
-        structured_notes: JSON.stringify({ recommendations: ['Empty outdoor containers'] }),
+        structured_notes: JSON.stringify({ formRecommendations: ['Empty outdoor containers'] }),
       },
       {
         id: 'rec-4', scheduled_service_id: 'old-4', service_line: 'mosquito', service_date: '2026-05-01',
-        structured_notes: { recommendations: ['Older than the three-visit bound'] },
+        structured_notes: { formRecommendations: ['Older than the three-visit bound'] },
       },
     ];
     const calls = [];
@@ -272,7 +275,7 @@ describe('GET /:serviceId/tech-tips', () => {
       { text: 'Schedule a follow-up inspection', serviceDate: '2026-07-15', serviceRecordId: 'rec-2' },
       { text: 'Empty outdoor containers', serviceDate: '2026-06-20', serviceRecordId: 'rec-3' },
     ]);
-    expect(JSON.stringify(res.body)).not.toMatch(/Raw notes|Wrong service line|Current visit|Future recommendation|Older than/);
+    expect(JSON.stringify(res.body)).not.toMatch(/Raw notes|Internal tagged|Wrong service line|Current visit|Future recommendation|Older than/);
     expect(calls).toEqual(['scheduled_services', 'service_records']);
   });
 
@@ -282,7 +285,7 @@ describe('GET /:serviceId/tech-tips', () => {
       service: SERVICE,
       recommendationRows: [{
         id: 'rec-many', scheduled_service_id: 'old-many', service_line: 'mosquito', service_date: '2026-08-01',
-        structured_notes: { recommendations: Array.from({ length: 15 }, (_, index) => `Recommendation ${index + 1}`) },
+        structured_notes: { formRecommendations: Array.from({ length: 15 }, (_, index) => `Recommendation ${index + 1}`) },
       }],
       calls: [],
     });
