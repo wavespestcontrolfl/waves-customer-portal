@@ -357,21 +357,6 @@ function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
   };
 }
 
-// Which day-move guard governs this run: ROUTE-TIERS (its days-out ladder +
-// cumulative drift budget) or, when GATE_AUTO_DISPATCH_FLEX_TIER is on, the
-// Flexible tier (its own 73h freeze + fixed ±5-day radius clamped by the
-// series' adjacent occurrence) — see flex-tier.js. Both govern the SAME
-// thing (which day-moves may run, and inside what window), so at most one is
-// active per run; flex wins if both are somehow on. Neither ⇒ 'legacy' (the
-// flat lock, byte for byte). Pulled into its own function (Codex/lane
-// pattern — see buildPlacementAudit above) so runAutoDispatch's already
-// over-budget complexity never grows from this.
-function resolveGuardMode(config) {
-  if (config.flexTierEnabled === true) return 'flex';
-  if (config.routeTiersEnabled === true) return 'tiers';
-  return 'legacy';
-}
-
 // The `scheduled_date` floor loadEligibleServices() queries with. ROUTE-TIERS
 // loads from its own tier-2 floor (today+6 — the days-out ladder decides the
 // rest per visit); FLEX-TIER loads from tomorrow on — its precise cutoff is
@@ -400,8 +385,8 @@ function buildEligCtx(guardMode, today, lockBoundary, lockWindowDays) {
 // evidence; FLEX-TIER needs the reminder freeze (its own, tighter 73h band)
 // + each visit's series neighbors. Both FAIL CLOSED: a failed read must
 // freeze/guard-unknown every visit rather than move without the check.
-// Pulled out of runAutoDispatch for the same complexity-budget reason as
-// resolveGuardMode above. Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
+// Pulled out of runAutoDispatch to keep its complexity budget (see
+// buildPlacementAudit above). Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
 async function loadGuardContext(guardMode, services, nowDate) {
   if (guardMode === 'legacy') {
     return {
@@ -433,9 +418,11 @@ async function loadGuardContext(guardMode, services, nowDate) {
 // of runAutoDispatch's per-service loop (same complexity-budget reason as
 // above) so GATE_AUTO_DISPATCH_FLEX_TIER's own branches never add to that
 // loop. `today` is the ET date the caller wants this decided against (the
-// run's own `today` on pass 1). Returns { window, meta, skip }; `skip` is
-// {code, description} when the visit cannot move this run/window.
-function resolveDayMoveWindow(guardMode, service, guardCtx, today) {
+// run's own `today` on pass 1); `nowDate` is the matching absolute clock
+// (flex mode's own-schedule freeze needs hours, not whole days). Returns
+// { window, meta, skip }; `skip` is {code, description} when the visit
+// cannot move this run/window.
+function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
   const { reminderFreeze, anchorMap, neighborMap } = guardCtx;
   if (!reminderFreeze || reminderFreeze.failed) {
@@ -446,6 +433,15 @@ function resolveDayMoveWindow(guardMode, service, guardCtx, today) {
   }
   const dateStr = toDateStr(service.scheduled_date);
   if (guardMode === 'flex') {
+    // Reminder evidence only ever ADDS a freeze (a sent flag, or the
+    // sender's own claimable band read off appointment_reminders ROWS) — a
+    // visit with NO reminder row at all is invisible to the check above, and
+    // the flex ctx skips eligibility.js's days-out lock entirely, so the 73h
+    // cutoff is ALSO enforced directly from the visit's own schedule
+    // (Codex pre-push P1).
+    if (flexTier.ownScheduleFrozen(service, nowDate)) {
+      return { window: null, meta: null, skip: { code: 'WITHIN_73H', description: '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)' } };
+    }
     if (!neighborMap) {
       return { window: null, meta: null, skip: { code: 'SERIES_NEIGHBORS_UNKNOWN', description: 'Series occurrence order could not be derived — no move (fail closed)' } };
     }
@@ -483,12 +479,19 @@ function resolveDayMoveWindow(guardMode, service, guardCtx, today) {
 // re-read against the LIVE clock right before applying, and the window
 // recomputed against the CURRENT ET date (a slow or manual run crossing ET
 // midnight must not apply yesterday's window). `meta` is the pass-1 tierMeta
-// this visit was scored with — its durable evidence (the tier anchor, or the
-// flex-tier series neighbors) is REUSED, never re-queried; only the
-// clock-dependent numbers are refreshed. Pulled out of runAutoDispatch's
-// pass-2 loop for the same complexity-budget reason as resolveDayMoveWindow.
-// Returns { window, meta, skip }; skip.degraded flags a read failure the
-// caller must fold into the run's health status.
+// this visit was scored with — the tier ladder's durable evidence (its
+// anchor) is REUSED, never re-queried, since it only ever grows (a
+// cumulative record of past moves). The flex tier's series-neighbor bounds
+// are NOT durable evidence the same way — a sibling occurrence can be
+// inserted or edited between pass 1 and this recheck — so they are re-read
+// fresh here (Codex pre-push P1) rather than reusing the pass-1 capture.
+// This is still a pre-transaction, best-effort fast-fail: the write path
+// re-validates the same bounds again, atomically, inside the rebooker's own
+// move transaction (apply.js's makeMoveGuard/makeMemberGuard), which is the
+// authoritative check against a concurrent insert/edit. Pulled out of
+// runAutoDispatch's pass-2 loop for the same complexity-budget reason as
+// resolveDayMoveWindow. Returns { window, meta, skip }; skip.degraded flags
+// a read failure the caller must fold into the run's health status.
 async function recheckDayMoveWindow(guardMode, service, meta, nowDate) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
   const freezeHours = guardMode === 'flex' ? flexTier.FLEX_TIER_FREEZE_HOURS : routeTiers.REMINDER_SENDABLE_HOURS;
@@ -501,12 +504,19 @@ async function recheckDayMoveWindow(guardMode, service, meta, nowDate) {
   }
   const todayNow = etDateString(nowDate);
   if (guardMode === 'flex') {
-    const neighbors = (meta && meta.neighbors) || {};
+    if (flexTier.ownScheduleFrozen(service, nowDate)) {
+      return { window: null, meta: null, skip: { code: 'WITHIN_73H', description: 'No longer legally movable at apply time — 73-hour cutoff reached on the visit\'s own schedule' } };
+    }
+    const neighborMap = await flexTier.loadSeriesNeighbors(db, [service]);
+    if (neighborMap === null) {
+      return { window: null, meta: null, skip: { code: 'SERIES_NEIGHBORS_UNKNOWN', description: 'Series occurrence order unreadable at apply time — frozen (fail closed)' } };
+    }
+    const neighbors = neighborMap.get(service.id) || {};
     const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, today: todayNow, neighbors });
     if (!window) {
       return { window: null, meta: null, skip: { code: 'FLEX_WINDOW_EXHAUSTED', description: 'No longer legally movable at apply time, clamped by the series\' adjacent occurrence' } };
     }
-    return { window, meta: { ...meta, window }, skip: null };
+    return { window, meta: { ...meta, neighbors, window }, skip: null };
   }
   const daysOutNow = routeTiers.daysBetween(todayNow, toDateStr(service.scheduled_date));
   const radiusNow = routeTiers.tierRadiusForDaysOut(daysOutNow);
@@ -552,7 +562,10 @@ async function runAutoDispatch(opts = {}) {
     const capabilityFor = makeCapabilityFn(capMap);
     // GUARD MODE: 'tiers' (GATE_ROUTE_TIERS), 'flex' (GATE_AUTO_DISPATCH_FLEX_TIER,
     // takes precedence), or 'legacy' (neither — the flat lock, byte for byte).
-    const guardMode = resolveGuardMode(config);
+    // Resolved once in config.js (getAutoDispatchConfig) so apply.js's
+    // grouped-member guard, which receives this SAME config object, reads
+    // the identical mode — never a second, independently-derived decision.
+    const { guardMode } = config;
     const loadBoundary = resolveLoadBoundary(guardMode, nowDate, lockBoundary, today);
     const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
 
@@ -607,7 +620,7 @@ async function runAutoDispatch(opts = {}) {
         let tierWindow = null;
         let tierMeta = null;
         if (guardMode !== 'legacy' && !(service.recurring_dispatch_due_date && !service.window_start)) {
-          const guardResult = resolveDayMoveWindow(guardMode, service, guardCtx, today);
+          const guardResult = resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate);
           if (guardResult.skip) {
             totals.skipped++;
             await audit.logDecision(runId, { action: 'skipped', service, reason_code: guardResult.skip.code, reason_description: guardResult.skip.description });

@@ -18,6 +18,19 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
+// A realistic composer (mirrors appointment-reminders.js's own
+// composeScheduledApptTime) so flexTier.ownScheduleFrozen's hours-until
+// math is genuine, without pulling the whole appointment-reminders module
+// (and its own dependencies) into this orchestrator test.
+jest.mock('../services/appointment-reminders', () => ({
+  composeScheduledApptTime: jest.fn((svc) => {
+    if (!svc) return null;
+    const datePart = String(svc.scheduled_date || '').slice(0, 10);
+    const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+    if (!datePart || !timePart) return null;
+    return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
+  }),
+}));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
@@ -202,4 +215,63 @@ test('gate off (neither flexTierEnabled nor routeTiersEnabled): legacy flat lock
   expect(res.changed).toBe(1);
   const changed = decisions('changed')[0];
   expect(changed.constraints.route_tiers).toBeUndefined();
+});
+
+// Codex pre-push P1, finding 1: loadReminderFreeze reports an EMPTY frozen
+// set for a visit with NO appointment_reminders row at all (not "sent",
+// just absent) — and the flex ctx removed eligibility.js's own days-out
+// lock, so a visit due inside 73h with no reminder row yet must still be
+// caught, directly from its own schedule, at BOTH pass 1 and the apply-time
+// recheck.
+describe('own-schedule 73h freeze — independent of reminder evidence (Codex pre-push P1)', () => {
+  const soonDate = shiftDateStr(TODAY, 2); // ~48h out — inside 73h, well outside the lookahead-irrelevant range
+  function soonSvc() {
+    return { ...svc(), scheduled_date: soonDate };
+  }
+
+  test('pass 1: skipped as WITHIN_73H even though the reminder-freeze read is a clean empty set (no row)', async () => {
+    reminderResults = [[]]; // no appointment_reminders row for this service at all
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
+      if (table === 'scheduled_services') return buildChain([soonSvc()]);
+      return buildChain([]);
+    });
+    const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(res.changed).toBe(0);
+    expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+    expect(decisions('skipped').map((d) => d.reason_code)).toContain('WITHIN_73H');
+  });
+
+  test('apply-time recheck: a visit that DRIFTS inside 73h during a slow scoring pass is caught independently of the reminder table', async () => {
+    // The visit is >73h out when pass 1 reads the clock, but the "scoring
+    // pass" (candidate-slots mock) advances the wall clock far enough that
+    // by the apply-time recheck it is inside 73h — recheckDayMoveWindow's
+    // own-schedule check must catch it even with a clean (empty) reminder
+    // read both times.
+    reminderResults = [[], []];
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    try {
+      jest.setSystemTime(new Date('2026-08-13T08:00:00Z'));
+      const visitDate = shiftDateStr(etDateString(new Date()), 4); // ~96h out — outside 73h at pass 1
+      db.mockImplementation((table) => {
+        if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
+        if (table === 'scheduled_services') return buildChain([{ ...svc(), scheduled_date: visitDate, window_start: '08:00' }]);
+        return buildChain([]);
+      });
+      candidateSlots.findValidCandidateSlots.mockImplementation(async () => {
+        // Advance the wall clock ~26h during the "long scoring pass" — the
+        // visit (still at its own original date/window) is now inside 73h.
+        jest.setSystemTime(new Date('2026-08-14T13:00:00Z'));
+        return {
+          current: { ...CURRENT, date: visitDate }, candidates: [{ ...CAND, date: shiftDateStr(visitDate, 1) }],
+        };
+      });
+      const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+      expect(res.changed).toBe(0);
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      expect(decisions('no_change').map((d) => d.reason_code)).toContain('WITHIN_73H');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

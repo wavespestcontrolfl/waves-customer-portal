@@ -133,10 +133,36 @@ function flexTierMoveWindow({ origDate, today, neighbors }) {
   return { dateFrom, dateTo };
 }
 
+/**
+ * Direct 73h freeze check from the visit's OWN schedule (scheduled_date +
+ * window_start composed into the canonical ET instant via
+ * AppointmentReminders.composeScheduledApptTime — reused, not re-derived;
+ * required lazily, the same way apply.js already requires it, to send the
+ * post-move reminder resync).
+ *
+ * INDEPENDENT of reminder evidence (Codex pre-push P1): route-tiers'
+ * loadReminderFreeze only ever ADDS a freeze — a sent flag, or the sender's
+ * own claimable band, both read off `appointment_reminders` ROWS. A visit
+ * with NO reminder row at all (not yet generated, a data gap, a race before
+ * registration) is invisible to that check, and the Flexible tier's own
+ * eligibility ctx (`ctx.flexTier`) skips eligibility.js's days-out lock
+ * entirely — so this direct computation is the ONLY thing standing between
+ * "no reminder row yet" and moving a visit that is due inside 73 hours.
+ * Fails closed: an uncomposable instant (missing/malformed scheduled_date or
+ * window_start) freezes the visit.
+ */
+function ownScheduleFrozen(service, now = new Date()) {
+  const AppointmentReminders = require('../appointment-reminders');
+  const apptTime = AppointmentReminders.composeScheduledApptTime(service);
+  if (!apptTime || Number.isNaN(apptTime.getTime())) return true; // fail closed
+  return apptTime.getTime() - now.getTime() <= FLEX_TIER_FREEZE_HOURS * 3600000;
+}
+
 module.exports = {
   FLEX_TIER_RADIUS_DAYS,
   FLEX_TIER_FREEZE_HOURS,
   seriesPosition,
   loadSeriesNeighbors,
   flexTierMoveWindow,
+  ownScheduleFrozen,
 };

@@ -1,0 +1,245 @@
+// FLEX-TIER apply-time write-path guards (Codex pre-push P1 — 3 findings):
+//   1. index.js:444 — loadReminderFreeze reports "not frozen" for a visit
+//      with NO reminder row at all, and the flex ctx removed the legacy
+//      date lock, so the 73h cutoff must ALSO be enforced directly from the
+//      visit's own schedule (flexTier.ownScheduleFrozen), independent of
+//      reminder evidence — exercised here through the write-path guards
+//      that gate the actual commit (checkFlexOwnBounds / checkFlexSiblingBounds).
+//   2. apply.js's makeMemberGuard only knew routeTiersEnabled — grouped
+//      siblings must get the SAME flex rules (73h cutoff, ±5 days, their
+//      own series-neighbor bounds), with flex precedence over tiers.
+//   3. The series-neighbor bounds must be RE-READ fresh at apply time,
+//      inside the write path (under the trx the rebooker/apply already
+//      hold) — never reused from an earlier snapshot — so a newly
+//      inserted/edited occurrence blocks a crossing move.
+jest.mock('../services/auto-dispatch/route-tiers', () => ({
+  ...jest.requireActual('../services/auto-dispatch/route-tiers'),
+  loadReminderFreeze: jest.fn(),
+}));
+jest.mock('../services/appointment-reminders', () => ({
+  // A realistic composer (mirrors the real module's own logic) so
+  // ownScheduleFrozen's hours-until-appointment math is genuine, without
+  // pulling in the full appointment-reminders module and its own
+  // dependencies into this unit test.
+  composeScheduledApptTime: jest.fn((svc) => {
+    if (!svc) return null;
+    const datePart = String(svc.scheduled_date || '').slice(0, 10);
+    const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+    if (!datePart || !timePart) return null;
+    return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
+  }),
+}));
+
+const routeTiers = require('../services/auto-dispatch/route-tiers');
+const {
+  makeMoveGuard, makeMemberGuard, checkFlexOwnBounds, checkFlexSiblingBounds, resolveGuardModeCompat,
+} = require('../services/auto-dispatch/apply');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+
+const TODAY = etDateString(new Date());
+const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${TODAY}T12:00`), n));
+
+function refuseFactory() {
+  return (id, why) => Object.assign(new Error(`refused ${id}: ${why}`), { code: 'TEST_REFUSE', id, why });
+}
+
+// A trx stub for loadSeriesNeighbors' `db('scheduled_services')
+// .where(fn).whereNotIn(status).select(...)` query — the only query these
+// unit-level guard functions issue once loadReminderFreeze is mocked.
+function seriesTrx(rowsByParent) {
+  return jest.fn((table) => {
+    if (table !== 'scheduled_services') throw new Error(`unexpected table ${table}`);
+    let parentId;
+    const capture = { where: (col, val) => { if (col === 'id') parentId = val; return capture; }, orWhere: () => capture };
+    const api = {
+      where: (fn) => { fn.call(capture); return api; },
+      whereNotIn: () => api,
+      select: async () => rowsByParent[parentId] || [],
+    };
+    return api;
+  });
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
+
+describe('checkFlexOwnBounds (the tapped row, inside makeMoveGuard)', () => {
+  const BEST = { date: dayOffset(9), technician_id: null };
+
+  test('no-op outside flex mode, for a non-recurring-child row, or an unplaced due-date visit', async () => {
+    const trx = jest.fn(() => { throw new Error('must not query'); });
+    const refuse = refuseFactory();
+    const recurringRow = {
+      id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+    };
+    await expect(checkFlexOwnBounds(trx, recurringRow, BEST, 'tiers', refuse)).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, recurringRow, BEST, 'legacy', refuse)).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, { ...recurringRow, recurring_parent_id: null }, BEST, 'flex', refuse)).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, { ...recurringRow, is_recurring: false }, BEST, 'flex', refuse)).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, {
+      ...recurringRow, recurring_dispatch_due_date: dayOffset(9), window_start: null,
+    }, BEST, 'flex', refuse)).resolves.toBeUndefined();
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('Finding 1: a row within 73h of its OWN schedule is frozen — no reminder evidence involved at all', async () => {
+    const trx = jest.fn(() => { throw new Error('must not query — frozen before any DB read'); });
+    const refuse = refuseFactory();
+    const soonRow = {
+      id: 's1', scheduled_date: dayOffset(2), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+    };
+    await expect(checkFlexOwnBounds(trx, soonRow, BEST, 'flex', refuse))
+      .rejects.toMatchObject({ code: 'TEST_REFUSE', id: 's1' });
+  });
+
+  test('a row safely past 73h, with no adjacent occurrence, admits a best.date inside ±5 days', async () => {
+    const row = {
+      id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+    };
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: dayOffset(9) }] });
+    const refuse = refuseFactory();
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(12) }, 'flex', refuse)).resolves.toBeUndefined();
+  });
+
+  test('Finding 3: a freshly-read (never cached) NEXT occurrence blocks a move that would cross it', async () => {
+    const row = {
+      id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+    };
+    // A sibling occurrence 3 days after the tapped row — inside the ±5
+    // radius, so it must clamp the legal window.
+    const trx = seriesTrx({
+      p1: [
+        { id: 's1', scheduled_date: dayOffset(9) },
+        { id: 's2', scheduled_date: dayOffset(12) },
+      ],
+    });
+    const refuse = refuseFactory();
+    // Landing ON or past the adjacent occurrence's date is refused...
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(12) }, 'flex', refuse))
+      .rejects.toMatchObject({ code: 'TEST_REFUSE', id: 's1' });
+    // ...one day short of it is fine.
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuse)).resolves.toBeUndefined();
+  });
+
+  test('an unreadable series-neighbor read fails closed (no move)', async () => {
+    const row = {
+      id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+    };
+    const trx = jest.fn(() => ({ where: () => ({ whereNotIn: () => ({ select: async () => { throw new Error('db down'); } }) }) }));
+    const refuse = refuseFactory();
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuse))
+      .rejects.toMatchObject({ code: 'TEST_REFUSE', id: 's1' });
+  });
+});
+
+describe('checkFlexSiblingBounds (grouped siblings) — Finding 2', () => {
+  const BEST = { date: dayOffset(11) };
+  function sib(overrides = {}) {
+    return {
+      id: 's2', scheduled_date: dayOffset(9), window_start: '09:00', recurring_parent_id: 'p1', ...overrides,
+    };
+  }
+
+  test('the 73h reminder band (route-tiers evidence) freezes a sibling, fail closed on an unreadable read', async () => {
+    const rows = [sib()];
+    const trx = seriesTrx({ p1: rows });
+    const refuse = refuseFactory();
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: true, frozen: new Set() });
+    await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuse)).rejects.toMatchObject({ id: 's2' });
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set(['s2']) });
+    await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuse)).rejects.toMatchObject({ id: 's2' });
+    // Confirms the FLEX freeze band was requested, not route-tiers' own default.
+    const { FLEX_TIER_FREEZE_HOURS } = require('../services/auto-dispatch/flex-tier');
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), FLEX_TIER_FREEZE_HOURS);
+  });
+
+  test('Finding 1: a sibling within 73h of its OWN schedule freezes the grouped move even with clean reminder evidence', async () => {
+    const rows = [sib({ scheduled_date: dayOffset(2) })];
+    const trx = seriesTrx({ p1: rows });
+    const refuse = refuseFactory();
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() }); // no reminder row at all
+    await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuse)).rejects.toMatchObject({ id: 's2' });
+  });
+
+  test('a sibling passes when clear of the freeze and inside its own flex window', async () => {
+    const rows = [sib()];
+    const trx = seriesTrx({ p1: rows });
+    const refuse = refuseFactory();
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuse)).resolves.toBeUndefined();
+  });
+
+  test('Finding 3: a sibling series-neighbor bound is re-read fresh — a newly inserted occurrence between the members blocks the move', async () => {
+    const rows = [sib({ id: 's2', scheduled_date: dayOffset(9) }), sib({ id: 's3', scheduled_date: dayOffset(20) })];
+    // s3's real previous occurrence is now s2b (a NEW row at day+12, inserted
+    // since any earlier read) — s3 cannot legally land on dayOffset(11),
+    // which is BEFORE that newly-inserted occurrence's own date... exercise
+    // the more direct case: a new occurrence lands INSIDE the radius and
+    // must clamp best.date for the sibling whose window it bounds.
+    const trx = seriesTrx({
+      p1: [
+        { id: 's2', scheduled_date: dayOffset(9) },
+        { id: 's2b', scheduled_date: dayOffset(12) }, // newly inserted, between s2 and s3
+        { id: 's3', scheduled_date: dayOffset(20) },
+      ],
+    });
+    const refuse = refuseFactory();
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    // best.date = dayOffset(11) crosses s2's newly-adjacent next occurrence (day 12 - 1 = day 11 is the last legal day; day 12+ crosses it)
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(12) }, TODAY, refuse))
+      .rejects.toMatchObject({ id: 's2' });
+  });
+});
+
+describe('resolveGuardModeCompat', () => {
+  test('an explicit guardMode wins', () => {
+    expect(resolveGuardModeCompat({ guardMode: 'flex', routeTiersEnabled: true })).toBe('flex');
+  });
+  test('falls back to flexTierEnabled, then routeTiersEnabled, then legacy', () => {
+    expect(resolveGuardModeCompat({ flexTierEnabled: true })).toBe('flex');
+    expect(resolveGuardModeCompat({ routeTiersEnabled: true })).toBe('tiers');
+    expect(resolveGuardModeCompat({})).toBe('legacy');
+  });
+});
+
+describe('makeMoveGuard / makeMemberGuard thread the resolved guard mode (Finding 2 wiring)', () => {
+  test('makeMoveGuard applies the flex check when config.guardMode is flex, and skips it otherwise', async () => {
+    const row = {
+      id: 's1', scheduled_date: dayOffset(2), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1', technician_id: null,
+    };
+    const best = { date: dayOffset(9), technician_id: null };
+    const guardOn = makeMoveGuard({ service: row, best, config: { guardMode: 'flex' } });
+    await expect(guardOn({ trx: jest.fn(), technicianId: null }))
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }); // 73h own-schedule freeze, no trx query needed
+    const guardOff = makeMoveGuard({ service: row, best, config: {} });
+    await expect(guardOff({ trx: jest.fn(), technicianId: null })).resolves.toBeUndefined();
+  });
+
+  test('makeMemberGuard dispatches to the flex sibling check when config.flexTierEnabled is set (no explicit guardMode)', async () => {
+    const service = { id: 's1', status: 'confirmed' };
+    const sibling = {
+      id: 's2', status: 'confirmed', scheduled_date: dayOffset(2), window_start: '09:00',
+      is_recurring: true, recurring_parent_id: 'p1', technician_id: null,
+      lat: 27.4, lng: -82.5, customer_active: true, // clears eligibility so the flex freeze is what's actually exercised
+    };
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services as ss') {
+        return {
+          leftJoin: () => ({ whereIn: () => ({ select: async () => [sibling] }) }),
+        };
+      }
+      if (table === 'recurring_plan_alerts') return { where: () => ({ where: () => ({ where: () => ({ whereNull: () => ({ first: async () => null }) }) }) }) };
+      if (table === 'scheduled_services') {
+        return {
+          where: (fn) => { const cap = { where: () => cap, orWhere: () => cap }; fn.call(cap); return { whereNotIn: () => ({ select: async () => [sibling] }) }; },
+        };
+      }
+      return { where: () => ({ orWhereNull: () => ({ first: async () => null }) }) };
+    });
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    const guard = makeMemberGuard({ service, best: { date: dayOffset(9) }, config: { flexTierEnabled: true }, techChanged: false });
+    await expect(guard({ trx, members: [service, { id: 's2', status: 'confirmed' }] }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('73 hours') });
+  });
+});
