@@ -71,6 +71,13 @@ describe('scanPost — same four heuristics as the quality gate', () => {
     const good = seeder.scanPost({ url: '/termite/bait-vs-liquid-good/', body: GOOD });
     expect(good.gaps).toEqual([]);
   });
+  test('a legacy .md post never gets a comparison gap (no MDX components on refresh; Codex P2)', () => {
+    const md = seeder.scanPost({ url: '/termite/bait-vs-liquid/', file: 'src/content/blog/termite/bait-vs-liquid.md', body: POOR });
+    expect(md.gaps).toEqual(['named_sources', 'concrete_specifics']);
+    expect(md.results.comparison).toEqual({ ok: true, reason: 'markdown_only_post_cannot_carry_ComparisonTable' });
+    const mdx = seeder.scanPost({ url: '/termite/bait-vs-liquid/', file: 'src/content/blog/termite/bait-vs-liquid.mdx', body: POOR });
+    expect(mdx.gaps).toContain('comparison');
+  });
   test('a post that frames no choice never gets comparison / how_to_choose gaps', () => {
     const r = seeder.scanPost(corpus()[2]);
     // "a few weeks" with no measurement → concrete_specifics (softening, not a quota).
@@ -148,6 +155,11 @@ describe('rescanLive — stale seeded rows are re-checked before drafting (Codex
     // Same page before the fix → the live gaps, not the seeded ones.
     publisher.loadExistingPageBody.mockResolvedValue({ body: POOR.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } });
     expect((await seeder.rescanLive(opp, { publisher })).gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
+  });
+  test('the live re-scan honours the seeded source_file extension', async () => {
+    const publisher = { loadExistingPageBody: async () => ({ body: POOR.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } }) };
+    const r = await seeder.rescanLive({ ...opp, signal_metadata: { source_file: 'src/content/blog/termite/bait-vs-liquid.md' } }, { publisher });
+    expect(r.gaps).toEqual(['named_sources', 'concrete_specifics']);
   });
   test('unreadable page → null (caller keeps the seeded gaps)', async () => {
     expect(await seeder.rescanLive(opp, { publisher: { loadExistingPageBody: async () => null } })).toBeNull();

@@ -114,12 +114,20 @@ function splitPost(raw) {
  * Run the four citability checks over one post. Pure.
  * → { gaps: string[], results: { [gapId]: { ok, reason } } }
  */
-function scanPost({ body: raw, url }) {
+function scanPost({ body: raw, url, file }) {
   const { frontmatter, body } = splitPost(raw);
-  return scanParsed({ frontmatter, body, url });
+  return scanParsed({ frontmatter, body, url, file });
 }
 
-function scanParsed({ frontmatter = {}, body = '', url }) {
+// Legacy .md posts cannot carry MDX components: publishRefresh keeps the
+// extension and 422s a refreshed .md body containing <ComparisonTable>, so a
+// comparison gap there could never publish (Codex P2, 2026-09-26). The other
+// gaps are plain markdown and still apply.
+function isMarkdownOnly(file) {
+  return /\.md$/i.test(String(file || ''));
+}
+
+function scanParsed({ frontmatter = {}, body = '', url, file = null }) {
   const draft = { url, title: frontmatter.title || '', body, frontmatter };
   const results = {};
   const gaps = [];
@@ -128,6 +136,10 @@ function scanParsed({ frontmatter = {}, body = '', url }) {
     try { r = check(draft); } catch (err) { r = { ok: true, reason: `check_threw:${err.message}` }; }
     results[id] = { ok: !!r.ok, reason: r.reason || null };
     if (!r.ok) gaps.push(id);
+  }
+  if (isMarkdownOnly(file) && gaps.includes('comparison')) {
+    gaps.splice(gaps.indexOf('comparison'), 1);
+    results.comparison = { ok: true, reason: 'markdown_only_post_cannot_carry_ComparisonTable' };
   }
   // A table added for the comparison gap immediately makes how_to_choose
   // applicable — and a weight-0 miss would not stop that refresh from
@@ -149,7 +161,7 @@ async function rescanLive(opportunity, { publisher = require('../content-astro/a
   if (!url || !publisher?.loadExistingPageBody) return null;
   const live = await publisher.loadExistingPageBody(url);
   if (!live || typeof live.body !== 'string') return null;
-  const scan = scanParsed({ frontmatter: live.frontmatter || {}, body: live.body, url });
+  const scan = scanParsed({ frontmatter: live.frontmatter || {}, body: live.body, url, file: opportunity.signal_metadata?.source_file || null });
   return { gaps: scan.gaps, results: scan.results };
 }
 
