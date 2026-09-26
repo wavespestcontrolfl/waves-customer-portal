@@ -269,6 +269,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Our spray keeps your kids safe.', ''],
     ['The treatment harms neither pets nor children.', ''],
     ['Neither pets nor children will be harmed by this product.', ''],
+    ['Your pets are not going to be harmed.', ''],
     ['Sus mascotas van a estar bien.', ''],
     ['Tu perro va a estar bien.', ''],
     ['This treatment is benign for pets.', ''],
@@ -327,6 +328,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['You can re-enter immediately after treatment.', ''],
     ['You may go back inside right away.', ''],
     ['Puede volver a entrar inmediatamente.', ''],
+    ['You do not need to wait before entering.', 'When can I re-enter?'],
     ['The technician recommends no entry for 30 minutes.', 'What precautions after the treatment?'],
     ['The visit has a 30-minute no-entry window.', 'What precautions after the treatment?'],
     ['The visit requires a 30-minute exclusion period.', 'What precautions after the treatment?'],
@@ -652,6 +654,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
   test('"going to be fine" after a recognized pet emergency gets the veterinary script', () => {
     const out = normalizeIntakeResult({ reply: 'Your dog is going to be fine.', intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My dog ate rat poison');
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test.each(['There is no reason to seek medical care.', 'You have no reason to call Poison Control.', 'Medical care is unnecessary.'])('a no-reason-to-seek-care reply after an ingestion gets the emergency script: %s', (reply) => {
+    const out = normalizeIntakeResult({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
   test.each(['No medical attention is needed.', 'Your child does not require medical care.'])('a care denial after an ingestion gets the emergency script: %s', (reply) => {
@@ -2015,6 +2022,13 @@ describe('looksLikeEmergency', () => {
     'My child could be poisoned',
     'My child was possibly poisoned',
     'My child is believed to have been poisoned',
+    'My child drank water contaminated with poison',
+    'My dog ate food laced with rat poison',
+    'My child is covered in poison',
+    'There is poison all over my child',
+    'My dog is covered in pesticide',
+    'My child was stung\nNow the swelling is worse',
+    'My child was bitten\nNow there are hives',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2099,6 +2113,9 @@ describe('looksLikeEmergency', () => {
     'My child ate dinner after the lawn treatment',
     'My dog ate dinner next to the bait station',
     "Pesticide didn't get in my eyes",
+    "My child didn't get pesticide in her eyes",
+    "I didn't get pesticide in my eye",
+    "My dog didn't get poison on his paws",
     'Do ants bite?\nMy child has a question about the lawn',
     'I notice a burning smell after the treatment',
     'I saw a rash of brown spots after the lawn treatment',
