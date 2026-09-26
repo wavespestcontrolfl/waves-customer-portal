@@ -225,31 +225,6 @@ function buildUserMessage(facts) {
   return `Grounding facts:\n${JSON.stringify(facts, null, 2)}\n\nReturn only the JSON object.`;
 }
 
-function reviewNarrativeResponse(res, facts) {
-  const text = cleanText(res && res.ok && res.json ? res.json.summary : '');
-  if (!text || text.length < 40 || text.length > 900) {
-    return {
-      text: '',
-      warning: res && !res.ok
-        ? `[visit-summary] narrative miss (${res.reason}); using deterministic summary`
-        : null,
-    };
-  }
-
-  const problems = [
-    ...findBannedCustomerCopy(text),
-    ...EXTRA_FORBIDDEN.map((rx) => text.match(rx)?.[0] || null).filter(Boolean),
-    ...appointmentClaimProblems(text, facts),
-  ];
-  if (problems.length) {
-    return {
-      text: '',
-      warning: `[visit-summary] narrative hit guard (${problems.join(', ')}); using deterministic summary`,
-    };
-  }
-  return { text, warning: null };
-}
-
 /**
  * Returns the enriched Visit Summary string for a pest report, or the
  * deterministic fallback (recap + next-visit sentence). Never throws; never
@@ -285,9 +260,21 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
       jsonMode: true,
       maxTokens: 400,
     });
-    const reviewed = reviewNarrativeResponse(res, facts);
-    if (reviewed.text) value = reviewed.text;
-    if (reviewed.warning) logger.warn(reviewed.warning);
+    const text = cleanText(res?.ok ? res.json?.summary : '');
+    if (text.length >= 40 && text.length <= 900) {
+      const problems = [
+        ...findBannedCustomerCopy(text),
+        ...EXTRA_FORBIDDEN.map((rx) => text.match(rx)?.[0] || null).filter(Boolean),
+        ...appointmentClaimProblems(text, facts),
+      ];
+      if (!problems.length) {
+        value = text;
+      } else {
+        logger.warn(`[visit-summary] narrative hit guard (${problems.join(', ')}); using deterministic summary`);
+      }
+    } else if (res?.ok === false) {
+      logger.warn(`[visit-summary] narrative miss (${res.reason}); using deterministic summary`);
+    }
   } catch (err) {
     logger.warn(`[visit-summary] narrative failed: ${err.message}; using deterministic summary`);
   }
