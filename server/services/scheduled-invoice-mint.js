@@ -174,6 +174,14 @@ async function adoptScheduledInvoiceUnderMintLock(trx, scheduledServiceId) {
 // price instead of silently minting the stale one.
 async function mintScheduledServiceInvoiceWithDeposit({
   svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false,
+  // A quiet backfill closeout leaves the estimate deposit on its ledger for
+  // the reviewer (the completion path's skipDepositCredit posture).
+  skipDepositCredit = false,
+  // The caller's check, under the visit lock, that the lines it built are
+  // still what the visit bills (e.g. its add-on rows — an equal-total edit
+  // passes the price guard). An editor locking the visit row first waits
+  // for this mint, so a throw here is the only race left.
+  assertLinesCurrentInTrx = null,
 }) {
   const InvoiceService = require('../services/invoice');
   const {
@@ -182,7 +190,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
   const sourceEstimateId = svc.source_estimate_id || null;
   let lastErr = null;
   for (let attempt = 0; attempt < (sourceEstimateId ? 2 : 1); attempt += 1) {
-    const withDeposit = !!sourceEstimateId;
+    const withDeposit = !!sourceEstimateId && !skipDepositCredit;
     try {
       return await db.transaction(async (trx) => {
         // The shared lock chain (advisory → customer key-share → caller
@@ -221,6 +229,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
         }
+        if (assertLinesCurrentInTrx) await assertLinesCurrentInTrx(trx);
         if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)

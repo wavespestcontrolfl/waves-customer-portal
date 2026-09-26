@@ -1403,9 +1403,17 @@ async function buildScheduledServiceInvoiceLines(
     // connection, or the price read here would come from a different
     // connection's snapshot and the lock would be theater.
     database = null,
+    // A failed read throws instead of degrading to fallback lines: a caller
+    // that bills FROM these lines must tell an outage from "no add-ons"
+    // (ADMIN-BUG-R13).
+    strictReads = false,
   } = {},
 ) {
   const conn = database || db;
+  const degrade = (fallback) => (err) => {
+    if (strictReads) throw err;
+    return fallback;
+  };
   if (!scheduledServiceId) {
     return {
       lineItems:
@@ -1427,7 +1435,7 @@ async function buildScheduledServiceInvoiceLines(
   const scheduled = await conn("scheduled_services")
     .where({ id: scheduledServiceId })
     .first()
-    .catch(() => null);
+    .catch(degrade(null));
   if (!scheduled) {
     return {
       lineItems:
@@ -1449,7 +1457,7 @@ async function buildScheduledServiceInvoiceLines(
   const addons = await conn("scheduled_service_addons")
     .where({ scheduled_service_id: scheduledServiceId })
     .orderBy("created_at", "asc")
-    .catch(() => []);
+    .catch(degrade([]));
   const primaryBaseKnown = hasNumericValue(scheduled.primary_line_price);
   const appointmentGrossKnown =
     primaryBaseKnown &&
