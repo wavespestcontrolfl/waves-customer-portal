@@ -2,19 +2,21 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 
 const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
+const { buildDeterministicReportCopy } = require('../routes/admin-schedule')._test;
 
 // Permissive knex stub. lawn_assessments gets query-aware resolution: a
 // where({ service_id }) chain resolves to the `linked` row (the visit-linked
 // "today" lookup), a where('service_date', '<', …) chain resolves to the
 // `prior` row — mirroring how the real queries differ.
-function makeKnexStub({ customers = [], linked = null, prior = null } = {}) {
+function makeKnexStub({ customers = [], linked = null, prior = null, catalogProducts = [] } = {}) {
   const calls = [];
   const stub = (table) => {
     calls.push(table);
-    const chain = { _byServiceId: false, _priorHistory: false };
-    for (const method of ['whereIn', 'whereNull', 'whereNot', 'andWhere', 'orWhere', 'orWhereNot', 'orderBy', 'orderByRaw', 'limit', 'select', 'join', 'groupBy', 'count', 'whereRaw', 'whereBetween']) {
+    const chain = { _byServiceId: false, _priorHistory: false, _whereIns: [] };
+    for (const method of ['whereNull', 'whereNot', 'andWhere', 'orWhere', 'orWhereNot', 'orderBy', 'orderByRaw', 'limit', 'select', 'join', 'groupBy', 'count', 'whereRaw', 'whereBetween']) {
       chain[method] = () => chain;
     }
+    chain.whereIn = (column, values) => { chain._whereIns.push([column, values]); return chain; };
     // The prior-history query is the one that joins scheduled_services (its
     // bound runs on the linked visit's scheduled_date).
     chain.leftJoin = (joined) => {
@@ -23,6 +25,10 @@ function makeKnexStub({ customers = [], linked = null, prior = null } = {}) {
     };
     chain.modify = (fn) => { if (typeof fn === 'function') fn(chain); return chain; };
     chain.where = (...args) => {
+      if (typeof args[0] === 'function') {
+        args[0].call(chain);
+        return chain;
+      }
       if (args[0] && typeof args[0] === 'object' && 'service_id' in args[0]) chain._byServiceId = true;
       if (args[0] && typeof args[0] === 'object' && 'id' in args[0]) chain._byId = true;
       // The supersession probe (loadLawnAssessments: "any NEWER row on the
@@ -36,6 +42,11 @@ function makeKnexStub({ customers = [], linked = null, prior = null } = {}) {
     };
     const resolveRows = () => {
       if (table === 'customers') return customers;
+      if (table === 'products_catalog') {
+        return chain._whereIns.reduce((rows, [column, values]) => (
+          rows.filter((row) => values.includes(row[column]))
+        ), catalogProducts);
+      }
       // The prior query aliases the table ('lawn_assessments as la').
       if (!String(table).startsWith('lawn_assessments')) return [];
       if (chain._newerCheck) return [];
@@ -187,5 +198,76 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
     expect(knex.calls).not.toContain('lawn_assessments');
     expect(contextText).not.toContain('LAWN ASSESSMENT');
     expect(signals.hasLawnAssessment).toBe(false);
+  });
+});
+
+describe('buildReportCopyContext deterministic application evidence', () => {
+  test('binds approved repeated applications to the provider-failure fallback', async () => {
+    const catalogProducts = [
+      {
+        id: 'approved', name: 'Approved Residual', category: 'Insecticide', product_type: 'pesticide',
+        active_ingredient: 'Bifenthrin', epa_reg_number: '279-3206', approved_for_service_report: true,
+        rei_hours: 0, rainfast_minutes: 90, reentry_summary: 'Keep people and pets away until dry.',
+      },
+      {
+        id: 'unapproved', name: 'Unapproved Product', category: 'Insecticide', product_type: 'pesticide',
+        epa_reg_number: '100-200', approved_for_service_report: false,
+      },
+      {
+        id: 'noncanonical', name: 'Unsupported Category', category: 'Insecticide Plus', product_type: 'pesticide',
+        epa_reg_number: '100-201', approved_for_service_report: true,
+      },
+    ];
+    const result = await buildReportCopyContext({
+      customerId: 'c1',
+      serviceType: 'Quarterly Pest Control Service',
+      serviceDate: '2026-07-28',
+      products: [
+        {
+          productId: 'approved', applicationMethod: 'broadcast_spray',
+          applicationArea: 'rear gate 2468', areaValue: '4200', areaUnit: 'sqft',
+        },
+        {
+          productId: 'approved', applicationMethod: 'spot_treatment',
+          applicationArea: 'Side lawn', areaValue: '-5', areaUnit: 'linear_ft',
+        },
+        {
+          productId: 'unapproved', applicationMethod: 'garage PIN 9753',
+          applicationArea: 'Bedding areas', areaValue: '600', areaUnit: 'sqft',
+        },
+        {
+          productId: 'noncanonical', applicationMethod: 'foliar_spray',
+          applicationArea: 'Palms', areaValue: '12', areaUnit: 'linear_ft',
+        },
+        { productId: 'approved', applicationMethod: 'constructor', applicationArea: 'Front lawn' },
+      ],
+      knex: makeKnexStub({ customers: [CUSTOMER], catalogProducts }),
+    });
+
+    expect(result.contextText).toContain('REI until dry');
+    expect(result.contextText).toContain('rainfast 1.5 hr');
+    expect(result.signals.productSafetyCount).toBe(2);
+    expect(result.deterministicApplications).toEqual([
+      {
+        role: 'insect-control application', method: 'broadcast spray', area: 'rear gate [redacted]',
+        areaValue: '4200', areaUnit: 'sqft',
+      },
+      {
+        role: 'insect-control application', method: 'spot treatment', area: 'Side lawn',
+        areaValue: null, areaUnit: null,
+      },
+      {
+        role: 'insect-control application', method: null, area: 'Front lawn',
+        areaValue: null, areaUnit: null,
+      },
+    ]);
+
+    const report = buildDeterministicReportCopy({
+      serviceType: 'Quarterly Pest Control Service',
+      applicationRecords: result.deterministicApplications,
+    });
+    expect(report).toContain('using broadcast spray in rear gate [redacted] with 4200 sq ft recorded');
+    expect(report).toContain('using spot treatment in Side lawn');
+    expect(report).not.toMatch(/2468|9753|Unapproved Product|Unsupported Category|-5 linear ft/);
   });
 });
