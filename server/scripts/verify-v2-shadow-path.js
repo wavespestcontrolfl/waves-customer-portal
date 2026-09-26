@@ -71,7 +71,15 @@ async function main() {
   let valid = 0;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
+    // Codex #4933 r2 P1: derive contactPhone through the SAME resolver
+    // production uses for the ENTIRE pass (no extractedPhone) — a naive
+    // to_phone/from_phone-by-direction guess gets a lead-webhook-auto-bridge
+    // row wrong (to_phone is the staff cell) and, on malformed/missing
+    // metadata, silently omits caller_phone_missing where production would
+    // raise it. This ONE value feeds every routing/flag/extraction call
+    // below — a single source of truth, matching production's own single
+    // `contactPhone` const.
+    const contactPhone = CRP.resolveCallContactPhone(r);
     const t0 = Date.now();
     const res = await CRP._test.extractCallDataV2(r.transcription, contactPhone, {
       callId: r.id,
@@ -109,9 +117,10 @@ async function main() {
       // V1-conflict demotion that always follows canAutoRoute on the live
       // path — a fail-open allow whose V1 address conflicts with the on-file
       // one is a NEW address and goes back to review.
-      // buildFailOpenRoutingContext resolves identity itself
-      // (resolveCallContactPhone) rather than trusting this script's own
-      // naive to_phone/from_phone-by-direction guess — Codex #4933 r1 P2.
+      // buildFailOpenRoutingContext resolves its OWN identity internally via
+      // resolveCallContactPhone(r) too (Codex #4933 r1 P2) — same value as
+      // `contactPhone` above (r2 P1 fix), computed independently since
+      // neither side has a genuine extractedPhone signal to pass.
       const { knownCaller, options: failOpenOptions } = CRP.buildFailOpenRoutingContext({
         call: r,
         customer: pj(r.linked_customer),

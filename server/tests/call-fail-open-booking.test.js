@@ -9,6 +9,7 @@
 const {
   canAutoRoute, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS,
   hasAgentCommittedEvidence, quoteBindsConfirmedSlot, normalizeCommitmentText,
+  computeDeterministicTriageFlags,
 } = require('../services/call-triage-flags');
 const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
@@ -3045,6 +3046,56 @@ describe('outbound calls use the fail-open contract too, scoped to address recov
     const ctx = buildFailOpenRoutingContext({ call: bridgeCall, customer: knownCustomer, failOpenEnabled: true });
     expect(ctx.options.callerAni).toBeNull(); // outbound — withheld regardless of identity (P1-1)
     expect(ctx.options.knownCustomer).toMatchObject({ hasAddress: true, addressOnly: true });
+  });
+
+  // Codex #4933 r2 P1 (NEW round-2 finding): buildFailOpenRoutingContext
+  // resolves identity correctly (r1 P2), but the offline audit SCRIPTS were
+  // still computing their OWN naive contactPhone for the deterministic-flags
+  // pass and for canAutoRoute's `contactPhone` option — the exact naive
+  // to_phone/from_phone-by-direction guess this lane keeps fixing. For a
+  // lead-webhook-auto-bridge row with broken metadata, that guess resolves to
+  // the STAFF cell (always present, always dialable), so
+  // computeDeterministicTriageFlags never raises caller_phone_missing at all
+  // — the audit silently counts a call production would hold as
+  // auto-routable. Fixed in all three scripts (replay-call-extraction-variance.js,
+  // verify-v2-shadow-path.js, v2-promotion-readiness.js): their `contactPhone`
+  // is now `resolveCallContactPhone(call)` — ONE value feeding every
+  // routing/flag/extraction call in each script, exactly mirroring
+  // production's own single `contactPhone` const (call-recording-processor.js
+  // computes it once, with no extractedPhone, and never recomputes it).
+  test('a lead-webhook-auto-bridge row with invalid metadata: contactPhone resolves to null (not the staff cell), so computeDeterministicTriageFlags raises caller_phone_missing and canAutoRoute holds on it', () => {
+    const { resolveCallContactPhone } = CallRecordingProcessor._test;
+    const staffCell = '+19415559999'; // to_phone: the ADAM_CELL-shaped staff leg
+    const badMetadataCall = {
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      from_phone: '+19415551000',
+      to_phone: staffCell,
+      metadata: null, // broken/missing — no prospect number recoverable
+    };
+    // The bug this round fixes: a naive to_phone/from_phone-by-direction
+    // guess (what the 3 scripts used to compute) resolves to the staff cell
+    // — dialable, so it would never have raised the flag.
+    const naiveContactPhone = badMetadataCall.to_phone;
+    const resolvedContactPhone = resolveCallContactPhone(badMetadataCall);
+    expect(resolvedContactPhone).toBeNull();
+    expect(naiveContactPhone).toBe(staffCell);
+
+    const extractionShape = {
+      meta: {}, caller: {}, confidence: { overall: 0.9 },
+      scheduling: { status: 'confirmed', confirmed_start_at: '2026-07-11T09:00:00-04:00' },
+    };
+    const flagsWithNaivePhone = computeDeterministicTriageFlags(extractionShape, { contactPhone: naiveContactPhone });
+    const flagsWithResolvedPhone = computeDeterministicTriageFlags(extractionShape, { contactPhone: resolvedContactPhone });
+    expect(flagsWithNaivePhone).not.toContain('caller_phone_missing'); // the bug: silently never held
+    expect(flagsWithResolvedPhone).toContain('caller_phone_missing'); // the fix: correctly raised
+
+    // Feed the CORRECTLY-raised flag set into canAutoRoute exactly as the
+    // fixed scripts now do (buildFailOpenRoutingContext's options, same call).
+    const ctx = buildFailOpenRoutingContext({ call: badMetadataCall, customer: knownCustomer, failOpenEnabled: true });
+    const r = canAutoRoute(extraction(flagsWithResolvedPhone), ctx.options);
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_phone_missing');
   });
 
   // Deliberately UNCHANGED by this lane — pinned against the exact source so a

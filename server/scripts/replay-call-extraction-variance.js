@@ -919,10 +919,6 @@ function compareScheduledService(scheduled, currentFlat, includeValues) {
     }));
 }
 
-function contactPhoneForCall(call) {
-  return String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
-}
-
 // The stored AV verdict was computed for the HISTORICAL extraction's address.
 // It transfers to another extraction only when that extraction states the
 // same address (codex round-11 P1) — a re-extraction that changes the street
@@ -1233,7 +1229,17 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
 
 async function replayCall(call, context) {
   const { helpers, CRP, db, scheduledColumns, includeValues, retranscribe, fixtureCaseByCallId } = context;
-  const contactPhone = contactPhoneForCall(call);
+  // Codex #4933 r2 P1: derive contactPhone through the SAME resolver
+  // production uses for the ENTIRE pass (call-recording-processor.js's own
+  // `contactPhone` is `resolveCallContactPhone(call)`, no extractedPhone) —
+  // a naive to_phone/from_phone-by-direction guess gets a
+  // lead-webhook-auto-bridge row wrong (to_phone is the staff cell) and, on
+  // malformed/missing metadata, silently omits caller_phone_missing where
+  // production would raise it. This ONE value feeds every routing/flag/
+  // extraction call below (computeDeterministicTriageFlags, canAutoRoute,
+  // extractCallDataV2, the retranscription context) — a single source of
+  // truth, matching production's own single `contactPhone` const.
+  const contactPhone = CRP.resolveCallContactPhone(call);
   const legacyFlat = parseJson(call.ai_extraction, {}) || {};
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
@@ -1277,10 +1283,10 @@ async function replayCall(call, context) {
       .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
       .catch(() => null)
     : null;
-  // buildFailOpenRoutingContext resolves identity itself (resolveCallContactPhone)
-  // rather than trusting this script's own naive contactPhoneForCall — Codex
-  // #4933 r1 P2: that naive to_phone/from_phone-by-direction guess gets a
-  // lead-webhook-auto-bridge outbound row wrong (to_phone is the staff cell).
+  // buildFailOpenRoutingContext resolves its OWN identity internally via
+  // resolveCallContactPhone(call) too (Codex #4933 r1 P2) — same value as
+  // `contactPhone` above (r2 P1 fix), computed independently since neither
+  // side has a genuine extractedPhone signal to pass.
   const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
     call,
     customer: linkedCustomer,

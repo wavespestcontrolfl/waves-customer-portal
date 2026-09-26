@@ -33,7 +33,7 @@ const {
 // Production's own fail-open context builder + V1-conflict demotion, so this
 // audit cannot drift from the live contract (local pre-push audit P1).
 const {
-  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict,
+  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, resolveCallContactPhone,
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
@@ -295,15 +295,23 @@ async function main() {
     // so omitting it makes the audit report zero production-equivalent
     // auto-routes and the readiness comparison meaningless (codex round-10 P1
     // on PR #3119).
-    const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
+    // Codex #4933 r2 P1: derive contactPhone through the SAME resolver
+    // production uses for the ENTIRE pass (no extractedPhone) — a naive
+    // to_phone/from_phone-by-direction guess gets a lead-webhook-auto-bridge
+    // row wrong (to_phone is the staff cell) and, on malformed/missing
+    // metadata, silently omits caller_phone_missing where production would
+    // raise it. This ONE value feeds every routing/flag call below — a
+    // single source of truth, matching production's own single
+    // `contactPhone` const.
+    const contactPhone = resolveCallContactPhone(r);
     const storedAv = parseJson(r.ai_address_validation);
     const effectiveAv = recoveredCallIds.has(r.id)
       ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
       : storedAv;
-    // buildFailOpenRoutingContext resolves identity itself
-    // (resolveCallContactPhone) rather than trusting this script's own naive
-    // to_phone/from_phone-by-direction contactPhone guess above — Codex
-    // #4933 r1 P2.
+    // buildFailOpenRoutingContext resolves its OWN identity internally via
+    // resolveCallContactPhone(r) too (Codex #4933 r1 P2) — same value as
+    // `contactPhone` above (r2 P1 fix), computed independently since
+    // neither side has a genuine extractedPhone signal to pass.
     const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
       call: r,
       customer: r.customer_id ? customerById.get(r.customer_id) || null : null,
