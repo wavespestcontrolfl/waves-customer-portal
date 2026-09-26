@@ -155,7 +155,12 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
 // the existing atomic workflow (choose/add → server repoints Auto Pay in
 // one transaction → old card untouched until then). onOpenRequestHandled
 // lets the parent clear the request so a later remount doesn't replay it.
-export default function AutopayCard({ onStateChange, openRequest = null, onOpenRequestHandled, embedded = false }) {
+// annualPrepay: /me's customer.annualPrepay ({ termEnd, renewalDeclined,
+// awaitsInstallation, … }) — billing_mode stays 'annual_prepay' after the
+// customer declines renewal, so the renewal copy reads the decision here.
+export default function AutopayCard({
+  onStateChange, openRequest = null, onOpenRequestHandled, embedded = false, annualPrepay = null,
+}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -333,6 +338,16 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
     if (Number.isNaN(d.getTime())) return 'Not scheduled';
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
+
+  // Codex r2 P1: a declined annual plan won't renew — never tell the
+  // customer their saved method will be charged at renewal. A term still
+  // awaiting its station installation has no real end date yet.
+  const annualPrepayRenewalDeclined = annualPrepayBilling && annualPrepay?.renewalDeclined === true;
+  const annualPrepayNonRenewalCopy = annualPrepay?.awaitsInstallation === true
+    ? 'Your plan won’t renew; coverage runs 12 months from your station installation.'
+    : annualPrepay?.termEnd
+      ? `Your plan won’t renew; coverage continues through ${formatDate(annualPrepay.termEnd)}.`
+      : 'Your plan won’t renew; coverage continues through the end of your current term.';
 
   const runUpdate = async (patch) => {
     setSaving(true); setErr('');
@@ -524,7 +539,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
               ? (perApplicationBilling
                 ? ['Auto Pay is on', 'Your saved payment method is charged after each application.']
                 : annualPrepayBilling
-                  ? ['Auto Pay is on', 'Your plan is prepaid; your saved method is used at renewal.']
+                  ? ['Auto Pay is on', annualPrepayRenewalDeclined ? annualPrepayNonRenewalCopy : 'Your plan is prepaid; your saved method is used at renewal.']
                   : perVisitBilling
                     ? ['Payment method saved', 'We send an invoice after each completed service.']
                     : monthlyUnpriced

@@ -21,6 +21,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockIsPaidDecidedLapseTerm = jest.fn();
 jest.mock('../services/annual-prepay-renewals', () => ({
   isPaidDecidedLapseTerm: (...args) => mockIsPaidDecidedLapseTerm(...args),
+  // The REAL provisional-term rule (pure) — /me must agree with billing.
+  coverageAwaitsInstallation: (...args) => jest.requireActual('../services/annual-prepay-renewals').coverageAwaitsInstallation(...args),
 }));
 
 const db = require('../models/db');
@@ -142,6 +144,37 @@ describe('annualPrepayForCustomer', () => {
 
     expect(result).toEqual(expect.objectContaining({ id: 'term-older', status: 'active' }));
     expect(mockIsPaidDecidedLapseTerm).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex r2 P1: billing_mode stays 'annual_prepay' after a portal decline,
+  // so the Billing tab reads renewalDeclined / awaitsInstallation from here
+  // to stop promising a renewal charge (and to avoid quoting a provisional
+  // term_end for a plan still awaiting its station installation).
+  test.each([
+    ['an undecided, installation-anchored termite term', {
+      status: 'active', renewal_decision: null, annual_plan_version: 'v3', installation_anchored_at: '2026-10-14T12:00:00Z',
+    }, { renewalDeclined: false, awaitsInstallation: false }],
+    ['a paid decline of an anchored termite term', {
+      status: 'cancelled', renewal_decision: 'cancel', annual_plan_version: 'v3', installation_anchored_at: '2026-10-14T12:00:00Z',
+    }, { renewalDeclined: true, awaitsInstallation: false }],
+    ['a paid decline BEFORE installation (provisional term_end)', {
+      status: 'cancelled', renewal_decision: 'cancel', annual_plan_version: 'v3', installation_anchored_at: null, renewed_from_term_id: null,
+    }, { renewalDeclined: true, awaitsInstallation: true }],
+    ['a non-termite annual prepay term (never anchored, never provisional)', {
+      status: 'active', renewal_decision: null, annual_plan_version: null, installation_anchored_at: null,
+    }, { renewalDeclined: false, awaitsInstallation: false }],
+    ['a termite RENEWAL term (dates are real from the start)', {
+      status: 'active', renewal_decision: null, annual_plan_version: 'v3', installation_anchored_at: null, renewed_from_term_id: 'term-0',
+    }, { renewalDeclined: false, awaitsInstallation: false }],
+  ])('%s reports its renewal decision and anchor state', async (_label, shape, expected) => {
+    mockIsPaidDecidedLapseTerm.mockResolvedValue(true);
+    db.mockReturnValueOnce(chainSelecting([{
+      id: 'term-1', term_start: '2026-09-25', term_end: '2027-09-25', prepay_invoice_id: 'inv-1', ...shape,
+    }]));
+
+    const result = await annualPrepayForCustomer('cust-1');
+
+    expect(result).toEqual(expect.objectContaining({ id: 'term-1', ...expected }));
   });
 
   test('no matching term (e.g. only a void/refund cancelled row on file) returns null', async () => {

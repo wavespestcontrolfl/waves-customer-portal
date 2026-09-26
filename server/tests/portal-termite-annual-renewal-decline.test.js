@@ -50,6 +50,9 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   // The REAL shared eligibility rule — GET's canDecline must match the write.
   termiteDeclineBlockedReason: (...args) => jest.requireActual('../services/annual-prepay-renewals').termiteDeclineBlockedReason(...args),
   isPaidDecidedLapseTerm: (...args) => mockIsPaidDecidedLapseTerm(...args),
+  // The REAL provisional-term rule — the card must agree with billing about
+  // whether a term_end is still provisional (awaiting installation).
+  coverageAwaitsInstallation: (...args) => jest.requireActual('../services/annual-prepay-renewals').coverageAwaitsInstallation(...args),
 }));
 
 const state = { rows: [], fail: false, whereArgs: [] };
@@ -159,7 +162,9 @@ describe('GET /api/property/termite-annual-plan', () => {
     const { body } = await invoke(getHandler());
     expect(body).toEqual({
       available: true,
-      terms: [{ id: 'term-1', propertyLabel: null, termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }],
+      terms: [{
+        id: 'term-1', propertyLabel: null, termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, declined: false, canDecline: true,
+      }],
     });
   });
 
@@ -177,12 +182,17 @@ describe('GET /api/property/termite-annual-plan', () => {
         annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
       },
     ];
+    mockTermPropertyLabels.mockResolvedValue(new Map([['term-a', '12 Palm Ave'], ['term-b', '400 Gulf Dr']]));
     const { body } = await invoke(getHandler());
     expect(body).toEqual({
       available: true,
       terms: [
-        { id: 'term-a', propertyLabel: null, termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true },
-        { id: 'term-b', propertyLabel: null, termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: false },
+        {
+          id: 'term-a', propertyLabel: '12 Palm Ave', termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, declined: false, canDecline: true,
+        },
+        {
+          id: 'term-b', propertyLabel: '400 Gulf Dr', termEnd: '2027-08-01', awaitsInstallation: true, prepayAmount: 600, declined: false, canDecline: false,
+        },
       ],
     });
   });
@@ -234,7 +244,97 @@ describe('GET /api/property/termite-annual-plan', () => {
     mockTermPropertyLabels.mockRejectedValue(new Error('labels down'));
     const { statusCode, body } = await invoke(getHandler());
     expect(statusCode).toBe(200);
-    expect(body.terms).toEqual([{ id: 'term-1', propertyLabel: null, termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }]);
+    expect(body.terms).toEqual([{
+      id: 'term-1', propertyLabel: null, termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, declined: false, canDecline: true,
+    }]);
+  });
+
+  // Codex r2 P1: with SEVERAL terms a label failure must never yield
+  // declinable look-alike cards — 503, which the portal shows as its error
+  // + Retry state.
+  test('a label lookup failure with several terms fails closed (503), never look-alike declinable cards', async () => {
+    state.rows = [
+      {
+        id: 'term-a', term_end: '2027-05-20', prepay_amount: '450.00', status: 'active', renewal_decision: null,
+        annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+      },
+      {
+        id: 'term-b', term_end: '2027-08-01', prepay_amount: '600.00', status: 'active', renewal_decision: null,
+        annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+      },
+    ];
+    mockTermPropertyLabels.mockRejectedValue(new Error('labels down'));
+    const { statusCode, body } = await invoke(getHandler());
+    expect(statusCode).toBe(503);
+    expect(body).toEqual(expect.objectContaining({ available: false, reason: 'labels_unavailable' }));
+    expect(body.terms).toBeUndefined();
+  });
+
+  const anchoredActive = (id, termEnd, extra = {}) => ({
+    id, term_end: termEnd, prepay_amount: '450.00', status: 'active', renewal_decision: null,
+    annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z', ...extra,
+  });
+
+  test('two terms resolving to the SAME label are told apart by their (anchored) renewal date', async () => {
+    state.rows = [anchoredActive('term-a', '2027-05-20'), anchoredActive('term-b', '2027-08-01')];
+    mockTermPropertyLabels.mockResolvedValue(new Map([['term-a', '1 Home St, Bradenton, FL 34202'], ['term-b', '1 Home St, Bradenton, FL 34202']]));
+    const { body } = await invoke(getHandler());
+    expect(body.terms.map((term) => [term.propertyLabel, term.canDecline])).toEqual([
+      ['1 Home St, Bradenton, FL 34202 (renews May 20, 2027)', true],
+      ['1 Home St, Bradenton, FL 34202 (renews August 1, 2027)', true],
+    ]);
+  });
+
+  test('a shared label on a term still awaiting installation is marked as such — never its provisional date', async () => {
+    state.rows = [anchoredActive('term-a', '2027-05-20'), anchoredActive('term-b', '2027-08-01', { installation_anchored_at: null })];
+    mockTermPropertyLabels.mockResolvedValue(new Map([['term-a', '1 Home St'], ['term-b', '1 Home St']]));
+    const { body } = await invoke(getHandler());
+    expect(body.terms.map((term) => [term.propertyLabel, term.canDecline])).toEqual([
+      ['1 Home St (renews May 20, 2027)', true],
+      ['1 Home St (awaiting installation)', true],
+    ]);
+    expect(JSON.stringify(body.terms[1].propertyLabel)).not.toContain('2027');
+  });
+
+  test.each([
+    ['share a label and both still await installation (no real date to tell them apart)', [
+      anchoredActive('term-a', '2027-05-20', { installation_anchored_at: null }),
+      anchoredActive('term-b', '2027-08-01', { installation_anchored_at: null }),
+    ], new Map([['term-a', '1 Home St'], ['term-b', '1 Home St']]), ['term-a', 'term-b']],
+    ['share a label AND a renewal date', [
+      anchoredActive('term-a', '2027-05-20'),
+      anchoredActive('term-b', '2027-05-20'),
+    ], new Map([['term-a', '1 Home St'], ['term-b', '1 Home St']]), ['term-a', 'term-b']],
+    ['one has no label at all', [
+      anchoredActive('term-a', '2027-05-20'),
+      anchoredActive('term-b', '2027-08-01'),
+    ], new Map([['term-a', '12 Palm Ave']]), ['term-b']],
+  ])('several terms that %s: the indistinguishable ones fail closed (no decline control, propertyUnclear)', async (_label, rows, labels, unclearIds) => {
+    state.rows = rows;
+    mockTermPropertyLabels.mockResolvedValue(labels);
+    const { body } = await invoke(getHandler());
+    for (const term of body.terms) {
+      const unclear = unclearIds.includes(term.id);
+      expect(term.canDecline).toBe(!unclear);
+      expect(Boolean(term.propertyUnclear)).toBe(unclear);
+      if (unclear) expect(term.propertyLabel).toBeNull();
+    }
+  });
+
+  // Codex r2 P1: an un-anchored original term's term_end is provisional —
+  // the GET says so, so the card describes coverage relative to the
+  // installation instead of quoting that date.
+  test('an un-anchored original term reports awaitsInstallation:true; anchored and renewal terms do not', async () => {
+    state.rows = [
+      anchoredActive('term-anchored', '2027-05-20'),
+      anchoredActive('term-provisional', '2027-06-01', { installation_anchored_at: null }),
+      anchoredActive('term-renewal', '2027-07-01', { installation_anchored_at: null, renewed_from_term_id: 'term-0' }),
+    ];
+    mockTermPropertyLabels.mockResolvedValue(new Map([['term-anchored', 'A St'], ['term-provisional', 'B St'], ['term-renewal', 'C St']]));
+    const { body } = await invoke(getHandler());
+    expect(body.terms.map((term) => [term.id, term.awaitsInstallation])).toEqual([
+      ['term-anchored', false], ['term-provisional', true], ['term-renewal', false],
+    ]);
   });
 
   test('an already-declined term reports declined:true and canDecline:false', async () => {
@@ -271,7 +371,9 @@ describe('GET /api/property/termite-annual-plan', () => {
     mockIsPaidDecidedLapseTerm.mockResolvedValue(false);
     const { body } = await invoke(getHandler());
     expect(body.available).toBe(true);
-    expect(body.terms).toEqual([{ id: 'term-b', propertyLabel: null, termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: true }]);
+    expect(body.terms).toEqual([{
+      id: 'term-b', propertyLabel: null, termEnd: '2027-08-01', awaitsInstallation: false, prepayAmount: 600, declined: false, canDecline: true,
+    }]);
   });
 
   test('an unpaid (payment_pending) plan never offers the decline control', async () => {
@@ -316,41 +418,44 @@ describe('GET /api/property/termite-annual-plan', () => {
 });
 
 describe('POST /api/property/termite-annual-plan/decline', () => {
+  const TERM_ID = '6f1c2b1e-2a4d-4c8e-9b7a-1d2e3f4a5b6c';
+  const OTHER_TERM_ID = '0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d';
+  const post = () => invoke(postHandler(), { body: { termId: TERM_ID } });
+
   // codex round-1 P1: the route now forwards a body-supplied termId (a
   // multi-property account picks WHICH overlapping term to decline) — but
   // the customer identity NEVER comes from the body, and the termId is only
   // ever a selector the SERVICE re-matches against customer_id =
   // req.customerId AND annual_plan_version NOT NULL, so it can never target
   // another customer's term.
-  test('forwards a body-supplied termId, but the customerId always comes from req.customerId, never the body', async () => {
+  test('forwards the body termId, but the customerId always comes from req.customerId, never the body', async () => {
     mockDeclineTermiteAnnualRenewal.mockResolvedValue({
-      ok: true, termId: 'term-someone-elses', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
+      ok: true, termId: OTHER_TERM_ID, termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
     });
-    await invoke(postHandler(), { customerId: 'cust-1', body: { termId: 'term-someone-elses', customerId: 'cust-2' } });
-    expect(mockDeclineTermiteAnnualRenewal).toHaveBeenCalledWith({ customerId: 'cust-1', termId: 'term-someone-elses' });
+    await invoke(postHandler(), { customerId: 'cust-1', body: { termId: OTHER_TERM_ID, customerId: 'cust-2' } });
+    expect(mockDeclineTermiteAnnualRenewal).toHaveBeenCalledWith({ customerId: 'cust-1', termId: OTHER_TERM_ID });
   });
 
-  test('no termId in the body keeps the legacy single-current-term behavior', async () => {
-    mockDeclineTermiteAnnualRenewal.mockResolvedValue({
-      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
-    });
-    await invoke(postHandler());
-    expect(mockDeclineTermiteAnnualRenewal).toHaveBeenCalledWith({ customerId: 'cust-1', termId: null });
-  });
-
-  test('a non-string body termId (e.g. an object/array injection attempt) is ignored, not forwarded', async () => {
-    mockDeclineTermiteAnnualRenewal.mockResolvedValue({
-      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
-    });
-    await invoke(postHandler(), { body: { termId: { $ne: null } } });
-    expect(mockDeclineTermiteAnnualRenewal).toHaveBeenCalledWith({ customerId: 'cust-1', termId: null });
+  // Codex r2 P2: termId is REQUIRED and must be a UUID — the route never
+  // falls back to the service's "earliest current term" selector.
+  test.each([
+    ['missing', {}],
+    ['empty', { termId: '' }],
+    ['not a UUID', { termId: 'term-1' }],
+    ['a non-string (object injection attempt)', { termId: { $ne: null } }],
+    ['an array', { termId: [TERM_ID] }],
+  ])('a %s termId is a 400 and never reaches the service', async (_label, body) => {
+    const { statusCode, body: resBody } = await invoke(postHandler(), { body });
+    expect(statusCode).toBe(400);
+    expect(resBody).toEqual(expect.objectContaining({ available: false, reason: 'invalid_term' }));
+    expect(mockDeclineTermiteAnnualRenewal).not.toHaveBeenCalled();
   });
 
   test('success: 200 with the service result', async () => {
     mockDeclineTermiteAnnualRenewal.mockResolvedValue({
       ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
     });
-    const { statusCode, body } = await invoke(postHandler());
+    const { statusCode, body } = await post();
     expect(statusCode).toBe(200);
     expect(body).toEqual({
       available: true, ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
@@ -361,27 +466,27 @@ describe('POST /api/property/termite-annual-plan/decline', () => {
     mockDeclineTermiteAnnualRenewal.mockResolvedValue({
       ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: true,
     });
-    const { statusCode, body } = await invoke(postHandler());
+    const { statusCode, body } = await post();
     expect(statusCode).toBe(200);
     expect(body.alreadyDeclined).toBe(true);
   });
 
   test('gate disabled: 404', async () => {
     mockDeclineTermiteAnnualRenewal.mockResolvedValue({ ok: false, reason: 'disabled' });
-    const { statusCode, body } = await invoke(postHandler());
+    const { statusCode, body } = await post();
     expect(statusCode).toBe(404);
     expect(body).toEqual(expect.objectContaining({ available: false, ok: false, reason: 'disabled' }));
   });
 
   test('no eligible term: 404', async () => {
     mockDeclineTermiteAnnualRenewal.mockResolvedValue({ ok: false, reason: 'no_term' });
-    const { statusCode } = await invoke(postHandler());
+    const { statusCode } = await post();
     expect(statusCode).toBe(404);
   });
 
   test('term already ended: 409', async () => {
     mockDeclineTermiteAnnualRenewal.mockResolvedValue({ ok: false, reason: 'term_ended', termId: 'term-1', termEnd: '2026-01-01' });
-    const { statusCode, body } = await invoke(postHandler());
+    const { statusCode, body } = await post();
     expect(statusCode).toBe(409);
     expect(body).toEqual(expect.objectContaining({
       available: false, ok: false, reason: 'term_ended', termId: 'term-1', termEnd: '2026-01-01',
@@ -390,12 +495,12 @@ describe('POST /api/property/termite-annual-plan/decline', () => {
 
   test('conflicting decision already on file: 409', async () => {
     mockDeclineTermiteAnnualRenewal.mockResolvedValue({ ok: false, reason: 'already_decided', decision: 'renew', termId: 'term-1' });
-    const { statusCode } = await invoke(postHandler());
+    const { statusCode } = await post();
     expect(statusCode).toBe(409);
   });
 
   test('a thrown service error is passed to next(), not swallowed as a 200', async () => {
     mockDeclineTermiteAnnualRenewal.mockRejectedValue(new Error('db exploded'));
-    await expect(invoke(postHandler())).rejects.toThrow('db exploded');
+    await expect(post()).rejects.toThrow('db exploded');
   });
 });

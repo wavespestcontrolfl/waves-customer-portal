@@ -140,6 +140,83 @@ describe('termite annual plan renewal card', () => {
     expect(screen.getByText('Don’t renew your plan?')).toBeInTheDocument();
   });
 
+  // Codex r2 P1: an original plan not yet anchored to its station
+  // installation has a provisional term end — never quoted, before or after
+  // the decline.
+  it('a plan still awaiting installation describes coverage relative to installation, never its provisional date', async () => {
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [{
+        id: 'term-1', termEnd: '2027-05-20', awaitsInstallation: true, prepayAmount: 450, declined: false, canDecline: true,
+      }],
+    });
+    api.declineTermiteAnnualPlanRenewal.mockResolvedValue({
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
+    });
+    render(<MyPlanTab customer={customer} />);
+    expect(await screen.findByText('12 months after installation')).toBeInTheDocument();
+    expect(screen.queryByText('May 20, 2027')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Don’t renew my plan' }));
+    expect(screen.getByText('Your plan will not renew. Coverage runs 12 months from your station installation.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(api.declineTermiteAnnualPlanRenewal).toHaveBeenCalledWith('term-1'));
+    expect(await screen.findByText('Your plan will not renew. Coverage runs 12 months from your station installation.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/2027/)).not.toBeInTheDocument();
+  });
+
+  // Codex r2 P1: several plans the server could not tell apart are never
+  // declinable look-alikes — the card says why instead.
+  it('a plan whose property could not be confirmed offers no decline control and says why', async () => {
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [
+        {
+          id: 'term-a', propertyLabel: '12 Palm Ave, Bradenton, FL 34202', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true,
+        },
+        {
+          id: 'term-b', propertyLabel: null, termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: false, propertyUnclear: true,
+        },
+      ],
+    });
+    render(<MyPlanTab customer={customer} />);
+    expect(await screen.findByText(/couldn’t confirm which property this plan covers/)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Don’t renew my plan' })).toHaveLength(1);
+  });
+
+  // Codex r2 P1: the Billing tab's renewal copy reads /me's
+  // annualPrepay.renewalDeclined — a successful decline refreshes it.
+  it('a successful decline refreshes the customer so Billing stops promising a renewal charge', async () => {
+    const refreshCustomer = vi.fn(async () => {});
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [{ id: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }],
+    });
+    api.declineTermiteAnnualPlanRenewal.mockResolvedValue({
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false,
+    });
+    render(<MyPlanTab customer={customer} refreshCustomer={refreshCustomer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Don’t renew my plan' }));
+    expect(refreshCustomer).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
+  });
+
+  it('a failed decline does not refresh the customer', async () => {
+    const refreshCustomer = vi.fn(async () => {});
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [{ id: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }],
+    });
+    api.declineTermiteAnnualPlanRenewal.mockRejectedValue(new Error('nope'));
+    render(<MyPlanTab customer={customer} refreshCustomer={refreshCustomer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Don’t renew my plan' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('nope');
+    expect(refreshCustomer).not.toHaveBeenCalled();
+  });
+
   it('hides the decline control once a conflicting decision (renew) is already on file', async () => {
     api.getTermiteAnnualPlan.mockResolvedValue({
       available: true,

@@ -199,7 +199,7 @@ function dateOnlyForApi(value) {
   return String(value).slice(0, 10);
 }
 
-const { isPaidDecidedLapseTerm } = require('../services/annual-prepay-renewals');
+const { isPaidDecidedLapseTerm, coverageAwaitsInstallation } = require('../services/annual-prepay-renewals');
 
 async function annualPrepayForCustomer(customerId) {
   if (!customerId) return null;
@@ -252,6 +252,9 @@ async function annualPrepayForCustomer(customerId) {
       'apt.prepay_amount',
       'apt.term_start',
       'apt.term_end',
+      'apt.annual_plan_version',
+      'apt.renewed_from_term_id',
+      'apt.installation_anchored_at',
       'apt.prepay_invoice_id',
       'inv.status as prepay_invoice_status',
       'inv.total as prepay_invoice_total',
@@ -282,6 +285,13 @@ async function annualPrepayForCustomer(customerId) {
     prepayInvoiceId: term.prepay_invoice_id,
     prepayInvoiceStatus: term.prepay_invoice_status,
     prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
+    // Codex r2 P1: billing_mode stays 'annual_prepay' after a portal
+    // decline, so the Billing tab's "your saved method is used at renewal"
+    // copy reads these instead: a decided-lapse term won't renew, and an
+    // un-anchored original termite term's termEnd is provisional (coverage
+    // runs 12 months from the station installation).
+    renewalDeclined: term.status === 'cancelled' && term.renewal_decision === 'cancel',
+    awaitsInstallation: coverageAwaitsInstallation(term),
   };
 }
 

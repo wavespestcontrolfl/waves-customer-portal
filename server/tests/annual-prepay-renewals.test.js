@@ -2330,6 +2330,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     expect(termUpdateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'cancelled', renewal_decision: 'cancel',
     }));
+    // Codex r2 P2: a portal decline never touches renewal_notes — staff's
+    // own notes on the term survive; the activity_log row is the record.
+    expect(termUpdateQuery.update.mock.calls[0][0]).not.toHaveProperty('renewal_notes');
     expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
       customer_id: 'cust-1',
       action: 'termite_annual_renewal_declined',

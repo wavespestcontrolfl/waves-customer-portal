@@ -6361,6 +6361,17 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // Annual prepay is term-covered — no monthly charge runs; the saved method
   // is used at renewal.
   const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
+  // Codex r2 P1: billing_mode stays 'annual_prepay' after the customer
+  // declines renewal — /me's annualPrepay.renewalDeclined says the plan
+  // won't renew, so the "used at renewal" copy must not show. A term still
+  // awaiting its station installation has no real end date to quote.
+  const billingAnnualPrepay = customer?.annualPrepay || null;
+  const annualPrepayRenewalDeclined = annualPrepayBilling && billingAnnualPrepay?.renewalDeclined === true;
+  const annualPrepayNonRenewalCopy = billingAnnualPrepay?.awaitsInstallation === true
+    ? 'Your plan won’t renew; coverage runs 12 months from your station installation.'
+    : billingAnnualPrepay?.termEnd
+      ? `Your plan won’t renew; coverage continues through ${fmtDate(billingAnnualPrepay.termEnd, { month: 'long', day: 'numeric', year: 'numeric' })}.`
+      : 'Your plan won’t renew; coverage continues through the end of your current term.';
   // Explicit per-visit lanes invoice each completed service — the monthly
   // cron skips them, so monthly projection copy is wrong here too (Codex
   // r6). NULL modes the SERVER resolved non-monthly (non_monthly_billing)
@@ -6490,7 +6501,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         : perVisitBilling
           ? 'We send an invoice after each completed service visit — your saved payment method makes paying it quick.'
           : annualPrepayBilling
-          ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
+          ? (annualPrepayRenewalDeclined
+            ? annualPrepayNonRenewalCopy
+            : 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.')
           : autopayMonthlyUnpriced
             ? 'Your monthly rate is being finalized, so no charge is scheduled yet.'
             : daysUntilDue === 0
@@ -7104,6 +7117,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         <AutopayCard
           key={autopayRefreshKey}
           embedded
+          annualPrepay={customer?.annualPrepay || null}
           onStateChange={setAutopay}
           openRequest={autopayOpenRequest}
           onOpenRequestHandled={() => setAutopayOpenRequest(null)}
@@ -10964,9 +10978,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // P1: never silently hidden, distinct from "nothing to show"). A
   // multi-property account can carry more than one overlapping term, so
   // this is an array — one card per term, each with its own decline
-  // control: [{ id, propertyLabel, termEnd, prepayAmount, declined,
-  // canDecline }] — propertyLabel (server-resolved, ownership-scoped) tells
-  // one property's card from another's.
+  // control: [{ id, propertyLabel, termEnd, awaitsInstallation,
+  // prepayAmount, declined, canDecline, propertyUnclear? }] — propertyLabel
+  // (server-resolved, ownership-scoped, distinct across cards) tells one
+  // property's card from another's.
   const [termiteAnnualPlans, setTermiteAnnualPlans] = useState([]);
   const [termiteAnnualPlanStatus, setTermiteAnnualPlanStatus] = useState('loading');
   const loadTermiteAnnualPlan = useCallback(() => {
@@ -11844,7 +11859,13 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
               primaryButton={primaryButton}
               secondaryButton={secondaryButton}
               muted={muted}
-              onDeclined={(update) => setTermiteAnnualPlans((prev) => prev.map((t) => (t.id === term.id ? { ...t, ...update } : t)))}
+              onDeclined={(update) => {
+                setTermiteAnnualPlans((prev) => prev.map((t) => (t.id === term.id ? { ...t, ...update } : t)));
+                // Codex r2 P1: /me's annualPrepay.renewalDeclined drives the
+                // Billing tab's renewal copy — refresh it so Billing stops
+                // promising a renewal charge right away. Best-effort.
+                if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
+              }}
             />
           ))}
 
@@ -11924,6 +11945,13 @@ function TermiteAnnualRenewalCard({
   // Which property this plan covers (pre-push audit P1: a multi-property
   // account's cards were otherwise identical). Absent label = single card.
   const propertyLabel = typeof term.propertyLabel === 'string' && term.propertyLabel.trim() ? term.propertyLabel.trim() : null;
+  // Codex r2 P1: an original plan not yet anchored to its station
+  // installation has a PROVISIONAL term end — never quote it; describe
+  // coverage relative to the installation instead.
+  const awaitsInstallation = term.awaitsInstallation === true;
+  const nonRenewalCopy = awaitsInstallation
+    ? 'Your plan will not renew. Coverage runs 12 months from your station installation.'
+    : `Your plan will not renew. Coverage continues through ${termEndLabel}.`;
 
   const handleDecline = async () => {
     setSubmitting(true);
@@ -11952,21 +11980,28 @@ function TermiteAnnualRenewalCard({
       )}
       {term.declined ? (
         <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
-          Your plan will not renew. Coverage continues through {termEndLabel}.
+          {nonRenewalCopy}
         </div>
       ) : (
         <>
-          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{termEndLabel}</div>
+          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
+            {awaitsInstallation ? '12 months after installation' : termEndLabel}
+          </div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Renewal date{feeLabel ? ` · ${feeLabel} renewal fee` : ''}
           </div>
+          {term.propertyUnclear && (
+            <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+              We couldn’t confirm which property this plan covers, so it can’t be changed online right now. Please contact us about its renewal.
+            </div>
+          )}
           {term.canDecline && (confirming ? (
             <div style={{ marginTop: 14 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: B.glassNavy, lineHeight: 1.45 }}>
                 {propertyLabel ? `Don’t renew the plan at ${propertyLabel}?` : 'Don’t renew your plan?'}
               </div>
               <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-                Your plan will not renew. Coverage continues through {termEndLabel}.
+                {nonRenewalCopy}
               </div>
               {error && (
                 <div role="alert" style={{ marginTop: 8, fontSize: 14, color: B.red }}>{error}</div>

@@ -5848,7 +5848,6 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 // Idempotent: a repeat call against an already-declined term (status
 // 'cancelled', renewal_decision 'cancel') returns the SAME success shape
 // (alreadyDeclined: true) instead of erroring.
-const CUSTOMER_DECLINE_RENEWAL_NOTE = 'Customer declined renewal online via the customer portal.';
 const CUSTOMER_DECLINE_ACTIVITY_ACTION = 'termite_annual_renewal_declined';
 
 function declineResultFromRow(term, { alreadyDeclined }) {
@@ -5941,8 +5940,11 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
     if (blocked === 'term_ended') return { ok: false, reason: blocked, termId: term.id, termEnd: dateOnly(term.term_end) };
     if (blocked) return { ok: false, reason: blocked, termId: term.id };
 
+    // No `notes`: recordDecision would OVERWRITE renewal_notes, which may
+    // hold staff's own renewal notes (Codex r2 P2). The activity_log row
+    // below is the record that the customer declined online.
     const decided = await recordDecision({
-      termId: term.id, action: 'cancel', notes: CUSTOMER_DECLINE_RENEWAL_NOTE, conn: trx,
+      termId: term.id, action: 'cancel', conn: trx,
     });
     if (!decided) {
       // recordDecision's own guard (status IN ACTIVE_STATUSES AND
@@ -5985,6 +5987,10 @@ module.exports = {
   // The portal renewal card's per-term property label (property.js GET
   // /termite-annual-plan) — ownership-scoped, see its definition.
   termPropertyLabelsForCustomer,
+  // "Is this term_end still provisional?" (an un-anchored original termite
+  // annual term) — the portal card and /me read it so a provisional date
+  // is never quoted to the customer.
+  coverageAwaitsInstallation,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   // Public: the one-step-prepay booking preflight (admin-schedule) matches the

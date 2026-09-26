@@ -660,9 +660,50 @@ router.get('/termite-bond', async (req, res, next) => {
 // uses) before it is ever shown as covered (codex pre-push P1).
 const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
+const { validate: isUuid } = require('uuid');
 const {
   declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm, termPropertyLabelsForCustomer,
+  coverageAwaitsInstallation,
 } = require('../services/annual-prepay-renewals');
+
+// Codex r2 P1: on a multi-term account every card must name a DISTINCT
+// property, or the customer can't tell which plan a decline applies to.
+// Two terms resolving to the same label are told apart by their renewal
+// date when that date is real (installation-anchored), or marked
+// "awaiting installation" when it is still provisional — a provisional
+// date is never shown (see awaitsInstallation below). A term still
+// unlabeled or still colliding after that maps to null, and the caller
+// withholds its decline control (fail closed). A single term keeps
+// whatever label it has — there is nothing to confuse it with.
+function renewalDateText(ymd) {
+  return new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
+    timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric',
+  });
+}
+
+function distinctTermLabels(rows, labels) {
+  const out = new Map(rows.map((term) => [term.id, labels.get(term.id) || null]));
+  if (rows.length < 2) return out;
+  const tally = () => {
+    const counts = new Map();
+    for (const label of out.values()) if (label) counts.set(label, (counts.get(label) || 0) + 1);
+    return counts;
+  };
+  const first = tally();
+  for (const term of rows) {
+    const label = out.get(term.id);
+    const termEnd = dateOnlyString(term.term_end);
+    if (!label || !(first.get(label) > 1)) continue;
+    if (coverageAwaitsInstallation(term)) out.set(term.id, `${label} (awaiting installation)`);
+    else if (termEnd) out.set(term.id, `${label} (renews ${renewalDateText(termEnd)})`);
+  }
+  const second = tally();
+  for (const term of rows) {
+    const label = out.get(term.id);
+    if (!label || second.get(label) > 1) out.set(term.id, null);
+  }
+  return out;
+}
 
 router.get('/termite-annual-plan', async (req, res, next) => {
   res.set('Cache-Control', 'private, no-store');
@@ -704,26 +745,47 @@ router.get('/termite-annual-plan', async (req, res, next) => {
     // Pre-push audit P1: a multi-property account's cards were otherwise
     // indistinguishable — each term names its property (source estimate's
     // property -> estimate address -> the customer's own address), scoped
-    // to req.customerId at every join. Fail-soft: a label lookup failure
-    // only drops the labels, never the renewal card itself.
+    // to req.customerId at every join. A single term is fail-soft (a lookup
+    // failure only drops its label). Codex r2 P1: with SEVERAL terms a
+    // lookup failure fails closed — 503, which the portal renders as its
+    // error + Retry state — never a set of declinable look-alike cards.
     let propertyLabels = new Map();
     try {
       propertyLabels = await termPropertyLabelsForCustomer(req.customerId, applicableRows.map((term) => term.id), db);
     } catch (labelErr) {
       logger.warn(`[property] termite annual plan property labels failed for customer ${req.customerId}: ${labelErr.message}`);
+      if (applicableRows.length > 1) {
+        return res.status(503).json({
+          available: false,
+          reason: 'labels_unavailable',
+          error: 'Your termite annual plans couldn’t be loaded. Please try again.',
+        });
+      }
     }
+    const labels = distinctTermLabels(applicableRows, propertyLabels);
     const terms = applicableRows.map((term) => {
       const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
+      const propertyLabel = labels.get(term.id);
+      // The write side's own eligibility (decision on file, unpaid, or
+      // the renewal date already passed) — never offer a decline the
+      // POST refuses. Same `today` this request already resolved.
+      const eligible = !declined && !termiteDeclineBlockedReason(term, today);
+      // Several terms but THIS one can't be told apart from the others:
+      // withhold its decline control (fail closed) and say why.
+      const propertyUnclear = eligible && applicableRows.length > 1 && !propertyLabel;
       return {
         id: term.id,
-        propertyLabel: propertyLabels.get(term.id) || null,
+        propertyLabel,
         termEnd: dateOnlyString(term.term_end),
+        // Codex r2 P1: an original term not yet anchored to its station
+        // installation has a PROVISIONAL term_end (the signature day + 12
+        // months) — the portal must describe it relative to installation,
+        // never quote that date.
+        awaitsInstallation: coverageAwaitsInstallation(term),
         prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
         declined,
-        // The write side's own eligibility (decision on file, unpaid, or
-        // the renewal date already passed) — never offer a decline the
-        // POST refuses. Same `today` this request already resolved.
-        canDecline: !declined && !termiteDeclineBlockedReason(term, today),
+        canDecline: eligible && !propertyUnclear,
+        ...(propertyUnclear ? { propertyUnclear: true } : {}),
       };
     });
     return res.json({ available: true, terms });
@@ -750,13 +812,18 @@ const DECLINE_REFUSAL_MESSAGES = {
 
 router.post('/termite-annual-plan/decline', async (req, res, next) => {
   try {
-    // A body-supplied termId picks WHICH of a multi-property account's
+    // The body's termId picks WHICH of a multi-property account's
     // overlapping terms to decline — it can never target another
     // customer's term: declineTermiteAnnualRenewal always re-matches it
     // against customer_id = req.customerId (never trusted from the body)
-    // AND annual_plan_version IS NOT NULL. No termId keeps the legacy
-    // single-current-term behavior.
-    const termId = (typeof req.body?.termId === 'string' && req.body.termId) || null;
+    // AND annual_plan_version IS NOT NULL. Codex r2 P2: it is REQUIRED and
+    // must be a UUID — the service's no-selector "earliest current term"
+    // fallback is for internal callers only; a customer's decline must
+    // always name the exact card they confirmed.
+    const termId = req.body?.termId;
+    if (typeof termId !== 'string' || !isUuid(termId)) {
+      return res.status(400).json({ available: false, reason: 'invalid_term', error: 'Please choose which plan to decline.' });
+    }
     const result = await declineTermiteAnnualRenewal({ customerId: req.customerId, termId });
     if (!result.ok) {
       const status = (result.reason === 'disabled' || result.reason === 'no_term' || result.reason === 'not_found') ? 404 : 409;
