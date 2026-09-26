@@ -143,6 +143,10 @@ const ymd = (value) => {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
 };
 
+// Drives the REAL createTermForAnnualPrepay/refreshTermSnapshot against a
+// scratch schema — measured ~13s on a loaded machine, past jest's 5s default.
+jest.setTimeout(60000);
+
 describeOrSkip('a decided-lapse termite term (declined before install) gets real coverage seeding + prepaid stamping once anchored — real Postgres', () => {
   let fixture;
 
