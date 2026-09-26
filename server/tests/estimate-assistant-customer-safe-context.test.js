@@ -256,4 +256,20 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(result.source).toBe('fallback');
     expect(result.answer).toContain('follow the product label directions');
   });
+
+  test.each([
+    'Is it safe to accept this estimate?',
+    'What does fertilization do for my lawn?',
+  ])('non-pesticide question "%s" with empty support reaches the model', async (question) => {
+    dispatch.mockResolvedValue({ ok: true, provider: 'openai', text: 'Here is how that works.' });
+    const result = await answerEstimateQuestion({
+      database: null,
+      question,
+      estimate: { id: 'synthetic-estimate-12', token: 'synthetic-token-12', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'lawn_care', label: 'Lawn Care' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.source).toBe('openai');
+  });
 });
