@@ -641,7 +641,7 @@
       "key": null,
       "label": "Wildlife Referral (exclusion only, never trapping)",
       "inspection_first": true,
-      "referral": "wildlife_trapper"
+      "referral": "bat_exclusion"
     },
     "urgency": "high",
     "copy": {
@@ -659,7 +659,7 @@
       "https://en.wikipedia.org/wiki/Mexican_free-tailed_bat"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Included 'bat'/'bats' as aliases even though this is the only bat organism entry; note there is also a 'bat-bug' insect slug elsewhere in the catalog whose name contains the word 'bat', so alias matching logic should be checked for false-positive overlap. Per audit item 20: label and tech_notes now say 'exclusion only, never trapping' since trapping this protected species is illegal; kept referral wildlife_trapper (the enum has no separate exclusion-only referral value, and the same wildlife professional performs legal exclusion) and action specialist."
     },
     "role": "protected_wildlife",

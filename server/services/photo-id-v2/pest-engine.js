@@ -98,6 +98,9 @@ const REFERRAL_TEMPLATES = {
   report_fwc: 'Please report this sighting to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
   report_fdacs: 'This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
   protected_leave_alone: 'This animal and its burrow are protected by Florida law. Please leave it undisturbed — no treatment is needed here.',
+  // Bats are never trapped or handled; only exclusion is lawful, and not in
+  // the FWC maternity season (Codex #4974 r2).
+  bat_exclusion: 'Bats are protected in Florida and are never trapped or handled. We refer you to a licensed wildlife professional who can exclude them legally; exclusion is not permitted during the April 15 to August 15 maternity season.',
 };
 
 function escalateBelow() {
@@ -660,9 +663,14 @@ function candidatesBlockFor(candidates, currentMonth) {
 function pairBetween(entry, other) {
   if (!entry || !other) return null;
   const own = (entry.look_alikes || []).find((l) => l.slug === other.slug);
-  if (own) return own;
   const reverse = (other.look_alikes || []).find((l) => l.slug === entry.slug);
-  return reverse ? { ...reverse, slug: other.slug } : null;
+  if (!own && !reverse) return null;
+  // If EITHER direction says no photo can settle the pair, it can't — from
+  // whichever side is on top (southern house spider over brown recluse must
+  // not read "pretty sure"; Codex #4974 r2).
+  const unconfirmable = own?.photo_can_confirm === false || reverse?.photo_can_confirm === false;
+  const pair = own || { ...reverse, slug: other.slug };
+  return unconfirmable ? { ...pair, photo_can_confirm: false } : pair;
 }
 
 function pairIfBothApproved(entry, other) {

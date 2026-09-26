@@ -40,7 +40,7 @@ const ENUMS = {
   urgency: ['low', 'moderate', 'high'],
   line: ['pest', 'termite', 'mosquito', 'lawn', 'tree_shrub', 'rodent', 'none'],
   key: ['pest', 'mosquito', 'flea', 'lawnPestControl', null],
-  referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone'],
+  referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone', 'bat_exclusion'],
   // Revision 2 (outside review, 2026-09-26): what it is / the risk / what to do.
   role: ['beneficial', 'harmless_visitor', 'nuisance', 'plant_pest', 'lawn_pest', 'structural_pest', 'health_pest', 'stinging_pest', 'wildlife', 'protected_wildlife'],
   risk: ['low', 'defensive', 'irritant', 'medical'],
@@ -206,12 +206,11 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(e.safety.venomous).toBe(true);
       expect(s.referral).toBe('wildlife_trapper');
     }
-    // brazilian-free-tailed-bat is a deliberate, owner-reviewed exception
-    // (validate.js carries the same one): bat exclusion is legal-permit
-    // work done by the same wildlife professional, so it stays a
-    // wildlife_trapper referral rather than protected_leave_alone/report_fwc.
-    if (e.safety.protected === true && e.verdict === 'call' && e.slug !== 'brazilian-free-tailed-bat') {
-      expect(['protected_leave_alone', 'report_fwc']).toContain(s.referral);
+    // A protected animal that needs a professional is referred for legal
+    // handling only: leave it alone, report it, or (bats) exclusion — never
+    // a trapper (Codex #4974 r2).
+    if (e.safety.protected === true && e.verdict === 'call') {
+      expect(['protected_leave_alone', 'report_fwc', 'bat_exclusion']).toContain(s.referral);
     }
 
     expect(ENUMS.urgency).toContain(e.urgency);

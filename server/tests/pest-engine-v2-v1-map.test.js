@@ -25,3 +25,26 @@ describe('v1SlugFor on the real catalog', () => {
     expect(v1SlugFor(null)).toBeNull();
   });
 });
+
+describe('real-catalog answer guards (Codex #4974 r2)', () => {
+  const catalog = require('../services/species-catalog');
+  const { buildAnswer, REFERRAL_TEMPLATES } = require('../services/photo-id-v2/pest-engine');
+  const cand = (slug, confidence) => {
+    const entry = catalog.getEntry(slug);
+    return { slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible: [1], traitsNotVisible: [], checked: true, verified: true };
+  };
+  const ctx = (candidates) => ({
+    candidates, disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+    openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+  });
+
+  test('southern house spider over a brown recluse never reads pretty sure: the recluse side says no photo settles it', () => {
+    const built = buildAnswer(ctx([cand('southern-house-spider', 0.95), cand('brown-recluse', 0.3)]));
+    expect(built.answer.wording).not.toBe('pretty_sure');
+  });
+
+  test('bats get the exclusion-only referral, never a trapper', () => {
+    expect(catalog.getEntry('brazilian-free-tailed-bat').service.referral).toBe('bat_exclusion');
+    expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/never trapped or handled/);
+  });
+});
