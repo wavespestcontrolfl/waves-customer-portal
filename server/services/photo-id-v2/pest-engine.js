@@ -735,7 +735,10 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // Node level (group/subgroup/category): the catalog's own authored
   // prompt has no per-pair confirmability of its own — always
   // photo_can_confirm: true (contract delta #3).
-  const np = nodeId ? catalog.nextPhoto(nodeId) : null;
+  // An unknown answer (no node) falls back to the catalog's general
+  // "other" prompt, so the least identifiable photos still get retake
+  // guidance (pre-push audit on Codex #4916 r4).
+  const np = catalog.nextPhoto(nodeId || 'other');
   return np ? { ask: np.ask || null, why: np.why || null, photo_can_confirm: true } : null;
 }
 

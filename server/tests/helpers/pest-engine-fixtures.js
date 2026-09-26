@@ -105,6 +105,7 @@ const FIXTURE = buildFixtureCatalog({
   categories: {
     insect: { label: 'Insect', generic: 'an insect' },
     wildlife: { label: 'Wildlife', generic: 'a wildlife visitor' },
+    other: { label: 'Other', generic: 'something else', next_photo: { ask: 'Other retake photo', why: 'Other retake why' } },
   },
   groups: [
     { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant', next_photo: { ask: 'Ant group node photo', why: 'Ant group why' } },

@@ -199,6 +199,8 @@ describe('buildAnswer — lineage climb', () => {
     const built = buildAnswer(baseCtx({ candidates: [candOff('something unrecognizable', null, 0.1)] }));
     expect(built.answer).toMatchObject({ level: 'unknown', wording: 'unknown', node_id: null, headline: "We couldn't tell from these photos" });
     expect(built.tier).toBe('needs_more_evidence');
+    // Still gets retake guidance (pre-push audit on Codex #4916 r4).
+    expect(built.nextPhoto).toEqual({ ask: 'Other retake photo', why: 'Other retake why', photo_can_confirm: true });
   });
 });
 
