@@ -113,7 +113,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'Puede volver a entrar en dos horas.',
     'Después de 4 horas ya está seco y puede volver.',
   ])('Spanish EPA-approved and fixed-time claims are replaced: %s', (reply) => {
-    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+    expect(scrubUnsafeClaims({ ...base, reply }, '¿Cuándo puedo volver a entrar después del tratamiento?').reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
 
   test.each([
@@ -121,7 +121,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'Pueden regresar después de treinta y cinco minutos.',
     'Puede salir en media hora.',
   ])('any Spanish fixed re-entry duration is replaced: %s', (reply) => {
-    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/instrucciones de la etiqueta/);
+    expect(scrubUnsafeClaims({ ...base, reply }, '¿Cuándo puedo volver a entrar después del tratamiento?').reply).toMatch(/instrucciones de la etiqueta/);
   });
 
   test.each([
@@ -155,12 +155,40 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
   });
 
   test.each([
-    ['Puede volver a entrar en veintidós minutos.', ''],
-    ['Se seca en veintitrés minutos.', ''],
+    ['Puede volver a entrar en veintidós minutos.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
+    ['Se seca en veintitrés minutos.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
     ['It takes one and a half hours to dry.', 'How long does your spray take to dry?'],
     ['Nuestro control de plagas es seguro para mascotas.', ''],
   ])('unit-word durations and Spanish service wording are caught: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    'Puede volver a entrar en 30 min.',
+    'Puede volver en 2 h.',
+  ])('abbreviated Spanish units are caught: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, '¿Cuándo puedo volver a entrar después del tratamiento?').reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test('a Spanish duration with no treatment context is untouched', () => {
+    const reply = 'Puede volver a entrar al portal en dos horas.';
+    expect(scrubUnsafeClaims({ ...base, reply }, '¿Cuándo puedo entrar al portal?').reply).toBe(reply);
+  });
+
+  test.each([
+    ["Yes, it's risk-free for your pets.", 'Is your spray okay for my pets?'],
+    ['Sí, nuestro servicio es seguro para mascotas.', ''],
+  ])('risk-free wording and generic service subjects are caught: %s', (reply, context) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test('"Sí, es seguro." gets the Spanish replacement', () => {
+    expect(scrubUnsafeClaims({ ...base, reply: 'Sí, es seguro.' }).reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test('a relative "that" clause about a non-treatment subject is untouched', () => {
+    const reply = 'Ladybugs that are generally safe around pets are helpful in gardens.';
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
   });
 
   test('a lone ñ does not make an English reply Spanish', () => {
