@@ -786,6 +786,29 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
   }
 }
 
+// Whether the page would take this lead at all — eligibility and a live
+// Waves Assessment catalog row, WITHOUT the location resolution (geocoder)
+// or availability search computeConsultationSlotsForLead runs. For a caller
+// that only links to the page (the public estimate view's consultation
+// offer), where paying for a slot search on every page view buys nothing.
+// Fail closed: false on any ineligibility or error.
+async function consultationEligibleForLead(leadId) {
+  try {
+    const lead = await loadLead(db, leadId);
+    if (!lead) return false;
+    const custRow = await loadTrustedCustomer(db, lead, undefined);
+    // The same lead-wide predicate computeConsultationSlotsForLead and GET
+    // use (Codex #4813 r3 P1).
+    const eligibility = await readEligibility(lead, custRow, undefined, { includeRescheduleUrl: false });
+    if (eligibility.state !== 'ok') return false;
+    const catalog = await loadAssessmentCatalog();
+    return Boolean(catalog.serviceId);
+  } catch (err) {
+    logger.warn(`[inspection-public] consultation eligibility failed for lead ${leadId}: ${err.message}`);
+    return false;
+  }
+}
+
 // The earliest `count` slots across every day, in the days/slots order
 // buildAvailabilityForLead already returns (day-sorted, each day's own
 // slots time-sorted) — flattening just caps the total instead of re-sorting.
@@ -2402,9 +2425,11 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
 
 // Production-safe reuse surface (same convention as booking.js's own
 // `_internals`) — unlike `_test` below, this is a real caller (the new_lead
-// automation email), not test introspection.
+// automation email and the estimate view's consultation offer), not test
+// introspection.
 router._internals = {
   computeConsultationSlotsForLead,
+  consultationEligibleForLead,
 };
 
 router._test = {

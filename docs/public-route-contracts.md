@@ -1420,9 +1420,10 @@ the same set the accept/decline handlers' own lead re-lock condition on); the
 linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
 customer is linked — that customer live and still on the lead's phone) and
 `leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
-eligibility (`inspection-public.js` `_internals.computeConsultationSlotsForLead`
-— the same reuse surface the email block calls, so this page can never offer
-a link that page would refuse) reports `ok`. The URL is
+eligibility plus a live Waves Assessment catalog row (`inspection-public.js`
+`_internals.consultationEligibleForLead` — the same predicate the page and
+the email block's slot compute use, without the geocoder or availability
+search, so this page can never offer a link that page would refuse) is clear. The URL is
 `consultationUrlForLead(leadId)` with NO channel (unverified delivery — this
 is neither an SMS send, which asserts phone delivery, nor an email send);
 the endpoint makes NO write of any kind to mint it (no `createShortCode`, no

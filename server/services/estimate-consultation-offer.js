@@ -27,12 +27,12 @@
  *     phone): the SAME chokepoint every consultation-link caller shares;
  *   - the lead wants a recurring plan (leadWantsRecurringPlan);
  *   - the /inspection/:token page's own lead-wide eligibility (booked
- *     already / converted / gone) says ok — reused via
- *     inspection-public.js's `_internals.computeConsultationSlotsForLead`,
- *     the ONE production-safe reuse surface that route exports (same
- *     function the email block reuses), so this can never offer a link the
- *     page itself would refuse. Only `result.ok` is required — a bookable-
- *     slots check is the email's own narrower need, not this page's.
+ *     already / converted / gone, and a live Waves Assessment catalog row)
+ *     says ok — reused via inspection-public.js's
+ *     `_internals.consultationEligibleForLead`, the same eligibility the
+ *     email block's slot compute runs, minus the geocoder and availability
+ *     search: this page only links, so it never pays for a slot search on
+ *     a public page view.
  *
  * NO writes: no createShortCode, no DB insert. The long URL only
  * (consultationUrlForLead with NO channel — unverified delivery; this is
@@ -64,13 +64,10 @@ async function buildEstimateConsultationOffer({ leadId, leadLinkage, acceptActiv
     if (await leadLinkRefusal(lead)) return null;
     if (!leadWantsRecurringPlan(lead)) return null;
 
-    // Reused verbatim from the /inspection/:token page's own lead-wide
-    // eligibility (already_booked / converted / gone) so this offer can
-    // never link to a page that would refuse the same lead — the ONE
-    // production-safe reuse surface that route exports.
-    const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
-    const result = await computeConsultationSlotsForLead(lead.id);
-    if (!result.ok) return null;
+    // The /inspection/:token page's own lead-wide eligibility, so this
+    // offer can never link to a page that would refuse the same lead.
+    const { consultationEligibleForLead } = require('../routes/inspection-public')._internals;
+    if (!(await consultationEligibleForLead(lead.id))) return null;
 
     const url = consultationUrlForLead(lead.id);
     if (!url) return null;
