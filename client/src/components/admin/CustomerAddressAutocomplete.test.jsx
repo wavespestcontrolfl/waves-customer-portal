@@ -77,6 +77,32 @@ it('replaces the primary address without carrying the old unit to another proper
   await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'fixture', action: 'update' }));
 });
 
+it('notifies the overlay parent when the first service address becomes primary', async () => {
+  const onCustomerMutation = vi.fn();
+  const addresslessDetail = {
+    ...detail,
+    customer: { ...detail.customer, address: { line1: '', line2: '', city: '', state: '', zip: '' } },
+  };
+  fetchMock.mockImplementation(async (url, options = {}) => new Response(JSON.stringify(
+    options.method === 'POST' && String(url).endsWith('/properties')
+      ? { properties: [{ id: 'primary-1', address_line1: '100 Example Street', city: 'Sarasota', state: 'FL', zip: '34236', is_primary: true }] }
+      : String(url).endsWith('/properties')
+        ? { properties: [] }
+        : String(url).endsWith('/fixture') ? addresslessDetail : {}
+  ), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+  render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} onCustomerMutation={onCustomerMutation} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Property', exact: true }));
+  await screen.findByText('No service address on file.');
+  expect(onCustomerMutation).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));
+  selectPlace(place());
+  fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
+
+  await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'fixture', action: 'update' }));
+  expect(onCustomerMutation).toHaveBeenCalledTimes(1);
+});
+
 it.each(['gate', 'key'])('keeps manual entry available when the %s is absent', async (missing) => {
   vi.stubEnv(missing === 'gate' ? 'VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE' : 'VITE_GOOGLE_MAPS_API_KEY', '');
   render(<CustomerPropertiesPanelV2 customerId="fixture" canEdit />);

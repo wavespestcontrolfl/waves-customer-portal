@@ -6622,8 +6622,13 @@ function CustomerProfileProperty({
   c,
   profileVersion,
   reloadCustomer,
+  onCustomerMutation,
   prefs,
 }) {
+  const handlePropertyChanged = async () => {
+    onCustomerMutation?.({ customerId, action: "update" });
+    await reloadCustomer();
+  };
   return (
     <div className="c360-details-content">
       {embedded && recipientDetails}
@@ -6647,7 +6652,7 @@ function CustomerProfileProperty({
           // not) re-syncs the primary customer_properties row server-side
           // — refetch on the reload counter, never on the address tuple.
           refreshToken={profileVersion}
-          onChanged={reloadCustomer}
+          onChanged={handlePropertyChanged}
           canEdit
         />
       )}
@@ -9982,6 +9987,7 @@ export default function Customer360ProfileV2({
         c={c}
         profileVersion={profileVersion}
         reloadCustomer={reloadCustomer}
+        onCustomerMutation={onCustomerMutation}
         prefs={prefs}
       />
     ),
