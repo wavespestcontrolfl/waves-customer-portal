@@ -582,6 +582,21 @@ async function buildReportCopyContext({
     sections.push(`TARGETS TAGGED TODAY (tech-tagged, per product — pests, weeds/diseases, or nutrition goals): ${targets.join(', ')}`);
   }
 
+  if (productEvidence.deterministicApplications.length) {
+    const applications = productEvidence.deterministicApplications.map((application) => [
+      application.role,
+      application.method ? `selected method: ${application.method}` : null,
+      application.area ? `selected area: ${application.area}` : null,
+      application.areaValue && application.areaUnit
+        ? `treated area entered: ${application.areaValue} ${application.areaUnit}`
+        : null,
+    ].filter(Boolean).join('; '));
+    sections.push(
+      'APPLICATION DETAILS (selected product entries for THIS VISIT; catalog-approved roles, with only supplied method and area values. Do not infer additional scope, quantity, targets, or outcomes):\n'
+      + applications.map((application) => `- ${application}`).join('\n'),
+    );
+  }
+
   // Photo-scored lawn assessment (tech-confirmed scores only — the free-text
   // vision observations are deliberately NOT grounded: the confirm UI never
   // shows them to the tech, so an unreviewed photo diagnosis must not become

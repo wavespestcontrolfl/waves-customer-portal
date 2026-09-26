@@ -220,7 +220,7 @@ describe('buildReportCopyContext deterministic application evidence', () => {
       .toContain(role);
   });
 
-  test('binds approved repeated applications to the provider-failure fallback', async () => {
+  test('binds approved repeated applications to model grounding and the provider-failure fallback', async () => {
     const catalogProducts = [
       {
         id: 'approved', name: 'Approved Residual', category: 'Insecticide', product_type: 'pesticide',
@@ -264,6 +264,11 @@ describe('buildReportCopyContext deterministic application evidence', () => {
 
     expect(result.contextText).toContain('REI until dry');
     expect(result.contextText).toContain('rainfast 1.5 hr');
+    const applicationsBlock = result.contextText.split('APPLICATION DETAILS')[1].split('\n\n')[0];
+    expect(applicationsBlock).toContain('insect-control application; selected method: broadcast spray; selected area: rear gate [redacted]; treated area entered: 4200 sqft');
+    expect(applicationsBlock).toContain('insect-control application; selected method: spot treatment; selected area: Side lawn');
+    expect(applicationsBlock).not.toMatch(/2468|9753|Unapproved Product|Unsupported Category|Bedding areas|Palms|-5|constructor/);
+    expect(applicationsBlock).toContain('Do not infer additional scope, quantity, targets, or outcomes');
     expect(result.signals.productSafetyCount).toBe(2);
     expect(result.deterministicApplications).toEqual([
       {
