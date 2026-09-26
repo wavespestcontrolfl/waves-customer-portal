@@ -15,6 +15,8 @@
 
 const EmailTemplates = require('../services/email-template-library');
 const migration = require('../models/migrations/20260926010000_estimate_gone_quiet_consultation_offer_cta');
+// Supersedes 20260926010000's marker idempotency (pre-push Codex P1: up → down → up).
+const reapply = require('../models/migrations/20260926010100_estimate_gone_quiet_consultation_offer_cta_reapply');
 
 const { primaryCtaAnchorIndex, alreadyHasConsultationLink, NEW_VARIABLE, LINK_LABEL, MIGRATION } = migration._private;
 
@@ -461,6 +463,96 @@ const knexLib = require('knex');
       expect(await trx('audit_log').where({ resource_id: template.id }).count('* as n').first())
         .toEqual({ n: '0' });
 
+      await trx.rollback();
+    });
+  });
+
+  // Both migrations in deploy order, the way knex runs them.
+  async function upBoth(trx) { await migration.up(trx); await reapply.up(trx); }
+  async function downBoth(trx) { await reapply.down(trx); await migration.down(trx); }
+  async function seedTemplate(trx) {
+    const [template] = await trx('email_templates').insert({
+      template_key: 'estimate.engage_gone_quiet', status: 'active', from_email: 'contact@wavespestcontrol.com',
+      send_stream: 'service_operational',
+      allowed_variables: JSON.stringify(['first_name', 'estimate_url', 'service_label']),
+      optional_variables: JSON.stringify([]), required_variables: JSON.stringify(['first_name', 'estimate_url', 'service_label']),
+    }).returning('*');
+    const [version] = await trx('email_template_versions').insert({
+      template_id: template.id, version_number: 1, status: 'active',
+      subject: 'Any questions about your Waves estimate?', preview_text: 'Reply and ask — real answers in minutes.',
+      blocks: JSON.stringify(SEED_BLOCKS), validation_snapshot: JSON.stringify({ staff_reviewed: true }),
+    }).returning('*');
+    await trx('email_templates').where({ id: template.id }).update({ active_version_id: version.id });
+    return { template, version };
+  }
+  async function activeState(trx, templateId) {
+    const t = await trx('email_templates').where({ id: templateId }).first();
+    const active = await trx('email_template_versions').where({ id: t.active_version_id }).first();
+    const activeRows = await trx('email_template_versions').where({ template_id: templateId, status: 'active' });
+    return { active, hasLink: alreadyHasConsultationLink(active.blocks), activeRowCount: activeRows.length };
+  }
+  const { alreadyHasConsultationLink } = migration._private;
+
+  test('a normal deploy: 20260926010000 publishes the link and 20260926010100 is a no-op', async () => {
+    await db.transaction(async (trx) => {
+      const { template } = await seedTemplate(trx);
+      await upBoth(trx);
+      const state = await activeState(trx, template.id);
+      expect(state.hasLink).toBe(true);
+      expect(state.active.validation_snapshot.migration).toBe('20260926010000');
+      expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first()).toEqual({ n: '2' });
+      await trx.rollback();
+    });
+  });
+
+  test('up → down → up (twice) across both migrations: the link is present after every up and absent after every down (Codex P1)', async () => {
+    await db.transaction(async (trx) => {
+      const { template, version: original } = await seedTemplate(trx);
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        await upBoth(trx);
+        const up = await activeState(trx, template.id);
+        expect(up.hasLink).toBe(true);
+        expect(up.activeRowCount).toBe(1);
+        await downBoth(trx);
+        const down = await activeState(trx, template.id);
+        expect(down.hasLink).toBe(false);
+        expect(down.active.id).toBe(original.id);
+        expect(down.activeRowCount).toBe(1);
+      }
+      await upBoth(trx);
+      expect((await activeState(trx, template.id)).hasLink).toBe(true);
+      await trx.rollback();
+    });
+  });
+
+  test('a staff version published after the link survives both rollbacks untouched', async () => {
+    await db.transaction(async (trx) => {
+      const { template } = await seedTemplate(trx);
+      await upBoth(trx);
+      await downBoth(trx);
+      await upBoth(trx); // 20260926010100 republishes after the rollback
+      const republished = await activeState(trx, template.id);
+      expect(republished.active.validation_snapshot.migration).toBe('20260926010100');
+      const [staff] = await trx('email_template_versions').insert({
+        template_id: template.id, version_number: 99, status: 'active',
+        subject: republished.active.subject, preview_text: republished.active.preview_text,
+        blocks: JSON.stringify(republished.active.blocks), validation_snapshot: JSON.stringify({ staff_reviewed: true }),
+      }).returning('*');
+      await trx('email_template_versions').where({ id: republished.active.id }).update({ status: 'archived' });
+      await trx('email_templates').where({ id: template.id }).update({ active_version_id: staff.id });
+      await downBoth(trx);
+      expect((await trx('email_templates').where({ id: template.id }).first()).active_version_id).toBe(staff.id);
+      await trx.rollback();
+    });
+  });
+
+  test('20260926010100 down() never reverts a version it did not publish', async () => {
+    await db.transaction(async (trx) => {
+      const { template } = await seedTemplate(trx);
+      await migration.up(trx); // the older migration's publication
+      const published = (await activeState(trx, template.id)).active;
+      await reapply.down(trx);
+      expect((await trx('email_templates').where({ id: template.id }).first()).active_version_id).toBe(published.id);
       await trx.rollback();
     });
   });
