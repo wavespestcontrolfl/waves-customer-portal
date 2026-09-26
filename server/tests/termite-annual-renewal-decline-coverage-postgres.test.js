@@ -307,20 +307,43 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(row.prepaid_method).toBeNull();
   });
 
-  test('a fresh decline raises the dated station-retrieval task once; a replay raises nothing', async () => {
-    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+  // Codex #4940 r9: station retrieval is evaluated at DUE time — never at
+  // decline or anchor time.
+  const dayOffset = (ymdStr, days) => new Date(Date.parse(`${ymdStr}T00:00:00Z`) + days * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const portalDeclineRow = (db, fx) => db('activity_log').insert({
+    customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+  });
+  // A declined term whose paid-through day was yesterday: its retrieval is due.
+  async function dueDeclinedTerm(db) {
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    const termEnd = dayOffset(fx.today, -1);
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: termEnd });
+    await portalDeclineRow(db, fx);
+    return { ...fx, termEnd };
+  }
+  const settledMarker = (db, fx) => db('activity_log').where({ action: 'termite_annual_decline_retrieval' })
+    .whereRaw("metadata->>'term_id' = ?", [fx.term.id]).first('metadata');
+
+  test('a decline raises nothing; the sweep raises the dated task only once term_end has passed — once', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
     const fx = await paidInstalledTerm(db);
+    const termEnd = ymd(fx.term.term_end);
 
     await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
-    await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+    expect(notifyAdmin.mock.calls[0][2]).toContain('The stations will be retrieved after coverage ends');
 
-    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: fx.today })).toEqual({ scanned: 0, raised: 0 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: termEnd })).toEqual({ scanned: 0, raised: 0 });
+
+    const dayAfter = dayOffset(termEnd, 1);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: dayAfter })).toEqual({ scanned: 1, raised: 1 });
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, {
-      retrieveAfter: ymd(fx.term.term_end),
-      termId: fx.term.id,
-      episodeKey: 'portal_renewal_decline',
-      eventAt: expect.anything(),
+      retrieveAfter: termEnd, termId: fx.term.id, episodeKey: 'portal_renewal_decline', eventAt: expect.anything(),
     });
+    expect((await settledMarker(db, fx)).metadata).toEqual(expect.objectContaining({ outcome: 'raised', retrieve_after: termEnd }));
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: dayAfter })).toEqual({ scanned: 0, raised: 0 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
   });
 
   test('an UNPROCESSED staff renew is superseded by the customer decline (real guarded UPDATE)', async () => {
@@ -361,7 +384,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
 
   // Codex #4940 r5 P1: declined BEFORE installation — no real end date to
   // date the task against until the installation anchors the term.
-  test('decline before install, then the installation anchors: the task is raised once against the NEW term_end; re-anchor and sweep never duplicate it', async () => {
+  test('decline before install, then the installation anchors: nothing raised then; at the NEW term_end + 1 the task is raised once', async () => {
     const {
       db, Renewals, notifyAdmin, raiseTermiteRetrievalTask, anchorTermToInstallation,
     } = await load();
@@ -389,95 +412,83 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
 
     const declined = await Renewals.declineTermiteAnnualRenewal({ customerId, termId: term.id, today });
     expect(declined).toEqual(expect.objectContaining({ ok: true, awaitsInstallation: true }));
-    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
-    expect(notifyAdmin.mock.calls[0][2]).toContain('a dated retrieval task will be raised once the stations are installed');
-    // Nothing to sweep yet — still awaiting installation.
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+    expect(notifyAdmin.mock.calls[0][2]).toContain('after the 12-month coverage year from the station installation ends');
 
     await db('scheduled_services').insert({
       customer_id: customerId, source_estimate_id: estimate.id, status: 'completed',
       service_type: 'Termite Bait Station Installation', scheduled_date: today,
     });
     const anchored = await anchorTermToInstallation({ termId: term.id, conn: db });
-    expect(anchored).toEqual(expect.objectContaining({ anchored: true, termStart: today, declinedRenewal: true }));
+    expect(anchored).toEqual(expect.objectContaining({ anchored: true, termStart: today }));
     const newTermEnd = anchored.termEnd;
     expect(newTermEnd).not.toBe(ymd(term.term_end));
+    // Nothing at anchor time, nor before the new term_end passes.
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: newTermEnd })).toEqual({ scanned: 0, raised: 0 });
 
-    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    const dayAfter = dayOffset(newTermEnd, 1);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: dayAfter })).toEqual({ scanned: 1, raised: 1 });
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(customerId, null, {
       retrieveAfter: newTermEnd, termId: term.id, episodeKey: 'portal_renewal_decline', eventAt: expect.anything(),
     });
-    const marker = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).first();
-    expect(marker.metadata).toEqual(expect.objectContaining({ term_id: term.id, term_end: newTermEnd, outcome: 'raised' }));
-
-    // A second anchor attempt and the daily sweep are both no-ops.
     expect(await anchorTermToInstallation({ termId: term.id, conn: db })).toEqual({ skipped: 'already_anchored' });
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: dayAfter })).toEqual({ scanned: 0, raised: 0 });
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
   });
 
-  test('the daily sweep backstops an installed, portal-declined term whose task was never settled — once', async () => {
-    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
-    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    // The decline committed (its activity row exists) but its raise never
-    // landed — e.g. the process died right after the commit.
-    await db('activity_log').insert({
-      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-    });
-
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
-    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, {
-      retrieveAfter: ymd(fx.term.term_end), termId: fx.term.id, episodeKey: 'portal_renewal_decline', eventAt: expect.anything(),
-    });
-  });
-
-  test('a raise still unsettled AFTER the term ends is still retried (stations still need collecting)', async () => {
+  test('a retrieval still unsettled long after the term ended is still due (stations still need collecting)', async () => {
     const { db, Renewals, raiseTermiteRetrievalTask } = await load();
     const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
     await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: '2025-01-15' });
-    await db('activity_log').insert({
-      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-    });
+    await portalDeclineRow(db, fx);
 
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: '2025-01-15' }));
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
   });
 
-  test('the sweep never touches a decline staff recorded (no portal-decline row) or a refunded one, and a failed raise is retried', async () => {
+  test('a staff-recorded decline is never a candidate; a failed raise is belled, not settled, and retried', async () => {
     const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
     const staffDeclined = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    const refunded = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    await db('invoices').where({ id: refunded.invoice.id }).update({ status: 'overdue', paid_at: null });
-    const failing = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    for (const fx of [refunded, failing]) {
-      await db('activity_log').insert({
-        customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-      });
-    }
+    await db('annual_prepay_terms').where({ id: staffDeclined.term.id }).update({ term_end: dayOffset(staffDeclined.today, -1) });
+    const failing = await dueDeclinedTerm(db);
     raiseTermiteRetrievalTask.mockRejectedValueOnce(new Error('notifications down'));
 
-    // Only the still-paid, portal-declined term is a candidate.
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
-    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(failing.customerId, null, expect.any(Object));
     expect(notifyAdmin.mock.calls.map((c) => c[2]).join(' ')).toContain('could not be raised yet');
-    // The failure left no marker, so the next sweep retries and settles it.
-    // The refunded term is never raised; staff's own decline is never a
-    // candidate.
+    expect(await settledMarker(db, failing)).toBeUndefined();
+
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
-    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(2);
     expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).not.toContain(staffDeclined.customerId);
-    expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).not.toContain(refunded.customerId);
   });
 
-  // Codex #4940 r7 P1: raiseTermiteRetrievalTask counts every station on the
-  // ACCOUNT, so any OTHER live termite coverage means no automatic task —
-  // staff are belled to confirm which stations to pull. Settled (marker)
-  // with the reason, so the sweep doesn't re-bell daily.
+  test('a FULL REFUND after the decline makes the retrieval due at once: an IMMEDIATE task, before term_end', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await portalDeclineRow(db, fx);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'refunded' });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: null, termId: fx.term.id }));
+    expect((await settledMarker(db, fx)).metadata).toEqual(expect.objectContaining({ outcome: 'raised', retrieve_after: 'immediate' }));
+  });
+
+  test('a DISPUTED prepay (unpaid, not refunded) waits for term_end like any declined year', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await portalDeclineRow(db, fx);
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'overdue', paid_at: null });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+  });
+
+  // raiseTermiteRetrievalTask counts every station on the ACCOUNT, so any
+  // OTHER live termite coverage AT DUE TIME means no automatic task — staff
+  // are belled to confirm which stations to pull, and it settles only once
+  // that bell is stored.
   test.each([
     ['another termite annual term', async (db, fx) => {
       await db('annual_prepay_terms').insert({
@@ -493,28 +504,33 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     ['an active termite bond', async (db, fx) => {
       await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'active' });
     }, 'termite_bond', 'has an active termite bond'],
-  ])('other live termite coverage (%s): no automatic task, staff belled, settled', async (_label, addCoverage, outcome, wording) => {
+  ])('other live termite coverage at due time (%s): no automatic task, staff belled, settled', async (_label, addCoverage, outcome, wording) => {
     const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
-    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    await db('activity_log').insert({
-      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-    });
+    const fx = await dueDeclinedTerm(db);
     await addCoverage(db, fx);
 
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
     expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
     expect(notifyAdmin.mock.calls.map((c) => c[2]).join(' ')).toContain(wording);
-    const marker = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).first();
-    expect(marker.metadata).toEqual(expect.objectContaining({ term_id: fx.term.id, outcome }));
+    expect((await settledMarker(db, fx)).metadata).toEqual(expect.objectContaining({ term_id: fx.term.id, outcome }));
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
   });
 
-  test('coverage that is NOT live never blocks the task: a completed / cancelled termite visit, an expired bond', async () => {
+  test('a staff bell that is NOT stored leaves the term unsettled — the next sweep retries it', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    const fx = await dueDeclinedTerm(db);
+    await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'active' });
+    notifyAdmin.mockResolvedValueOnce(null);
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
+    expect(await settledMarker(db, fx)).toBeUndefined();
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
+    expect((await settledMarker(db, fx)).metadata).toEqual(expect.objectContaining({ outcome: 'termite_bond' }));
+  });
+
+  test('coverage that ended before the due date never blocks the task: a completed / cancelled termite visit, an expired bond', async () => {
     const { db, Renewals, raiseTermiteRetrievalTask } = await load();
-    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    await db('activity_log').insert({
-      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-    });
+    const fx = await dueDeclinedTerm(db);
     await db('scheduled_services').insert([
       { customer_id: fx.customerId, status: 'completed', service_type: 'Termite Liquid Treatment', scheduled_date: addMonths(fx.today, -3) },
       { customer_id: fx.customerId, status: 'cancelled', service_type: 'Quarterly Termite Bait Monitoring', scheduled_date: addMonths(fx.today, 2) },
@@ -525,60 +541,13 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
   });
 
-  // Codex #4940 r8 P1: the other-coverage guard is re-checked at DUE time —
-  // coverage added after the task was raised withdraws the automatic task.
-  test('an open task due soon is withdrawn once other live termite coverage appears; staff belled; settled for that instruction', async () => {
-    const { db, Renewals, notifyAdmin } = await load();
-    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    // Paid through a week from now — inside the 14-day revalidation horizon.
-    const dueSoon = new Date(Date.parse(`${fx.today}T00:00:00Z`) + 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: dueSoon });
-    await db('activity_log').insert({
-      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-    });
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
-
-    // Nothing changed yet: the due task stays.
-    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 1, withdrawn: 0 });
-
-    await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'active' });
-    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 1, withdrawn: 1 });
-
-    const task = await db('notifications').whereRaw("metadata->>'churnEpisode' = 'portal_renewal_decline'").first();
-    expect(task.read_at).not.toBeNull();
-    const latest = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).orderBy('created_at', 'desc').first();
-    expect(latest.metadata).toEqual(expect.objectContaining({ outcome: 'termite_bond', retrieve_after: dueSoon }));
-    const bodies = notifyAdmin.mock.calls.map((c) => c[2]).join(' ');
-    expect(bodies).toContain('The automatic station-retrieval task for a termite annual plan declined online was withdrawn.');
-    expect(bodies).toContain('has an active termite bond');
-    // Withdrawn and settled: no re-check, no re-raise.
-    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 0, withdrawn: 0 });
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
-  });
-
-  test('a task due beyond the horizon is not re-checked yet', async () => {
-    const { db, Renewals } = await load();
-    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    await db('activity_log').insert({
-      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-    });
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
-    await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'active' });
-    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 0, withdrawn: 0 });
-  });
-
-  // Codex #4940 r8 P2: terms whose raise keeps failing rotate — the least-
+  // Codex #4940 r8 P2: terms whose action keeps failing rotate — the least-
   // recently-attempted (never-attempted first) goes next, not the same one.
   test('with limit 1, a repeatedly failing candidate never starves a newer one', async () => {
     const { db, Renewals, raiseTermiteRetrievalTask } = await load();
-    const older = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    const newer = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
-    await db('annual_prepay_terms').where({ id: newer.term.id }).update({ term_end: addMonths(ymd(newer.term.term_end), 1) });
-    for (const fx of [older, newer]) {
-      await db('activity_log').insert({
-        customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
-      });
-    }
+    const older = await dueDeclinedTerm(db);
+    const newer = await dueDeclinedTerm(db);
+    await db('annual_prepay_terms').where({ id: older.term.id }).update({ term_end: dayOffset(older.today, -5) });
     raiseTermiteRetrievalTask.mockRejectedValue(new Error('notifications down'));
 
     await Renewals.raisePendingDeclineRetrievalTasks({ limit: 1 });
@@ -588,5 +557,35 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).toEqual([older.customerId, newer.customerId, older.customerId]);
     const stamped = await db('annual_prepay_terms').whereIn('id', [older.term.id, newer.term.id]).whereNotNull('decline_retrieval_attempted_at');
     expect(stamped).toHaveLength(2);
+  });
+
+  // Codex #4940 r9 P1: a signed plan still payment_pending is declinable
+  // online (move 15). Never paid: nothing is covered. Paid later: it covers
+  // the paid year (its visits are stamped by the end-at-term upkeep) and it
+  // never becomes 'active' again, so it never renews.
+  test('an unpaid (payment_pending) plan declined online: no coverage while unpaid; paid later it covers the year and stays a decided lapse', async () => {
+    const { db, Renewals } = await load();
+    const fx = await paidInstalledTerm(db);
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'sent', paid_at: null });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'payment_pending' });
+
+    const declined = await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
+    expect(declined).toEqual(expect.objectContaining({ ok: true, unpaid: true, alreadyDeclined: false }));
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first())
+      .toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }));
+    expect(await Renewals.isPaidDecidedLapseTerm({ id: fx.term.id, status: 'cancelled', renewal_decision: 'cancel' }, db)).toBe(false);
+    await Renewals.refreshActiveTermsForCustomer(fx.customerId, db);
+    expect((await db('scheduled_services').where({ id: fx.coveredVisit.id }).first()).prepaid_amount).toBeNull();
+
+    // The prepay is paid after all.
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(await Renewals.isPaidDecidedLapseTerm(after, db)).toBe(true);
+    await Renewals.refreshActiveTermsForCustomer(fx.customerId, db);
+    const stamped = await db('scheduled_services').where({ id: fx.coveredVisit.id }).first();
+    expect(Number(stamped.prepaid_amount)).toBeGreaterThan(0);
+    expect(stamped.prepaid_method).toBe('annual_prepay_invoice');
   });
 });

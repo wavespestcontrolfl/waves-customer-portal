@@ -2667,34 +2667,20 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     expect(result).toEqual({ ok: false, reason: 'not_active', status: 'renewed', termId: 'term-1' });
   });
 
-  // Codex #4940 r4 P1: a successful decline raises the dated station-
-  // retrieval task once — never on a replay, never for an uninstalled term.
-  describe('station-retrieval task', () => {
+  // Codex #4940 r9: the station retrieval is evaluated at DUE time by the
+  // daily sweep (real-PG: termite-annual-renewal-decline-coverage-postgres).
+  // The decline itself raises NOTHING — its staff bell only says when the
+  // stations come out.
+  describe('decline time: no station-retrieval task', () => {
     const anchored = {
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
     };
-    // Post-commit the raise re-reads the COMMITTED term, confirms the
-    // portal-decline row, finds no settled marker, re-checks it is paid,
-    // looks for another live plan, raises, then writes the settled marker.
-    let markerInsert;
-    let taskRowProbe;
-    let serviceProbe;
-    const freshDecline = (termRow, otherPlan = null, { taskRow = { id: 'notif-task' }, otherService = null, bond = null } = {}) => {
+    const decline = (termRow) => {
       const decided = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
-      markerInsert = query();
-      taskRowProbe = query({ first: taskRow });
-      serviceProbe = query({ first: otherService });
       setDeclineQueues({
-        annual_prepay_terms: [query({ first: termRow }), query({ returning: [decided] }), query({ first: decided }), query({ first: otherPlan })],
-        activity_log: [query(), query({ first: { id: 'decline-row', created_at: '2026-09-26T14:00:00Z', metadata: { term_id: 'term-1', decided_at: '2026-09-26T14:00:00.000Z' } } }), query({ first: null }), markerInsert],
-        'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
-        // Codex #4940 r6: the marker is written only once THIS decline's
-        // own task row is confirmed to exist.
-        notifications: [taskRowProbe],
-        // Codex #4940 r7: other live termite coverage on the account.
-        scheduled_services: [serviceProbe],
-        termite_bonds: [query({ first: bond })],
+        annual_prepay_terms: [query({ first: termRow }), query({ returning: [decided] })],
+        activity_log: [query()],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
       return AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
@@ -2702,111 +2688,60 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const { raiseTermiteRetrievalTask } = require('../services/cancellation-processor');
     const bellBody = () => require('../services/notification-service').notifyAdmin.mock.calls[0][2];
 
-    test('a fresh decline raises it once, dated to the paid-through day, keyed on the term + portal episode', async () => {
-      await freshDecline(anchored);
-      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-      expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, {
-        retrieveAfter: '2027-05-20', termId: 'term-1', episodeKey: 'portal_renewal_decline',
-        // The decline's own time — its place in the retrieval chronology.
-        eventAt: '2026-09-26T14:00:00.000Z',
-      });
-      expect(taskRowProbe.whereRaw).toHaveBeenCalledWith(
-        "metadata->>'dedupeKey' = ?", ['termite_station_retrieval:term:term-1:portal_renewal_decline:dated:2027-05-20'],
-      );
-      expect(bellBody()).toContain('A dated station-retrieval task was raised for after');
-      expect(bellBody()).not.toContain('no action needed');
-      // Settled: the persisted marker keeps the daily sweep off this term.
-      expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
-        action: 'termite_annual_decline_retrieval',
-        metadata: expect.objectContaining({ term_id: 'term-1', term_end: '2027-05-20', outcome: 'raised' }),
-      }));
+    test('an installed plan: nothing raised; the bell says the stations are retrieved after the paid year', async () => {
+      const result = await decline(anchored);
+      expect(result.ok).toBe(true);
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(bellBody()).toContain('The stations will be retrieved after coverage ends');
+      expect(bellBody()).toContain('a retrieval task is raised then');
+      expect(result).not.toHaveProperty('retrieval');
     });
 
-    test('an idempotent replay raises nothing', async () => {
+    test('a plan awaiting installation: nothing raised; the bell dates it from the installation', async () => {
+      await decline({ ...anchored, installation_anchored_at: null, renewed_from_term_id: null });
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(bellBody()).toContain('after the 12-month coverage year from the station installation ends');
+    });
+  });
+
+  // Codex #4940 r9 P1: agreement v3 lets the customer decline "at any time
+  // before the renewal date" — a signed plan still payment_pending (unpaid,
+  // or dispute-suspended) included (move 15).
+  describe('payment_pending plan', () => {
+    const unpaidTerm = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'payment_pending', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+
+    test('is declinable (termiteDeclineBlockedReason)', () => {
+      expect(AnnualPrepayRenewals.termiteDeclineBlockedReason(unpaidTerm, '2026-09-26')).toBeNull();
+      expect(AnnualPrepayRenewals.termiteDeclineBlockedReason({ ...unpaidTerm, dispute_suspended_at: '2026-09-01T00:00:00Z' }, '2026-09-26')).toBeNull();
+    });
+
+    test('records the decided lapse through the guarded payment_pending write, says unpaid, never quotes paid coverage', async () => {
+      const decided = { ...unpaidTerm, status: 'cancelled', renewal_decision: 'cancel' };
+      const write = query({ returning: [decided] });
+      const activityInsert = query();
       setDeclineQueues({
-        annual_prepay_terms: [query({ first: { ...anchored, status: 'cancelled', renewal_decision: 'cancel' } })],
-        'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
+        annual_prepay_terms: [query({ first: unpaidTerm }), write],
+        activity_log: [activityInsert],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
+
       const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
-      expect(result.alreadyDeclined).toBe(true);
-      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
-    });
 
-    test('a term still awaiting installation raises none — the bell says the stations are not installed yet', async () => {
-      await freshDecline({ ...anchored, installation_anchored_at: null, renewed_from_term_id: null });
-      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
-      expect(bellBody()).toContain('a dated retrieval task will be raised once the stations are installed');
-    });
-
-    test('another live termite plan on the account: no automatic task, staff confirm which stations', async () => {
-      await freshDecline(anchored, { id: 'term-other' });
-      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
-      expect(bellBody()).toContain('another termite annual plan');
-      expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
-        metadata: expect.objectContaining({ outcome: 'other_termite_plan' }),
+      expect(result).toEqual(expect.objectContaining({ ok: true, alreadyDeclined: false, unpaid: true }));
+      expect(write.where).toHaveBeenCalledWith({ id: 'term-1', status: 'payment_pending' });
+      expect(write.whereNull).toHaveBeenCalledWith('renewal_decision');
+      expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term',
       }));
-    });
-
-    test('a caller-supplied transaction (not yet committed) never raises the durable task — reported so the caller raises it after commit', async () => {
-      const callerTrx = Object.assign((...args) => db(...args), { isTransaction: true });
-      setDeclineQueues({
-        annual_prepay_terms: [query({ first: anchored }), query({ returning: [{ ...anchored, status: 'cancelled', renewal_decision: 'cancel' }] })],
-        activity_log: [query()],
-        customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
-      });
-      const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
-        customerId: 'cust-1', termId: 'term-1', today: '2026-09-26', conn: callerTrx,
-      });
-      expect(result.ok).toBe(true);
-      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
-      expect(result.retrieval).toEqual({ raised: false, reason: 'caller_transaction' });
-    });
-
-    // Codex #4940 r7 P1: stations are counted per ACCOUNT — any other live
-    // termite coverage means staff confirm which stations to pull.
-    test.each([
-      ['a live termite service still on the calendar', { otherService: { id: 'svc-quarterly' } }, 'other_termite_service', 'still has termite service on the calendar'],
-      ['an active termite bond', { bond: { id: 7 } }, 'termite_bond', 'has an active termite bond'],
-    ])('%s on the account: no automatic task; the bell asks staff to confirm; settled', async (_label, extra, outcome, wording) => {
-      await freshDecline(anchored, null, extra);
-      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
-      expect(bellBody()).toContain(wording);
-      expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
-        metadata: expect.objectContaining({ outcome }),
-      }));
-    });
-
-    test('the live-service check skips visits of THIS plan and anything not live', async () => {
-      await freshDecline({ ...anchored, source_estimate_id: 'est-1' });
-      expect(serviceProbe.whereRaw).toHaveBeenCalledWith("LOWER(COALESCE(service_type, '')) LIKE '%termite%'");
-      expect(serviceProbe.whereRaw).toHaveBeenCalledWith('annual_prepay_term_id IS DISTINCT FROM ?', ['term-1']);
-      expect(serviceProbe.whereRaw).toHaveBeenCalledWith('source_estimate_id IS DISTINCT FROM ?', ['est-1']);
-      expect(serviceProbe.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']));
-      expect(serviceProbe.where).toHaveBeenCalledWith('scheduled_date', '>=', expect.any(String));
-      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-    });
-
-    test('a helper result of supersededByNewer is NOT raised — no marker (the sweep re-checks), and the bell says a newer instruction stands', async () => {
-      raiseTermiteRetrievalTask.mockResolvedValueOnce({ raised: true, stationCount: 12, deduped: true, supersededByNewer: 'req-9' });
-      await freshDecline(anchored);
-      expect(markerInsert.insert).not.toHaveBeenCalled();
-      expect(bellBody()).toContain('A newer station-retrieval instruction already stands on this account');
-      expect(bellBody()).not.toContain('A dated station-retrieval task was raised');
-    });
-
-    test('a "raised" result with no task row for THIS decline is not settled either', async () => {
-      await freshDecline(anchored, null, { taskRow: null });
-      expect(markerInsert.insert).not.toHaveBeenCalled();
-      expect(bellBody()).toContain('could not be raised yet');
-    });
-
-    test('a task failure never fails the committed decline — no marker, so the daily sweep retries; the bell says so', async () => {
-      raiseTermiteRetrievalTask.mockRejectedValueOnce(new Error('notifications down'));
-      const result = await freshDecline(anchored);
-      expect(result.ok).toBe(true);
-      expect(bellBody()).toContain('could not be raised yet — it is retried automatically each day');
-      expect(markerInsert.insert).not.toHaveBeenCalled();
+      expect(write.update.mock.calls[0][0]).not.toHaveProperty('renewal_notes');
+      expect(activityInsert.insert.mock.calls[0][0].description).toContain('The prepay is not paid yet; if it is paid, coverage runs through 2027-05-20');
+      expect(activityInsert.insert.mock.calls[0][0].metadata).toEqual(expect.objectContaining({ unpaid: true }));
+      const body = require('../services/notification-service').notifyAdmin.mock.calls[0][2];
+      expect(body).toContain('The prepay is not paid yet; if it is paid, coverage runs through');
+      expect(body).not.toContain('Coverage continues through');
     });
   });
 

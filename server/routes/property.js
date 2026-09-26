@@ -651,9 +651,10 @@ router.get('/termite-bond', async (req, res, next) => {
 // term still awaiting its installation (Codex r3 P1): its term_end is only
 // a placeholder, so it is never cut off by it
 // (whereTermCurrentOrAwaitingInstallation).
-// Status filter keeps active/renewal_pending/payment_pending (an unpaid
-// payment_pending term still shows — see canDecline below — but only a
-// paid, live term is declinable) PLUS the decided-lapse shape (cancelled +
+// Status filter keeps active/renewal_pending/payment_pending (a signed but
+// unpaid payment_pending term shows AND is declinable — Codex #4940 r9:
+// agreement v3 allows declining any time before the renewal date) PLUS the
+// decided-lapse shape (cancelled +
 // renewal_decision 'cancel', still covered through term_end) — and drops
 // every other terminal shape: a refund/void 'cancelled' row with
 // renewal_decision NULL, 'refunded', or 'canceled' never had its coverage
@@ -809,6 +810,9 @@ router.get('/termite-annual-plan', async (req, res, next) => {
         prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
         declined,
         canDecline: eligible && !propertyUnclear,
+        // A signed plan still payment_pending is declinable (Codex #4940 r9)
+        // but has no paid coverage to quote yet.
+        ...(term.status === 'payment_pending' ? { unpaid: true } : {}),
         ...(propertyUnclear ? { propertyUnclear: true } : {}),
       };
     });

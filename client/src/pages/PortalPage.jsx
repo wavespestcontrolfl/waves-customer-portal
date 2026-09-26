@@ -11974,9 +11974,13 @@ function TermiteAnnualRenewalCard({
   // installation has a PROVISIONAL term end — never quote it; describe
   // coverage relative to the installation instead.
   const awaitsInstallation = term.awaitsInstallation === true;
-  const nonRenewalCopy = awaitsInstallation
-    ? 'Your plan will not renew. Coverage runs 12 months from your station installation.'
-    : `Your plan will not renew. Coverage continues through ${termEndLabel}.`;
+  // A plan declined before its prepay is paid (term.unpaid) has no paid
+  // coverage to quote — the copy says only that it will not renew.
+  const nonRenewalCopy = term.unpaid
+    ? 'Your plan will not renew.'
+    : (awaitsInstallation
+      ? 'Your plan will not renew. Coverage runs 12 months from your station installation.'
+      : `Your plan will not renew. Coverage continues through ${termEndLabel}.`);
 
   const handleDecline = async () => {
     setSubmitting(true);
@@ -11988,6 +11992,8 @@ function TermiteAnnualRenewalCard({
         canDecline: false,
         termEnd: result.termEnd || term.termEnd,
         prepayAmount: result.prepayAmount != null ? result.prepayAmount : term.prepayAmount,
+        // Declined before the prepay was paid: no paid coverage to quote.
+        ...(result.unpaid ? { covered: false } : {}),
       });
       setConfirming(false);
     } catch (err) {

@@ -245,7 +245,7 @@ describe('GET /api/property/termite-annual-plan', () => {
           id: 'term-a', propertyLabel: '12 Palm Ave', termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, declined: false, canDecline: true,
         },
         {
-          id: 'term-b', propertyLabel: '400 Gulf Dr', termEnd: '2027-08-01', awaitsInstallation: true, prepayAmount: 600, declined: false, canDecline: false,
+          id: 'term-b', propertyLabel: '400 Gulf Dr', termEnd: '2027-08-01', awaitsInstallation: true, prepayAmount: 600, declined: false, canDecline: true, unpaid: true,
         },
       ],
     });
@@ -467,13 +467,16 @@ describe('GET /api/property/termite-annual-plan', () => {
     }]);
   });
 
-  test('an unpaid (payment_pending) plan never offers the decline control', async () => {
+  // Codex #4940 r9 P1: agreement v3 allows declining "any time before the
+  // renewal date" — a signed plan still payment_pending included. It is
+  // flagged unpaid so the portal never quotes paid coverage for it.
+  test('an unpaid (payment_pending) plan offers the decline control and is flagged unpaid', async () => {
     state.rows = [{
       id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'payment_pending', renewal_decision: null,
       annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
     }];
     const { body } = await invoke(getHandler());
-    expect(body.terms[0]).toEqual(expect.objectContaining({ declined: false, canDecline: false }));
+    expect(body.terms[0]).toEqual(expect.objectContaining({ declined: false, canDecline: true, unpaid: true }));
   });
 
   // codex round-1 P1: REVERSES the earlier "paid, installed plan only"

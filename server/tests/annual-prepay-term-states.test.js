@@ -615,7 +615,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     ]);
   });
 
-  test('every write site keeps its documented WHERE guard (moves 1–14) — loosening a guard fails here', () => {
+  test('every write site keeps its documented WHERE guard (moves 1–15) — loosening a guard fails here', () => {
     // Exact source-level pin of each write's guard chain, in scan order.
     // (`orWhere` branches are pinned behaviorally in the notice-claim test
     // below; this list covers the where/whereIn/whereNull/whereNotIn guards.)
@@ -657,6 +657,9 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
           'whereNotExists(function noSuccessorTerm()',
           "whereRaw('successor.renewed_from_term_id = annual_prepay_terms.id')"],
       },
+      // Move 15: the customer's online decline of a signed plan still
+      // payment_pending — undecided payment_pending only.
+      { expr: "'cancelled'", guards: ['where({ id: termId, status: PAYMENT_PENDING_STATUS })', "whereNull('renewal_decision')"] },
     ]);
     // Move 11's third predicate lives on the upstream revival SELECT, not the
     // conditional UPDATE — pin it there: only dispute-marked, undecided
@@ -734,11 +737,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(src).toContain("const PAYMENT_PENDING_STATUS = 'payment_pending';");
   });
 
-  test('the doc moves table has 14 rows with CHECK-valid targets and each row names its documented guard', () => {
+  test('the doc moves table has 15 rows with CHECK-valid targets and each row names its documented guard', () => {
     const doc = read(DOC);
     const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \|$/gm)]
       .map((m) => ({ n: Number(m[1]), from: m[2], to: m[3], trigger: m[4], where: m[5], guard: m[6] }));
-    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     const valid = new Set([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES]);
     for (const r of rows) {
       for (const s of r.to.matchAll(/`([a-z_]+)`/g)) expect(valid.has(s[1])).toBe(true);
@@ -761,6 +764,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
       13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
       14: { from: st(['renewed']), to: st(['cancelled']), where: 'supersedeRenewWithCustomerCancel' },
+      15: { from: st(['payment_pending']), to: st(['cancelled']), where: 'declinePaymentPendingWithCustomerCancel' },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -786,6 +790,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       12: "NOT IN ('cancelled','canceled')",
       13: 'renewal_decision IS NULL',
       14: "renewal_decision = 'renew' AND NOT EXISTS",
+      15: "status = 'payment_pending' AND renewal_decision IS NULL",
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });

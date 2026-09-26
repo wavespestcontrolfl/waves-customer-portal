@@ -582,15 +582,14 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     countersignScanned: 0, countersignReminded: 0,
     signatureNudgeScanned: 0, signatureNudged: 0,
     signatureExpireScanned: 0, signatureExpired: 0, signatureExpireFailed: 0,
-    declineRetrievalScanned: 0, declineRetrievalRaised: 0, declineRetrievalWithdrawn: 0,
+    declineRetrievalScanned: 0, declineRetrievalRaised: 0,
   };
   await retryAwaitingActivations({ conn, limit, counts });
   await retryUndeliveredInvoices({ conn, limit, counts });
   // Anchor BEFORE the handoff retry: a term whose installation already
   // happened needs no "schedule the installation" bell.
   await anchorInstalledTerms({ conn, limit, counts });
-  // After anchoring: a portal-declined term whose dated station-retrieval
-  // task was never settled (see raisePendingDeclineRetrievalTasks).
+  // After anchoring: portal-declined terms whose station retrieval is due.
   await retryDeclineRetrievalTasks({ counts });
   await retryInstallHandoffs({ conn, limit, counts });
   await remindPendingCountersignatures({ conn, limit, counts });
@@ -996,7 +995,10 @@ async function installationPlanForEstimate(conn, estimateId) {
 }
 
 async function anchorTermToInstallation({ termId, conn = db }) {
-  const result = await conn.transaction(async (trx) => {
+  // A term the customer declined online BEFORE its installation gets its
+  // real term_end here; its station retrieval is evaluated by the daily
+  // sweep once that date passes (Codex #4940 r9) — nothing is raised now.
+  return conn.transaction(async (trx) => {
     const peek = await trx('annual_prepay_terms').where({ id: termId }).first('customer_id');
     if (!peek) return { skipped: 'term_not_found' };
     // The per-customer annual-prepay advisory lock every term writer holds
@@ -1069,24 +1071,8 @@ async function anchorTermToInstallation({ termId, conn = db }) {
       termStart,
       termEnd,
       moved,
-      declinedRenewal: term.status === 'cancelled' && term.renewal_decision === 'cancel',
     };
   });
-  // Codex #4940 r5 P1: a term the customer declined online BEFORE its
-  // installation had no real term_end to date a station-retrieval task
-  // against — it has one now. Raised only AFTER the anchor commits and only
-  // when this call owned that transaction (raiseTermiteRetrievalTask writes
-  // on its own connection; a caller transaction could still roll back —
-  // the daily sweep then raises it). Never fails the anchor: a raise that
-  // cannot happen bells staff instead.
-  if (result?.anchored && result.declinedRenewal && !conn.isTransaction) {
-    try {
-      await require('./annual-prepay-renewals').raiseRetrievalAfterAnchor(result.termId);
-    } catch (err) {
-      logger.error(`[termite-annual-activation] decline retrieval task after anchor failed for term ${result.termId}: ${err.message}`);
-    }
-  }
-  return result;
 }
 
 async function anchorInstalledTerms({ conn, limit, counts }) {
@@ -1153,12 +1139,11 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
   }
 }
 
-// Codex #4940 r5 P1: backstop for the station-retrieval task of a term the
-// customer declined online — an anchor (or decline) that committed but whose
-// raise never landed. The candidate set is the PERSISTED marker's absence
-// (annual-prepay-renewals.js DECLINE_RETRIEVAL_ACTIVITY_ACTION), so a
-// settled term is never re-raised; the task's own dedupe key covers a lost
-// marker. Isolated from the other passes' failures.
+// Codex #4940 r9: the station retrieval of a term the customer declined
+// online is evaluated HERE, once it is due (its paid-through term_end has
+// passed, or its prepay was refunded) — see annual-prepay-renewals.js
+// raisePendingDeclineRetrievalTasks. Isolated from the other passes'
+// failures.
 async function retryDeclineRetrievalTasks({ counts }) {
   try {
     const { raisePendingDeclineRetrievalTasks } = require('./annual-prepay-renewals');
@@ -1168,17 +1153,6 @@ async function retryDeclineRetrievalTasks({ counts }) {
   } catch (err) {
     logger.error(`[termite-annual-activation] decline retrieval sweep failed: ${err.message}`);
     counts.declineRetrievalScanError = err.message;
-  }
-  // Codex #4940 r8: an open automatic retrieval task due soon is re-checked
-  // against the account's other live termite coverage (see
-  // revalidateDueDeclineRetrievalTasks). Isolated from the raise pass.
-  try {
-    const { revalidateDueDeclineRetrievalTasks } = require('./annual-prepay-renewals');
-    const outcome = await revalidateDueDeclineRetrievalTasks();
-    counts.declineRetrievalWithdrawn = outcome?.withdrawn || 0;
-  } catch (err) {
-    logger.error(`[termite-annual-activation] decline retrieval revalidation failed: ${err.message}`);
-    counts.declineRetrievalRevalidateScanError = err.message;
   }
 }
 

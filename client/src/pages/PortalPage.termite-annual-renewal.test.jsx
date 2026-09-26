@@ -221,6 +221,29 @@ describe('termite annual plan renewal card', () => {
     expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
   });
 
+  // Codex #4940 r9 P1: a signed plan still payment_pending is declinable
+  // online; it has no paid coverage to quote, before or after the decline.
+  it('an unpaid plan can be declined, and the copy never claims paid coverage', async () => {
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [{
+        id: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true, unpaid: true,
+      }],
+    });
+    api.declineTermiteAnnualPlanRenewal.mockResolvedValue({
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, alreadyDeclined: false, unpaid: true,
+    });
+    render(<MyPlanTab customer={customer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Don’t renew my plan' }));
+    expect(screen.getByText('Your plan will not renew.')).toBeInTheDocument();
+    expect(screen.queryByText(/Coverage continues/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(api.declineTermiteAnnualPlanRenewal).toHaveBeenCalledWith('term-1'));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument());
+    expect(screen.getByText('Your plan will not renew.')).toBeInTheDocument();
+    expect(screen.queryByText(/Coverage continues/)).not.toBeInTheDocument();
+  });
+
   it('a failed decline does not refresh the customer', async () => {
     const refreshCustomer = vi.fn(async () => {});
     api.getTermiteAnnualPlan.mockResolvedValue({
