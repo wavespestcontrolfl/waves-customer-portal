@@ -5669,14 +5669,6 @@ function visualProofMomentIntro(moments = []) {
   return 'Reviewed service highlights from today\'s visit.';
 }
 
-const CUSTOMER_SAFE_LAWN_OBSERVATIONS = new Set(
-  serviceCompletionChoicesFor('lawn', 'observations').map(({ label }) => label),
-);
-
-function isCustomerSafeLawnObservation(value) {
-  return isLawnFindingSelection(value) || CUSTOMER_SAFE_LAWN_OBSERVATIONS.has(value);
-}
-
 function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
@@ -5685,9 +5677,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
-  const lawnFindings = data.serviceLine === 'lawn'
-    ? [...new Set((data.protocol?.structuredObservations || []).filter(isCustomerSafeLawnObservation))]
-    : [];
+  const customerSafeObservationLabels = new Set(
+    serviceCompletionChoicesFor(data.serviceLine, 'observations').map(({ label }) => label),
+  );
+  const routineFindings = [...new Set(
+    (Array.isArray(data.protocol?.structuredObservations) ? data.protocol.structuredObservations : [])
+      .filter((value) => customerSafeObservationLabels.has(value)
+        || (data.serviceLine === 'lawn' && isLawnFindingSelection(value))),
+  )];
+  const recordedFindingsList = routineFindings.length > 0 ? (
+    <ul aria-label={data.serviceLine === 'lawn' ? 'Recorded lawn findings' : 'Recorded visit findings'}>
+      {routineFindings.map((finding) => <li key={finding}>{finding}</li>)}
+    </ul>
+  ) : null;
   // Tree & Shrub V2 adopts the same "lead layout" as lawn V2: the visit timeline +
   // Ask-Waves + products render up top (under Re-entry), not in the generic non-lawn
   // slots lower down. `isV2LeadLayout` is the shared gate for that reordering.
@@ -8921,6 +8923,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 />
               ) : null}
             />
+            {recordedFindingsList && (
+              <section data-glass="card" className="sr-section">
+                <h2>What we found</h2>
+                {recordedFindingsList}
+              </section>
+            )}
           </div>
         )}
 
@@ -9048,15 +9056,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             (V2 dashboard, legacy assessment, mowing block) keeps it. */}
         {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !cockroachV2Primary && !typedNarrativeOwnsSummary
           && !(data.isCallback && data.reserviceGateOn && todaysResultCarriesSummary
-            && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !lawnFindings.length) && (
+            && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !routineFindings.length) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
-            {lawnFindings.length > 0 && (
-              <ul aria-label="Recorded lawn findings">
-                {lawnFindings.map((finding) => <li key={finding}>{finding}</li>)}
-              </ul>
-            )}
+            {recordedFindingsList}
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
                 gallery is skipped for these reports so the photos show once.

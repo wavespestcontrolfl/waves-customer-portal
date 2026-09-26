@@ -10,6 +10,7 @@ import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from './__fixtures__/mosquito-report-v2.json';
 import termiteReportV2 from './__fixtures__/termite-report-v2.json';
 import pestReportV2 from './__fixtures__/pest-report-v2.json';
+import treeShrubReportV2 from './__fixtures__/tree-shrub-report-v2.json';
 
 // Full-render guards for the lawn service report. V2 is THE lawn report
 // (owner ruling 2026-07-09, LAWN_REPORT_V2 flag retired): the server builds
@@ -1024,6 +1025,31 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
   });
 });
 
+
+describe('Governed routine observations without generated report copy', () => {
+  it.each([
+    ['pest dashboard', pestReportV2, 'Live pest activity was visible in an inspected exterior area.', false],
+    ['legacy pest summary', pestReportV2, 'Live pest activity was visible in an inspected exterior area.', true],
+    ['tree dashboard', treeShrubReportV2, 'Yellow foliage was visible; the cause was not confirmed.', false],
+  ])('renders exact governed observations once in the %s', async (_name, fixture, observation, legacy) => {
+    const payload = structuredClone(fixture);
+    payload.summary = 'The recorded visit details are available below.';
+    payload.summarySource = 'deterministic';
+    if (payload.pestReportV2) payload.pestReportV2.aiSummary = null;
+    if (legacy) payload.pestReportV2 = null;
+    payload.protocol = {
+      structuredObservations: [observation, observation, 'Internal custom technician note.', 'Thin turf was visible in the inspected area.'],
+    };
+
+    renderReport(payload);
+
+    const finding = await screen.findByText(observation);
+    expect(document.getElementById('visit-summary')).toContainElement(finding);
+    expect(screen.getAllByText(observation)).toHaveLength(1);
+    expect(document.body.textContent).not.toContain('Internal custom technician note.');
+    expect(document.body.textContent).not.toContain('Thin turf was visible in the inspected area.');
+  });
+});
 
 describe('Consolidated lawn report', () => {
   it('keeps the lawn summary once and omits the separate inspection card', async () => {
