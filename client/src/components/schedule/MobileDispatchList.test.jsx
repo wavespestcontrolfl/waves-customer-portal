@@ -184,6 +184,39 @@ describe('MobileDispatchList tie-proximity display order', () => {
     expect(names).toEqual(['Tech A Customer', 'Tech B Customer']);
   });
 
+  it('keeps each tech proximity order when techs interleave (no comparator cycle)', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    // Tech 1: the 12:00 stop is nearer, so it goes before the 11:30 stop.
+    // Tech 2 has an 11:45 stop between them. A pairwise same-tech override
+    // cycles here (12:00<11:30 by order, 11:30<11:45, 11:45<12:00 by time).
+    const t1Late = {
+      ...SERVICE, id: 'svc-t1-late', customerName: 'T1 Noon Customer',
+      technicianId: 'tech-1', windowStart: '12:00', displayOrder: 0,
+    };
+    const t1Early = {
+      ...SERVICE, id: 'svc-t1-early', customerName: 'T1 Half Customer',
+      technicianId: 'tech-1', windowStart: '11:30', displayOrder: 1,
+    };
+    const t2 = {
+      ...SERVICE, id: 'svc-t2', customerName: 'T2 Customer',
+      technicianId: 'tech-2', windowStart: '11:45', displayOrder: 0,
+    };
+    const expected = ['T2 Customer', 'T1 Noon Customer', 'T1 Half Customer'];
+    [[t1Early, t2, t1Late], [t2, t1Late, t1Early], [t1Late, t1Early, t2]].forEach((services) => {
+      const { unmount } = render(
+        <MobileDispatchList
+          mode="day"
+          date="2026-07-15"
+          services={services}
+          technicians={[{ id: 'tech-1', name: 'Tech One' }, { id: 'tech-2', name: 'Tech Two' }]}
+        />,
+      );
+      const names = screen.getAllByText(/Customer$/).map((el) => el.textContent);
+      expect(names).toEqual(expected);
+      unmount();
+    });
+  });
+
   it('falls back to plain windowStart order when displayOrder is absent (gate off)', () => {
     fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
     const first = { ...SERVICE, id: 'svc-1', customerName: 'First Customer', technicianId: 'tech-1', windowStart: '08:00' };

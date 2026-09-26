@@ -90,26 +90,46 @@ function formatWindow(svc) {
   return `${formatTimeLabel(svc.windowStart)} – ${formatTimeLabel(svc.windowEnd)}`;
 }
 
+// Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
+// `displayOrder` is a 0-based index within ONE technician's day. This list
+// can mix techs, so a pairwise "use displayOrder if same tech" comparator
+// would be non-transitive. Instead each stop gets one fixed key: walking a
+// tech's stops in displayOrder, its effective start is the max of its own
+// windowStart and the previous stop's effective start. That key never
+// decreases along a tech's order, so sorting by (effective start, then
+// displayOrder) keeps each tech's proximity order and interleaves techs by
+// time. Absent displayOrder (gate off) = plain windowStart order.
+function effectiveStarts(services) {
+  const eff = new Map();
+  const byTech = new Map();
+  services.forEach((s) => {
+    if (!s.technicianId || s.displayOrder == null || parseHHMM(s.windowStart) == null) return;
+    if (!byTech.has(s.technicianId)) byTech.set(s.technicianId, []);
+    byTech.get(s.technicianId).push(s);
+  });
+  byTech.forEach((list) => {
+    let prev = -Infinity;
+    [...list].sort((a, b) => a.displayOrder - b.displayOrder).forEach((s) => {
+      prev = Math.max(prev, parseHHMM(s.windowStart));
+      eff.set(s, prev);
+    });
+  });
+  return eff;
+}
+
 function sortByWindow(services) {
+  const eff = effectiveStarts(services);
   return [...services].sort((a, b) => {
-    const ax = parseHHMM(a.windowStart);
-    const bx = parseHHMM(b.windowStart);
+    const ax = eff.has(a) ? eff.get(a) : parseHHMM(a.windowStart);
+    const bx = eff.has(b) ? eff.get(b) : parseHHMM(b.windowStart);
     if (ax == null && bx == null) return 0;
     if (ax == null) return 1;
     if (bx == null) return -1;
-    // Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
-    // `displayOrder` is a 0-based index within ONE technician's day, not
-    // comparable across techs, so it only overrides the raw windowStart
-    // comparison between two stops on the SAME tech — that's exactly what
-    // lets a nearer stop within the 30-minute tie window show before one
-    // whose window starts slightly earlier. Absent (gate off, or either
-    // stop unassigned/on a different tech) falls back to today's plain
-    // windowStart order.
-    if (a.technicianId && a.technicianId === b.technicianId
-      && a.displayOrder != null && b.displayOrder != null) {
+    if (ax !== bx) return ax - bx;
+    if (eff.has(a) && eff.has(b) && a.technicianId === b.technicianId) {
       return a.displayOrder - b.displayOrder;
     }
-    return ax - bx;
+    return 0;
   });
 }
 
