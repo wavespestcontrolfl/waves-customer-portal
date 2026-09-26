@@ -1562,18 +1562,9 @@ router.post('/estimate', async (req, res, next) => {
     // Strip posted replay authority and derive linked-customer eligibility
     // from the same evidence resolver used by saved estimates.
     const input = await resolvePricingQuoteInput(req.body);
-    if (input.services?.rodentTrapping) {
-      // A Service Library edit may have landed on another Node process while
-      // this process's 60-second pricing sync is still fresh. The admin UI
-      // saves this result as the V1 quote, so stamp the active catalog value
-      // on this request before that customer-facing copy becomes frozen.
-      const { readRodentAdditionalCheckPriceFromCatalog } = require('../services/pricing-engine/db-bridge');
-      input.catalogPricing = {
-        ...(input.catalogPricing || {}),
-        rodentAdditionalCheckPrice: await readRodentAdditionalCheckPriceFromCatalog(db),
-      };
-    }
-    const estimate = pricingEngine.generateEstimate(input);
+    const trustedInput = await require('../services/pricing-engine/trusted-catalog-pricing')
+      .withTrustedCatalogPricing(input, { database: db });
+    const estimate = pricingEngine.generateEstimate(trustedInput);
     res.json({ estimate });
   } catch (err) { next(err); }
 });

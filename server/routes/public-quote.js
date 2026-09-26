@@ -838,16 +838,6 @@ function quoteOnRequestEstimate(keyedService, engineInput = {}) {
   };
 }
 
-async function attachRodentAdditionalCheckCatalogPrice(engineInput, dbh = db) {
-  if (!engineInput?.services?.rodentTrapping) return engineInput;
-  const { readRodentAdditionalCheckPriceFromCatalog } = require('../services/pricing-engine/db-bridge');
-  engineInput.catalogPricing = {
-    ...(engineInput.catalogPricing || {}),
-    rodentAdditionalCheckPrice: await readRodentAdditionalCheckPriceFromCatalog(dbh),
-  };
-  return engineInput;
-}
-
 // Keyed quotes carry the catalog name as the lead label — identity wins —
 // EXCEPT the standalone cockroach package, whose engine line renders the
 // admin-editable regular_standalone display name: the lead, notifications
@@ -1557,7 +1547,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
-    const engineInput = {
+    let engineInput = {
       homeSqFt: sqft,
       // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
       // reads footprintSqFt BEFORE homeSqFt, so the synthetic confirm default can't
@@ -1960,7 +1950,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // active catalog row in this request and pass the price into the engine;
     // the process-local pricing singleton is only a fallback for paths that
     // have no database boundary.
-    await attachRodentAdditionalCheckCatalogPrice(engineInput, db);
+    engineInput = await require('../services/pricing-engine/trusted-catalog-pricing')
+      .withTrustedCatalogPricing(engineInput, { database: db });
     const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
       isManualQuoteLine(line)
@@ -4357,7 +4348,6 @@ module.exports._internals = {
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,
-  attachRodentAdditionalCheckCatalogPrice,
   isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
   findExistingCustomerByContact,

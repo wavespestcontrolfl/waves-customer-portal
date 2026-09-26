@@ -70,12 +70,26 @@ describe('a new trapping quote renders the 1-check copy on the public page path'
     expect(page.aiBody).toMatch(/the setup visit and one trap check for/);
     expect(page.hero.sub).not.toMatch(/until the activity stops/);
   });
+
+  test('non-trapping rows do not gain nullable allowance fields', () => {
+    const result = {
+      oneTime: {
+        items: [{ service: 'flea', name: 'Flea Treatment', price: 250 }],
+      },
+    };
+    const [row] = normalizeOneTimeBreakdown({ result }).items;
+    expect(row).toMatchObject({ service: 'flea', label: 'Flea Treatment', amount: 250 });
+    expect(row).not.toHaveProperty('includedFollowUps');
+    expect(row).not.toHaveProperty('includedCallbacks');
+    expect(row).not.toHaveProperty('unlimitedCallbacks');
+    expect(row).not.toHaveProperty('includedScope');
+  });
 });
 
 describe('public trapping quote catalog freshness', () => {
   const bridge = require('../services/pricing-engine/db-bridge');
   const { buildPricingBundle } = require('../routes/estimate-public');
-  const { attachRodentAdditionalCheckCatalogPrice } = require('../routes/public-quote')._internals;
+  const { withTrustedCatalogPricing } = require('../services/pricing-engine/trusted-catalog-pricing');
   const { clearAllEstimatePricingCache } = require('../services/estimate-pricing-cache');
 
   function liveRodentEstimate(id) {
@@ -106,11 +120,31 @@ describe('public trapping quote catalog freshness', () => {
 
   test('quote creation attaches the catalog price as a request-scoped engine input', async () => {
     jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog').mockResolvedValue(110.25);
-    const input = { services: { rodentTrapping: { plan: 'standard' } } };
+    const input = {
+      services: { rodentTrapping: { plan: 'standard' } },
+      catalogPricing: { rodentAdditionalCheckPrice: 1 },
+    };
 
-    await expect(attachRodentAdditionalCheckCatalogPrice(input, {})).resolves.toBe(input);
+    const trusted = await withTrustedCatalogPricing(input, { database: {} });
 
-    expect(input.catalogPricing).toEqual({ rodentAdditionalCheckPrice: 110.25 });
+    expect(trusted).not.toBe(input);
+    expect(trusted.catalogPricing).toEqual({ rodentAdditionalCheckPrice: 110.25 });
+    expect(input.catalogPricing).toEqual({ rodentAdditionalCheckPrice: 1 });
+  });
+
+  test('a non-trapping quote drops a posted catalog override without changing its shape otherwise', async () => {
+    const readCatalog = jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog');
+    const posted = {
+      homeSqFt: 1800,
+      services: { flea: {} },
+      catalogPricing: { rodentAdditionalCheckPrice: 1 },
+    };
+
+    await expect(withTrustedCatalogPricing(posted, { database: {} })).resolves.toEqual({
+      homeSqFt: 1800,
+      services: { flea: {} },
+    });
+    expect(readCatalog).not.toHaveBeenCalled();
   });
 
   test('a quote reads the catalog even when this process still holds the old bridge price', async () => {
@@ -163,5 +197,50 @@ describe('public trapping quote catalog freshness', () => {
 
     expect(bundle).toMatchObject({ snapshotHit: true, source: 'frozen_rodent_snapshot' });
     expect(readCatalog).not.toHaveBeenCalled();
+  });
+});
+
+describe('active admin V2 calculator catalog freshness', () => {
+  const pricingEngine = require('../services/pricing-engine');
+  const bridge = require('../services/pricing-engine/db-bridge');
+  const propertyRouter = require('../routes/property-lookup-v2');
+  const handler = propertyRouter.stack
+    .find((layer) => layer.route?.path === '/calculate-estimate' && layer.route.methods.post)
+    .route.stack.at(-1).handle;
+
+  afterEach(() => jest.restoreAllMocks());
+
+  test('another process catalog edit overrides this process stale 60-second singleton', async () => {
+    RODENT.trapping.additionalCheckPrice = 95;
+    jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
+    const readCatalog = jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog').mockResolvedValue(110.25);
+    const req = {
+      body: {
+        profile: {
+          homeSqFt: 2000,
+          lotSqFt: 10000,
+          stories: 1,
+          propertyType: 'single_family',
+          zone: 'A',
+          features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+        },
+        selectedServices: ['RODENT_TRAP'],
+        options: {},
+      },
+    };
+    let statusCode = 200;
+    let payload;
+    const res = {
+      status(code) { statusCode = code; return this; },
+      json(body) { payload = body; return this; },
+    };
+
+    await handler(req, res);
+
+    expect(statusCode).toBe(200);
+    const trapping = payload.oneTime.specItems.find((item) => item.service === 'rodent_trapping');
+    expect(trapping.detail).toContain('$110.25');
+    expect(trapping.pricingBasis.additionalCheckPrice).toBe(110.25);
+    expect(readCatalog).toHaveBeenCalledTimes(1);
   });
 });

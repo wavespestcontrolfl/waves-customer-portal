@@ -17661,10 +17661,13 @@ function normalizeOneTimeBreakdown(estData) {
         creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
         includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
         // Trapping allowance the copy pack renders (codex #4932 pre-push P1).
-        includedFollowUps: item.includedFollowUps ?? null,
-        includedCallbacks: item.includedCallbacks ?? null,
-        unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
-        includedScope: item.includedScope || null,
+        // Keep every other service's public item shape byte-compatible.
+        ...(service === 'rodent_trapping' ? {
+          includedFollowUps: item.includedFollowUps ?? null,
+          includedCallbacks: item.includedCallbacks ?? null,
+          unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
+          includedScope: item.includedScope || null,
+        } : {}),
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
         surfaceSqFt: Number(item.surfaceSqFt) > 0 ? Number(item.surfaceSqFt) : null,
@@ -24996,17 +24999,11 @@ async function buildPricingBundleInner(estimate) {
   // process handled the Service Library edit.
   const v1 = readV1Shape(estData);
   let engineInputs = v1 ? null : extractEngineInputs(estData);
-  if (engineInputs?.services?.rodentTrapping) {
-    const { readRodentAdditionalCheckPriceFromCatalog } = require('../services/pricing-engine/db-bridge');
-    const rodentAdditionalCheckPrice = await readRodentAdditionalCheckPriceFromCatalog(db);
-    engineInputs = {
-      ...engineInputs,
-      catalogPricing: {
-        ...(engineInputs.catalogPricing || {}),
-        rodentAdditionalCheckPrice,
-      },
-    };
-    clearEstimatePricingCache(estimate);
+  if (engineInputs) {
+    const hasRodentTrapping = !!engineInputs.services?.rodentTrapping;
+    engineInputs = await require('../services/pricing-engine/trusted-catalog-pricing')
+      .withTrustedCatalogPricing(engineInputs, { database: db });
+    if (hasRodentTrapping) clearEstimatePricingCache(estimate);
   }
 
   const cached = getEstimatePricingCache(estimate);
