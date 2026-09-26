@@ -51,13 +51,14 @@ jest.mock('../services/collections/contact-ledger', () => ({
   markDelivered: jest.fn(async () => true),
 }));
 jest.mock('../services/billing-reminder-delivery', () => ({
+  reminderProgress: jest.fn(async () => []),
   sendReminderChannels: jest.fn(),
 }));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AccountMembershipEmail = require('../services/account-membership-email');
-const { sendReminderChannels } = require('../services/billing-reminder-delivery');
+const { reminderProgress, sendReminderChannels } = require('../services/billing-reminder-delivery');
 const { runSweep } = require('../services/previsit-balance-reminder');
 
 function chain({ result = [], first } = {}) {
@@ -129,6 +130,7 @@ function armReleaseChain() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  reminderProgress.mockResolvedValue([]);
   process.env.PREVISIT_BALANCE_REMINDER = 'true';
   sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
   AccountMembershipEmail.sendPrevisitBalanceReminder.mockResolvedValue({ ok: true });
@@ -350,4 +352,31 @@ test('the dues allowance is forwarded to the shared helper', async () => {
   sendReminderChannels.mockResolvedValueOnce({ complete: true, deliveredNow: ['sms'], results: {} });
   await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(sendReminderChannels.mock.calls[0][0]).toHaveProperty('offLedgerBalanceCents');
+});
+
+// A released-claim retry must not be denied by the policy's recent-contact
+// spacing because of this appointment's OWN earlier reservations: only the
+// resumed episode's ledger ids are excluded from the policy consult.
+test('a retry excludes only the resumed episode reservations from the policy check', async () => {
+  const { collectionsChannelVerdict } = require('../services/collections/rail-guard');
+  reminderProgress.mockResolvedValueOnce([
+    { metadata: { notificationEventKey: 'previsit-balance:ss-other' }, entries: [{ id: 'led-other' }] },
+    { metadata: { notificationEventKey: 'previsit-balance:ss-1' }, entries: [{ id: 'led-sms' }, { id: 'led-email' }] },
+  ]);
+  armOneVisit({ notificationPrefs: { billing_channels: ['sms', 'email'] } });
+  sendReminderChannels.mockResolvedValueOnce({ complete: true, deliveredNow: ['email'], results: {} });
+  await runSweep({ now: new Date('2026-08-15T15:00:00Z') });
+  expect(reminderProgress).toHaveBeenCalledWith('cust-1', 'previsit_balance_reminder', expect.arrayContaining(['sms', 'email']));
+  for (const [args] of collectionsChannelVerdict.mock.calls) {
+    expect(args.excludeLedgerIds).toEqual(['led-sms', 'led-email']);
+  }
+});
+
+test('an unreadable episode history skips before any claim', async () => {
+  reminderProgress.mockRejectedValueOnce(new Error('ledger read failed'));
+  const { claimChain } = armOneVisit({ notificationPrefs: { billing_channels: ['email'] } });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(sendReminderChannels).not.toHaveBeenCalled();
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(result).toMatchObject({ sent: 0, skipped: 1 });
 });

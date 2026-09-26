@@ -35,7 +35,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
-const { sendReminderChannels } = require('./billing-reminder-delivery');
+const { reminderProgress, sendReminderChannels } = require('./billing-reminder-delivery');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
 const EMAIL_TEMPLATE_KEY = 'billing.previsit_balance';
@@ -312,9 +312,22 @@ async function runSweep({ now = new Date() } = {}) {
       let smsPolicyPermitted = false;
       let emailPolicyPermitted = false;
       if (explicitChannels !== null) {
+        // This appointment's own earlier reservations (a released-claim
+        // retry) must not trip the policy's recent-contact spacing against
+        // the very episode being resumed; unrelated contacts still count.
+        let episodeLedgerIds;
+        try {
+          const progress = await reminderProgress(visit.customer_id, 'previsit_balance_reminder', explicitChannels);
+          const episode = progress.find((event) => event.metadata.notificationEventKey === `previsit-balance:${visit.id}`);
+          episodeLedgerIds = (episode?.entries || []).map((entry) => entry.id);
+        } catch (progressErr) {
+          logger.warn(`[previsit-balance] reminder progress read failed for visit ${visit.id}: ${progressErr.message}`);
+          skipped++;
+          continue;
+        }
         const verdicts = [];
         for (const channel of explicitChannels) {
-          verdicts.push(await collectionsChannelVerdict({ ...consult, channel }));
+          verdicts.push(await collectionsChannelVerdict({ ...consult, channel, excludeLedgerIds: episodeLedgerIds }));
         }
         const permittedVerdicts = verdicts.filter((v) => v.permitted);
         if (!permittedVerdicts.length) { skipped++; continue; }
