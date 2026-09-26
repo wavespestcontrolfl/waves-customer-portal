@@ -14,8 +14,13 @@ const MODELS = require('../config/models'); // adjust path
 // MODELS.DEEP / MODELS.FLAGSHIP / MODELS.WORKHORSE / MODELS.FAST / MODELS.VOICE / MODELS.VISION
 ```
 
-These are **quality tiers, not cost tiers** (owner directive: best model
-regardless of cost). Every tier is env-overridable (`MODEL_FLAGSHIP`, etc.)
+Tiers are **workload tiers** (registry header, directive 2026-07-16 and the
+2026-09-25 cost audit): the least-expensive model that is reliably strong for
+the lane, Opus reserved for work a human or a customer reads, Fable explicit
+only. The test for a lane: if nobody reads the output (a classifier, an
+extractor, a verifier whose verdict is consumed by code), it belongs on
+`fastStructured` / FAST / WORKHORSE, not `highStakes` / FLAGSHIP. Every tier
+is env-overridable (`MODEL_FLAGSHIP`, etc.)
 so a model swap is a Railway var flip, never a code hunt. A per-feature pin
 that can't use a tier still lives in `models.js` under the `MODEL_<NAME>`
 registry convention (see `LAWN_CHALLENGE`) — never in the service file.
@@ -37,6 +42,38 @@ never from docs, which go stale.
 | `FAST` | High-volume classification, tagging, signals |
 | `VOICE` | Customer-facing copy where warm/natural beats raw reasoning: SMS replies, service recaps, social posts. High-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site |
 | `VISION` | Image scoring, called with the SDK directly. No Anthropic call sends `temperature` (current models 400 on sampling controls); the Gemini scorer keeps its own |
+
+## 2b. Reading a Message — never `content[0]`
+
+Always-thinking models (Opus 5.5, Fable) put a `thinking` block ahead of the
+text block. Read the answer with `anthropicText(response)` from
+`services/llm/call.js` (first TEXT block) or `stripThinkingBlocks` from
+`deep.js` — never `content[0].text`. Tool loops push `response.content` back
+whole (thinking blocks included) so the next turn stays valid.
+
+Opus 5.5 readiness (2026-09-25): request sizing lives in
+`server/services/llm/anthropic-wire.js`. `anthropicMaxTokens(model, cap)` raises
+a cap to a thinking floor on models that think by default (Opus 5+, Fable,
+Mythos — thinking spends from `max_tokens` ahead of the text block) and leaves
+it alone everywhere else; `anthropicEffortConfig(model)` spreads the
+`MODEL_ANTHROPIC_EFFORT` pin (5.5 defaults to `medium`, 4.8 to `high`) onto
+models that accept every effort level (Opus 4.7+, Sonnet 5+, Fable, Mythos).
+The adapter and the DEEP helper apply both; **a new direct SDK call on an Opus
+tier must too** (`max_tokens: anthropicMaxTokens(MODELS.X, n)` plus
+`...anthropicEffortConfig(MODELS.X)`). `thinking: { type: 'disabled' }` and
+forced `tool_choice` any/tool are 400s on 5.5 — only the two VOICE lanes send
+the former (VOICE is Sonnet) and nothing sends the latter. Flip order in the
+registry header.
+
+## 2c. Caching
+
+The adapter and the DEEP helper both put an ephemeral breakpoint on the
+system prompt, so repeat calls inside five minutes read it back at ~0.1x.
+Minimum cacheable prefix: 512 tokens on Opus 5 / 5.5 / Fable, 1024 on Opus 4.8
+and Sonnet 5, 2048 on Opus 4.7, 4096 on Opus 4.5 / 4.6 and Haiku 4.5 — a
+shorter prompt never caches, whatever the TTL (the previsit brief's ~450-token
+prompt is below all of them). Check `cached_input_tokens` in `llm_dispatch_log`
+before and after any caching change.
 
 ## 3. DEEP call sites — the helper is mandatory
 

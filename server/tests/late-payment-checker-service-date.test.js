@@ -11,7 +11,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted' })),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (templateKey, vars) =>
@@ -40,6 +40,7 @@ function chain({ result = [], first } = {}) {
   q.whereIn = jest.fn(() => q);
   q.whereNull = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
+  q.orderBy = jest.fn(() => q);
   q.whereNot = jest.fn(() => q);
   q.orWhereNot = jest.fn(() => q);
   q.orWhereNull = jest.fn(() => q);
@@ -59,6 +60,9 @@ function setDbQueues(queues) {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) {
       if (table === 'payment_plans') return chain({ first: undefined });
+      // No prefs row = legacy NULL arrays (a read failure is a distinct hold).
+      if (table === 'notification_prefs') return chain({ first: undefined });
+      if (table === 'collections_contact_ledger') return chain({ result: [] });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();

@@ -14,11 +14,15 @@ jest.mock('../models/db', () => {
     const builder = {};
     let limitN = null;
     let offsetN = 0;
-    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'clone']) {
+    for (const m of ['where', 'whereNull', 'whereExists', 'clone']) {
       builder[m] = () => builder;
     }
+    builder.select = (...args) => { state.selectArgs = args; return builder; };
     builder.orderByRaw = (sql) => { state.orderBy = String(sql); return builder; };
-    builder.havingRaw = (sql, bindings) => { state.having = [String(sql), bindings]; return builder; };
+    builder.whereRaw = (sql, bindings) => { state.cutoff = [String(sql), bindings]; return builder; };
+    // Postgres rejects HAVING without GROUP BY over plain columns; the
+    // cutoff must stay a WHERE.
+    builder.havingRaw = () => { throw new Error('HAVING without GROUP BY: Postgres rejects this query'); };
     builder.limit = (n) => { limitN = n; return builder; };
     builder.offset = (n) => { offsetN = n; state.pages = (state.pages || 0) + 1; return builder; };
     builder.then = (resolve, reject) => Promise.resolve(
@@ -26,7 +30,7 @@ jest.mock('../models/db', () => {
     ).then(resolve, reject);
     return builder;
   };
-  dbFn.raw = (sql) => ({ toString: () => sql });
+  dbFn.raw = (sql, bindings) => ({ toString: () => sql, sql, bindings });
   dbFn.__state = state;
   return dbFn;
 });
@@ -169,6 +173,26 @@ test('a Feb–Oct seasonal plan is due on the scheduler\'s next seasonal slot (c
   expect(await overdue('2027-02-17T17:00:00Z', [visit('october-visit', '2026-10-20', seasonal())])).toEqual([['october-visit', 119]]);
 });
 
+test('a generic ID-less T&S plan row supplies its own cadence (codex r35 on #4786)', async () => {
+  db.__state.rows = [
+    // "Tree & Shrub Care" booked quarterly with no catalog link: 90, not the label's 60.
+    { ...row('generic-quarterly', 'Tree & Shrub Care', 75), active_plan: { service_key: null, recurring_pattern: 'quarterly', recurring_interval_days: null } },
+    { ...row('generic-quarterly-due', 'Tree & Shrub Care', 95), active_plan: { service_key: null, recurring_pattern: 'quarterly', recurring_interval_days: null } },
+    // ...and every 6 weeks: 42, not 60.
+    { ...row('generic-6wk-due', 'Tree & Shrub Care', 50), active_plan: { service_key: null, recurring_pattern: 'every_6_weeks', recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['generic-6wk-due', 42], ['generic-quarterly-due', 90]]);
+  // The plan lookup keeps rows no catalog row claims when their label is a
+  // T&S plan, on both the primary line and add-on lines.
+  const plan = db.__state.selectArgs.find((a) => a && typeof a.sql === 'string' && a.sql.includes('row_to_json(plan)'));
+  expect(plan.sql.match(/LEFT JOIN services ON/g)).toHaveLength(2);
+  expect(plan.sql).toMatch(/services\.id IS NULL AND scheduled_services\.service_type ~\* \?/);
+  expect(plan.sql).toMatch(/services\.id IS NULL AND scheduled_service_addons\.service_name ~\* \?/);
+  expect(plan.bindings.filter((b) => b === 'tree.*shrub')).toHaveLength(2);
+  expect((plan.sql.match(/\?/g) || []).length).toBe(plan.bindings.length);
+});
+
 test('other categories keep their fixed interval', async () => {
   db.__state.rows = [{ ...row('pest', 'Quarterly Pest Control Service', 100) }];
   const result = await executeTool('find_overdue_customers', { service_category: 'pest' });
@@ -275,18 +299,18 @@ test('the SQL prefilter admits a customer due exactly at the shortest supported 
   // prefilter keeps every row the per-customer cadence check can mark
   // overdue: 16:00Z on Sept 25 is Sept 25 ET; one day before is Sept 24 — inclusive.
   db.__state.rows = [];
-  db.__state.having = null;
+  db.__state.cutoff = null;
   await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 0 });
-  expect(db.__state.having[0]).toMatch(/\) <= \?$/);
-  expect(db.__state.having[1][1]).toBe('2026-09-24');
+  expect(db.__state.cutoff[0]).toMatch(/\) <= \?$/);
+  expect(db.__state.cutoff[1][1]).toBe('2026-09-24');
   // 21:00 ET on Sept 25 (Sept 26 UTC): still Sept 25 on the Eastern calendar.
   jest.setSystemTime(new Date('2026-09-26T01:00:00Z'));
   await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 3 });
-  expect(db.__state.having[1][1]).toBe('2026-09-21');
+  expect(db.__state.cutoff[1][1]).toBe('2026-09-21');
   // Other categories keep their own cadence as the prefilter.
   jest.setSystemTime(NOW);
   await executeTool('find_overdue_customers', { service_category: 'pest', overdue_days: 0 });
-  expect(db.__state.having[1][1]).toBe('2026-06-27');
+  expect(db.__state.cutoff[1][1]).toBe('2026-06-27');
 });
 
 test('a weekly T&S plan is reported at its own cadence, not held back to 42 days (codex r30)', async () => {
@@ -295,4 +319,62 @@ test('a weekly T&S plan is reported at its own cadence, not held back to 42 days
   ];
   const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
   expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days, c.days_overdue])).toEqual([['weekly-due', 7, 1]]);
+});
+
+// Edge cases below are a live-verification pass on codex r35 (this session
+// did not author the r35 fix). Backed by a real PostgreSQL run against a
+// migrated schema (see the handback report) that exercised the actual
+// active-plan LEFT JOIN/label SQL directly — bypassing this file's mocked
+// db, which only exercises the JS cadence-resolution side below — plus a
+// direct comparison against the merge-base's INNER JOIN text.
+test('a generic ID-less row with NO recurrence at all (pattern and interval both null) falls back to the label default, not a crash', async () => {
+  db.__state.rows = [
+    // 65 days since last service: overdue at the label default (60) but
+    // would NOT be overdue at any real T&S cadence shorter than that.
+    { ...row('generic-no-recurrence', 'Tree & Shrub Care', 65), active_plan: { service_key: null, recurring_pattern: null, recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['generic-no-recurrence', 60]]);
+});
+
+test('a generic ID-less row on an unrecognized cadence string (e.g. "every_3_months") falls to the seeder\'s ~quarterly fallback, not a crash', async () => {
+  // The seeder's canonical name is 'quarterly' (-> 90); 'every_3_months' is
+  // not in its pattern tables, so intervalDaysForPattern returns the
+  // 91-day FALLBACK_RECURRENCE_GAP_DAYS — a plausible free-text/legacy
+  // value on a generic row, and a real behavior difference from 'quarterly'
+  // worth pinning explicitly (not a bug in this PR; recurring-appointment-
+  // seeder.js's fallback predates it).
+  db.__state.rows = [
+    { ...row('not-due-at-91', 'Tree & Shrub Care', 88), active_plan: { service_key: null, recurring_pattern: 'every_3_months', recurring_interval_days: null } },
+    { ...row('due-at-91', 'Tree & Shrub Care', 92), active_plan: { service_key: null, recurring_pattern: 'every_3_months', recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['due-at-91', 91]]);
+});
+
+test('the active_plan JSON is read by snake_case service_key only; a stray camelCase serviceKey field is ignored, not crashed on', async () => {
+  // row_to_json() always emits snake_case column names, so a real SQL
+  // response can never carry a camelCase serviceKey — this pins that the
+  // JS reader (planIntervalDays) does not accidentally accept one, which
+  // would silently pick up the wrong (shorter) catalog cadence.
+  db.__state.rows = [
+    { ...row('camel-key-ignored', 'Tree & Shrub Care', 65), active_plan: { serviceKey: 'tree_shrub_6week', service_key: null, recurring_pattern: null, recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  // Falls to the label-text default (60), NOT the camelCase field's 42.
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['camel-key-ignored', 60]]);
+});
+
+test('the generic-label fallback pattern is literal "tree...shrub" text, not the "ornamental" alias the client-side retired-sale matcher also accepts (documents an existing, unchanged boundary)', () => {
+  // This regex (patterns.tree_shrub in findOverdueCustomers) is shared with
+  // the category prefilter elsewhere in this same function — this fix
+  // reuses it as-is rather than introducing a second definition, so an
+  // "Ornamental Care" free-text row (no literal tree/shrub substring) was
+  // never covered by the category scan at all, before or after this PR.
+  // (Contrast client/src/constants/retiredSaleLabels.js's TREE_SHRUB_LABEL_RE,
+  // an unrelated matcher for a different feature, which DOES special-case
+  // \bornamentals?\b.)
+  const label = 'tree.*shrub';
+  expect('Tree & Shrub Care').toMatch(new RegExp(label, 'i'));
+  expect('Ornamental Care').not.toMatch(new RegExp(label, 'i'));
 });

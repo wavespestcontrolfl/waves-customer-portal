@@ -155,6 +155,28 @@ describe('baseline', () => {
   });
 });
 
+describe('App collections policy', () => {
+  test.each(['late_payment', 'balance_reminder'])('%s uses App policy without Text or Email-specific holds', async (purpose) => {
+    armAllowedBaseline({ flags: [
+      { flag: 'do_not_text', released_at: null },
+      { flag: 'do_not_email', released_at: null },
+    ] });
+    const result = await ContactPolicy.evaluate('cust-1', { channel: 'push', purpose, now: WED_11AM_EDT });
+    expect(result.allowed).toBe(true);
+    expect(readCachedLineType).not.toHaveBeenCalled();
+    expect(ConsentProvenance.resolve).not.toHaveBeenCalled();
+  });
+
+  test('a recent live conversation still holds App outreach', async () => {
+    armAllowedBaseline({ ledger: [{ channel: 'voice', source: 'voice_agent',
+      occurred_at: new Date(WED_11AM_EDT.getTime() - 2 * 86400000),
+      metadata: { outcome: 'conversation_completed', live_conversation: true } }] });
+    const result = await ContactPolicy.evaluate('cust-1', { channel: 'push', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(result.allowed).toBe(false);
+    expect(result.denialReasons).toContain('live_conversation_within_7d');
+  });
+});
+
 describe('structural denials', () => {
   test('unknown channel denies before any read', async () => {
     const result = await ContactPolicy.evaluate('cust-1', { channel: 'fax', now: WED_11AM_EDT });
@@ -291,7 +313,7 @@ describe('structural denials', () => {
 });
 
 describe('flag matrix — each flag vs each channel', () => {
-  const ALL = ['sms', 'email', 'voice', 'manual_call'];
+  const ALL = ['sms', 'email', 'push', 'voice', 'manual_call'];
   const EXPECTED = {
     do_not_collect: ALL,
     collection_hold: ALL,
@@ -499,7 +521,7 @@ describe('voice pilot caps (purpose late_payment)', () => {
   });
 
   test('payment_plan_active blocks every channel (A2 mirrors its PAYMENT_PLAN state here)', async () => {
-    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.payment_plan_active).toEqual(['sms', 'email', 'voice', 'manual_call']);
+    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.payment_plan_active).toEqual(['sms', 'email', 'push', 'voice', 'manual_call']);
     armAllowedBaseline({ flags: [{ flag: 'payment_plan_active', customer_id: 'cust-1', released_at: null }] });
     expect((await evalVoice()).denialReasons).toContain('flag_payment_plan_active');
     armAllowedBaseline({ flags: [{ flag: 'payment_plan_active', customer_id: 'cust-1', released_at: null }] });
@@ -536,8 +558,8 @@ describe('voice pilot caps (purpose late_payment)', () => {
     const voice = await evalVoice();
     expect(voice.allowed).toBe(false);
     expect(voice.denialReasons).toContain('flag_pays_by_check');
-    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.pays_by_check).toEqual(['voice', 'sms', 'email']);
-    for (const channel of ['sms', 'email']) {
+    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.pays_by_check).toEqual(['voice', 'sms', 'email', 'push']);
+    for (const channel of ['sms', 'email', 'push']) {
       withFlag();
       const late = await ContactPolicy.evaluate('cust-1', { channel, purpose: 'late_payment', now: WED_11AM_EDT });
       expect(late.denialReasons).toContain('flag_pays_by_check');
@@ -809,7 +831,7 @@ describe('canonical suppression list', () => {
   }
 
   test('manual_dnc denies EVERY channel, email included', async () => {
-    for (const ch of ['voice', 'manual_call', 'sms', 'email']) {
+    for (const ch of ['voice', 'manual_call', 'sms', 'email', 'push']) {
       armWithSuppression('manual_dnc');
       const purpose = ch === 'email' || ch === 'sms' ? 'late_payment' : 'late_payment';
       const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose, now: WED_11AM_EDT });
@@ -820,7 +842,7 @@ describe('canonical suppression list', () => {
 
   test('STOP-style opt-outs and wrong_number deny EVERY channel (canonical HARD semantics, codex r3)', async () => {
     for (const reason of ['opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
-      for (const ch of ['voice', 'manual_call', 'sms', 'email']) {
+      for (const ch of ['voice', 'manual_call', 'sms', 'email', 'push']) {
         armWithSuppression(reason);
         const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose: 'late_payment', now: WED_11AM_EDT });
         expect(result.denialReasons).toContain(`suppression_${reason}`);

@@ -68,6 +68,13 @@ const {
 // never cacheable.
 router.use(noStore);
 
+// Also enforce the dark response before local limits when this router is
+// mounted independently of index.js's pre-limiter guard.
+router.use((req, res, next) => {
+  if (!reserviceSelfServeEnabled()) return res.status(404).json({ error: 'Not found' });
+  return next();
+});
+
 // Token format: 64-char lowercase hex (encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 

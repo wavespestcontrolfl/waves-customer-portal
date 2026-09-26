@@ -136,6 +136,51 @@ function assessment(overrides = {}) {
   };
 }
 
+describe('reviewed tree scores — missing evidence stays unknown', () => {
+  const partialScores = {
+    foliageFullness: 82, leafColorVigor: 76, pestActivity: null,
+    diseaseLeafSpot: 88, waterHeatStress: 73, overallScore: null,
+  };
+
+  test('retains partial details without an overall healthy or all-clear claim', () => {
+    const report = buildTreeShrubReportV2({ treeShrubAssessment: assessment({
+      scores: partialScores, observations: '', photos: [],
+    }) });
+    expect(report.snapshot).toMatchObject({
+      overallScore: null, status: 'tracking', noActionNeeded: false,
+      statusHeadline: 'Some plant-health scores are available',
+      peaceOfMind: 'Recorded plant-health scores are shown below. An overall score is unavailable for this visit.',
+    });
+    expect(report.diagnosis.find((category) => category.key === 'pest_activity'))
+      .toMatchObject({ score: null, status: 'tracking', explanation: '' });
+    expect(report.diagnosis.filter((category) => category.score != null)).toHaveLength(4);
+    expect(report.insights).toEqual([]);
+    expect(report.smsSummary).not.toMatch(/healthy|no action needed/i);
+  });
+
+  test('all hidden metrics produce no healthy reassurance or inspection claims', () => {
+    const scores = Object.fromEntries(Object.keys(partialScores).map((key) => [key, null]));
+    const report = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ scores, observations: '', photos: [] }) });
+    expect(report.snapshot).toMatchObject({
+      overallScore: null, status: 'tracking', noActionNeeded: false,
+      statusHeadline: 'Plant-health details unavailable',
+    });
+    expect(report.insights).toEqual([]);
+    expect(JSON.stringify(report)).not.toMatch(/healthy|good shape|full inspection|no action needed|protected/i);
+  });
+
+  test.each([58, 40])('retained pest score %i still surfaces its issue without calling an unknown overall healthy', (pestActivity) => {
+    const report = buildTreeShrubReportV2({ treeShrubAssessment: assessment({
+      scores: { ...partialScores, pestActivity, leafColorVigor: null }, observations: '', photos: [],
+    }) });
+    expect(report.snapshot.overallScore).toBeNull();
+    expect(report.snapshot.statusHeadline).toMatch(/pest pressure/);
+    expect(report.snapshot.statusHeadline).not.toMatch(/healthy/i);
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.insights.some((item) => item.category === 'pest_pressure')).toBe(true);
+  });
+});
+
 describe('scoreStatus — bands match the lawn report (85/70/55) + tracking', () => {
   it.each([
     [95, 'strong'], [85, 'strong'], [72, 'healthy'], [70, 'healthy'],
