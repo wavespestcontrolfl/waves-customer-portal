@@ -29,9 +29,22 @@ const ARGS = Object.fromEntries(
 );
 
 const dryRun = !!(ARGS['dry-run'] || ARGS.dryrun);
-const perDay = ARGS['per-day'] ? parseInt(ARGS['per-day'], 10) : undefined;
-const minGaps = ARGS['min-gaps'] ? parseInt(ARGS['min-gaps'], 10) : undefined;
-const limit = ARGS.limit ? parseInt(ARGS.limit, 10) : null;
+
+// A flag that is present but not a positive integer is an operator typo —
+// fail closed with exit 1 rather than widening the run to the defaults
+// (`--limit=abc` must never become "unlimited"; fallback P2).
+function positiveIntFlag(name) {
+  const raw = ARGS[name];
+  if (raw === undefined) return undefined;
+  if (raw === true || !/^\d+$/.test(String(raw)) || parseInt(raw, 10) < 1) {
+    console.error(`seed-citability-backfill: --${name} must be a positive integer (got ${JSON.stringify(raw)})`);
+    process.exit(1);
+  }
+  return parseInt(raw, 10);
+}
+const perDay = positiveIntFlag('per-day');
+const minGaps = positiveIntFlag('min-gaps');
+const limit = positiveIntFlag('limit') ?? null;
 
 (async function main() {
   try {

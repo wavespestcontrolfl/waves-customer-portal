@@ -99,10 +99,18 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
     expect(row.available_at).toBeNull();
     expect(row.expires_at.getTime()).toBe(now.getTime() + 45 * 86400_000);
   });
-  test('availableAtFor: day 0 is claimable now; later days land at midnight ET (04:00Z in EDT)', () => {
+  test('availableAtFor: day 0 is claimable now; later days land at midnight ET via the shared ET parser (DST-correct)', () => {
     expect(availableAtFor(now, 0)).toBeNull();
     expect(availableAtFor(now, 1).toISOString()).toBe('2026-09-26T04:00:00.000Z');
     expect(availableAtFor(now, 3).toISOString()).toBe('2026-09-28T04:00:00.000Z');
+    // Fall-back day (2026-11-01): midnight ET is still EDT → 04:00Z, and the
+    // day after is EST → 05:00Z. Spring-forward day (2027-03-14): midnight is
+    // still EST → 05:00Z. A noon-UTC offset probe got both wrong.
+    expect(availableAtFor(new Date('2026-10-31T15:00:00Z'), 1).toISOString()).toBe('2026-11-01T04:00:00.000Z');
+    expect(availableAtFor(new Date('2026-10-31T15:00:00Z'), 2).toISOString()).toBe('2026-11-02T05:00:00.000Z');
+    expect(availableAtFor(new Date('2027-03-13T15:00:00Z'), 1).toISOString()).toBe('2027-03-14T05:00:00.000Z');
+    // Late-evening ET "now" still counts as that ET day (etDateString, not UTC).
+    expect(availableAtFor(new Date('2026-09-26T02:30:00Z'), 1).toISOString()).toBe('2026-09-26T04:00:00.000Z');
   });
   test('planRows: blog collection only, minGaps filter, worst-first, perDay pacing, limit', () => {
     const rows = seeder.planRows(corpus(), { now, perDay: 1, minGaps: 2 });

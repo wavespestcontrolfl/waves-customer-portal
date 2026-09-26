@@ -45,6 +45,7 @@ const logger = require('../logger');
 const { isEnabled } = require('../../config/feature-gates');
 const fm = require('../content-astro/frontmatter');
 const { _internals: { maxClaimAttempts } } = require('./opportunity-queue');
+const { parseETDateTime, etDateString } = require('../../utils/datetime-et');
 const { _internals: gate } = require('./content-quality-gate');
 
 const CITABILITY_BACKFILL_BUCKET = 'citability_backfill';
@@ -133,16 +134,14 @@ function dedupeKeyFor(url) {
 
 // ET-midnight of today + dayOffset, so rows self-activate one batch per day
 // (claimNext/peek filter available_at IS NULL OR available_at <= now()).
+// Calendar arithmetic on the ET date string, then the shared ET parser
+// resolves the wall-clock midnight — no private offset inference (a noon
+// probe read the wrong offset on DST transition days; fallback P1).
 function availableAtFor(now, dayOffset) {
   if (dayOffset <= 0) return null;
-  const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-  const [y, m, d] = etDate.split('-').map(Number);
-  // Midnight ET expressed in UTC: compute noon UTC of that calendar day
-  // then shift to the ET offset in force on that day.
-  const probe = new Date(Date.UTC(y, m - 1, d + dayOffset, 12, 0, 0));
-  const etHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(probe));
-  const offsetHours = 12 - etHour; // 4 (EDT) or 5 (EST)
-  return new Date(Date.UTC(y, m - 1, d + dayOffset, offsetHours, 0, 0));
+  const [y, m, d] = etDateString(now).split('-').map(Number);
+  const ymd = new Date(Date.UTC(y, m - 1, d + dayOffset)).toISOString().slice(0, 10);
+  return parseETDateTime(`${ymd}T00:00`);
 }
 
 function rowForPost(post, scan, { now = new Date(), dayOffset = 0, scannedRef = null } = {}) {
