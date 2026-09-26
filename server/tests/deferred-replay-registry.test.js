@@ -82,6 +82,12 @@ jest.mock('../services/voicemail-lead-sms', () => ({ _deferredClaims: mockVmClai
 jest.mock('../services/account-membership-email', () => ({
   sendCancellationReceived: jest.fn(async () => ({ ok: true })),
 }));
+const mockReplayBillingRetryEmail = jest.fn(async () => ({
+  sent: true, channel: 'email', deliveryOutcome: 'accepted',
+}));
+jest.mock('../services/billing-retry-email-obligation', () => ({
+  replayPaymentRetryNotice: (...args) => mockReplayBillingRetryEmail(...args),
+}));
 
 const db = require('../models/db');
 const {
@@ -123,6 +129,23 @@ describe('deferred-replay registry', () => {
 
     await expect(dispatchDeferredReplay('test_dispatch_deferred', meta, fallback)).resolves.toBe(outcome);
     expect(dispatch).toHaveBeenCalledWith(meta);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  test('only the Email-only replay is allowed to run without a recipient phone', () => {
+    const { replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
+    expect(replaysWithoutPhone('billing_retry_email_deferred')).toBe(true);
+    expect(replaysWithoutPhone('invoice_followup_deferred')).toBe(false);
+    expect(replaysWithoutPhone(undefined)).toBe(false);
+  });
+
+  test('billing retry Email obligations use their registered Email-only dispatcher', async () => {
+    const fallback = jest.fn(async () => ({ sent: true, channel: 'sms' }));
+    const meta = { customer_id: 'cust-1', payment_id: 'pay-1', retry_date: '2026-09-29' };
+    await expect(dispatchDeferredReplay('billing_retry_email_deferred', meta, fallback)).resolves.toMatchObject({
+      sent: true, channel: 'email', deliveryOutcome: 'accepted',
+    });
+    expect(mockReplayBillingRetryEmail).toHaveBeenCalledWith(meta);
     expect(fallback).not.toHaveBeenCalled();
   });
 
