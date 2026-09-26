@@ -1749,6 +1749,6 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
     normalize({ reply: fill(600), intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
     emergency(ctx);
     const ms = Number(process.hrtime.bigint() - started) / 1e6;
-    expect(ms).toBeLessThan(250);
+    expect(ms).toBeLessThan(50);
   });
 });
