@@ -822,6 +822,29 @@ test('a grouped visit charges its siblings\' planning minutes on both the curren
   expect(groupedCand.detour_minutes).toBeCloseTo(aloneCand.detour_minutes, 5);
 });
 
+// Codex r4 (PRRT_kwDOR3YQi86mQsaf / PRRT_kwDOR3YQi86mQsai): the day-stop rows
+// carry the canonical sequence keys and the co-visit identity inputs, so a
+// real legacy co-visit pair on a candidate day scores as ONE stop.
+test('day-stop rows carry route_order/created_at and the co-visit inputs — a legacy co-visit pair costs what one stop does', async () => {
+  const coVisit = (id) => ({
+    id, visit_id: null, customer_id: 'c9', status: 'confirmed', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: null,
+    route_order: 1, created_at: '2026-07-01T12:00:00Z', svc_lat: 27.45, svc_lng: -82.45,
+    service_address_line1: '12 Palm Way', service_address_line2: null, service_address_city: 'Bradenton', service_address_zip: '34203', ...SLOT_KEY,
+  });
+  const dbWith = (rows) => () => {
+    const c = {};
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => rows;
+    return c;
+  };
+  const cand = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+  const service = { id: 's1', estimated_duration_minutes: 60 };
+  const [pair] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([coVisit('p'), coVisit('l')]) }, {});
+  const [single] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([coVisit('p')]) }, {});
+  expect(pair.route_minutes).toBeCloseTo(single.route_minutes, 5);
+  expect(pair.detour_minutes).toBeCloseTo(single.detour_minutes, 5);
+});
+
 // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's
 // stops reach the comparison through route_minutes.
 test('route_minutes charges the owner planning table: a planning-table change moves the candidate\'s cost', async () => {

@@ -22,7 +22,9 @@
  * (60 min), while the CURRENT placement used plain haversine and charged
  * nothing at all. This module gives both sides the same arithmetic.
  */
-const { workDuration } = require('../route-reorder-window-fit');
+const {
+  workDuration, currentOrder, effectiveWindowRange, isCoVisitPair, startCoVisitChain, advanceCoVisit,
+} = require('../route-reorder-window-fit');
 const { driveMin, haversine, HQ } = require('./geo');
 
 const DEFAULT_DURATION_MINUTES = 60;
@@ -62,23 +64,71 @@ function sumPlanningMinutes(stops) {
   return (stops || []).reduce((sum, s) => sum + stopPlanningMinutes(s), 0);
 }
 
-// The day's PHYSICAL stops: a visit group's members (combo lawn+pest, etc.)
-// sit at one address on separate scheduled_services rows, so they are one
-// drive stop, the rule arrival-route.js groupRouteStops applies (key
-// visit_id, else the row itself; its members' work summed — routeCost sums
-// every row's minutes separately). Each group sits at its earliest start and
-// takes the first member location it has. A stop with no visit_id (the
-// common case) stands alone. Codex r1 (clustering) / r3 (drive chain).
+function hhmmFromMin(min) {
+  return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+}
+
+// The keys the canonical sequence reads (route_order, window_start,
+// created_at, id): a stop given only a `startMin` reads it as its start.
+function withSequenceKeys(stop) {
+  if (stop.window_start || !Number.isFinite(stop.startMin)) return stop;
+  return { ...stop, window_start: hhmmFromMin(stop.startMin) };
+}
+
+/**
+ * The day's PHYSICAL stops, in the sequence dispatch runs them
+ * (route-reorder-window-fit.js currentOrder: COALESCE(route_order, 999),
+ * window_start, created_at — Codex r4). Each carries `minutes`, its on-site
+ * time. Rows collapse into one physical stop two ways, each with the
+ * canonical duration rule:
+ *   - a visit_id group (combo lawn+pest, etc.) — one drive stop at its first
+ *     member's place in the sequence, members' work SUMMED (arrival-route.js
+ *     groupRouteStops' contract);
+ *   - a legacy null-visit_id co-visit — the row adjacent to the previous row
+ *     that isCoVisitPair accepts (same customer, promised window, premise and
+ *     coordinates) — merged with the co-visit duration rule
+ *     (startCoVisitChain / advanceCoVisit: real estimates summed, floored by
+ *     the longest window-derived duration — never a phantom extra hour).
+ * A location comes from the first member that has one. Codex r1 / r3 / r4.
+ */
 function physicalStops(stops) {
-  const groups = new Map();
-  for (const s of stops || []) {
-    if (!s) continue;
-    const key = s.visit_id != null ? `visit:${s.visit_id}` : s;
-    const prev = groups.get(key);
-    if (!prev) groups.set(key, { ...s });
-    else groups.set(key, { ...prev, startMin: Math.min(prev.startMin, s.startMin), geo: prev.geo || s.geo });
+  const out = [];
+  const byVisit = new Map();
+  let lastRow = null;
+  for (const row of currentOrder((stops || []).filter(Boolean).map(withSequenceKeys))) {
+    const group = row.visit_id != null ? byVisit.get(String(row.visit_id)) : null;
+    const last = out[out.length - 1];
+    if (group) {
+      group.minutes += stopPlanningMinutes(row);
+      group.geo = group.geo || row.geo;
+    } else if (lastRow && last && last.coChain && isCoVisitPair(effectiveWindowRange, lastRow, row)) {
+      last.coChain = advanceCoVisit({ clock: 0, ...last.coChain }, row);
+      last.minutes = last.coChain.coMerged;
+      last.geo = last.geo || row.geo;
+    } else {
+      const stop = { ...row, minutes: stopPlanningMinutes(row), coChain: row.visit_id != null ? null : startCoVisitChain(row) };
+      if (row.visit_id != null) byVisit.set(String(row.visit_id), stop);
+      out.push(stop);
+    }
+    lastRow = row;
   }
-  return [...groups.values()];
+  return out;
+}
+
+// Where the moving visit joins the day's sequence: before the first stop
+// that starts later, a tie broken by the canonical rule (currentOrder:
+// route_order, then created_at, then id) — the order dispatch would read.
+function insertVisit(sequence, visit) {
+  // The visit sits at its scored start (the candidate's, or its current
+  // one), whatever window it stores for its duration.
+  const v = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
+  const start = String(v.window_start).slice(0, 5);
+  const at = sequence.findIndex((s) => {
+    const other = String(s.window_start || '23:59').slice(0, 5);
+    if (other !== start) return other > start;
+    return currentOrder([s, v])[0] === v;
+  });
+  return at < 0 ? [...sequence, v] : [...sequence.slice(0, at), v, ...sequence.slice(at)];
 }
 
 /**
@@ -109,10 +159,10 @@ function physicalStops(stops) {
  * candidate, so adding them there would only saturate that cap.
  */
 function routeCost(otherStops, visit) {
-  const others = physicalStops(otherStops).filter((s) => s.geo).sort((a, b) => a.startMin - b.startMin);
-  const driveWithoutMinutes = chainDriveMinutes(others.map((s) => s.geo));
+  const sequence = physicalStops(otherStops);
+  const driveWithoutMinutes = chainDriveMinutes(sequence.map((s) => s.geo));
   // Every other stop is on-site time, located or not.
-  const otherServiceMinutes = sumPlanningMinutes((otherStops || []).filter(Boolean));
+  const otherServiceMinutes = sequence.reduce((sum, s) => sum + s.minutes, 0);
   const routeTimeWithoutMinutes = driveWithoutMinutes + otherServiceMinutes;
   if (!visit || !visit.geo) {
     return {
@@ -123,8 +173,7 @@ function routeCost(otherStops, visit) {
       routeTimeWithMinutes: routeTimeWithoutMinutes,
     };
   }
-  const withVisit = [...others, visit].sort((a, b) => a.startMin - b.startMin);
-  const driveWithMinutes = chainDriveMinutes(withVisit.map((s) => s.geo));
+  const driveWithMinutes = chainDriveMinutes(insertVisit(sequence, visit).map((s) => s.geo));
   // The moving unit: the visit plus any co-located group members moving with it.
   const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
   const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
@@ -160,5 +209,5 @@ module.exports = {
   chainDriveMinutes,
   routeCost,
   clusterShare,
-  _internals: { physicalStops, sumPlanningMinutes },
+  _internals: { physicalStops, insertVisit, sumPlanningMinutes },
 };

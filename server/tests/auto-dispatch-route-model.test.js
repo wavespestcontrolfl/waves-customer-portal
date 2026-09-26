@@ -197,6 +197,72 @@ describe('routeCost: a visit group is one physical drive stop', () => {
   });
 });
 
+// Codex r4 (PRRT_kwDOR3YQi86mQsaf): the day runs in the canonical dispatch
+// sequence (currentOrder: COALESCE(route_order, 999), window_start,
+// created_at), not window_start alone.
+describe('routeCost: the canonical dispatch sequence', () => {
+  const { _internals: { insertVisit, physicalStops } } = require('../services/auto-dispatch/route-model');
+
+  test('tied window_starts run in route_order', () => {
+    const second = { id: 'x', geo: FAR, startMin: 540, window_start: '09:00', route_order: 2, estimated_duration_minutes: 30 };
+    const first = { id: 'y', geo: NEAR_HQ, startMin: 540, window_start: '09:00', route_order: 1, estimated_duration_minutes: 30 };
+    expect(physicalStops([second, first]).map((st) => st.id)).toEqual(['y', 'x']);
+    expect(routeCost([second, first], null).driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([NEAR_HQ, FAR]), 5);
+  });
+
+  test('route_order outranks window_start, as dispatch reads it', () => {
+    const late = { id: 'late', geo: FAR, startMin: 840, window_start: '14:00', route_order: 1 };
+    const early = { id: 'early', geo: NEAR_HQ, startMin: 540, window_start: '09:00', route_order: 2 };
+    expect(physicalStops([early, late]).map((st) => st.id)).toEqual(['late', 'early']);
+  });
+
+  test('the moving visit joins by its start; a tie is broken by the canonical rule (an unsequenced visit goes after a sequenced stop)', () => {
+    const day = physicalStops([
+      { id: 'a', geo: NEAR_HQ, window_start: '09:00', route_order: 1 },
+      { id: 'b', geo: FAR, window_start: '11:00', route_order: 2 },
+    ]);
+    const at = (visit) => insertVisit(day, visit).map((st) => st.id);
+    expect(at({ id: 'v', geo: NEAR_HQ, startMin: 600, route_order: null })).toEqual(['a', 'v', 'b']); // 10:00
+    expect(at({ id: 'v', geo: NEAR_HQ, startMin: 540, route_order: null })).toEqual(['a', 'v', 'b']); // tied at 09:00, 999 > 1
+    expect(at({ id: 'v', geo: NEAR_HQ, startMin: 540, route_order: 0 })).toEqual(['v', 'a', 'b']); // tied, sequenced first
+  });
+});
+
+// Codex r4 (PRRT_kwDOR3YQi86mQsai): a legacy null-visit_id co-visit (same
+// customer, promised window, premise and coordinates) is one physical stop
+// under the canonical co-visit duration rule; a visit_id group stays additive.
+describe('routeCost: co-visits vs visit groups', () => {
+  const coVisitRow = (id, extra = {}) => ({
+    id, visit_id: null, customer_id: 'c9', window_start: '09:00', window_end: '10:00', startMin: 540,
+    estimated_duration_minutes: null, geo: FAR, lat: FAR.lat, lng: FAR.lng,
+    service_address_line1: '12 Palm Way', service_address_line2: null, service_address_city: 'Bradenton', service_address_zip: '34203',
+    ...extra,
+  });
+
+  test('a legacy co-visit pair is ONE stop charged the co-visit rule (one promised hour), not two hours', () => {
+    const cost = routeCost([coVisitRow('p'), coVisitRow('l')], null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(60);
+  });
+
+  test('co-visit rows with REAL estimates still add up (the canonical rule sums real estimates)', () => {
+    const cost = routeCost([coVisitRow('p', { estimated_duration_minutes: 45 }), coVisitRow('l', { estimated_duration_minutes: 45 })], null);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(90);
+  });
+
+  test('a different unit at the same pin is NOT a co-visit (two stops)', () => {
+    const cost = routeCost([coVisitRow('p', { service_address_line2: 'Apt 1' }), coVisitRow('l', { service_address_line2: 'Apt 2' })], null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR, FAR]), 5);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(120);
+  });
+
+  test('a visit_id group of the same shape stays additive (SUM contract), still one drive stop', () => {
+    const cost = routeCost([coVisitRow('p', { visit_id: 'v1' }), coVisitRow('l', { visit_id: 'v1' })], null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(120);
+  });
+});
+
 describe('clusterShare', () => {
   test('empty day (no other stops) scores 0 — nothing to cluster with', () => {
     expect(clusterShare([], NEAR_HQ)).toBe(0);

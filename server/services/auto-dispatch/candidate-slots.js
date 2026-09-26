@@ -66,13 +66,19 @@ function hhmmToMin(t) {
 }
 
 // Columns a technician-day's OTHER stops need for the shared route model
-// (route-model.js: geo + planning-minutes category) and the overlap
-// predicate (overlap-predicate.js: status/window/reservation). Shared by
+// (route-model.js: geo, planning-minutes category, the canonical sequence
+// keys route_order/created_at, and the co-visit merge's identity inputs —
+// customer, premise, time_window — Codex r4) and the overlap predicate
+// (overlap-predicate.js: status/window/reservation). Shared by
 // computeCurrentPlacement's neighbor query and loadDayStops below so both
 // sides of the comparison read the identical shape.
 const DAY_STOP_COLUMNS = [
   'scheduled_services.id',
   'scheduled_services.visit_id',
+  'scheduled_services.customer_id',
+  'scheduled_services.route_order',
+  'scheduled_services.created_at',
+  'scheduled_services.time_window',
   'scheduled_services.window_start',
   'scheduled_services.window_end',
   'scheduled_services.estimated_duration_minutes',
@@ -82,10 +88,13 @@ const DAY_STOP_COLUMNS = [
   'scheduled_services.is_recurring',
   'scheduled_services.is_callback',
   'scheduled_services.service_address_line1',
+  'scheduled_services.service_address_line2',
   'scheduled_services.service_address_city',
   'scheduled_services.service_address_zip',
   'customers.address_line1 as customer_address_line1',
+  'customers.address_line2 as customer_address_line2',
   'customers.city as customer_city',
+  'customers.state as customer_state',
   'customers.zip as customer_zip',
   'scheduled_services.lat as svc_lat',
   'scheduled_services.lng as svc_lng',
@@ -100,10 +109,28 @@ const DAY_STOP_COLUMNS = [
 // one physical stop rather than over-counting them.
 function rowToDayStop(r) {
   const startMin = hhmmToMin(r.window_start) ?? DAY_OPEN;
+  const geo = resolveGeo(r);
   return {
     id: r.id,
     visit_id: r.visit_id,
-    geo: resolveGeo(r),
+    customer_id: r.customer_id,
+    route_order: r.route_order,
+    created_at: r.created_at,
+    time_window: r.time_window,
+    // The co-visit merge (isCoVisitPair) reads the stop's coordinates and
+    // premise under the canonical column names.
+    lat: geo ? geo.lat : null,
+    lng: geo ? geo.lng : null,
+    service_address_line1: r.service_address_line1,
+    service_address_line2: r.service_address_line2,
+    service_address_city: r.service_address_city,
+    service_address_zip: r.service_address_zip,
+    customer_address_line1: r.customer_address_line1,
+    customer_address_line2: r.customer_address_line2,
+    customer_city: r.customer_city,
+    customer_state: r.customer_state,
+    customer_zip: r.customer_zip,
+    geo,
     startMin,
     endMin: r.window_end != null ? hhmmToMin(r.window_end) : startMin + (Number(r.estimated_duration_minutes) || DEFAULT_DURATION),
     window_start: r.window_start,
@@ -123,10 +150,14 @@ function rowToDayStop(r) {
 // so routeCost must charge their planning minutes with the visit's — on the
 // current placement and every candidate alike — or a grouped visit's route
 // minutes would omit their work (Codex pre-push P1).
-function serviceToRouteStop(service, geo, startMin, siblings = []) {
+function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order) {
   return {
     geo,
     startMin,
+    // Sequence tie keys (Codex r4): where the visit joins the day's order.
+    id: service.id,
+    route_order: routeOrder,
+    created_at: service.created_at,
     visit_id: service.visit_id,
     service_type: service.service_type,
     is_recurring: service.is_recurring,
@@ -355,11 +386,20 @@ function slotTaken(placement, occupied) {
   });
 }
 
+// The route_order the moved visit would carry: reschedule() clears it on a
+// date or technician change (the destination day appends the stop) and keeps
+// it on a same-day, same-tech window move.
+function candidateRouteOrder(service, cand) {
+  const sameDay = toDateStr(service.scheduled_date) === cand.date;
+  const sameTech = String(service.technician_id || '') === String(cand.technician_id || '');
+  return sameDay && sameTech ? service.route_order : null;
+}
+
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, unitStart) {
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(unitStart), siblings));
+  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(unitStart), siblings, candidateRouteOrder(service, cand)));
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
