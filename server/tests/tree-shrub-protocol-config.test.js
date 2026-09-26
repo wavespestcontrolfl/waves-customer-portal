@@ -80,11 +80,17 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     const program = protocols.tree_shrub;
     const notes = program.notes.join('\n');
 
-    // Dose table follows 1.5 lb per 100 sq ft of a circular canopy.
+    // The dose is a formula from the measured width (no table lookup that
+    // rounds between rows): width x width / 85 is 1.5 lb per 100 sq ft of a
+    // circular canopy to within 0.5%, and every worked example follows it.
+    const circle = (d) => 1.5 * Math.PI * (d / 2) ** 2 / 100;
+    expect(Math.abs(1 / 85 - circle(1)) / circle(1)).toBeLessThan(0.005);
+    expect(notes).toMatch(/width × width ÷ 85 lb/);
+    expect(notes).not.toMatch(/next size down/);
     const table = [...notes.matchAll(/(\d+) ft = ([\d.]+) lb/g)].map(([, d, lb]) => [Number(d), Number(lb)]);
     expect(table.map(([d]) => d)).toEqual([6, 8, 10, 12, 14, 16, 18, 20]);
-    for (const [d, lb] of table) expect(Math.abs(lb - 1.5 * Math.PI * (d / 2) ** 2 / 100)).toBeLessThan(0.05);
-    expect(program.calibration.palm_fertilizer_rate).toMatch(/By canopy width: .*20 ft = 4\.7 lb/);
+    for (const [d, lb] of table) expect(Math.abs(lb - circle(d))).toBeLessThan(0.05);
+    expect(program.calibration.palm_fertilizer_rate).toMatch(/canopy width \(ft\) × width ÷ 85 .*20 ft = 4\.7 lb/);
     expect(notes).toMatch(/Palm scout every visit/);
     expect(notes).toMatch(/never a disease name without a diagnosis/);
     expect(notes).toMatch(/do not quote a treatment on symptoms/);
@@ -92,7 +98,18 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     // Every visit that carries palm fertilizer tells the tech the dose by canopy width.
     const palmVisits = program.visits.filter((row) => /8-2-12/.test(`${row.primary}\n${row.secondary}`));
     expect(palmVisits.map((row) => row.month)).toEqual(['Jan', 'Apr', 'May', 'Oct', 'Dec']);
-    for (const row of palmVisits) expect(row.notes).toMatch(/Palm dose by canopy width: .*20 ft = 4\.7 lb/);
+    for (const row of palmVisits) expect(row.notes).toMatch(/Palm dose by canopy width: width × width ÷ 85 lb .*20 ft = 4\.7 lb/);
+  });
+
+  test('no visit line quotes a palm injection on symptoms alone', () => {
+    const lines = protocols.tree_shrub.visits
+      .flatMap((row) => `${row.primary}\n${row.secondary}`.split('\n'))
+      .filter((line) => /quote/i.test(line) && /injection/i.test(line));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).toMatch(/refer for diagnosis/);
+      expect(line).toMatch(/only after a diagnosis supports it and the palm is eligible/);
+    }
   });
 
   test('documents the 9x every-6-weeks program in the rendered program notes', () => {

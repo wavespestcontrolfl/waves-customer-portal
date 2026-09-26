@@ -856,7 +856,7 @@
       "CRM ordinance zone is required. Sarasota/Venice and Manatee/Parrish landscape N/P blackout runs June 1-Sept. 30. North Port turf blackout starts April 1, but landscape plants are route-gated separately. Unknown zone defaults to Sarasota/Manatee conservative.",
       "Palm/tree injections are add-ons only. Minimum $35/palm, not included in Tree & Shrub tiers.",
       "Do not make oil + copper, oil + broad-spectrum pyrethroid, or neonic systemics a default production tank. Use plant safety, pollinator status, pest ID, and life stage gates.",
-      "Palm fertilizer dose = 1.5 lb per 100 sq ft of canopy, so measure the canopy across and use: 6 ft = 0.4 lb, 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb (in between, use the next size down). Spread it evenly under the whole canopy, never piled at the trunk, off hardscape, and not within 10 ft of water. Palm granular goes on no closer than about 3 months apart (4 per year at most); check Fertilizer applied YTD first.",
+      "Palm fertilizer dose = 1.5 lb per 100 sq ft of canopy. Measure the canopy width in feet and apply width × width ÷ 85 lb (6 ft = 0.4 lb, 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb). Spread it evenly under the whole canopy, never piled at the trunk, off hardscape, and not within 10 ft of water. Palm granular goes on no closer than about 3 months apart (4 per year at most); check Fertilizer applied YTD first.",
       "Palm scout every visit, and record only what you see (symptom + photo, never a disease name without a diagnosis): oldest fronds with translucent yellow-orange spots or dead tips (potassium) or a broad yellow band (magnesium); newest fronds small and frizzled (manganese, mainly queen, royal, pygmy date); a collapsed spear or bronzing from the oldest fronds up; a hard shelf/conk on the lower 4-5 ft of trunk; fronds dying down one side; royal palm bug, spiraling whitefly, scale, or sooty mold; over-pruning.",
       "Palm diagnosis-only issues: suspected lethal bronzing, Ganoderma butt rot, or Fusarium wilt gets a photo, a note, and a call to the owner that it needs a diagnosis; do not quote a treatment on symptoms, and never promise the fertilizer program prevents them. Lethal-bronzing injections are preventive only, for healthy palms, palms near an infected one, or palms that tested negative; a symptomatic, positive, or infected palm is handled outside the injection service. Do not cut off potassium-yellowed fronds (it speeds decline; old fronds never re-green, new growth recovers over 1-2+ years), and never prune above the 9-to-3 o'clock line.",
       "9x program (every 6 weeks, about 9 visits a year) has no fixed months: each visit runs the protocol for the month it lands in. Palm granular still stays about 3 months apart, so skip it on a visit that comes too soon after the last one; the other visits scout palms."
@@ -907,7 +907,7 @@
         "Moderate weed pressure: 3.45 lb/1,000 sq ft",
         "Heavy pressure: 4.6 lb/1,000 sq ft only where label/site permits"
       ],
-      "palm_fertilizer_rate": "8-2-12 palm fertilizer at 1.5 lb per 100 sq ft canopy/root-zone area where ordinance allows. By canopy width: 6 ft = 0.4 lb, 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb.",
+      "palm_fertilizer_rate": "8-2-12 palm fertilizer at 1.5 lb per 100 sq ft canopy/root-zone area where ordinance allows. Dose in lb = canopy width (ft) × width ÷ 85 (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb).",
       "ornamental_fertilizer_rate": "13-0-13 at 0.25-0.50 lb N/1,000 sq ft equivalent unless site, plant type, and timing justify otherwise."
     },
     "mixing_order": [
@@ -996,7 +996,7 @@
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
-        "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos. Palm dose by canopy width: 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb; spread under the whole canopy, not at the trunk.",
+        "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
         "conditional_cost": "8.09"
       },
       {
@@ -1038,7 +1038,7 @@
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": false,
-        "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review. Palm dose by canopy width: 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb; spread under the whole canopy, not at the trunk.",
+        "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
         "conditional_cost": "8.70"
       },
       {
@@ -1047,12 +1047,12 @@
         "visit_type": "Nutrition + systemic PHC",
         "main_goal": "Finish legal nutrition before June blackout in Sarasota/Manatee and use non-neonic systemic rotation.",
         "primary": "Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 ($13.52)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nIron Plus + Mn Combo: label rate ($2.85)\n8-2-12 palm fertilizer and 13-0-13 ornamental fertilizer only if needed and legal before blackout ($9.63)",
-        "secondary": "Floramite for confirmed mites ($6.02)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nPalm weevil inspection and diagnostic/injection quote if crown, trunk wound, or decline symptoms support it\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
+        "secondary": "Floramite for confirmed mites ($6.02)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nPalm weevil and decline inspection: photo and note crown, trunk-wound, or decline symptoms and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
         "material_cost": "16.37",
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
-        "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf. Palm dose by canopy width: 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb; spread under the whole canopy, not at the trunk.",
+        "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
         "conditional_cost": "11.09"
       },
       {
@@ -1122,7 +1122,7 @@
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
-        "notes": "Visible fall reset: Snapshot + legal fertility + fall inspection. Keep this as a granular-first production visit whenever possible. Palm dose by canopy width: 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb; spread under the whole canopy, not at the trunk.",
+        "notes": "Visible fall reset: Snapshot + legal fertility + fall inspection. Keep this as a granular-first production visit whenever possible. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
         "conditional_cost": "9.76"
       },
       {
@@ -1145,12 +1145,12 @@
         "visit_type": "Scout/report + selective nutrition/systemic",
         "main_goal": "Retention, customer proof of value, winter palm nutrition where due, and next-year correction plan.",
         "primary": "8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone if due and appropriate ($5.31)\nCytogro: label rate for premium/stressed accounts ($4.82)\nEDDHA iron (Sequestar 6% Fe): label rate for high-pH chlorosis ($1.73)\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
-        "secondary": "Zylam only if pest history/pressure and 4A log allow ($17.63)\nDo not treat blooming plants with bee-toxic systemic/contact products while bees forage\nQuote diagnostic/injection add-on for palm decline\nNote soil pH, irrigation water, or salt issues for chronic chlorosis",
+        "secondary": "Zylam only if pest history/pressure and 4A log allow ($17.63)\nDo not treat blooming plants with bee-toxic systemic/contact products while bees forage\nInspect declining palms: photo, note, and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible (see the palm diagnosis note)\nNote soil pH, irrigation water, or salt issues for chronic chlorosis",
         "material_cost": "0.00",
         "labor_cost": "report",
         "tier_4x": false,
         "tier_6x": false,
-        "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying. Palm dose by canopy width: 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb; spread under the whole canopy, not at the trunk.",
+        "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
         "conditional_cost": "6.17"
       }
     ],
