@@ -340,6 +340,21 @@ describe('llm call ledger', () => {
   });
 
   describe('ledgerCall', () => {
+    // Codex r15 on #4884: direct calls inside a replay harness were filed
+    // under the live lane label, unlike dispatch chains.
+    it('files calls inside runAsReplay under the :replay policy, live calls under the lane', async () => {
+      const { metrics } = load();
+      await metrics.runAsReplay(() => metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(ANTHROPIC_MESSAGE), { laneId: 'lawn_challenge' }));
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(ANTHROPIC_MESSAGE), { laneId: 'lawn_challenge' });
+      await metrics.runAsReplay(() => metrics.ledgerCall('anthropic', 'm', () => Promise.reject(new Error('boom')), { laneId: 'lawn_challenge' }).catch(() => {}));
+      await flush();
+      expect(callRows().map((r) => [r.lane_id, r.policy])).toEqual([
+        ['lawn_challenge', 'lawn_challenge:replay'],
+        ['lawn_challenge', 'lawn_challenge'],
+        ['lawn_challenge', 'lawn_challenge:replay'],
+      ]);
+    });
+
     it('returns the resolved value unchanged and records from it', async () => {
       const { metrics } = load();
       const value = await metrics.ledgerCall('anthropic', 'req-model', () => Promise.resolve(ANTHROPIC_MESSAGE));
@@ -378,6 +393,64 @@ describe('llm call ledger', () => {
       expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(cut))).toBe(cut);
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_incomplete', error_class: 'incomplete', input_tokens: 200, output_tokens: 40 });
+    });
+
+    it('files a finished turn with no text as empty_text / incomplete; a tool round is never empty (value unchanged)', async () => {
+      const { metrics } = load();
+      const empty = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '  ' }] };
+      const toolRound = { ...ANTHROPIC_MESSAGE, stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'lookup', input: {} }] };
+      const answered = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn' };
+      const malformed = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn', content: {} };
+      // A malformed body never breaks the pass-through (Codex r4 on #4884).
+      expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(malformed))).toBe(malformed);
+      expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(empty))).toBe(empty);
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(toolRound));
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(answered));
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class])).toEqual([
+        [false, 'empty_text', 'incomplete'],
+        [false, 'empty_text', 'incomplete'],
+        [true, null, null],
+        [true, null, null],
+      ]);
+    });
+
+    it('rejectCall flips the row of an adapter leg a dispatch() caller rejects after the fact; a foreign object is a no-op', async () => {
+      mockAnthropicCreate.mockResolvedValue(ANTHROPIC_MESSAGE);
+      const { call } = load();
+      const result = await call.callAnthropic({ model: 'a', system: 's', text: 't' });
+      expect(result.ok).toBe(true);
+      await flush();
+      mockUpdate.mockClear();
+      call.rejectCall(result, 'invalid_output');
+      call.rejectCall({ ...result }, 'invalid_output');
+      call.rejectCall(null, 'invalid_output');
+      await flush();
+      expect(mockUpdate.mock.calls.map(([t, cond, patch]) => [t, cond.id > 0, patch])).toEqual([
+        ['llm_dispatch_log', true, { ok: false, error_code: 'invalid_output', error_class: 'instruction' }],
+      ]);
+    });
+
+    it("ledgerCallRejected flips the row ledgerCall recorded for that exact value to the caller's reason; anything else is a no-op", async () => {
+      const { metrics } = load();
+      const message = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn' };
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(message));
+      await flush();
+      mockUpdate.mockClear();
+      metrics.ledgerCallRejected(message, 'invalid_json');
+      metrics.ledgerCallRejected({ ...message }, 'invalid_json'); // a copy was never returned by ledgerCall
+      metrics.ledgerCallRejected(undefined, 'invalid_json'); // the call threw before a value existed
+      // A row already filed as a refusal / truncation keeps that classification.
+      const refused = { ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [] };
+      const cut = { ...ANTHROPIC_MESSAGE, stop_reason: 'max_tokens' };
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(refused));
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(cut));
+      metrics.ledgerCallRejected(refused, 'invalid_json');
+      metrics.ledgerCallRejected(cut, 'invalid_json');
+      await flush();
+      expect(mockUpdate.mock.calls.map(([t, cond, patch]) => [t, cond.id > 0, patch])).toEqual([
+        ['llm_dispatch_log', true, { ok: false, error_code: 'invalid_json', error_class: 'instruction' }],
+      ]);
     });
 
     it('DEEP helper: a refusal is a failed Anthropic leg and the OpenAI backup a successful one, same chain', async () => {

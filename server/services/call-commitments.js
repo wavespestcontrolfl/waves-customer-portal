@@ -40,6 +40,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // A due time typed by the office arrives either as an ISO instant (the
 // panel converts its datetime-local value with the ET helper) or, from any
@@ -701,17 +702,18 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   // No sampling controls on the request (current Anthropic models 400 on
   // them). maxRetries 0 because the pipeline has its own retry lanes — a
   // claim-holding pass must not sit through the SDK's per-attempt timeouts.
-  const response = await anthropic.messages.create({
+  const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
     model: MODELS.FLAGSHIP,
     ...anthropicEffortConfig(MODELS.FLAGSHIP),
     max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
     messages: [{ role: 'user', content: buildCommitmentsPrompt({ transcript, callStartedAt }) }],
-  }, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 });
+  }, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 }), { laneId: 'call_commitments' });
   const text = (response?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
   let parsed;
   try {
     parsed = parseLooseJsonObject(text);
   } catch (err) {
+    ledgerCallRejected(response, 'invalid_json');
     return { items: [], skipped: 'parse_failed', error: err.message, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
   normalizeModelOutput(parsed, transcript);
@@ -719,10 +721,15 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   if (!validate(parsed)) {
     // Paths and keywords only — never the model text (it quotes the caller).
     const why = (validate.errors || []).slice(0, 3).map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
+    ledgerCallRejected(response, 'schema_invalid');
     logger.warn(`[call-commitments] model output failed schema (${(validate.errors || []).length} error(s)): ${why}`);
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
   const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
+  // Claims returned but every one discarded (ungrounded, below the confidence
+  // floor, wrong party) is an answer that produced nothing usable; an empty
+  // commitments array stays a successful "nothing promised" (Codex r7 on #4884).
+  if (Array.isArray(parsed.commitments) && parsed.commitments.length && !grounded.kept.length) ledgerCallRejected(response, 'invalid_output');
   return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
 }
 
