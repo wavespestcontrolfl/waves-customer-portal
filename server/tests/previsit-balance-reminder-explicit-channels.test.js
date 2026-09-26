@@ -34,6 +34,7 @@ jest.mock('../services/invoice-helpers', () => ({
 jest.mock('../services/payer', () => ({
   resolveForInvoice: jest.fn(async () => ({ payerId: null })),
 }));
+jest.mock('../services/invoice-followups', () => ({ isDunningStopped: jest.fn(async () => false) }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted' })),
 }));
@@ -398,7 +399,9 @@ test('the ledger reservations carry the quoted overdue invoice ids', async () =>
   armOneVisit({ notificationPrefs: { billing_channels: ['sms'] } });
   sendReminderChannels.mockResolvedValueOnce({ complete: true, deliveredNow: ['sms'], results: {} });
   await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
-  expect(sendReminderChannels.mock.calls[0][0]).toMatchObject({ invoiceId: null, invoiceIds: ['inv-9'] });
+  expect(sendReminderChannels.mock.calls[0][0]).toMatchObject({
+    invoiceId: null, invoiceIds: ['inv-9'], policyInvoiceIds: ['inv-9'],
+  });
 });
 
 describe('currentDuesAllowanceCents (retry-time dues allowance)', () => {
@@ -442,7 +445,7 @@ describe('quotedBalanceStillOwed (pre-dispatch recheck of the quoted balance)', 
     });
   }
   const check = () => quotedBalanceStillOwed({
-    customerId: 'cust-1', quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
+    customerId: 'cust-1', scheduledServiceId: 'ss-1', quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
   })();
 
   test('passes while every quoted invoice still owes exactly the quoted amount', async () => {
@@ -464,6 +467,28 @@ describe('quotedBalanceStillOwed (pre-dispatch recheck of the quoted balance)', 
     invoicesDb([]);
     await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
     db.mockImplementation(() => { throw new Error('connection reset'); });
+    await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
+  });
+
+  test('holds immediately when dunning stops or the visit gains a payer', async () => {
+    invoicesDb([live]);
+    const { isDunningStopped } = require('../services/invoice-followups');
+    isDunningStopped.mockResolvedValueOnce(true);
+    await expect(check()).resolves.toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true });
+    expect(isDunningStopped).toHaveBeenCalledWith('inv-9', db);
+    const { resolveForInvoice } = require('../services/payer');
+    resolveForInvoice.mockResolvedValueOnce({ payerId: 17 });
+    await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
+    expect(resolveForInvoice).toHaveBeenCalledWith({
+      database: db, customerId: 'cust-1', scheduledServiceId: 'ss-1', throwOnError: true,
+    });
+  });
+
+  test('an unreadable payer or dunning decision holds for retry', async () => {
+    invoicesDb([live]);
+    require('../services/payer').resolveForInvoice.mockRejectedValueOnce(new Error('payer read failed'));
+    await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
+    require('../services/invoice-followups').isDunningStopped.mockRejectedValueOnce(new Error('dunning read failed'));
     await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
   });
 

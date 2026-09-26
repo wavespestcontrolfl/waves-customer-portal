@@ -285,7 +285,7 @@ async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, expli
   const eventKey = previsitEventKey(visit);
   const invoiceIds = quotedInvoices.map((inv) => inv.id);
   const preDispatchCheck = quotedBalanceStillOwed({
-    customerId: visit.customer_id, quotedInvoices, quotedDuesCents: duesCents,
+    customerId: visit.customer_id, scheduledServiceId: visit.id, quotedInvoices, quotedDuesCents: duesCents,
   });
   let result;
   try {
@@ -293,6 +293,7 @@ async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, expli
       customerId: visit.customer_id,
       invoiceId: null, // aggregate balance rail, no single target invoice (rail-guard.js)
       invoiceIds, // ...but the ledger still records the debts this reminder quotes
+      policyInvoiceIds: invoiceIds,
       offLedgerBalanceCents: duesCents,
       source: 'previsit_balance_reminder',
       purpose: 'balance_reminder',
@@ -339,10 +340,14 @@ async function currentDuesAllowanceCents(customerId, database = db, now = new Da
 // overdue invoice must still be collectible, self-pay and owe exactly what
 // was quoted, and the late dues must still be owed. Any change holds the leg
 // (retryable) so the next sweep re-quotes from current state.
-function quotedBalanceStillOwed({ customerId, quotedInvoices, quotedDuesCents }) {
+function quotedBalanceStillOwed({ customerId, scheduledServiceId, quotedInvoices, quotedDuesCents }) {
   const changed = (reason) => ({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, retryable: true });
   return async () => {
     try {
+      const payer = await require('./payer').resolveForInvoice({
+        database: db, customerId, scheduledServiceId, throwOnError: true,
+      });
+      if (payer.payerId) return changed('the visit is now payer billed');
       const helpers = require('./invoice-helpers');
       const ids = quotedInvoices.map((inv) => inv.id);
       const live = ids.length ? await db('invoices').whereIn('id', ids) : [];
@@ -353,6 +358,9 @@ function quotedBalanceStillOwed({ customerId, quotedInvoices, quotedDuesCents })
           || row.payer_id || helpers.invoiceWithdrawnFromCustomer(row)
           || Math.round(helpers.invoiceAmountDue(row) * 100) !== Math.round(quoted.due * 100)) {
           return changed(`quoted invoice ${quoted.id} changed before dispatch`);
+        }
+        if (await require('./invoice-followups').isDunningStopped(row.id, db)) {
+          return changed('dunning stopped for a quoted invoice');
         }
       }
       if (quotedDuesCents > 0 && (await currentDuesAllowanceCents(customerId)) !== quotedDuesCents) {

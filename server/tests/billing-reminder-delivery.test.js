@@ -11,6 +11,8 @@ jest.mock('../services/billing-email-reservation', () => ({
 jest.mock('../services/collections/rail-guard', () => ({
   collectionsChannelPermitted: jest.fn(),
 }));
+jest.mock('../services/collections/contact-policy', () => ({ evaluate: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
 const ContactLedger = require('../services/collections/contact-ledger');
@@ -106,6 +108,36 @@ describe('billing reminder per-channel delivery progress', () => {
       send: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
     });
     expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-a', 'inv-b'] }));
+  });
+
+  test('the real policy guard blocks an excluded quoted invoice and preserves the draft-invoice allowance', async () => {
+    const originalGate = process.env.GATE_COLLECTIONS_POLICY;
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    try {
+      const ContactPolicy = require('../services/collections/contact-policy');
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-b'], denialReasons: [] });
+      collectionsChannelPermitted.mockImplementation(jest.requireActual('../services/collections/rail-guard').collectionsChannelPermitted);
+      const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+      const result = await sendReminderChannels({
+        customerId: 'customer-1', invoiceId: null, invoiceIds: ['inv-a', 'inv-b'], policyInvoiceIds: ['inv-a', 'inv-b'],
+        source: 'previsit_balance_reminder', purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms'], send,
+      });
+      expect(result.complete).toBe(false);
+      expect(send).not.toHaveBeenCalled();
+      expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+      // A draft annual-prepay invoice is recorded for reconciliation but
+      // intentionally has no collectible-policy membership requirement.
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: [], denialReasons: [] });
+      await sendReminderChannels({
+        customerId: 'customer-1', invoiceId: null, invoiceIds: ['draft-invoice'], offLedgerBalanceCents: 4900,
+        source: 'annual_prepay_payment_reminder', purpose: 'balance_reminder', eventKey: 'annual-prepay-payment:term-1:3', channels: ['sms'], send,
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['draft-invoice'] }));
+    } finally {
+      if (originalGate === undefined) delete process.env.GATE_COLLECTIONS_POLICY;
+      else process.env.GATE_COLLECTIONS_POLICY = originalGate;
+    }
   });
 
   test('a dues-only aggregate reminder records an empty invoice list, not [null]', async () => {
