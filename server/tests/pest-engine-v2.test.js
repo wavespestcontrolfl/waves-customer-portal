@@ -164,6 +164,16 @@ describe('buildAnswer — lineage climb', () => {
     expect(built.answer.subhead).toBeNull();
   });
 
+  test('climbs across ALL candidates\' lineages, not just the top-by-confidence one (Codex round-0 P1, round 3)', () => {
+    // gopher-tortoise@0.40 is the TOP candidate by confidence, but its own
+    // group (turtles) alone is under 0.60; the two ants together clear it.
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('gopher-tortoise', 0.40), cand('fire-ant', 0.35), cand('ghost-ant', 0.30)],
+    }));
+    expect(built.answer.level).toBe('group');
+    expect(built.answer.node_id).toBe('ants');
+  });
+
   test('unknown when nothing clears any lineage rung', () => {
     const built = buildAnswer(baseCtx({ candidates: [candOff('something unrecognizable', null, 0.1)] }));
     expect(built.answer).toMatchObject({ level: 'unknown', wording: 'unknown', node_id: null, headline: "We couldn't tell from these photos" });
@@ -552,6 +562,25 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.internal.escalation_triggered).toBe(false);
     expect(result.internal.escalation_reasons).toEqual([]);
     expect(result.v2.answer.wording).toBe('pretty_sure');
+  });
+});
+
+describe('identifyPestV2 — combined photo quality (Codex round-0 P1, round 3)', () => {
+  test('an unusable/multiple_subjects quality read from EITHER leg forces needs_more_evidence, even at high combined confidence', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.60 }], { usable: true, issue: 'none' }))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.60, traits_visible: [1], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: false, issue: 'multiple_subjects' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.90 }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.answer.wording).toBe('pretty_sure'); // agreement bumps confidence to 0.90
+    expect(result.v2.tier).toBe('needs_more_evidence'); // but OpenAI's quality finding still forces this
   });
 });
 

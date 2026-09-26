@@ -330,20 +330,48 @@ function sumConfidenceAtNode(candidates, level, id) {
   }, 0);
 }
 
-/** Deepest subgroup/group whose summed candidate confidence >= 0.60; else
- * category >= 0.60; else null (unknown). */
-function climbLineage(candidates) {
-  const top = candidates[0];
-  const topNodeId = top ? candidateNodeId(top) : null;
-  if (!topNodeId) return null;
-  const lineage = catalog.lineage(topNodeId);
-  const nonCategoryRungs = lineage.filter((r) => r.level === 'subgroup' || r.level === 'group').reverse();
-  for (const rung of nonCategoryRungs) {
-    if (sumConfidenceAtNode(candidates, rung.level, rung.id) >= LINEAGE_CLIMB_MIN) return rung;
+// Every distinct (level, id) rung reachable from ANY candidate's own
+// lineage — not just the top candidate's. Codex round-0 P1 (round 3): a
+// tortoise@0.40 (its own group alone under 0.60) plus two ants@0.35+0.30
+// (group sum 0.65) must climb to "an ant", not "unknown" — the top
+// candidate by confidence is not necessarily the candidate whose lineage
+// carries the group with the most support.
+function allLineageRungs(candidates) {
+  const byKey = new Map();
+  for (const c of candidates) {
+    const nodeId = candidateNodeId(c);
+    if (!nodeId) continue;
+    for (const rung of catalog.lineage(nodeId)) {
+      if (rung.level === 'entry') continue;
+      const key = `${rung.level}:${rung.id}`;
+      if (!byKey.has(key)) byKey.set(key, rung);
+    }
   }
-  const categoryRung = lineage.find((r) => r.level === 'category');
-  if (categoryRung && sumConfidenceAtNode(candidates, 'category', categoryRung.id) >= LINEAGE_CLIMB_MIN) return categoryRung;
-  return null;
+  return [...byKey.values()];
+}
+
+/** The best-supported rung at one level (highest summed confidence among
+ * those clearing 0.60), or null if none clears it at that level. */
+function bestRungAtLevel(candidates, rungs, level) {
+  let best = null;
+  let bestSum = 0;
+  for (const rung of rungs) {
+    if (rung.level !== level) continue;
+    const sum = sumConfidenceAtNode(candidates, level, rung.id);
+    if (sum >= LINEAGE_CLIMB_MIN && sum > bestSum) { best = rung; bestSum = sum; }
+  }
+  return best;
+}
+
+/** Deepest subgroup/group whose summed candidate confidence >= 0.60, across
+ * ALL candidates' lineages (ties broken by higher sum); else the
+ * best-supported category >= 0.60; else null (unknown). */
+function climbLineage(candidates) {
+  const rungs = allLineageRungs(candidates);
+  return bestRungAtLevel(candidates, rungs, 'subgroup')
+    || bestRungAtLevel(candidates, rungs, 'group')
+    || bestRungAtLevel(candidates, rungs, 'category')
+    || null;
 }
 
 function deepestSharedNode(idA, idB) {
@@ -715,6 +743,22 @@ function combineEscalation(geminiCandidates, escalationResult) {
   };
 }
 
+// Codex round-0 P1 (round 3): Gemini's photo-quality read must not silently
+// win over a real problem OpenAI reports on the SAME photos — an unusable/
+// multiple_subjects finding from EITHER leg has to force needs_more_evidence
+// (combineQuality is conservative: unusable/multiple_subjects wins).
+function combineQuality(geminiQuality, openaiQuality) {
+  if (!geminiQuality && !openaiQuality) return { usable: true, issue: 'none' };
+  if (!geminiQuality) return openaiQuality;
+  if (!openaiQuality) return geminiQuality;
+  const usable = geminiQuality.usable !== false && openaiQuality.usable !== false;
+  let issue = 'none';
+  if (geminiQuality.issue === 'multiple_subjects' || openaiQuality.issue === 'multiple_subjects') issue = 'multiple_subjects';
+  else if (geminiQuality.issue && geminiQuality.issue !== 'none') issue = geminiQuality.issue;
+  else if (openaiQuality.issue && openaiQuality.issue !== 'none') issue = openaiQuality.issue;
+  return { usable, issue };
+}
+
 function legInfo(result) {
   if (!result) return null;
   return { ok: !!result.ok, provider: result.provider || null, model: result.model || null, reason: result.ok ? null : (result.reason || null) };
@@ -775,9 +819,7 @@ async function identifyPestV2(photos = []) {
     ({ finalCandidates, disagreed, disagreementNode, openaiAnswered } = combineEscalation(finalCandidates, escalationResult));
   }
 
-  const quality = candidatesJson?.quality
-    || (escalationResult?.ok ? escalationResult.json?.quality : null)
-    || { usable: true, issue: 'none' };
+  const quality = combineQuality(candidatesJson?.quality, escalationResult?.ok ? escalationResult.json?.quality : null);
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({
