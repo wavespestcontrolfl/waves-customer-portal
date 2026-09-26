@@ -15,7 +15,7 @@ const { wasLockSkipped } = require('../utils/cron-lock');
 const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
-  buildRollbackTargetOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
+  buildRollbackTargetOrder, buildRollbackPositions, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
   buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy,
 } = require('../../scripts/route-order-cleanup');
 const {
@@ -222,6 +222,33 @@ describe('buildRollbackTargetOrder', () => {
     // Backup array lists S before Q, but Q's "before" (2) precedes S's (4).
     const backup = [{ id: 'S', before: 4, after: 2 }, { id: 'Q', before: 2, after: 4 }];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
+  });
+});
+
+describe('buildRollbackPositions (the exact values the rollback writes back)', () => {
+  test('the codex thread: original 4,5,null restores to exactly 4,5,null — never renumbered 1,2,3', () => {
+    // Cleanup renumbered A=4,B=5,C=null to A=1,B=2,C=3.
+    const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }, { id: 'C', route_order: 3 }];
+    const backup = [
+      { id: 'A', before: 4, after: 1 },
+      { id: 'B', before: 5, after: 2 },
+      { id: 'C', before: null, after: 3 },
+    ];
+    expect(buildRollbackPositions(live, backup)).toEqual(new Map([['A', 4], ['B', 5], ['C', null]]));
+  });
+
+  test('a row the cleanup never touched keeps its CURRENT value, null included', () => {
+    const live = [
+      { id: 'A', route_order: 1 }, { id: 'X', route_order: 7 }, { id: 'Y', route_order: null },
+    ];
+    const backup = [{ id: 'A', before: 3, after: 1 }];
+    expect(buildRollbackPositions(live, backup)).toEqual(new Map([['A', 3], ['X', 7], ['Y', null]]));
+  });
+
+  test('a numeric-string "before" is restored as that integer; a non-numeric one as null (the same "no position" it sorts as)', () => {
+    const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
+    const backup = [{ id: 'A', before: '6', after: 1 }, { id: 'B', before: 'junk', after: 2 }];
+    expect(buildRollbackPositions(live, backup)).toEqual(new Map([['A', 6], ['B', null]]));
   });
 });
 
@@ -439,12 +466,33 @@ describe('applyRollback — hands each eligible tech-day to the SAME fenced writ
     expect(args.techStops).toBe(liveRows);
     expect(args.finalOrdered.map((r) => r.id)).toEqual(['A', 'B', 'X']);
     expect(args.repair).toBeNull();
-    expect(args.opts).toEqual({});
+    // Explicit-positions mode: the exact recorded values, never index+1.
+    expect(args.opts).toEqual({ positions: new Map([['B', 2], ['A', 1], ['X', 3]]) });
     expect(args.now).toBe(NOW);
     expect(args.repairGates).toEqual([]);
     expect(result.restored).toBe(2);
     expect(result.summary.skipped).toEqual([]);
     expect(result.summary.failed).toEqual([]);
+  });
+
+  test('the codex thread: a 4,5,null day hands the writer those exact values — the null row stays null', async () => {
+    const liveRows = [
+      { id: 'A', route_order: 1, window_start: '09:00' },
+      { id: 'B', route_order: 2, window_start: '11:00' },
+      { id: 'C', route_order: 3, window_start: '13:00' },
+    ];
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 4, after: 1 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 5, after: 2 },
+      { id: 'C', date: '2026-10-05', technician_id: 't1', before: null, after: 3 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    const [, args] = writeTechDayOrder.mock.calls[0];
+    expect(args.finalOrdered.map((r) => r.id)).toEqual(['A', 'B', 'C']);
+    expect(args.opts.positions).toEqual(new Map([['A', 4], ['B', 5], ['C', null]]));
+    expect(result.restored).toBe(3);
   });
 
   test('a STALE_TECH_DAY the writer refuses is reported as skipped via the REAL classifyWriteError, not a run-degrading failure', async () => {

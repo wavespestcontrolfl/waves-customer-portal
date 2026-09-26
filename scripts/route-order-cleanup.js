@@ -319,6 +319,30 @@ function buildRollbackTargetOrder(liveRows, dayRows) {
 }
 
 /**
+ * The EXACT route_order value every row on the day goes back to — handed to
+ * writeTechDayOrder as `opts.positions`, its explicit-positions mode, so the
+ * rollback writes back what was recorded instead of renumbering the day by
+ * index+1 (codex thread "Preserve null-position rows when reconstructing
+ * rollback order": original 4,5,null must come back as 4,5,null, never
+ * 1,2,3). A backed-up row returns to its recorded `before` (null stays
+ * null; a non-numeric value is treated as null, the same "no position" it
+ * sorts as in buildRollbackTargetOrder). A row the cleanup never touched
+ * keeps its CURRENT value — it is rewritten to itself, so the writer's
+ * per-row CAS still covers it.
+ */
+function buildRollbackPositions(liveRows, dayRows) {
+  const toPosition = (raw) => {
+    const n = raw == null ? NaN : Number(raw);
+    return Number.isInteger(n) ? n : null;
+  };
+  const beforeById = new Map(dayRows.map((row) => [row.id, row.before]));
+  return new Map(liveRows.map((row) => [
+    row.id,
+    toPosition(beforeById.has(row.id) ? beforeById.get(row.id) : row.route_order),
+  ]));
+}
+
+/**
  * The SAME legality guards chooseWindowSafeOrder itself runs before ever
  * certifying an order (route-reorder-window-fit.js's pure checks, reused
  * via `deps` rather than re-implemented): a target order that places a
@@ -389,7 +413,9 @@ async function previewRollback(conn, rows, deps) {
  * through (`deps.writeTechDayOrder` — writeTechDayOrder / runRouteReorder's
  * own writer) an ORDINARY write: techStops = the live read just taken (the
  * writer's own comparison snapshot — "expected snapshot = live day"),
- * finalOrdered = buildRollbackTargetOrder's restored sequence. The writer
+ * finalOrdered = buildRollbackTargetOrder's restored sequence, and
+ * opts.positions = buildRollbackPositions's exact recorded values (the
+ * writer's explicit-positions mode — never an index+1 renumber). The writer
  * re-reads the day itself under its own advisory lock, inside its own
  * SERIALIZABLE transaction, FOR UPDATE — compares against that snapshot,
  * re-checks freeze/lock/today-past with a FRESH clock at commit time, and
@@ -435,7 +461,7 @@ async function applyRollback(conn, rows, now, deps) {
     try {
       await deps.writeTechDayOrder(conn, {
         dateStr: day.date, techId: day.technician_id, techStops: liveRows, finalOrdered,
-        repair: null, opts: {}, now, repairGates: [],
+        repair: null, opts: { positions: buildRollbackPositions(liveRows, day.rows) }, now, repairGates: [],
       });
       restored += day.rows.length;
     } catch (writeErr) {
@@ -767,7 +793,7 @@ if (require.main === module) {
 
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
-  groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, rollbackWindowConflict,
-  previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, buildRollbackPositions,
+  rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
   outOfHorizonDates, runIsUnhealthy,
 };

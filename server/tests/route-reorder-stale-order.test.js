@@ -36,7 +36,12 @@ const db = require('../models/db');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const RouteOptimizer = require('../services/route-optimizer');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
-const { runRouteReorder } = require('../services/route-reorder');
+const routeReorder = require('../services/route-reorder');
+const { promisedWindowOrder } = require('../services/route-reorder-window-fit');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const { applyRollback } = require('../../scripts/route-order-cleanup');
+
+const { runRouteReorder, writeTechDayOrder, _internals } = routeReorder;
 
 // Fixed clock: 2026-08-13 04:10 ET (08:10Z). Band = 2026-08-14 .. 2026-08-19.
 const NOW = new Date('2026-08-13T08:10:00Z');
@@ -471,5 +476,173 @@ describe('mode ON — canonicalization', () => {
     expect(res.plan).toEqual(expect.arrayContaining([
       expect.objectContaining({ date: DAY, technicianId: 't1', skipped_reason: 'BELOW_MIN_SAVINGS' }),
     ]));
+  });
+});
+
+describe('promised-window baseline chronology (codex pre-push P1)', () => {
+  // visit_id siblings at 09:00 (a) and 11:00 (c) plus an unrelated 10:00
+  // stop (b): promisedWindowOrder pulls c adjacent to a — 09→11→10.
+  const groupedDay = (coords = {}) => [
+    stop('a', { window_start: '09:00', visit_id: 'v1', route_order: null, ...coords.a }),
+    stop('b', { window_start: '10:00', route_order: 2, customer_address_line1: '200 Oak St', ...coords.b }),
+    stop('c', { window_start: '11:00', visit_id: 'v1', route_order: 3, ...coords.c }),
+  ];
+
+  test('the repro: the grouped baseline is out of window order, so canonicalizeBaselineOrder refuses it', () => {
+    expect(promisedWindowOrder(groupedDay()).map((s) => s.id)).toEqual(['a', 'c', 'b']);
+    expect(_internals.canonicalizeBaselineOrder(RouteOptimizer, groupedDay()))
+      .toEqual({ conflict: 'WINDOW_ORDER_CONFLICT' });
+  });
+
+  test('a coordless stale day skips WINDOW_ORDER_CONFLICT and writes nothing — never the 09→11→10 baseline', async () => {
+    stopsByDate[DAY] = groupedDay({ c: { lat: null, lng: null } });
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'WINDOW_ORDER_CONFLICT', source: 'promised_window' });
+  });
+
+  test('a geocoded stale day where Google saves nothing skips WINDOW_ORDER_CONFLICT instead of writing the baseline', async () => {
+    stopsByDate[DAY] = groupedDay({ a: { lng: 1 }, b: { lng: 2 }, c: { lng: 3 } });
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(RouteOptimizer.optimizeRoute).toHaveBeenCalled();
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'WINDOW_ORDER_CONFLICT', source: 'promised_window' });
+  });
+});
+
+describe('MAX_APPLIES_REACHED outranks the coordinate skips on a canonicalize day (codex pre-push P2)', () => {
+  test('a coordless stale day at the cap reports MAX_APPLIES_REACHED, not COORDLESS_STOPS', async () => {
+    stopsByDate[DAY] = [
+      stop('a', { window_start: '09:00', route_order: null }),
+      stop('b', { window_start: '11:00', route_order: 2 }),
+      stop('c', { window_start: '13:00', route_order: 3, lat: null, lng: null }),
+    ];
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true, maxAppliesPerRun: 0 });
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'MAX_APPLIES_REACHED' });
+  });
+
+  test('a too-few-geocoded stale day at the cap reports MAX_APPLIES_REACHED, not TOO_FEW_GEOCODED_STOPS', async () => {
+    stopsByDate[DAY] = [
+      stop('a', { window_start: '09:00', route_order: null, lat: null, lng: null }),
+      stop('b', { window_start: '11:00', route_order: 2, lat: null, lng: null }),
+    ];
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true, maxAppliesPerRun: 0 });
+    expect(res.applied).toBe(0);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'MAX_APPLIES_REACHED' });
+  });
+
+  test('mode off: the same coordless day at the cap still reports COORDLESS_STOPS (unchanged precedence)', async () => {
+    stopsByDate[DAY] = [
+      stop('a', { window_start: '09:00', route_order: null }),
+      stop('b', { window_start: '11:00', route_order: 2 }),
+      stop('c', { window_start: '13:00', route_order: 3, lat: null, lng: null }),
+    ];
+    await runRouteReorder({ now: NOW, maxAppliesPerRun: 0 });
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'COORDLESS_STOPS' });
+  });
+
+  test('a stale but FROZEN coordless day at the cap keeps its freeze outcome — never canonicalized, never reported as capped', async () => {
+    const frozenDay = '2026-08-14';
+    stopsByDate[frozenDay] = [
+      stop('a', { route_order: null }),
+      stop('b', { route_order: 2, lat: null, lng: null }),
+    ];
+    await runRouteReorder({ now: NOW, canonicalizeStale: true, maxAppliesPerRun: 0 });
+    expect(ledger().skips.find((s) => s.date === frozenDay)).toMatchObject({ reason: 'WITHIN_72H' });
+  });
+});
+
+describe('writeTechDayOrder explicit positions (rollback) — persisted values', () => {
+  // A real future date: the rollback passes no opts.now, so the writer's
+  // commit-time today/freeze re-checks read the wall clock.
+  const FUTURE = etDateString(addETDays(new Date(), 10));
+
+  // readLiveTechDay's unlocked read + the writer's own fenced transaction
+  // (the trx fake above, which records every UPDATE's values).
+  function rollbackConn() {
+    const conn = () => {
+      const filters = {};
+      const c = {
+        where: (col, val) => { filters[String(col).replace('scheduled_services.', '')] = val; return c; },
+        whereNotIn: () => c,
+        whereRaw: () => c,
+        leftJoin: () => c,
+        select: () => Promise.resolve((stopsByDate[filters.scheduled_date] || [])
+          .filter((s) => s.technician_id === filters.technician_id)),
+      };
+      return c;
+    };
+    conn.raw = (sql) => sql;
+    conn.transaction = db.transaction;
+    return conn;
+  }
+
+  function realDeps() {
+    return {
+      writeTechDayOrder, classifyWriteError: routeReorder.classifyWriteError,
+      ROUTE_WRITE_GUARD_COLUMNS: routeReorder.ROUTE_WRITE_GUARD_COLUMNS,
+      CUSTOMER_PREMISE_ALIASES: routeReorder.CUSTOMER_PREMISE_ALIASES,
+      guardedCoordSelects: jest.requireMock('../services/scheduling/day-stops').guardedCoordSelects,
+      EXCLUDE_STATUSES: _internals.EXCLUDE_STATUSES, LIVE_HOLD_SQL: _internals.LIVE_HOLD_SQL,
+      RouteOptimizer, violatesWindowChronology: _internals.violatesWindowChronology,
+      violatesWindowFeasibility: _internals.violatesWindowFeasibility,
+    };
+  }
+
+  test('rollback through the REAL writer persists 4,5,null exactly — the null-position row stays null', async () => {
+    // Original A=4, B=5, C=null; the cleanup renumbered them 1,2,3.
+    stopsByDate[FUTURE] = [
+      stop('A', { window_start: '09:00', route_order: 1 }),
+      stop('B', { window_start: '11:00', route_order: 2 }),
+      stop('C', { window_start: '13:00', route_order: 3 }),
+    ];
+    const backup = [
+      { id: 'A', date: FUTURE, technician_id: 't1', before: 4, after: 1 },
+      { id: 'B', date: FUTURE, technician_id: 't1', before: 5, after: 2 },
+      { id: 'C', date: FUTURE, technician_id: 't1', before: null, after: 3 },
+    ];
+    const result = await applyRollback(rollbackConn(), backup, new Date(), realDeps());
+    expect(result.summary).toEqual({ skipped: [], failed: [] });
+    expect(result.restored).toBe(3);
+    expect(trxUpdates).toEqual([
+      { id: 'A', route_order: 4 },
+      { id: 'B', route_order: 5 },
+      { id: 'C', route_order: null },
+    ]);
+  });
+
+  test('a row the backup never touched is written back to its own current value', async () => {
+    stopsByDate[FUTURE] = [
+      stop('A', { window_start: '09:00', route_order: 2 }),
+      stop('X', { window_start: '11:00', route_order: 7 }),
+    ];
+    const backup = [{ id: 'A', date: FUTURE, technician_id: 't1', before: 6, after: 2 }];
+    await applyRollback(rollbackConn(), backup, new Date(), realDeps());
+    expect(trxUpdates).toEqual([{ id: 'A', route_order: 6 }, { id: 'X', route_order: 7 }]);
+  });
+
+  test('a positions map missing a stop rolls the whole tech-day back — nothing persisted', async () => {
+    stopsByDate[FUTURE] = [stop('A', { route_order: 1 }), stop('B', { route_order: 2 })];
+    const techStops = stopsByDate[FUTURE];
+    await expect(writeTechDayOrder(db, {
+      dateStr: FUTURE, techId: 't1', techStops, finalOrdered: techStops, repair: null,
+      opts: { positions: new Map([['A', 1]]) }, now: new Date(), repairGates: [],
+    })).rejects.toMatchObject({ code: 'STALE_TECH_DAY' });
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('without opts.positions the writer still numbers index+1 (the forward pass, unchanged)', async () => {
+    stopsByDate[FUTURE] = [stop('A', { route_order: 5 }), stop('B', { route_order: null })];
+    const techStops = stopsByDate[FUTURE];
+    await writeTechDayOrder(db, {
+      dateStr: FUTURE, techId: 't1', techStops, finalOrdered: [techStops[1], techStops[0]], repair: null,
+      opts: {}, now: new Date(), repairGates: [],
+    });
+    expect(trxUpdates).toEqual([{ id: 'B', route_order: 1 }, { id: 'A', route_order: 2 }]);
   });
 });
