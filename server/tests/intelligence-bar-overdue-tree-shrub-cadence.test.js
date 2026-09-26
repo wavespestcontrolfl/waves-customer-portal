@@ -14,9 +14,10 @@ jest.mock('../models/db', () => {
     const builder = {};
     let limitN = null;
     let offsetN = 0;
-    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'clone']) {
+    for (const m of ['where', 'whereNull', 'whereExists', 'clone']) {
       builder[m] = () => builder;
     }
+    builder.select = (...args) => { state.selectArgs = args; return builder; };
     builder.orderByRaw = (sql) => { state.orderBy = String(sql); return builder; };
     builder.havingRaw = (sql, bindings) => { state.having = [String(sql), bindings]; return builder; };
     builder.limit = (n) => { limitN = n; return builder; };
@@ -26,7 +27,7 @@ jest.mock('../models/db', () => {
     ).then(resolve, reject);
     return builder;
   };
-  dbFn.raw = (sql) => ({ toString: () => sql });
+  dbFn.raw = (sql, bindings) => ({ toString: () => sql, sql, bindings });
   dbFn.__state = state;
   return dbFn;
 });
@@ -167,6 +168,26 @@ test('a Feb–Oct seasonal plan is due on the scheduler\'s next seasonal slot (c
   // Feb 10: the Oct 20 visit's next slot is the 3rd Tuesday, Feb 16 — not Feb 1.
   expect(await overdue('2027-02-10T17:00:00Z', [visit('october-visit', '2026-10-20', seasonal())])).toEqual([]);
   expect(await overdue('2027-02-17T17:00:00Z', [visit('october-visit', '2026-10-20', seasonal())])).toEqual([['october-visit', 119]]);
+});
+
+test('a generic ID-less T&S plan row supplies its own cadence (codex r35 on #4786)', async () => {
+  db.__state.rows = [
+    // "Tree & Shrub Care" booked quarterly with no catalog link: 90, not the label's 60.
+    { ...row('generic-quarterly', 'Tree & Shrub Care', 75), active_plan: { service_key: null, recurring_pattern: 'quarterly', recurring_interval_days: null } },
+    { ...row('generic-quarterly-due', 'Tree & Shrub Care', 95), active_plan: { service_key: null, recurring_pattern: 'quarterly', recurring_interval_days: null } },
+    // ...and every 6 weeks: 42, not 60.
+    { ...row('generic-6wk-due', 'Tree & Shrub Care', 50), active_plan: { service_key: null, recurring_pattern: 'every_6_weeks', recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['generic-6wk-due', 42], ['generic-quarterly-due', 90]]);
+  // The plan lookup keeps rows no catalog row claims when their label is a
+  // T&S plan, on both the primary line and add-on lines.
+  const plan = db.__state.selectArgs.find((a) => a && typeof a.sql === 'string' && a.sql.includes('row_to_json(plan)'));
+  expect(plan.sql.match(/LEFT JOIN services ON/g)).toHaveLength(2);
+  expect(plan.sql).toMatch(/services\.id IS NULL AND scheduled_services\.service_type ~\* \?/);
+  expect(plan.sql).toMatch(/services\.id IS NULL AND scheduled_service_addons\.service_name ~\* \?/);
+  expect(plan.bindings.filter((b) => b === 'tree.*shrub')).toHaveLength(2);
+  expect((plan.sql.match(/\?/g) || []).length).toBe(plan.bindings.length);
 });
 
 test('other categories keep their fixed interval', async () => {
