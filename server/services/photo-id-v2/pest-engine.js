@@ -504,6 +504,22 @@ function buildEntryBlock(entry) {
 // be the top candidate. No fallback to an unapproved entry: if nothing
 // approved is on the list, there is no entry being named, so there is
 // nothing to cite evidence FOR either.
+/** The candidates that actually sit under the chosen answer node — the
+ * named entry itself, or every candidate whose own lineage passes through
+ * the climbed/disagreed group, subgroup or category. Everything the card
+ * cites as support must come from this list: the lineage climb can pick a
+ * group other than the top candidate's (a tortoise@0.40 over two ants
+ * summing to "an ant"), and the tortoise's "domed shell" is not evidence
+ * for an ant (Codex round-0 P1, round 14). An unknown answer has none. */
+function candidatesSupporting(candidates, level, nodeId) {
+  if (!nodeId) return [];
+  if (level === 'entry') return candidates.filter((c) => c.slug === nodeId);
+  return candidates.filter((c) => {
+    const id = candidateNodeId(c);
+    return !!id && catalog.lineage(id).some((r) => r.level === level && r.id === nodeId);
+  });
+}
+
 function evidenceFor(candidates) {
   const top = candidates.find((c) => c.entry && isApproved(c.entry)) || null;
   if (!top) return { matches: [], still_need: [] };
@@ -700,7 +716,7 @@ function buildAnswer(ctx) {
   const { level, wording, nodeId, subhead, headline, entry } = picked;
 
   const group = groupBlockFor(level, nodeId, entry);
-  const evidence = evidenceFor(candidates);
+  const evidence = evidenceFor(candidatesSupporting(candidates, level, nodeId));
   const candidatesBlock = candidatesBlockFor(candidates, currentMonth);
   const nextPhoto = nextPhotoFor(wording, candidates, level, nodeId);
 

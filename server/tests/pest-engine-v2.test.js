@@ -175,6 +175,24 @@ describe('buildAnswer — lineage climb', () => {
     expect(built.answer.node_id).toBe('ants');
   });
 
+  test('evidence comes only from candidates under the climbed node, never the off-lineage top (Codex round-0 P1, round 14)', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [
+        cand('gopher-tortoise', 0.40, { traitsVisible: [1], traitsNotVisible: [2] }),
+        cand('fire-ant', 0.35, { traitsVisible: [1, 3], traitsNotVisible: [2] }),
+        cand('ghost-ant', 0.30),
+      ],
+    }));
+    expect(built.answer.node_id).toBe('ants');
+    expect(built.evidence).toEqual({ matches: ['Reddish-brown mound builders', 'Two-node waist'], still_need: ['Aggressive when disturbed'] });
+  });
+
+  test('an unknown answer cites no evidence at all', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('gopher-tortoise', 0.30, { traitsVisible: [1] })] }));
+    expect(built.answer.level).toBe('unknown');
+    expect(built.evidence).toEqual({ matches: [], still_need: [] });
+  });
+
   test('unknown when nothing clears any lineage rung', () => {
     const built = buildAnswer(baseCtx({ candidates: [candOff('something unrecognizable', null, 0.1)] }));
     expect(built.answer).toMatchObject({ level: 'unknown', wording: 'unknown', node_id: null, headline: "We couldn't tell from these photos" });
