@@ -777,32 +777,6 @@ async function processDueBatch(now = new Date()) {
           continue;
         }
       }
-      if (isGoneQuiet) {
-        // The gone-quiet probe ran (up to 3 s) whether or not it produced an
-        // offer, so the recipient read before it is stale either way (Codex
-        // #4918 r8 P2). If the estimate's email moved since, this send goes
-        // to the NEW address, without the offer (never a bearer for another
-        // inbox).
-        const freshRecipient = await db('estimates').where({ id: est.id }).first('customer_email');
-        if (String(freshRecipient?.customer_email || '').trim().toLowerCase()
-          !== String(est.customer_email || '').trim().toLowerCase()) {
-          consultationUrl = '';
-          est.customer_email = freshRecipient?.customer_email || null;
-        }
-        // Same staleness for the portal-wide email opt-out read above the
-        // probe (Codex #4918 r8→r10 P2): an opt-out landing during it wins.
-        // A read error throws to the loop's catch, which releases the claim
-        // and takes the bounded retry — fail closed, as the first read does.
-        if (est.customer_id) {
-          const freshPrefs = await db('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled');
-          if (freshPrefs?.email_enabled === false) {
-            await followupShared.releaseFollowupSend(est.id, rule.rule_key);
-            claimed = false;
-            await markJob(job.id, 'skipped', 'email-prefs-off');
-            continue;
-          }
-        }
-      }
       const firstName = (est.customer_name || '').split(' ')[0] || 'there';
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
       // Accept-intent variant (owner 2026-07-15: as few clicks as possible)
@@ -812,12 +786,36 @@ async function processDueBatch(now = new Date()) {
       const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
-      // Last check before the send (Codex #4918 r9 P2): the short-link mints
-      // and the claim above all awaited after the builder's own final check.
-      // Probe-free re-run of the shared eligibility against the recipient
-      // this email goes to; anything changed drops the link, never the email.
-      if (consultationUrl && !(await reconfirmGoneQuietConsultation(consultationContext, est.customer_email))) {
-        consultationUrl = '';
+      if (isGoneQuiet) {
+        // ONE post-claim refresh, immediately before the send (Codex #4918
+        // r8–r11): the gone-quiet probe (up to 3 s), the claim and the link
+        // mints all awaited after the estimate/prefs reads above, so the
+        // recipient, the customer behind it, that customer's email opt-out
+        // and the offer's eligibility are all re-judged here together. A
+        // moved recipient gets the send without the offer; an opt-out wins
+        // (claim released, job skipped); lost eligibility drops only the
+        // link. Any read error throws to the loop's catch (claim released,
+        // bounded retry). The residual is the ms from here to the provider
+        // call — the same residual the deadline re-read above accepts.
+        const fresh = await db('estimates').where({ id: est.id }).first('customer_email', 'customer_id');
+        if (String(fresh?.customer_email || '').trim().toLowerCase()
+          !== String(est.customer_email || '').trim().toLowerCase()) {
+          consultationUrl = '';
+        }
+        est.customer_email = fresh?.customer_email || null;
+        est.customer_id = fresh?.customer_id || null;
+        if (est.customer_id) {
+          const freshPrefs = await db('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled');
+          if (freshPrefs?.email_enabled === false) {
+            await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+            claimed = false;
+            await markJob(job.id, 'skipped', 'email-prefs-off');
+            continue;
+          }
+        }
+        if (consultationUrl && !(await reconfirmGoneQuietConsultation(consultationContext, est.customer_email))) {
+          consultationUrl = '';
+        }
       }
       const ok = await followupShared.sendDualChannel(est, {
         email: {

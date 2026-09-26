@@ -93,6 +93,8 @@ const Engine = require('../services/estimate-engagement-engine');
 // Builder stub — chain methods return the builder; awaiting resolves by
 // mode. insert/update/del recorded in writes.
 const writes = [];
+// object-form where() args, per table (reads carry no other record).
+const reads = [];
 function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
@@ -102,6 +104,10 @@ function makeBuilder(table, cfg = {}) {
   ]) {
     b[m] = jest.fn(() => b);
   }
+  b.where = jest.fn((arg) => {
+    if (arg && typeof arg === 'object') reads.push({ table, where: arg });
+    return b;
+  });
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
   b.insert = jest.fn((payload) => {
     b._mode = 'insert';
@@ -191,6 +197,7 @@ const HOT_RULE = RULE_ROWS[0];
 beforeEach(() => {
   jest.clearAllMocks();
   writes.length = 0;
+  reads.length = 0;
   rawJobs.length = 0;
   rawRepairs.length = 0;
   jobInsertResults = [];
@@ -630,7 +637,7 @@ describe('processDueJobs', () => {
     test('an email opt-out landing during the probe wins: the claim is released and the job skipped, nothing sent (Codex #4918 r10 P2)', async () => {
       buildGoneQuietConsultationUrl.mockResolvedValue('');
       enqueueProcessorHappyPath({ est: baseEstimate({ customer_id: 'cust-1' }) });
-      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com', customer_id: 'cust-1' } });
       enqueue('notification_prefs', { first: { email_enabled: false } }); // post-probe re-read
 
       const result = await Engine.processDueJobs(NOW);
@@ -640,6 +647,34 @@ describe('processDueJobs', () => {
       expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
       const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
       expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped' }));
+    });
+
+    test('the estimate moved to another customer during the probe → THAT customer\'s opt-out is the one checked (Codex #4918 r11 P2)', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath({ est: baseEstimate({ customer_id: 'cust-1' }) });
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com', customer_id: 'cust-2' } });
+      enqueue('notification_prefs', { first: { email_enabled: false } });
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(0);
+      const prefsReads = reads.filter((r) => r.table === 'notification_prefs');
+      expect(prefsReads.pop().where).toEqual(expect.objectContaining({ customer_id: 'cust-2' }));
+    });
+
+    test('the final refresh runs AFTER the link mints, right before the send, and the reconfirm gets the fresh recipient (Codex #4918 r11 P2)', async () => {
+      const order = [];
+      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
+      followupShared.mintStageLinks.mockImplementation(async () => { order.push('mint'); return { emailUrl: 'https://x/e' }; });
+      reconfirmGoneQuietConsultation.mockImplementation(async () => { order.push('reconfirm'); return true; });
+      followupShared.sendDualChannel.mockImplementation(async () => { order.push('send'); return true; });
+      enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com', customer_id: 'cust-1' } });
+
+      await Engine.processDueJobs(NOW);
+
+      expect(order).toEqual(['mint', 'mint', 'reconfirm', 'send']);
+      expect(reconfirmGoneQuietConsultation).toHaveBeenCalledWith(expect.any(Object), 'taylor@example.com');
     });
 
     test('every other rule\'s payload never gets consultation_url — the builder is never even called for them', async () => {
