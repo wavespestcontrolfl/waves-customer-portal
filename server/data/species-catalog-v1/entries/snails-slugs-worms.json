@@ -267,7 +267,7 @@
       {
         "slug": "hammerhead-flatworm",
         "difference": "Slugs have a rounded head with two tentacles; hammerhead flatworm has a flat, fan- or hammer-shaped head, clearly wider than its body",
-        "next_photo": "A close-up of the front end checking for a fan/hammer shape versus a rounded head with tentacles",
+        "next_photo": "From a safe distance, zoom in on the front end checking for a fan/hammer shape versus a rounded head with tentacles.",
         "photo_can_confirm": true
       }
     ],
@@ -340,7 +340,7 @@
       "https://edis.ifas.ufl.edu/publication/IN891"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Found and confirmed a dedicated, current UF/IFAS EDIS page this session: EENY-494/IN891, \"Terrestrial Slugs of Florida\" (Capinera, rev. April 2025). It confirms Leidyula floridana specifically as tan/mottled with brown-black spots often coalescing into dorsolateral stripes, bearing a pale medial stripe; two pairs of anterior tentacles (larger upper pair with eyes) and a breathing pore (pneumostome) are confirmed as general slug anatomy shared by this species; it produces mucus/slime for locomotion and defense; it feeds on both living and decaying plant material at night; it's native to the Caribbean and south Florida, has spread to north Florida, Louisiana, Texas and northeast Mexico, and is \"normally...the most commonly encountered veronicellid in Florida\" reaching up to 12g and over 5cm (2in). This resolves the species-specific traits claim; general slug traits (tentacles, breathing pore, slime) are confirmed as accurate for this species too."
     },
     "role": "plant_pest",
@@ -382,7 +382,7 @@
       {
         "slug": "slugs",
         "difference": "Hammerhead flatworm has a flat, fan- or hammer-shaped head, clearly wider than its body; slugs have a rounded head with two visible tentacles",
-        "next_photo": "A close-up of the front end checking for a fan/hammer shape versus a rounded head with tentacles",
+        "next_photo": "From a safe distance, zoom in on the front end checking for a fan/hammer shape versus a rounded head with tentacles.",
         "photo_can_confirm": true
       }
     ],

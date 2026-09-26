@@ -882,7 +882,7 @@ function groupBlockFor(level, nodeId, entry) {
 function buildAnswer(ctx) {
   const {
     candidates, disagreed, disagreementNode, escalationTriggered, openaiAnswered, openaiStoodInAlone,
-    qualityUsable, qualityIssue, subjectConflict, currentMonth,
+    qualityUsable, qualityIssue, subjectConflict, signOnly, currentMonth,
   } = ctx;
   const unansweredTrigger = escalationTriggered && !openaiAnswered;
   // Codex round-0 P1 (round 10): an OpenAI candidate that stood in ALONE
@@ -899,9 +899,13 @@ function buildAnswer(ctx) {
   const blockPrettySure = unansweredTrigger || !!openaiStoodInAlone || evidenceBlocked;
   const top = candidates[0] || null;
 
+  // A sign-only read never names an organism: the photos show mud tubes, not
+  // a termite, and several species make them. The sign entry itself may
+  // still be named; an organism top climbs its lineage (Codex #4974 r7).
+  const organismFromSign = !!signOnly && top?.entry?.kind === 'organism';
   const picked = disagreed
     ? climbedOrDisagreedAnswer(candidates, true, disagreementNode)
-    : (entryLevelAnswer(candidates, top, blockPrettySure) || climbedOrDisagreedAnswer(candidates, false, null));
+    : ((!organismFromSign && entryLevelAnswer(candidates, top, blockPrettySure)) || climbedOrDisagreedAnswer(candidates, false, null));
   const { level, wording, nodeId, subhead, headline, entry } = picked;
 
   const group = groupBlockFor(level, nodeId, entry);
@@ -1313,6 +1317,10 @@ async function identifyPestV2(photos = []) {
   // two legs that disagree (pre-push audit on Codex #4916 r1).
   const subjectConflict = showsConflict(candidatesJson?.shows, escalationJson?.shows)
     || candidatesJson?.shows === 'nothing' || escalationJson?.shows === 'nothing';
+  // Every leg that read the photos saw only a sign (mud tubes, pellets,
+  // droppings), no animal: a sign can't name one species that makes it.
+  const showsReads = [candidatesJson?.shows, escalationJson?.shows].filter(Boolean);
+  const signOnly = showsReads.length > 0 && showsReads.every((v) => v === 'sign');
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({
@@ -1325,6 +1333,7 @@ async function identifyPestV2(photos = []) {
     qualityUsable: !!quality.usable,
     qualityIssue: quality.issue || 'none',
     subjectConflict,
+    signOnly,
     currentMonth,
   });
 

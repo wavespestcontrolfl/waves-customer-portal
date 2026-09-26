@@ -700,7 +700,7 @@
       {
         "slug": "webbing-clothes-moth",
         "difference": "Carpet beetle larvae are bristly, hairy grubs and adults are small round beetles; clothes moth larvae are smooth and hairless and the adult is a small tan moth",
-        "next_photo": "A close-up of the larva checking for hairs/bristles versus a smooth body, or a photo of the adult if seen",
+        "next_photo": "From a safe distance, zoom in on the larva checking for hairs/bristles versus a smooth body, or a photo of the adult if seen.",
         "photo_can_confirm": true
       }
     ],
@@ -771,7 +771,7 @@
       "https://ask.ifas.ufl.edu/publication/IN144"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Entry covers the several common household carpet beetle species (Anthrenus, Attagenus) collectively. Confirmed via UF/IFAS EDIS IN873 (Common Carpet Beetle): \"may also cause dermatitis when human skin comes in contact with shed larval skins.\" IN144 (Black Carpet Beetle) adds that people in close contact may have allergic reactions to beetle fragments, cast skins or dust. Safety line kept as contact/handling-based irritation, not a bite or sting."
     },
     "role": "nuisance",
@@ -819,7 +819,7 @@
       {
         "slug": "carpet-beetle",
         "difference": "Clothes moth larvae are smooth and hairless and the adult is a small tan moth; carpet beetle larvae are bristly, hairy grubs and adults are small round beetles",
-        "next_photo": "A close-up of the larva checking for hairs/bristles versus a smooth body, or a photo of the adult if seen",
+        "next_photo": "From a safe distance, zoom in on the larva checking for hairs/bristles versus a smooth body, or a photo of the adult if seen.",
         "photo_can_confirm": true
       }
     ],
@@ -890,7 +890,7 @@
       "https://ask.ifas.ufl.edu/ig090"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Found and confirmed a dedicated UF/IFAS EDIS page this session: ENY-223/IG090, \"Clothes Moths\" (covers the webbing clothes moth as the most commonly encountered species). It confirms adult size (1/4 to 1/2 inch), golden/yellowish coloring with unspotted wings, and larvae that are white with a dark head and are stationary, feeding in one spot under a silk tube (unlike the portable-case-making behavior of the related case-making clothes moth). Traits corrected accordingly (removed an inaccurate 'portable case' description that actually applies to the other species). No Florida-specific peak-month curve is given, so peak_months stays an estimate; the traits claim is resolved."
     },
     "role": "nuisance",

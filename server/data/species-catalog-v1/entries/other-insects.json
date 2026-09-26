@@ -32,7 +32,7 @@
       {
         "slug": "katydid",
         "difference": "Walkingstick is plain brown/striped and shaped like a stick with no wings; katydid is green with leaf-shaped wings",
-        "next_photo": "A close-up checking for wings and green leaf-shaped wing covers versus a plain stick shape",
+        "next_photo": "From a safe distance, zoom in checking for wings and green leaf-shaped wing covers versus a plain stick shape.",
         "photo_can_confirm": true
       }
     ],
@@ -100,7 +100,7 @@
       "https://en.wikipedia.org/wiki/Anisomorpha_buprestoides"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Peak months (fall mating season) are from general knowledge, not directly cited."
     },
     "role": "harmless_visitor",

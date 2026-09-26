@@ -239,6 +239,12 @@ describe('buildAnswer — tier', () => {
     expect(built.nextPhoto.photo_can_confirm).toBe(true);
   });
 
+  test('a sign-only read never names an organism entry (Codex #4974 r7)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.95, { traitsVisible: [1] })], signOnly: true }));
+    expect(built.answer.level).not.toBe('entry');
+    expect(built.entry).toBeNull();
+  });
+
   test('a subject conflict also caps the wording below pretty_sure (Codex #4916 r4)', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], subjectConflict: true }));
     expect(built.answer.wording).toBe('likely');

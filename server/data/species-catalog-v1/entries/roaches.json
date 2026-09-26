@@ -381,7 +381,7 @@
       {
         "slug": "smokybrown-cockroach",
         "difference": "Florida woods roach has only short wing pads and cannot fly; smokybrown cockroach has full, shiny wings and flies well",
-        "next_photo": "A photo from directly above showing whether the wings cover the abdomen or stop short",
+        "next_photo": "From a safe distance, a zoomed photo from directly above showing whether the wings cover the abdomen or stop short.",
         "photo_can_confirm": true
       }
     ],
@@ -452,7 +452,7 @@
       "https://journals.flvc.org/edis/article/view/119483"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 55: removed the 'palmetto bug' alias/aka, which also appears on american-cockroach (A entry) -- that is the more classic Florida usage for the American cockroach specifically, so it's kept there and dropped here to avoid a shared-name collision. 'Stink roach' and 'skunk cockroach' remain distinctive to this species."
     }
   },

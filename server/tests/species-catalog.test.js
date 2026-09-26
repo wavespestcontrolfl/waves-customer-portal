@@ -158,7 +158,7 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       // close-up, and never touch, poke or disturb it — zoom in from a safe
       // distance instead (Codex #4974 r6).
       const stingsVenomousOrMedical = (x) => !!x
-        && (x.safety.stings === true || x.safety.venomous === true || ['medical', 'defensive'].includes(x.risk));
+        && (x.safety.stings === true || x.safety.venomous === true || x.safety.irritant === true || ['medical', 'defensive', 'irritant'].includes(x.risk));
       const riskySign = (x) => !!x && x.kind === 'sign'
         && x.sign_of.some((s) => stingsVenomousOrMedical(catalog.getEntry(s)));
       const isRiskyPair = (slug) => {

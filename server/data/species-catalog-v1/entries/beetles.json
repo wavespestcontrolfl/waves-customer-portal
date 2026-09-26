@@ -253,13 +253,13 @@
       {
         "slug": "lady-beetle",
         "difference": "Asian lady beetle has a black 'M' or 'W' mark behind the head; native lady beetles lack that marking",
-        "next_photo": "A close-up looking straight down at the head and the area just behind it, a few inches away",
+        "next_photo": "From a safe distance, zoom in looking straight down at the head and the area just behind it.",
         "photo_can_confirm": true
       },
       {
         "slug": "mealybug-destroyer",
         "difference": "Mealybug destroyer adults are solid black with an orange-tan head and tail patch and have no spots at all",
-        "next_photo": "A close-up from directly above showing the whole back, checking for spots vs. solid black",
+        "next_photo": "From a safe distance, zoom in from directly above showing the whole back, checking for spots vs. solid black.",
         "photo_can_confirm": true
       }
     ],
@@ -376,7 +376,7 @@
       {
         "slug": "asian-lady-beetle",
         "difference": "Native lady beetles lack the black 'M'/'W' mark behind the head, and don't gather indoors by the hundreds",
-        "next_photo": "A close-up looking straight down at the head and the area just behind it, a few inches away",
+        "next_photo": "From a safe distance, zoom in looking straight down at the head and the area just behind it.",
         "photo_can_confirm": true
       }
     ],
@@ -447,7 +447,7 @@
       "https://ask.ifas.ufl.edu/publication/IN327"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Entry covers Florida's many native lady beetle species collectively (rank family); appearance varies a lot by species, so traits describe the general pattern rather than one look."
     },
     "role": "beneficial",
@@ -497,7 +497,7 @@
       {
         "slug": "asian-lady-beetle",
         "difference": "Mealybug destroyer adults are solid black with an orange-tan head/tail and have no spots; Asian lady beetles are orange or red with black spots",
-        "next_photo": "A close-up from directly above showing the whole back, checking for spots vs. solid black",
+        "next_photo": "From a safe distance, zoom in from directly above showing the whole back, checking for spots vs. solid black.",
         "photo_can_confirm": true
       }
     ],
@@ -568,7 +568,7 @@
       "https://ask.ifas.ufl.edu/publication/IN156"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Range in SWFL marked occasional; it's naturally present and also released commercially, but homeowners rarely notice or report it, so confidence is moderate."
     },
     "role": "beneficial",
@@ -943,7 +943,7 @@
       {
         "slug": "florida-woods-roach",
         "difference": "Bess beetle has hard, deeply grooved wing covers and one head horn; Florida woods roach has a smooth, unridged shell and no horn",
-        "next_photo": "A close-up looking straight down at the back, checking for grooves/ridges vs. a smooth shell",
+        "next_photo": "From a safe distance, zoom in looking straight down at the back, checking for grooves/ridges vs. a smooth shell.",
         "photo_can_confirm": true
       }
     ],
@@ -1013,7 +1013,7 @@
       "https://journals.flvc.org/edis/article/view/118865"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "beneficial",

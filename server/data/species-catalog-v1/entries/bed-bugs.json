@@ -218,7 +218,7 @@
   {
     "slug": "bed-bug-signs",
     "kind": "sign",
-    "common_name": "Bed Bug Signs",
+    "common_name": "Bed Bug or Bat Bug Signs",
     "role": "health_pest",
     "risk": "defensive",
     "action": "inspection",
