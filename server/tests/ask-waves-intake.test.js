@@ -269,6 +269,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['The treatment leaves pets unharmed.', ''],
     ['Our spray keeps your kids safe.', ''],
     ['The treatment harms neither pets nor children.', ''],
+    ['This treatment is incapable of harming pets.', ''],
     ['Neither pets nor children will be harmed by this product.', ''],
     ['Your pets are not going to be harmed.', ''],
     ['Sus mascotas van a estar bien.', ''],
@@ -683,6 +684,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.reply).toContain('1-800-222-1222');
   });
 
+  test.each(['Your child seems fine.', 'Your child appears to be okay.', 'He looks alright.', 'Su hijo parece estar bien.'])('an apparent-wellness reply after an ingestion gets the emergency script: %s', (reply) => {
+    const out = normalizeIntakeResult({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
   test.each([
     'My dog was exposed to pesticide',
     'My cat got sprayed with insecticide',
@@ -1030,6 +1036,9 @@ describe('normalizeIntakeResult', () => {
     ['The EPA did not okay this product; it is EPA-registered.', ''],
     ['EPA approval is not required for this EPA-exempt product.', ''],
     ['This product does not have EPA approval; it is EPA-exempt.', ''],
+    ['EPA approval was denied; it is not EPA-registered.', ''],
+    ['The EPA rejected its approval application.', ''],
+    ['The EPA declined to approve it.', ''],
     ['The product lacks EPA approval because it is EPA-exempt.', ''],
     ['EPA registration does not mean approval.', ''],
     ['EPA approval has not been granted; the product is EPA-registered.', ''],
@@ -2037,6 +2046,8 @@ describe('looksLikeEmergency', () => {
     'My child was stung\nNow the swelling is worse',
     'My child was bitten\nNow there are hives',
     "I didn't get pesticide in my eyes, but my son did",
+    'My child got poison in his nose',
+    'My son got pesticide in his nostrils',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2124,6 +2135,8 @@ describe('looksLikeEmergency', () => {
     "My child didn't get pesticide in her eyes",
     "I didn't get pesticide in my eye",
     "My dog didn't get poison on his paws",
+    'My child did not have any vomiting after the pesticide treatment',
+    "My dog didn't have a rash after the spray",
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
     'The ants got poisoned by chemicals',
