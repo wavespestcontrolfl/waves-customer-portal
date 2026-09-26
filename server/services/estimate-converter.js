@@ -4304,7 +4304,17 @@ function annualPlanRowsFor(estimateData, billingTerm) {
 // delivery/fingerprint stamp estimate-offer-version.js already writes at
 // send time, the same evidence annualPlanPublicReplayBlocked uses to keep
 // such an offer viewable and acceptable.
+const PERSISTED_SIGN_BEFORE_PAY_STAMPS = ['awaiting_signature', 'activated', 'signature_expired'];
+
 function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm) {
+  // A persisted stamp is checked BEFORE the billing-term row filter: it
+  // proves this estimate already entered sign-before-pay, whatever
+  // billingTerm a later caller passes. A retry that omits billingTerm
+  // (default 'standard' selects no annual-plan rows) must still reach
+  // parkTermiteAnnualPlanAccept's no-op for a parked / activated / closed
+  // estimate — never an ordinary conversion that mints services or an
+  // invoice beside it.
+  if (PERSISTED_SIGN_BEFORE_PAY_STAMPS.includes(estimate?.annual_plan_activation_status)) return true;
   const rows = annualPlanRowsFor(estimateData, billingTerm);
   if (rows.length === 0) return false;
   // Codex round-3 P0: once an estimate has actually parked, the PERSISTED
@@ -4318,8 +4328,17 @@ function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm)
   // annualPlanActivationStatus='activated' — and
   // termite-annual-activation.js's own defense-in-depth check then throws
   // and rolls back a signed contract's conversion forever.
-  if (estimate.annual_plan_activation_status === 'awaiting_signature'
-    || estimate.annual_plan_activation_status === 'activated') return true;
+  // Slice 3b: 'signature_expired' is ALSO a persisted, authoritative stamp
+  // (the customer never signed within the abandon window) — it must route
+  // here exactly like 'awaiting_signature' / 'activated' rather than fall
+  // through to the live-gate/delivered-offer check below. Without this, a
+  // gate disabled after the plan expired (or an estimate with no delivered-
+  // offer stamp) would let a re-run of convertEstimate treat the row as an
+  // ORDINARY accept and run the full standard conversion against a plan
+  // that already closed — never the intended outcome. parkTermiteAnnualPlanAccept
+  // (below) is what actually decides what a re-run of a 'signature_expired'
+  // estimate does; this only ensures every re-run reaches that decision.
+  // (All three stamps are checked at the top of this function.)
   return termiteAnnualPlanSelectionEnabled() || annualPlanHasDeliveredOffer(estimate);
 }
 
@@ -4474,6 +4493,20 @@ async function parkTermiteAnnualPlanAccept({
   }
   if (estimate.annual_plan_activation_status === 'awaiting_signature' && estimate.annual_plan_deferred_invoice) {
     return { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: parkedDeferredTotal(estimate.annual_plan_deferred_invoice) };
+  }
+  // Slice 3b, deliberate decision: a 'signature_expired' estimate NEVER
+  // silently re-parks or re-opens here, no matter how many times
+  // convertEstimate is re-run against it (a stray retry, a webhook replay,
+  // an operator re-triggering acceptance). The 45-day close is meant to be
+  // final — "re-quote if the customer still wants it" (a NEW estimate),
+  // never "re-accept the same one and the clock resets". Re-opening THIS
+  // exact estimate is not offered as a path in this slice; if the owner
+  // later wants a deliberate staff "reinstate" action, it should be an
+  // explicit endpoint that clears annual_plan_activation_status back to
+  // NULL (not routed through this accept-time park helper) so it can carry
+  // its own audit trail and can't be triggered by an ordinary retry.
+  if (estimate.annual_plan_activation_status === 'signature_expired') {
+    return { annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null };
   }
   // Codex round-3 P1: freeze the customer-accepted pricing NOW, before any
   // tier/pipeline work runs — never park without it. A failure here fails
@@ -4679,7 +4712,14 @@ const EstimateConverter = {
     // GATE_TERMITE_ANNUAL_PLAN off an annual-plan draft marked won with
     // standard billing slipped past (Codex #4937 r1 P1). The product has no
     // per-application shape whatever the gate says.
+    // An estimate that already entered sign-before-pay (a persisted
+    // parked / activated / closed stamp) is NOT refused here: a retry that
+    // omits billingTerm must still reach parkTermiteAnnualPlanAccept's
+    // idempotent no-op below (isTermiteAnnualPlanAccept is true for it) —
+    // refusing it would 422 a harmless replay of an accept that already
+    // happened. The refusal is for a FRESH accept only.
     if (billingTerm !== 'prepay_annual'
+      && !PERSISTED_SIGN_BEFORE_PAY_STAMPS.includes(estimate?.annual_plan_activation_status)
       && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
       const err = new Error(
         'The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront") — pick that option to continue.',

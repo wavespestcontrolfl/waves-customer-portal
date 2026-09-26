@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const db = require('../models/db');
 const ContactLedger = require('./collections/contact-ledger');
+const BillingEmailReservation = require('./billing-email-reservation');
 const { collectionsChannelPermitted } = require('./collections/rail-guard');
 
 const TERMINAL_EMAIL_REFUSAL_CODES = new Set([
@@ -52,6 +53,7 @@ function metadataOf(row) {
 async function reminderProgress(customerId, source, channels) {
   const rows = await db('collections_contact_ledger').where({ customer_id: customerId, source })
     .where('occurred_at', '>', new Date(Date.now() - 90 * 86400000));
+  const repaired = await BillingEmailReservation.repairAcceptedBillingEmailReservations(rows, db);
   const events = new Map();
   for (const row of rows) {
     const metadata = metadataOf(row);
@@ -61,7 +63,7 @@ async function reminderProgress(customerId, source, channels) {
     event.entries.push(row);
     for (const channel of metadata.policy_waived_channels || []) event.waived.add(channel);
     if (metadata.resolved === true && metadata.delivered !== true) event.resolved.add(row.channel);
-    if (metadata.delivered === true) {
+    if (metadata.delivered === true || repaired.has(String(row.id))) {
       event.delivered.add(row.channel);
       if (!event.deliveredAt || new Date(row.occurred_at) > new Date(event.deliveredAt)) event.deliveredAt = row.occurred_at;
     }

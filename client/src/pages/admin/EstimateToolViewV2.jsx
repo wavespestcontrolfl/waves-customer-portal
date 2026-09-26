@@ -45,7 +45,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
-import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile } from "../../lib/lookupPrefill";
+import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -1831,6 +1831,7 @@ export default function EstimateToolViewV2({
   // Set when the server-authoritative price (Decision #2) differs from the
   // client preview at save time, so the operator isn't left quoting a stale number.
   const [priceRecomputeNotice, setPriceRecomputeNotice] = useState(null);
+  const [reopenNotice, setReopenNotice] = useState("");
   // Server-detected unlinked-member save (2026-08-10): the typed address
   // matches an active member but no customer was linked, so the combined
   // WaveGuard tier was NOT applied — surfaced beside the saved totals so the
@@ -1887,6 +1888,31 @@ export default function EstimateToolViewV2({
           // would erase them on a service-only edit.
           notes: d.notes || "",
         };
+  }
+
+  // An estimate saved before today's lookup guards reopens with values they
+  // now refuse (lib/lookupPrefill.js scrubReopenedEstimateForm) or with a
+  // price the engine guessed at a 2,000 sq ft house. Its stored price is
+  // then not restored as current: no result, no saved id — Review and send
+  // stays off until the operator regenerates and saves (the server replays
+  // the saved engineRequest verbatim, so the old price would otherwise go
+  // out unchanged).
+  function reopenEditSource(d) {
+    const restored = formFromEditSource(d);
+    const { form: seeded, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
+    const guessedHomeSize = linesPricedOnGuessedHomeSize(d.result).length > 0;
+    const notice = [
+      cleared.length > 0
+        ? `This estimate was saved before a pricing fix. Removed values the lookup filled in: ${cleared.join(", ")}.`
+        : null,
+      // An association aggregate's missing input is the story count, as in
+      // the Generate guard (codex r1 P2).
+      guessedHomeSize && d.engineProfile?.footprintUnknown === true
+        ? "Its saved price was a guess at the home's footprint — enter the number of stories."
+        : guessedHomeSize ? "Its saved price was a guess at a 2,000 sq ft house — enter home sq ft." : null,
+    ].filter(Boolean);
+    if (notice.length > 0) notice.push("Generate the estimate again before saving or sending.");
+    return { restored, seeded, stale: notice.length > 0, notice: notice.join(" ") };
   }
 
   // ── Edit mode: reopen an existing estimate for in-place revision ──
@@ -2082,19 +2108,23 @@ export default function EstimateToolViewV2({
           );
           return;
         }
-        const seeded = formFromEditSource(d);
+        const { restored, seeded, stale, notice } = reopenEditSource(d);
         loadedEstimateRefresh.current = estimateRefresh;
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
         rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
         previousAddressRef.current = seeded.address;
-        savedFormRef.current = JSON.stringify(seeded);
+        // Against the SAVED form when the scrub refused the stored price (it
+        // reads as unsaved edits); otherwise the seeded form, so a bare
+        // _unitLookup seed never leaves a clean reopen dirty (pre-push P1).
+        savedFormRef.current = JSON.stringify(stale ? restored : seeded);
         setForm(seeded);
         setEnrichedProfile(scopeUnitParcelProfile(d.engineProfile) || null);
         setLookupMeta(null);
         setSatelliteData(null);
-        setEstimate(d.result ? { ...d.result, engineRequest: d.engineRequest } : null);
-        setSavedId(d.id);
+        setEstimate(d.result && !stale ? { ...d.result, engineRequest: d.engineRequest } : null);
+        setSavedId(stale ? null : d.id);
+        setReopenNotice(notice);
         setSavedViewUrl(estimatePreviewUrlFromSave(d));
         setPriceRecomputeNotice(null);
         setEditMode({
@@ -2140,6 +2170,7 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
+    setReopenNotice("");
     setGroupAnchorId(null);
     // Hydration now seeds the linked-customer chip — clear it with the rest
     // of the edit state or it lingers over the next blank form.
@@ -3090,6 +3121,8 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
+    // The reopen alert belongs to the previous estimate (codex r4 P2).
+    setReopenNotice("");
   }
 
   function toggleServiceSpecificDiscount(key) {
@@ -4081,6 +4114,7 @@ export default function EstimateToolViewV2({
       setSavedId(null);
       setSavedViewUrl(null);
       setPriceRecomputeNotice(null);
+      setReopenNotice("");
       setLookupStatus((s) => ({ ...s, type: "ok" }));
       return result;
     } catch (e) {
@@ -4430,16 +4464,18 @@ export default function EstimateToolViewV2({
       if (JSON.stringify(formRef.current) !== savedFormRef.current) {
         throw new Error("The saved estimate changed while you were editing. Your fields are retained; reopen the saved version before another save.");
       }
-      const seeded = formFromEditSource(source);
+      const { restored, seeded, stale, notice } = reopenEditSource(source);
       previousAddressRef.current = seeded.address;
       rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
-      savedFormRef.current = JSON.stringify(seeded);
+      savedFormRef.current = JSON.stringify(stale ? restored : seeded);
       setForm(seeded);
       setEnrichedProfile(scopeUnitParcelProfile(source.engineProfile) || null);
       setExistingCustomerMatch(source.customer || null);
+      if (stale) setSavedId(null);
+      setReopenNotice(notice);
       setEditMode((current) => ({ ...current, status: source.status, editVersion: source.editVersion }));
       if (!source.editable) setEditLoadError(source.blockReason);
-      setEstimate(source.result ? { ...source.result, engineRequest: source.engineRequest } : null);
+      setEstimate(source.result && !stale ? { ...source.result, engineRequest: source.engineRequest } : null);
 
     } catch (err) {
       setSaveError(err.message);
@@ -7400,6 +7436,7 @@ export default function EstimateToolViewV2({
             </section>
             <section tabIndex={-1} id="estimate-review" className="estimate-workflow-section space-y-4" aria-label="Review and send">
             <h2 className="text-18 font-medium">Review & send</h2>
+            {reopenNotice && <ActionFeedback error>{reopenNotice}</ActionFeedback>}
             {saveError && <ActionFeedback error>{saveError}</ActionFeedback>}
             {/* Action buttons */}
             <div className="ui-record-actions">
