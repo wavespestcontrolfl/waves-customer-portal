@@ -414,7 +414,8 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // this obligation only when its own quote states a clock ("Call me at 3
   // and send the estimate" leaves the estimate its default — Codex #4816 r31).
   const unresolvedClock = item.timing_unverified && statesClock(item.quote);
-  if (item.due_text || unresolvedClock || STATED_TIMING.test(withoutTopics(item.quote))) return { due_at: null, due_basis: null };
+  // Quotes are short excerpts; the cap keeps the timing regexes bounded.
+  if (item.due_text || unresolvedClock || STATED_TIMING.test(withoutTopics(String(item.quote || '').slice(0, 500)))) return { due_at: null, due_basis: null };
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };

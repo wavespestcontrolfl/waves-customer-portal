@@ -931,6 +931,19 @@ describe('fulfillment proof', () => {
     }
   });
 
+  test('Codex #4816 r46 pre-push: the provider sees whether an SMS row is an accepted App push, never its phone number', async () => {
+    const commitment = { kind: 'send_appointment_confirmation', description: 'Confirm my appointment',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    const push = { id: 'sms-1', ref: 'sms:sms-1', type: 'sms', status: 'sent', message_type: 'confirmation', from_phone: '+19415559876',
+      provider_accepted: true, push_channel: true, created_at: '2040-03-10T16:00:00Z', text: 'Your appointment is confirmed.' };
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment(commitment, { records: [push], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
+    expect(prompt).not.toContain('9415559876');
+    expect(prompt).not.toContain('from_phone');
+    expect(prompt).toContain('"app_push_accepted":true');
+  });
+
   test('Codex #4816 r7: a cancellation after the text answers a cancel ask for the model only; it never closes "still coming?"', () => {
     const ctx = { property_id: 'home', source_at: '2040-03-10T15:00:00Z' };
     const cancelled = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'cancelled', created_at: '2040-03-01T15:00:00Z',
