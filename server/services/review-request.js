@@ -7523,8 +7523,5 @@ ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
-// Shared with rodent-trap-check.js: the trap-check allowance counts one
-// premise's trapping job with the same premise rules.
-ReviewService.trappingPremiseMatcher = trappingPremiseMatcher;
 
 module.exports = ReviewService;

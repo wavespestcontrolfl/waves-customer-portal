@@ -2638,87 +2638,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     })();
   }, [selectedCustomer?.id, hasAutoMosquitoLine, mosquitoQuote]);
 
-  // Rodent trapping visit allowance (owner ruling 2026-09-26): $350 covers
-  // the setup visit + 1 trap check; visit 3+ is the separate $95 "Rodent
-  // Trap Check - Additional" row. Advisory only — the server counts the
-  // customer's current trapping job and the office picks the service.
-  const RODENT_TRAPPING_LINE_KEYS = ['rodent_trapping', 'rodent_trapping_followup', 'rodent_trap_check_additional'];
-  const isRodentTrappingLine = (svc) => RODENT_TRAPPING_LINE_KEYS.includes(svc?.service_key ?? svc?.serviceKey);
-  const hasRodentTrappingLine = services.some(isRodentTrappingLine);
-  const [trappingStatus, setTrappingStatus] = useState(null);
-  // Keyed by customer + booking property: another property's trapping job
-  // never spends this one's allowance.
-  const trappingPropertyId = propertyPickerActive && selectedPropertyId ? String(selectedPropertyId) : '';
-  // ...and by the booking date: the job and count are as of that day.
-  const trappingDate = /^\d{4}-\d{2}-\d{2}$/.test(String(apptDate || '')) ? String(apptDate) : '';
-  const trappingStatusKey = selectedCustomer?.id ? `${selectedCustomer.id}|${trappingPropertyId}|${trappingDate}` : null;
-  useEffect(() => {
-    const id = selectedCustomer?.id;
-    if (!id || !hasRodentTrappingLine) return;
-    const key = trappingStatusKey;
-    if (trappingStatus?.key === key) return;
-    setTrappingStatus({ key, status: 'loading' });
-    (async () => {
-      try {
-        const qs = `customerId=${encodeURIComponent(id)}${trappingPropertyId ? `&propertyId=${encodeURIComponent(trappingPropertyId)}` : ''}${trappingDate ? `&date=${trappingDate}` : ''}`;
-        const r = await adminFetch(`/admin/schedule/rodent-trapping-status?${qs}`);
-        setTrappingStatus((prev) => (prev?.key === key ? { ...r, key, status: 'ready' } : prev));
-      } catch {
-        setTrappingStatus((prev) => (prev?.key === key ? { key, status: 'error' } : prev));
-      }
-    })();
-  }, [selectedCustomer?.id, trappingStatusKey, trappingPropertyId, trappingDate, hasRodentTrappingLine, trappingStatus]);
-  // Carry the job's per-check price (the opener estimate's quoted price, or
-  // the live catalog price) into a newly added extra-check line ONCE; a
-  // later operator edit is left alone and flagged by the hint instead.
-  const trapCheckPriceSyncedRef = useRef(new Set());
-  useEffect(() => {
-    const t = trappingStatus;
-    if (!t || t.key !== trappingStatusKey || t.status !== 'ready' || !t.hasJob || t.grandfathered) return;
-    const target = Number(t.additionalCheckPrice);
-    if (!(target > 0)) return;
-    // Bookkeeping stays outside the state updater (StrictMode replays
-    // updaters): pick the unsynced lines from the committed state, mark
-    // them, then apply a pure, idempotent price update by lineId.
-    const pending = services
-      .filter((s) => (s?.service_key ?? s?.serviceKey) === 'rodent_trap_check_additional'
-        && s.lineId && !trapCheckPriceSyncedRef.current.has(s.lineId))
-      .map((s) => s.lineId);
-    if (!pending.length) return;
-    pending.forEach((id) => trapCheckPriceSyncedRef.current.add(id));
-    const ids = new Set(pending);
-    setServices((arr) => arr.map((s) => (
-      ids.has(s.lineId) && Number(s.price) !== target ? { ...s, price: String(target) } : s
-    )));
-  }, [trappingStatus, trappingStatusKey, services]);
-
-  const trappingHint = (svc) => {
-    if (!isRodentTrappingLine(svc)) return null;
-    const t = trappingStatus;
-    if (!t || t.key !== trappingStatusKey || t.status !== 'ready' || !t.hasJob) return null;
-    const key = svc?.service_key ?? svc?.serviceKey;
-    const visitNo = t.visitCount + 1;
-    if (t.openerUnknown) {
-      return `Visit ${visitNo} of a trapping job with no setup visit on file. Check the history before choosing the free check or the $${t.additionalCheckPrice} one.`;
-    }
-    if (t.grandfathered) {
-      return key === 'rodent_trap_check_additional'
-        ? `Trapping job sold before 9/27 — checks are included. Book the no-charge Trap Follow-Up instead.`
-        : `Visit ${visitNo} of this trapping job — sold before 9/27, checks included.`;
-    }
-    if (t.nextVisitBillable && key !== 'rodent_trap_check_additional') {
-      return `Visit ${visitNo} of this trapping job — the ${t.includedVisits} included visits are used. Book "Rodent Trap Check - Additional" ($${t.additionalCheckPrice}).`;
-    }
-    if (key === 'rodent_trap_check_additional' && t.nextVisitBillable
-      && svc?.price !== '' && svc?.price != null && Number(svc.price) !== Number(t.additionalCheckPrice)) {
-      return `Visit ${visitNo} of this trapping job. This job's extra check price is $${t.additionalCheckPrice}, but this line is set to $${svc.price}. Confirm before saving.`;
-    }
-    if (!t.nextVisitBillable && key === 'rodent_trap_check_additional') {
-      return `Visit ${visitNo} of this trapping job — still included. Book the no-charge Trap Follow-Up instead.`;
-    }
-    return `Visit ${visitNo} of this trapping job.`;
-  };
-
   const doSearch = async (val) => {
     setCustomerSearch(val);
     if (val.length >= 2) {
@@ -5270,9 +5189,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
                       Auto: ${mosquitoAutoAmount(svc).toFixed(2)} (lot-based)
                     </div>
-                  )}
-                  {trappingHint(svc) && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>{trappingHint(svc)}</div>
                   )}
                   {mosquitoQuotePending(svc) && (
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>

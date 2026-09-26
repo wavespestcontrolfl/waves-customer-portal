@@ -3403,7 +3403,7 @@ export function calculateEstimate(inputs) {
     // setup visit + 1 trap check (owner ruling 2026-09-26), no
     // footprint/lot adjustments.
     const fp = otP(350);
-    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup visit + 1 trap check for the same active trapping job; additional checks $95 each' });
+    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup visit + 1 trap check for the same active trapping job; additional checks billed separately' });
   }
 
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */

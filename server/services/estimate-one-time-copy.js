@@ -188,16 +188,32 @@ function bedBugMethod(item = {}) {
 //   { key, outcome, includes: [...], assurance|null, terms }
 // `includes` carries the assurance as its last bullet when present, so the
 // renderers list it exactly like the recurring card's guarantee bullet.
-// Rodent trapping rows priced before the 2-visit rule (owner ruling
-// 2026-09-26) carry unlimitedCallbacks:true, an 'unlimited' or other
-// allowance, or predate those fields. Those jobs are grandfathered, so their
-// saved estimate keeps the open-ended trap-check wording. Only a row priced
-// under the rule — an allowance of exactly 1, which the Pricing Logic
-// validator now pins — gets the setup + 1 check copy.
-function isLegacyUnlimitedTrapping(item = {}) {
-  if (item.unlimitedCallbacks === true) return true;
+// Rodent trapping rows priced under unlimited callbacks (before the owner
+// ruling of 2026-09-26) carry unlimitedCallbacks:true / an 'unlimited'
+// allowance, or predate those fields: their saved estimate keeps the
+// open-ended trap-check wording. A row with a finite allowance renders
+// exactly that saved count (1 under the current rule, which the Pricing
+// Logic validator pins).
+function trappingSavedChecks(item = {}) {
+  if (item.unlimitedCallbacks === true) return null;
   const allowance = item.includedFollowUps ?? item.includedCallbacks;
-  return allowance === '' || allowance == null || Number(allowance) !== 1;
+  if (allowance === '' || allowance == null) return null;
+  const n = Number(allowance);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+function isLegacyUnlimitedTrapping(item = {}) {
+  return trappingSavedChecks(item) == null;
+}
+
+const CHECK_WORDS = ['no', 'one', 'two', 'three', 'four', 'five'];
+function fillTrapChecks(text, checks) {
+  if (typeof text !== 'string') return text;
+  const n = checks ?? 1;
+  const word = CHECK_WORDS[n] || String(n);
+  return text
+    .replace('{Checks}', `${n} trap-check visit${n === 1 ? '' : 's'}`)
+    .replace('{checks}', `${word} trap check${n === 1 ? '' : 's'}`);
 }
 
 function resolveOneTimeServiceCopy(item = {}) {
@@ -308,9 +324,14 @@ function resolveOneTimeServiceCopy(item = {}) {
           : entry.woodBulletNeutral;
     lines = lines.map((line) => (line === entry.woodBullet ? bullet : line));
   }
-  if (key === 'rodent_trapping' && isLegacyUnlimitedTrapping(item)) {
-    outcome = entry.outcomeLegacy || outcome;
-    lines = lines.map((line) => (line === entry.checksBullet ? entry.checksBulletLegacy : line));
+  if (key === 'rodent_trapping') {
+    if (isLegacyUnlimitedTrapping(item)) {
+      outcome = entry.outcomeLegacy || outcome;
+      lines = lines.map((line) => (line === entry.checksBullet ? entry.checksBulletLegacy : line));
+    } else {
+      const checks = trappingSavedChecks(item);
+      lines = lines.map((line) => (line === entry.checksBullet ? fillTrapChecks(line, checks) : line));
+    }
   }
   // Rodent inspection: the fee credit carries the row's configured window
   // (creditableWithinDays); no window on the row ⇒ no credit promise.
@@ -379,8 +400,13 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   }
   const legacyTrapping = key === 'rodent_trapping' && rows.some(isLegacyUnlimitedTrapping);
   if (legacyTrapping) heroSub = entry.hero.subLegacy || heroSub;
+  // Finite allowances: the smallest saved count on the quote (never promise
+  // more checks than any trapping row carries).
+  const savedChecks = key === 'rodent_trapping' && !legacyTrapping
+    ? Math.min(...rows.map(trappingSavedChecks))
+    : null;
   const aiBody = stingingV2 ? (entry.aiBodyV2 || entry.aiBody)
-    : legacyTrapping ? (entry.aiBodyLegacy || entry.aiBody) : entry.aiBody;
+    : legacyTrapping ? (entry.aiBodyLegacy || entry.aiBody) : fillTrapChecks(entry.aiBody, savedChecks);
   return {
     key,
     hero: {

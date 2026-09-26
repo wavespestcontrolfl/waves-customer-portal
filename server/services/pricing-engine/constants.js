@@ -1241,9 +1241,9 @@ const RODENT = {
   // It covers TWO visits for the same active trapping job — the setup visit
   // plus one trap check (owner ruling 2026-09-26, replacing the 08-26
   // unlimited callbacks). Visit 3+ is the separate "Rodent Trap Check -
-  // Additional" catalog row, booked by the office at additionalCheckPrice
-  // (server/services/rodent-trap-check.js). Jobs sold before 2026-09-27
-  // keep their included checks.
+  // Additional" catalog row, booked by the office; additionalCheckPrice is
+  // overlaid from that row's base_price by db-bridge (customer copy only).
+  // Jobs sold before 2026-09-27 keep their included checks.
   trapping: {
     standardPrice: r(350),
     base: r(350),
