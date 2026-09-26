@@ -4322,6 +4322,46 @@ function ReviewBeforeBookingCard({ reason }) {
   );
 }
 
+// "Want us to come look first?" (consultation-first lane, owner ruling
+// 2026-09-23): renders ONLY from the server-composed `consultationOffer`
+// field (`/data`'s `{ url }`, dark behind GATE_ESTIMATE_CONSULTATION_OFFER +
+// GATE_LEAD_INSPECTION_LINK) — every eligibility decision (open lead,
+// recurring intent, strong lead linkage, an open/customer-actionable
+// estimate, the /inspection page's own availability) is server-side; this
+// component makes none of its own. Absent field → renders nothing, so a
+// gate-off or ineligible response is byte-identical. Opens the same
+// /inspection/:token self-booking page the recurring-lead email offers in a
+// new tab, so a customer mid-configuration here never loses their
+// in-progress choices. Placed near the accept/decision area but never
+// disables or replaces the estimate's own accept CTA.
+export function ConsultationOfferSection({ consultationOffer }) {
+  if (!consultationOffer?.url) return null;
+  return (
+    <section aria-label="Want us to come look first?" style={{
+      background: COLORS.white,
+      borderRadius: 16,
+      padding: 24,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+        Want us to come look first?
+      </div>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+        A Waves technician can stop by for a free consultation, look at the property with you, and walk through the plan — no commitment.
+      </div>
+      <a
+        href={consultationOffer.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={estimateCallCtaStyle}
+      >
+        Pick a time
+      </a>
+    </section>
+  );
+}
+
 // Service-related card headlines (owner directive 2026-07-10): every service
 // box leads with copy about ITS service — the generic "Same protection" line
 // only survives as the fallback for unmapped/bundle sections. Pest keeps its
@@ -8429,6 +8469,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
         {data.returnVisit
           ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
           : null}
+        {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
         {/* Commercial proposal: the what-happens-next card sits directly under
             the hero identity block (owner 2026-08-08) — at the bottom it
             repeated the hero's "your formal proposal is ready" and read as a
@@ -8578,6 +8619,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
         {/* aiPanelBlock below renders the Ask bar on this branch (regulated
             certificate surfaces excepted), so the action follows that. */}
         {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
+        {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -9084,6 +9126,8 @@ function EstimateViewPageInner({ websiteMode = false }) {
               price → slot picker → approve, with the member discount
               itemized in the price block itself). */}
           {glassContent ? null : aiPanelBlock}
+
+          {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
 
           {bookingContent}
 

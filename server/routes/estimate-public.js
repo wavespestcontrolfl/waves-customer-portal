@@ -130,6 +130,7 @@ function lawnCalendarBlock(services) {
 }
 const acceptanceTerms = require('../services/acceptance-terms-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
+const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
 const {
   parcelOverlayEnabled,
@@ -26598,6 +26599,21 @@ async function composeEstimateDataPayload(estimate, {
     // include-when-present so every other response stays byte-identical.
     const successReferral = await estimateReferralCardFor(estimate);
 
+    // "Want us to come look first?" consultation offer (GATE_ESTIMATE_
+    // CONSULTATION_OFFER + GATE_LEAD_INSPECTION_LINK, consultation-first
+    // lane, owner ruling 2026-09-23): a strongly-linked recurring-intent
+    // lead viewing an open, customer-actionable estimate gets a link to the
+    // same /inspection/:token self-booking page the recurring-lead email
+    // offers. `acceptActive` mirrors every other accept-active-gated section
+    // on this page (returnVisit, softExit below) — never a staff draft/
+    // preview or the headless document pass. Include-when-present; the
+    // builder itself fails soft (never throws) on any ineligibility or error.
+    const consultationOffer = await buildEstimateConsultationOffer({
+      leadId: estimateDataForIntelligence?.lead_id,
+      leadLinkage: estimateDataForIntelligence?.lead_linkage,
+      acceptActive: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
+    });
+
     // Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Include-when-TRUE
     // only: gate on, a live accept-active row, never a staff draft preview or
     // the headless document pass. The current open's estimate_views row was
@@ -26639,6 +26655,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(propertyGroup ? { propertyGroup } : {}),
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
+      ...(consultationOffer ? { consultationOffer } : {}),
       // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): per lawn
       // frequency key, the program's annual application count when that
       // count is a catalog lawn plan (resolveLawnCareRecurringPlanByCount);
