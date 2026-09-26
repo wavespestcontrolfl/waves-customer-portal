@@ -231,6 +231,18 @@ describe('GET /:serviceId/tech-tips', () => {
         structured_notes: { formRecommendations: ['Current visit recommendation'] },
       },
       {
+        id: 'internal-only', scheduled_service_id: 'internal-svc', service_line: 'mosquito', service_date: '2026-08-14',
+        structured_notes: { typedReportDelivery: 'internal_only', formRecommendations: ['Internal-only recommendation'] },
+      },
+      {
+        id: 'disabled-report', scheduled_service_id: 'disabled-svc', service_line: 'mosquito', service_date: '2026-08-13',
+        structured_notes: { typedReportDelivery: 'disabled', formRecommendations: ['Disabled recommendation'] },
+      },
+      {
+        id: 'incomplete-visit', scheduled_service_id: 'incomplete-svc', service_line: 'mosquito', service_date: '2026-08-12',
+        structured_notes: { visitOutcome: 'incomplete', formRecommendations: ['Incomplete recommendation'] },
+      },
+      {
         id: 'rec-1', scheduled_service_id: 'old-1', service_line: 'mosquito', service_date: '2026-08-01',
         technician_notes: 'Raw notes must never be mined for recommendations.',
         structured_notes: {
@@ -275,7 +287,7 @@ describe('GET /:serviceId/tech-tips', () => {
       { text: 'Schedule a follow-up inspection', serviceDate: '2026-07-15', serviceRecordId: 'rec-2' },
       { text: 'Empty outdoor containers', serviceDate: '2026-06-20', serviceRecordId: 'rec-3' },
     ]);
-    expect(JSON.stringify(res.body)).not.toMatch(/Raw notes|Internal tagged|Wrong service line|Current visit|Future recommendation|Older than/);
+    expect(JSON.stringify(res.body)).not.toMatch(/Raw notes|Internal tagged|Internal-only|Disabled recommendation|Incomplete recommendation|Wrong service line|Current visit|Future recommendation|Older than/);
     expect(calls).toEqual(['scheduled_services', 'service_records']);
   });
 

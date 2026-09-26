@@ -77,26 +77,27 @@ describe("service completion choices", () => {
     }
   });
 
-  test("supplies pesticide scope as action facts and never product defaults", () => {
+  test("supplies dry-time metadata only as action facts and never product defaults", () => {
     const exterior = serviceCompletionChoicesFor("pest", "actions")
       .find(({ id }) => id.endsWith("applied-perimeter-band"));
-    const interiorApplication = serviceCompletionChoicesFor("pest", "actions")
+    const unscopedApplication = serviceCompletionChoicesFor("pest", "actions")
       .find(({ id }) => id.endsWith("applied-gel-bait"));
-    const interiorApplicationIds = [
+    const unscopedApplicationIds = [
       "completed-crack-crevice",
       "applied-gel-bait",
       "dusted-voids",
     ];
-    const interiorApplications = serviceCompletionChoicesFor("pest", "actions")
-      .filter(({ id }) => interiorApplicationIds.some((suffix) => id.endsWith(suffix)));
+    const unscopedApplications = serviceCompletionChoicesFor("pest", "actions")
+      .filter(({ id }) => unscopedApplicationIds.some((suffix) => id.endsWith(suffix)));
     const inspection = serviceCompletionChoicesFor("lawn", "actions")
       .find(({ id }) => id.endsWith("inspected-turf"));
 
     expect(exterior).toMatchObject({ scope: "exterior", treatmentApplied: true });
-    expect(interiorApplication).toMatchObject({ scope: "interior", treatmentApplied: true });
-    expect(interiorApplications).toHaveLength(interiorApplicationIds.length);
-    expect(interiorApplications.every((choice) => choice.scope === "interior" && choice.treatmentApplied === true)).toBe(true);
+    expect(unscopedApplication).toMatchObject({ treatmentApplied: true });
+    expect(unscopedApplications).toHaveLength(unscopedApplicationIds.length);
+    expect(unscopedApplications.every((choice) => choice.treatmentApplied === true)).toBe(true);
+    expect(unscopedApplications.every((choice) => !Object.hasOwn(choice, "scope"))).toBe(true);
     expect(inspection).toMatchObject({ scope: "exterior", treatmentApplied: false });
-    expect([...exterior.keywords, ...interiorApplication.keywords]).not.toContain("product");
+    expect([...exterior.keywords, ...unscopedApplication.keywords]).not.toContain("product");
   });
 });

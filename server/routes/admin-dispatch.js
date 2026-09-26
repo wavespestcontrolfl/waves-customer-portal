@@ -345,6 +345,14 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
   const priorVisits = rows
     .filter((row) => String(row.scheduled_service_id || '') !== String(serviceId || ''))
     .filter((row) => (String(row.service_line || '').trim() || detectServiceLine(row.service_type)) === visitLine)
+    // Suggestions must come from a report the customer could actually open.
+    // Apply this before the three-visit bound so an internal/incomplete row
+    // cannot consume one of the customer's visible-history slots.
+    .filter((row) => {
+      const structured = parseJsonObject(row.structured_notes);
+      return String(structured.typedReportDelivery || 'auto_send') === 'auto_send'
+        && String(structured.visitOutcome || '') !== 'incomplete';
+    })
     .slice(0, PREVIOUS_RECOMMENDATION_VISIT_LIMIT);
   const output = [];
   for (const row of priorVisits) {
