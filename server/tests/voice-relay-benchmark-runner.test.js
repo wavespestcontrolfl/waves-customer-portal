@@ -633,6 +633,27 @@ describe('summarizeCondition — real per-round usage (cache-hit logging, this P
     expect(s.usage.complete).toBe(false);
   });
 
+  // Codex pre-push on #4946: a run whose telemetry never arrived (crashed,
+  // killed, inconclusive) spent tokens the totals cannot count — even an
+  // entirely crashed condition must not read as complete.
+  test('a run without usage telemetry marks the condition incomplete', () => {
+    const ok = {
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } },
+        attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } } }],
+      },
+    };
+    const crashed = { condition: 'x', ranOk: false, inconclusive: false, crashError: 'child timed out', result: null };
+    expect(summarizeCondition('x', [ok]).usage.complete).toBe(true);
+    const s = summarizeCondition('x', [ok, crashed]);
+    expect(s.usage.missingTelemetryRuns).toBe(1);
+    expect(s.usage.complete).toBe(false);
+    const allCrashed = summarizeCondition('x', [crashed]);
+    expect(allCrashed.usage.inputTokens).toBe(0);
+    expect(allCrashed.usage.complete).toBe(false);
+  });
+
   test('no usage anywhere (an older/mocked result summary) reports zero counts and a null — never NaN or a false zero — cacheHitRate', () => {
     const runs = [{
       condition: 'x', ranOk: true, inconclusive: false,

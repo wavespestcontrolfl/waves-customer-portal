@@ -1074,6 +1074,16 @@ describe('voice relay eval — each expect key', () => {
       expect(failing(id, [find1, s1, gone, s3])).toContain('tool_input_includes'); // no refreshed lookup
     });
 
+    // Codex pre-push on #4946: a spelled Spanish price in another billing
+    // unit or after a price verb reaches the unit/plan-total checks.
+    test('spanish-interruption: a spelled annual price for the premium plan fails the unit check', () => {
+      const pest = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control' }, ok: true, turn: 1, text: 'Pest control: quarterly $129 per application.' };
+      const quote = { kind: 'agent', turn: 1, text: 'El servicio trimestral cuesta 129 dólares por aplicación. ¿Le [interrupted]' };
+      const lawn = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care' }, ok: true, turn: 2, text: 'Lawn care: enhanced $119 per application (9x/yr), premium $99 per application (12x/yr).' };
+      const annual = { kind: 'agent', turn: 2, text: 'El mejorado cuesta ciento diecinueve por aplicación y el premium cuesta noventa y nueve al año.' };
+      expect(failing('spanish-interruption-inside-amount-or-date', [pest, quote, lawn, annual])).toContain('amount_requires_unit');
+    });
+
     test.each(['backchannel-vs-explicit-correction', 'spanish-backchannel-vs-explicit-correction'])('%s: no lead captured before the correction turn', (id) => {
       const early = { kind: 'tool', name: 'capture_lead', input: { address_line1: '88B Palm Harbor Drive' }, ok: true, receipt: true, turn: 1 };
       expect(failing(id, [early])).toContain('tool_not_called_before_turn');

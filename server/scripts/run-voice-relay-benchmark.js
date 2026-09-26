@@ -432,7 +432,15 @@ function summarizeCondition(id, runs) {
   // null (not 0) with no rounds carrying usage at all — missing data, never
   // read as "confirmed zero cache hits".
   usage.cacheHitRate = usage.rounds ? usage.cacheReadRounds / usage.rounds : null;
-  usage.complete = usage.incompleteRounds === 0;
+  // A run whose token telemetry never reached these totals — crashed, timed
+  // out or killed (no result), inconclusive, model-mismatched (excluded
+  // from every aggregate), or a completed run with an attempt that carries
+  // no usage block — still spent tokens this condition cannot count (Codex
+  // pre-push, PR #4946). Any such run also makes the totals a lower bound.
+  const withTelemetry = completed.filter((r) => Array.isArray(r.result.attempts) && r.result.attempts.length > 0
+    && r.result.attempts.every((a) => a && a.summary && a.summary.usage && typeof a.summary.usage === 'object'));
+  usage.missingTelemetryRuns = runs.length - withTelemetry.length;
+  usage.complete = usage.incompleteRounds === 0 && usage.missingTelemetryRuns === 0;
 
   return {
     condition: id,
@@ -646,7 +654,10 @@ if (require.main === module) {
         tokensIn: c.usage.inputTokens, tokensOut: c.usage.outputTokens,
         cacheRead: c.usage.cachedInputTokens, cacheWrite: c.usage.cacheWriteTokens,
         cacheHitRate: c.usage.cacheHitRate == null ? 'n/a (0 rounds)' : `${(c.usage.cacheHitRate * 100).toFixed(1)}% (${c.usage.rounds} round(s))`,
-        usageComplete: c.usage.incompleteRounds ? `NO — ${c.usage.incompleteRounds} rejected round(s), totals are a lower bound` : 'yes',
+        usageComplete: c.usage.complete ? 'yes' : `NO — ${[
+          c.usage.incompleteRounds ? `${c.usage.incompleteRounds} rejected round(s)` : null,
+          c.usage.missingTelemetryRuns ? `${c.usage.missingTelemetryRuns} run(s) without telemetry` : null,
+        ].filter(Boolean).join(', ')}; totals are a lower bound`,
       })));
       process.exitCode = exitCode;
     } catch (err) {

@@ -163,13 +163,28 @@ function convertDigitStrings(text) {
 // new amount_requires_unit check saw only word text and reported the price
 // "never quoted". The pricing-unit lookahead consumes nothing, leaving "por
 // aplicación"/"cada aplicación" itself untouched right after the digits.
-const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(?:(d[oó]lares?|pesos?)\\b|(?=(?:por|cada)\\s+aplicaci[oó]n))`, 'gi');
+// Codex pre-push on #4946: any billing unit names a price too, not only
+// "por aplicación" — "noventa y nueve al año" must reach the plan-total and
+// unit checks as "99 al año" — and so does a price verb before the figure
+// ("el premium cuesta noventa y nueve"). Both need a two-digit amount
+// (priceRe's own rule): a smaller one is a count ("dos por mes"), and a
+// count before its noun ("nueve aplicaciones al año") never matches at all.
+const BILLING_UNIT_AHEAD_ES = '(?=(?:por|cada|al|a\\s+la)\\s+(?:aplicaci[oó]n(?:es)?|tratamientos?|visitas?|servicios?|mes(?:es)?|a[ñn]os?|semanas?|trimestres?)(?![a-záéíóúñ]))';
+const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(?:(d[oó]lares?|pesos?)\\b|${BILLING_UNIT_AHEAD_ES})`, 'gi');
+const PRICE_VERB_ES = '(?:cuestan?|costar[íi]an?|costar[áa]n?|valen?|salen?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a))';
+const PRICE_VERB_WORD_RUN_RE = new RegExp(`(\\b${PRICE_VERB_ES}\\s+(?:de\\s+)?)(${NUMBER_RUN_RE_SRC})`, 'gi');
 
 function convertPriceWordRuns(text) {
-  return text.replace(PRICE_WORD_RUN_RE, (match, run, currencyWord) => {
+  const out = text.replace(PRICE_WORD_RUN_RE, (match, run, currencyWord) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount)) return match;
-    return currencyWord ? `${amount} ${currencyWord}` : `${amount} `;
+    if (currencyWord) return `${amount} ${currencyWord}`;
+    return amount >= 10 ? `${amount} ` : match;
+  });
+  return out.replace(PRICE_VERB_WORD_RUN_RE, (match, lead, run) => {
+    const amount = parseSpanishCardinal(run);
+    if (!Number.isFinite(amount) || amount < 10) return match;
+    return `${lead}${amount}${/\s$/.test(run) ? ' ' : ''}`;
   });
 }
 

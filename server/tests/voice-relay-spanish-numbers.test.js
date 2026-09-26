@@ -98,6 +98,28 @@ describe('normalizeSpanishSpokenText — hour + minute phrases -> digital time',
   });
 });
 
+// Codex pre-push on #4946: a spelled price reaches the price checks in every
+// price context — any billing unit ("al año", "por tratamiento") or a price
+// verb ("cuesta") — but only as a two-digit-or-more amount, so counts stay words.
+describe('normalizeSpanishSpokenText — spelled prices in every price context', () => {
+  test.each([
+    ['el premium cuesta noventa y nueve al año', 'el premium cuesta 99 al año'],
+    ['el premium cuesta noventa y nueve.', 'el premium cuesta 99.'],
+    ['son noventa y nueve por tratamiento', 'son 99 por tratamiento'],
+    ['vale ciento diecinueve', 'vale 119'],
+  ])('%s -> %s', (input, expected) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(expected);
+  });
+  test.each([
+    'Hacemos dos por mes.',
+    'Son nueve aplicaciones al año.',
+    '¿Cuánto cuesta una casa de dos mil pies?',
+    'El plan incluye doce aplicaciones al año.',
+  ])('leaves counts and non-prices alone: %s', (input) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(input);
+  });
+});
+
 describe('normalizeSpanishSpokenText — written meridiems', () => {
   test.each([
     ['llega de 1 p. m. a 3 p. m. Gracias.', 'llega de 1 pm a 3 pm Gracias.'],
@@ -169,8 +191,10 @@ describe('normalizeSpanishSpokenText — grouped Spanish CARDINALS, phone-number
   // scenario in this repo, which always states each price's own unit
   // immediately ("por aplicación") rather than listing bare amounts.
   test('two spelled-out amounts followed by one with an immediate currency word do not collide (below the chunk floor)', () => {
+    // The price verb converts the first figure too since the #4946 pre-push
+    // fix ("cuesta noventa y nueve" is a price) — still never a phone number.
     expect(normalizeSpanishSpokenText('cuesta noventa y nueve, ciento diecinueve, ciento veintinueve dólares'))
-      .toBe('cuesta noventa y nueve, ciento diecinueve, 129 dólares');
+      .toBe('cuesta 99, ciento diecinueve, 129 dólares');
   });
 });
 
