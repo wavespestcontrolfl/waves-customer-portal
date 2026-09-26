@@ -24,7 +24,7 @@ source names and authoritative rendered-tab beacons.
 
 Search pages and Cmd/Ctrl+K open the page finder while the flag is enabled.
 Results come from the same permitted destination registry, matching current
-names, old names (including Recovery, Payers, Taxes and Tool Health), and
+names, old names (including Tool Health), and
 workspace terms. Arrow keys, Home and End move between result links; Enter
 in the search field opens the first result. Escape closes search and returns
 focus to its trigger. Modified clicks keep ordinary new-tab link behavior.

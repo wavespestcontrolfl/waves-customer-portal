@@ -1415,7 +1415,8 @@ field is absent from ordinary customer responses.
 Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
-preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
+its own estimatePdfLimiter (10 per 5 min)).
 `/data`'s optional `consultationOffer: { url }` (consultation-first lane,
 owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)
@@ -1426,9 +1427,15 @@ only, never the email. Present only when: both gates are live; the estimate
 is in an open, customer-actionable state (never accepted/declined/expired/
 send_failed/unpublished/past-expiry, and never a staff draft or verified
 staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
-`softExit` use); `estimate_data.lead_linkage` is STRONG (`sid` or `stamp` —
-the same set the accept/decline handlers' own lead re-lock condition on); the
-linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
+`softExit` use); exactly one linked lead — a live lead whose
+`leads.estimate_id` names this estimate (the link the admin estimate tool
+writes) and/or a stamped `estimate_data.lead_id` with a STRONG `lead_linkage`
+(`sid` or `stamp`); two pointing leads, or a pointer and a stamp that
+disagree, offer nothing; the linked lead is still the estimate's contact
+(`leadMatchesEstimateContact`, `lead-estimate-link.js` — the same customer
+when both are linked to one, otherwise a matching phone or email; the
+pointer is editable on its own, so a lead that no longer matches offers
+nothing); the linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
 customer is linked — that customer live and still on the lead's phone) and
 `leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
 probe (`inspection-public.js` `_internals.computeConsultationSlotsForLead`,
@@ -2049,9 +2056,13 @@ a raw `resolveServiceAddress` — a directly supplied out-of-area address
 422s `{ error: 'out_of_area', county, waitlist_ticket }` or 503s
 `{ error: 'service_area_unavailable' }` instead of returning slot
 availability for a location that could never survive the commit handler's
-own area check. `resolveServiceAddress` and `checkServiceArea` have no
-callers anywhere in this file outside `finalizeBookingLocation`'s own body
-— a structural test on the route file's source enforces it. `POST
+own area check. `resolveServiceAddress` has no callers anywhere in this file outside
+`finalizeBookingLocation`'s own body, and `checkServiceArea` has none outside
+`serviceAreaFailure` — reached from `finalizeBookingLocation` and from the
+commit route's own recheck of a verified lead's adopted property (the one
+location not produced by `finalizeBookingLocation`), never a bare
+`checkServiceArea` call. A structural test on the route file's source
+enforces both. `POST
 /:token` commit:
 body `{ date, time, address?, notes? }`; idempotent — a lead whose customer
 already holds an open assessment short-circuits to the SAME `already_booked`
@@ -2183,7 +2194,16 @@ payment hold 402s BEFORE any content-derived answer; the paper compliance
 documents (wdo_inspection, pre_treatment_termite_certificate) return a
 generic 404 — their pages never mount the ask bar. Only write: an
 `activity_log` analytics row recording question length, never answer
-content).
+content. Optional body field `intent` — one of `findings` / `treatment` /
+`recommendations` / `next_visit`, sent by the shipped prompt chips — selects
+that answer directly; any other value is ignored and the question is
+keyword-routed as before, so older clients are unaffected. This route and the
+service-report `/api/reports/:token/ask` both answer with
+`Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
+response, including CORS preflights, the global `/api` limiter's 429 and
+body-parser errors — the middleware is mounted app-level ahead of all
+response-producing middleware (`server/index.js`) and again inside the router
+ahead of the `:token` param gate and limiter).
 `/api/webhooks/voice-agent/lead` (POST; machine-to-machine webhook — the
 bilingual AI voice agent (ElevenLabs) posts a captured lead when an AI-handled
 call ends. NOT browser-facing. Fail-closed shared-secret auth in the route

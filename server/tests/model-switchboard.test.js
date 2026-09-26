@@ -235,16 +235,21 @@ describe('model-switchboard', () => {
       expect(lane.also).toEqual([]);
     }
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
-    // pest_id, tree_shrub, the caption read, and the treatment-zone map are all
+    // tree_shrub, the caption read, and the treatment-zone map are all
     // sequential ladders in execution order (Gemini → the prior Gemini model →
     // Claude, with the Gemini retry skipped since it resolves to the same
-    // model), not fan-outs — pest_id/tree_shrub moved off the Claude+Gemini
-    // fan-out shape under the same 2026-09-24 owner ruling as satellite.
-    for (const id of ['pest_id', 'tree_shrub', 'tech_caption_vision', 'treatment_zone']) {
+    // model), not fan-outs — tree_shrub moved off the Claude+Gemini fan-out
+    // shape under the same 2026-09-24 owner ruling as satellite.
+    for (const id of ['tree_shrub', 'tech_caption_vision', 'treatment_zone']) {
       const ladder = lanes.find((l) => l.id === id);
       expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
         .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: true, retry: 'VISION' });
     }
+    // pest_id (owner ruling 2026-09-26): the same Gemini ladder, but its last
+    // leg is ChatGPT's best vision model through TEXT_POLICIES.photoIdVision.
+    const pest = lanes.find((l) => l.id === 'pest_id');
+    expect({ fanout: pest.fanout, primary: pest.primary.provider, fallback: pest.fallback.selector, fallbackSkipped: pest.fallback.skipped, retry: pest.retry.selector, retryProvider: pest.retry.provider })
+      .toEqual({ fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: true, retry: 'OPENAI_FRONTIER', retryProvider: 'openai' });
   });
 
   it('estimate image overrides retain the Gemini base and dedicated Sol selector', () => {
@@ -301,7 +306,7 @@ describe('model-switchboard', () => {
       for (const id of ['pest_id', 'tree_shrub', 'tech_caption_vision', 'treatment_zone']) {
         const ladder = lanes.find((l) => l.id === id);
         expect({ id, fallback: ladder.fallback.model, fallbackSelector: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
-          .toEqual({ id, fallback: 'gemini-9.9-prior', fallbackSelector: 'GEMINI_VISION_FALLBACK', fallbackSkipped: undefined, retry: 'VISION' });
+          .toEqual({ id, fallback: 'gemini-9.9-prior', fallbackSelector: 'GEMINI_VISION_FALLBACK', fallbackSkipped: undefined, retry: id === 'pest_id' ? 'OPENAI_FRONTIER' : 'VISION' });
       }
     } finally {
       if (prev === undefined) delete process.env.GEMINI_VISION_FALLBACK_MODEL; else process.env.GEMINI_VISION_FALLBACK_MODEL = prev;
