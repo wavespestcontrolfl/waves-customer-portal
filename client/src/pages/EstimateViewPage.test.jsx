@@ -1585,6 +1585,22 @@ describe('SuccessCard — already-accepted retry', () => {
     expect(screen.queryByText(/sign your plan agreement/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/pay/i)).not.toBeInTheDocument();
   });
+
+  it('offer_closed (slice 3b: never signed within the abandon window): honest closed state, never asks to sign', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true, nextStep: 'offer_closed', billingTerm: 'prepay_annual',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('This plan offer has closed.')).toBeInTheDocument();
+    expect(screen.getByText(/Nothing was charged or booked/)).toBeInTheDocument();
+    expect(screen.queryByText(/sign your plan agreement/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/We received your signature/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
+  });
 });
 
 describe('oneTimeExtrasForPaymentNote', () => {

@@ -574,6 +574,21 @@ function redactedPayloadSnapshot(value) {
 }
 
 const BILLING_REPLAY_CONTEXT_KEY = '__billing_replay_context';
+const BILLING_REPLAY_TEMPLATES = new Set(['billing.notice', 'billing.receipt_notice']);
+
+function parsedObject(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function parsedStringArray(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? value : null;
+}
 
 function billingReplayContextForSnapshot(context, facts = {}) {
   const out = sanitizeBillingReplayContext(context);
@@ -584,6 +599,23 @@ function billingReplayContextForSnapshot(context, facts = {}) {
     || String(facts.recipientId) !== out.customer_id || facts.triggerEventId !== out.notificationEventKey
     || facts.idempotencyKey !== expectedKey || !(facts.categories || []).includes(out.category)) return null;
   return out;
+}
+
+function readStoredBillingReplayContext(message) {
+  const templateKey = String(message?.template_key || '').trim();
+  if (!BILLING_REPLAY_TEMPLATES.has(templateKey)) return null;
+  const payload = parsedObject(message.payload_snapshot);
+  const categories = parsedStringArray(message.categories);
+  const recipientEmail = String(message.recipient_email_snapshot || '').trim().toLowerCase();
+  if (!payload || !categories || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) return null;
+  return billingReplayContextForSnapshot(payload[BILLING_REPLAY_CONTEXT_KEY], {
+    templateKey,
+    recipientType: message.recipient_type,
+    recipientId: message.recipient_id,
+    triggerEventId: message.trigger_event_id,
+    idempotencyKey: message.idempotency_key,
+    categories,
+  });
 }
 
 function payloadSnapshotForSend(payload, billingReplayContext, facts) {
@@ -1615,6 +1647,7 @@ module.exports = {
   validationFor,
   redactedPayloadSnapshot,
   payloadSnapshotForSend,
+  readStoredBillingReplayContext,
   redactEmailAddresses,
   safeUrl,
   productionPlaceholderPayloadValues,

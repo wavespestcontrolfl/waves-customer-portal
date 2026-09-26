@@ -1037,6 +1037,23 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     }
   });
 
+  test('a failed notification ledger write is a retry, never an App miss (Codex r6 P1 on #4843)', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-LEDGER', status: 'sent' });
+    await mockPg.schema.alterTable('notifications', t => t.renameColumn('title', 'qa_title'));
+    try {
+      expect(await require('../services/messaging/push-channel-routing').attemptPushFirst({
+        customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice',
+        explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}`,
+      })).toEqual({ delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' });
+      expect(apns.send).not.toHaveBeenCalled();
+    } finally {
+      await mockPg.schema.alterTable('notifications', t => t.renameColumn('qa_title', 'title'));
+    }
+  });
+
   test('older clients and a gate rollback preserve saved App first values', async () => {
     await device();
     expect((await put({ enRouteChannel: 'push', paymentConfirmationChannel: 'push' })).status).toBe(200);

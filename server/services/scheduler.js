@@ -119,7 +119,12 @@ async function scheduledDepositReceiptAllowed(msg) {
   try {
     const prefs = await db('notification_prefs')
       .where({ customer_id: msg.customer_id })
-      .first('payment_receipt_channel');
+      .first('payment_receipt_channel', 'payment_receipt_channels');
+    if (require('./billing-delivery-channels').explicitBillingChannels(prefs, 'payment_receipt') !== null) {
+      // The central router will fan out the current explicit combination.
+      // The legacy scalar must not intercept a queued App/Email selection.
+      return true;
+    }
     const channel = prefs?.payment_receipt_channel || 'sms';
     return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
@@ -2415,6 +2420,35 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — purchase receipts → stock (Amazon Delivered emails and
+  // SiteOne invoices). For Amazon the
+  // post-email-sync hook (email-sync.js) handles the common case right when
+  // the email lands; this sweep scans `emails` directly (from_address +
+  // subject, never LLM classification) for anything it missed — a process
+  // restart mid-sync, a swallowed hook error, a backfill. Gate
+  // GATE_PURCHASE_RECEIPT_RESTOCK is read INSIDE the sweep at call time
+  // (also requires PURCHASE_RECEIPT_SINCE); kill = unset either one.
+  // runExclusive: an overlapping tick must not double-claim the same line
+  // (purchase_receipt_lines' own UNIQUE constraint is the hard backstop).
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    if (!gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK')) return;
+    try {
+      await runExclusive('purchase-receipt-restock', async () => {
+        const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
+        const result = await runPurchaseReceiptRestockSweep();
+        if (result.skipped) return;
+        const { logged, held, errors } = summarize(result);
+        if (logged || held || errors) {
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Purchase receipt restock sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:20AM ET — Prune the inbound-webhook idempotency ledger. Twilio
   // never redelivers a webhook days later, so a 7-day horizon is ample; this
   // keeps inbound_webhook_events from growing unbounded.
@@ -4044,6 +4078,7 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
@@ -4069,7 +4104,9 @@ function initScheduledJobs() {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
-              ...(claimMeta.billingDeliveryCategory ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory } : {}),
+              ...(claimMeta.billingDeliveryCategory
+                ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory }
+                : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,

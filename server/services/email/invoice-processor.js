@@ -79,7 +79,7 @@ async function processVendorInvoice(email, classification) {
   "total": number,
   "payment_terms": "NET 30, etc.",
   "line_items": [
-    { "description": "string", "quantity": number, "unit_price": number, "total": number, "product_name": "if identifiable" }
+    { "description": "string", "quantity": number, "unit_price": number, "total": number, "uom": "the line's unit of measure exactly as printed (EA, CS, ...) or null", "product_name": "if identifiable" }
   ]
 }`,
             },

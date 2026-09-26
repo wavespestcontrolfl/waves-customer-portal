@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
+const { REPLAY_HOLD_CODES } = require('./messaging/billing-channel-routing');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { logAutopay } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
@@ -72,7 +73,7 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
   });
   if (purpose === 'payment_failure' && paymentId && attemptPaymentId && !sendResult.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(sendResult.code)
+    && REPLAY_HOLD_CODES.includes(sendResult.code)
     && sendResult.deferred && sendResult.nextAllowedAt) {
     await db('sms_log').insert({
       customer_id: customer.id, direction: 'outbound',
