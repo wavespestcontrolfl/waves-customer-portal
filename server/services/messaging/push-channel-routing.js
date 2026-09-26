@@ -547,24 +547,29 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // another same-type push could satisfy (Codex #4816 r45).
       try {
         const notificationId = String(appNotification.id);
-        const existing = await db('sms_log').where({ customer_id: customerId, from_phone: 'push' })
-          .where(function sameNotice() {
-            this.whereRaw("metadata->>'push_notification_id' = ?", [notificationId])
-              .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); });
-          })
-          .first('id');
-        // The proof must state what was delivered: the stored notification
-        // is the accepted payload. A retry whose body differs from it
-        // (template changed since) repairs nothing (Codex #4816 r46). The
-        // stored notification does not record its visit, so a repaired proof
-        // carries none: it proves delivery but never a property scope it
-        // cannot show. A scheduled send's queue row is its own proof.
-        const samePayload = appNotification.body === body;
-        if (!existing && !scheduledSmsLogId && samePayload) {
-          await db('sms_log').insert(proofRow({ push_notification_id: notificationId, scheduled_service_id: undefined, proof_repaired: true }));
-        } else if (!existing && !samePayload) {
-          logger.warn(`[push-routing] proof repair skipped for notification ${notificationId}: retry payload differs from the delivered notice`);
-        }
+        // Check and insert under one transaction-scoped lock per notice, so
+        // overlapping retries of the same accepted push write one proof.
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`push-proof:${notificationId}`]);
+          const existing = await trx('sms_log').where({ customer_id: customerId, from_phone: 'push' })
+            .where(function sameNotice() {
+              this.whereRaw("metadata->>'push_notification_id' = ?", [notificationId])
+                .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); });
+            })
+            .first('id');
+          // The proof must state what was delivered: the stored notification
+          // is the accepted payload. A retry whose body differs from it
+          // (template changed since) repairs nothing (Codex #4816 r46). The
+          // stored notification does not record its visit, so a repaired proof
+          // carries none: it proves delivery but never a property scope it
+          // cannot show. A scheduled send's queue row is its own proof.
+          const samePayload = appNotification.body === body;
+          if (!existing && !scheduledSmsLogId && samePayload) {
+            await trx('sms_log').insert(proofRow({ push_notification_id: notificationId, scheduled_service_id: undefined, proof_repaired: true }));
+          } else if (!existing && !samePayload) {
+            logger.warn(`[push-routing] proof repair skipped for notification ${notificationId}: retry payload differs from the delivered notice`);
+          }
+        });
       } catch (repairErr) {
         logger.warn(`[push-routing] proof repair failed: ${repairErr.message}`);
       }

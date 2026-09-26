@@ -974,6 +974,20 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
   });
 
+  test('Codex #4816 r46 pre-push: overlapping retries of one accepted push repair a single proof', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-7', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:race` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    await Promise.all([routing.attemptPushFirst(notice), routing.attemptPushFirst(notice), routing.attemptPushFirst(notice)]);
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+  });
+
   test('Codex #4816 r46: a retry whose payload differs from the delivered notice repairs nothing', async () => {
     await device();
     await put({ invoiceChannel: 'push' });
