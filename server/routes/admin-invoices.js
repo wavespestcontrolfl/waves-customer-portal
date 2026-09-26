@@ -2338,11 +2338,18 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         });
       }
     }
+    // Visit invoices this term settled as coverage, which the cancel reopens.
+    // Settlement stopped their reminders and the reopen skips the re-arm
+    // inside a transaction, so it runs after commit (below).
+    let coveredInvoiceIds = [];
     await db.transaction(async (trx) => {
       await trx('invoices')
         .where({ id: invoice.id })
         .update({ annual_prepay_term_id: null, updated_at: new Date() });
       if (termId) {
+        coveredInvoiceIds = await trx('invoices')
+          .where({ annual_prepay_covered_term_id: termId, status: 'prepaid' })
+          .pluck('id');
         // Canonical cancel: renewal_decision guard, stamp clear
         // (throwOnError — a swallowed failure here used to leave a future
         // visit silently prepaid-free of charge), covered-invoice reopen,
@@ -2377,6 +2384,26 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           .update({ annual_prepay_term_id: null, updated_at: new Date() });
       }
     });
+
+    // Re-arm reminders on the invoices the cancel actually reopened (a
+    // cash-paid one keeps its coverage marker and is skipped), the same way
+    // reverse-prepaid does: resumeSequenceIfSystemResumable leaves an office
+    // stop stopped, and scheduleForInvoice creates a sequence if none exists.
+    if (coveredInvoiceIds.length) {
+      const FollowUps = require('../services/invoice-followups');
+      const reopenedIds = await db('invoices')
+        .whereIn('id', coveredInvoiceIds)
+        .whereNull('annual_prepay_covered_term_id')
+        .pluck('id');
+      for (const reopenedId of reopenedIds) {
+        try {
+          await FollowUps.resumeSequenceIfSystemResumable(reopenedId);
+          await FollowUps.scheduleForInvoice(reopenedId);
+        } catch (err) {
+          logger.warn(`[admin-invoices:remove-annual-prepay] follow-up re-arm failed for ${reopenedId}: ${err.message}`);
+        }
+      }
+    }
 
     const updated = await InvoiceService.getById(invoice.id);
     res.json({ ok: true, invoice: updated });

@@ -28,6 +28,7 @@ jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(a
 jest.mock('../services/invoice-followups', () => ({
   stopOnPayment: jest.fn(async () => null),
   resumeSequence: jest.fn(async () => null),
+  resumeSequenceIfSystemResumable: jest.fn(async () => null),
   scheduleForInvoice: jest.fn(async () => null),
 }));
 
@@ -54,6 +55,7 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
   });
 
   beforeEach(async () => {
+    jest.clearAllMocks();
     trx = await database.transaction();
     require('../models/db').connection = trx;
   });
@@ -130,6 +132,10 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await trx('customers').where({ id: customerId }).first('billing_mode')).billing_mode).toBeNull();
     const reopened = await trx('invoices').where({ id: coveredInvoiceId }).first('status', 'annual_prepay_covered_term_id');
     expect(reopened).toEqual({ status: 'sent', annual_prepay_covered_term_id: null });
+    // Its reminders, stopped at settlement, are re-armed after commit.
+    const FollowUps = require('../services/invoice-followups');
+    expect(FollowUps.resumeSequenceIfSystemResumable).toHaveBeenCalledWith(coveredInvoiceId);
+    expect(FollowUps.scheduleForInvoice).toHaveBeenCalledWith(coveredInvoiceId);
     const released = await trx('scheduled_services').whereIn('id', openVisits.map((v) => v.id))
       .select('annual_prepay_term_id', 'prepaid_method');
     expect(released.every((v) => v.annual_prepay_term_id === null && v.prepaid_method === null)).toBe(true);
