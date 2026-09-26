@@ -90,6 +90,11 @@ describe('custom action credential screening', () => {
     'Rear gate is 24-0-11 fertilizer',
     'Opened rear gate with #24-0-11 fertilizer',
     'Opened rear gate with 2-4-6-8 and applied fertilizer',
+    'Use 2468 AT THE SIDE GATE',
+    'USE 24-68 AT THE GATE',
+    'USE 2468 TO OPEN THE GATE',
+    'USE AB-24-68-XY AT THE SIDE GATE',
+    'USE AB-24-68-XY TO OPEN THE GATE',
     'Rear gate AB-24-0-11 fertilizer',
     'Rear gate is AB-24-0-11 fertilizer',
     'Rear gate #AB-24-0-11 fertilizer',
@@ -113,6 +118,9 @@ describe('custom action credential screening', () => {
     'Inspected the rear gate 120–150 feet from the lanai',
     'Opened rear gate, applied 24-68ml around hinges',
     'Applied 24-0-11 near the rear gate',
+    'APPLIED 24-0-11 NEAR THE REAR GATE',
+    'OPENED THE GATE ONTO 400 SQUARE FEET OF TREATED TURF',
+    'OPENED REAR GATE, APPLIED 100 ML AROUND HINGES',
     'Near the rear gate, applied 24-0-11',
     'Applied fertilizer 24-0-11 near the rear gate',
     'Applied 24-0-11 fertilizer near the rear gate',
@@ -125,6 +133,18 @@ describe('custom action credential screening', () => {
 });
 
 describe('technicianReportCustomerCopy — shape parsing', () => {
+  test.each([
+    'Use 2468 AT THE SIDE GATE',
+    'USE 24-68 AT THE GATE',
+    'USE 2468 TO OPEN THE GATE',
+    'USE AB-24-68-XY AT THE SIDE GATE',
+    'USE AB-24-68-XY TO OPEN THE GATE',
+  ])('does not publish uppercase access instructions: %s', (instruction) => {
+    const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
+    expect(parsed.body).toBeNull();
+    expect(parsed.violations).toContain('access_code');
+  });
+
   test('parses the generate-report two-section shape into a single customer body', () => {
     const parsed = technicianReportCustomerCopy(AI_REPORT);
     expect(parsed).not.toBeNull();

@@ -182,7 +182,10 @@ const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|
 // A separated suffix must be uppercase/symbolic. Lowercase words after a code
 // are ordinary prose ("8842 after hours") and must remain available to the
 // surrounding detector rather than being absorbed as part of the token.
-const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
+// Uppercase relation/action words are context too: consuming "AT THE SIDE"
+// or "TO OPEN THE" would erase the link between a credential and its device.
+const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AT|FOR|TO|ON|IN|INTO|NEAR|BY|AS|WITH|USING|VIA|IS|WAS|WERE|REMAINS?|STAYS?|BECOMES?|OPEN(?:S|ED|ING)?|UNLOCK(?:S|ED|ING)?|ACCESS(?:ES|ED|ING)?|ENTER(?:S|ED|ING)?)\b)(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
+const REPORT_CREDENTIAL_TRAILING_AFFIX_RE = new RegExp(String.raw`^${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}$`);
 const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:[\s–—-]+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}){0,3}`;
 const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
   String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
@@ -246,8 +249,7 @@ function hasCredentialAffixAroundAnalysis(before, after, preserveLeading, preser
 
   const trailingGroup = after.match(/^([\s–—-]+)([A-Za-z0-9#*]{1,12})/);
   const uppercaseCredentialGroup = trailingGroup
-    && /^[A-Z0-9#*]+$/.test(trailingGroup[2])
-    && /[A-Z#*]/.test(trailingGroup[2]);
+    && REPORT_CREDENTIAL_TRAILING_AFFIX_RE.test(trailingGroup[2]);
   return Boolean(uppercaseCredentialGroup && !preserveTrailing);
 }
 
@@ -297,25 +299,26 @@ const REPORT_CREDENTIAL_TOKEN_RE = new RegExp(
 );
 
 function accessCodeDetectionText(text) {
-  return maskFertilizerAnalyses(text)
-    .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]')
-    .replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
-      const digits = token.replace(/\D/g, '');
-      const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
-      if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
-      const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)/i);
-      if (compactDevice) {
-        const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
-        return `${prefix}${direction}${compactDevice[2]} ${digits}`;
-      }
-      return `${prefix}${digits}`;
-    });
+  return text.replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
+    const digits = token.replace(/\D/g, '');
+    const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
+    if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
+    const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)/i);
+    if (compactDevice) {
+      const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
+      return `${prefix}${direction}${compactDevice[2]} ${digits}`;
+    }
+    return `${prefix}${digits}`;
+  });
 }
 
 function containsReportAccessCode(text) {
   if (containsExplicitNumericCredential(text)) return true;
-  const value = accessCodeDetectionText(text);
-  return REPORT_ACCESS_CODE_RES.some((re) => re.test(value));
+  const value = maskFertilizerAnalyses(text).replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
+  const normalized = accessCodeDetectionText(value);
+  // Normalization adds grouped/affixed spellings; it must never remove an
+  // access relationship that the original, measurement-screened copy exposes.
+  return REPORT_ACCESS_CODE_RES.some((re) => re.test(value) || re.test(normalized));
 }
 const { validateCustomerCopy } = require('./premium-experience');
 const { EXTRA_FORBIDDEN } = require('./visit-summary-narrative');
