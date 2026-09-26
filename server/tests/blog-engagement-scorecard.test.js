@@ -19,6 +19,8 @@ describe('blog scorecard path classes', () => {
     ['/pest-control/page/2/', 'blog-category'],
     ['/pest-control/florida-huntsman-spider/extra/', 'other'],
     ['/blog/', 'blog-index'],
+    ['/blog/category/pest-control/', 'blog-category'],
+    ['/blog/category/lawn-care/?utm_source=blog#posts', 'blog-category'],
     ['/pest-control-calculator/', 'estimate'],
     ['/pest-control-quote-sarasota-fl/', 'estimate'],
     ['/estimate/pest-control/', 'estimate'],

@@ -77,7 +77,7 @@ function classifyPath(path) {
   const segs = pathSegments(path);
   if (segs.length === 0) return 'home';
   const [first] = segs;
-  if (first === 'blog') return 'blog-index';
+  if (first === 'blog') return segs[1] === 'category' ? 'blog-category' : 'blog-index';
   if (BLOG_CATEGORIES.has(first)) {
     // /{category}/ and its /{category}/page/N/ listing pages are category pages;
     // a post is exactly /{category}/{slug}/; anything deeper is not a post.
