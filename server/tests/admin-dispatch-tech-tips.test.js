@@ -324,6 +324,15 @@ describe('completion freeze contract', () => {
 });
 
 describe('route wiring contracts', () => {
+  test('tree/shrub assess-preview returns the exact photo-set hash beside its HMAC', () => {
+    const start = source.indexOf("router.post('/:serviceId/tree-shrub/assess-preview'");
+    const end = source.indexOf("router.post('/:serviceId/rain-out'", start);
+    const block = source.slice(start, end);
+    expect(block).toContain('const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));');
+    expect(block).toContain('treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations)');
+    expect(block).toContain('return res.json({ ...result, photosHash, status: \'complete\' });');
+  });
+
   test('the handler is registered after the router-level tech-or-admin auth', () => {
     const layer = routeLayer('get', '/:serviceId/tech-tips');
     expect(layer).toBeTruthy();

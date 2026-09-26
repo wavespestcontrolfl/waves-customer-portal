@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { etDateString } = require('../utils/datetime-et');
 
 let Anthropic;
@@ -60,7 +61,8 @@ class TaxAdvisor {
 
       const response = await anthropic.messages.create({
         model: MODELS.FLAGSHIP,
-        max_tokens: 6000,
+        ...anthropicEffortConfig(MODELS.FLAGSHIP),
+        max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 6000),
         tools: [
           {
             type: 'web_search_20250305',
