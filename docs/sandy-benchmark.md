@@ -114,15 +114,35 @@ final cycle repeats a prefix of the 4 orders, so a few adjacencies land more
 than once while others land zero times) — still far better than a fixed
 order, but not perfectly balanced.
 
-Every run's `cacheHypothesis` field is always `"unknown"` — never a
-cold/warm label by trial position. Two reasons: rotation above already
-removes "trial 0 == first" as even a positional proxy, and the eval JSON
-does not surface Anthropic's own prompt-cache read/write token counts
-anywhere today — a real warm/cold split needs reading
-`usage.cache_read_input_tokens` / `cache_creation_input_tokens` off the raw
-API response, which `runVoiceRelayEval` does not expose. If a future PR
-threads real per-scenario usage data through the eval harness, this label
-should read those fields directly instead of guessing from trial index.
+There is no cold/warm label by trial position, and there never should be:
+rotation above already removes "trial 0 == first" as even a positional
+proxy for cache state, so guessing warm/cold from where a trial falls in the
+sequence would just be wrong labeled as data.
+
+Instead, the eval JSON now carries the real thing. Each model round's
+`finalMessage()` resolves with Anthropic's own `usage` block
+(`input_tokens` / `output_tokens` / `cache_read_input_tokens` /
+`cache_creation_input_tokens`); `voice-relay-replay.js`'s `installHarness`
+patches `stream.finalMessage` to read it as each round settles (via the same
+`extractUsage('anthropic', …)` normaliser the LLM call ledger uses, so the
+field names match: `input_tokens` / `output_tokens` / `cached_input_tokens`
+/ `cache_write_tokens`) and accumulates it onto that scenario's `record`.
+Every scenario record in `result.results[]` carries its own `usage` totals;
+`result.summary.usage` sums them for the whole run, with `rounds` (how many
+rounds actually carried a `usage` block — a scripted unit-test double with
+none is not counted) and `cacheReadRounds` (how many of those had a
+non-zero `cached_input_tokens`) as the cache-hit-rate's own denominator and
+numerator: `summary.usage.cacheHitRate = cacheReadRounds / rounds`, `null`
+(never `0`) when `rounds` is `0` — no evidence either way, not a confirmed
+zero. `run-voice-relay-benchmark.js`'s `summarizeCondition` sums the same
+fields across every attempt of every trial in a condition (`usage.rounds` /
+`usage.cacheReadRounds` / `usage.cacheHitRate`, plus raw
+`inputTokens` / `outputTokens` / `cachedInputTokens` / `cacheWriteTokens`)
+and the CLI's own printed table includes them per condition. This is why
+Haiku 4.5's minimum cacheable prefix (4,096 tokens) against Sandy's own
+system-prompt size (~3.6K tokens) is a real, checkable question now rather
+than a guess: run the benchmark and read `cacheHitRate` for the Haiku
+condition directly instead of inferring it from trial position.
 
 ### Inconclusive runs are missing data, never a completed run
 
@@ -346,31 +366,44 @@ alone:
   `judgeFallbackVerdictCountFinalAttemptOnly` /
   `judgeFallbackPassCountFinalAttemptOnly` — a condition leaning on the
   fallback leg a lot is a reliability signal about the judge call itself.
-- **Cost**: **benchmark-wide only, never per-condition** — the eval JSON
-  (`result.summary` / `result.attempts[].summary` / `result.results[]`)
-  carries no token-usage field anywhere; `runVoiceRelayEval` never surfaces
-  `usage.input_tokens` / `output_tokens` / cache token counts off the raw
-  Anthropic response, so `run-voice-relay-benchmark.js` has nothing to
-  aggregate per condition and does not attempt to (confirmed by inspection —
-  do not add relay-runtime instrumentation to get it; see the file header's
-  scope limit). Sandy's own model calls
-  (`relay-conversation.js`'s `anthropic.messages.stream`, which
-  `voice-relay-replay.js` calls into unmodified for the replay) go straight
-  to the Anthropic SDK and are NOT recorded in `llm_dispatch_log` — that
-  ledger is written only by calls that go through
+- **Cost**: **token counts are now per-condition; dollar cost is still
+  benchmark-wide only.** The eval JSON's `result.summary.usage` (and each
+  scenario's own `results[].usage`) now carries real per-round
+  `input_tokens` / `output_tokens` / `cached_input_tokens` (cache read) /
+  `cache_write_tokens` (cache creation) off Anthropic's own `usage` block —
+  `voice-relay-replay.js`'s `installHarness` reads it as each round's
+  `finalMessage()` resolves (see "Interleaving, rotation, and why there is
+  no cold/warm label" above) — and `run-voice-relay-benchmark.js`'s
+  `summarizeCondition` sums it across every attempt into each condition's
+  own `usage` block (`inputTokens` / `outputTokens` / `cachedInputTokens` /
+  `cacheWriteTokens` / `rounds` / `cacheReadRounds` / `cacheHitRate`),
+  printed in the CLI's own table. **Report tokens per condition — that part
+  no longer needs the console.** Turning those tokens into a DOLLAR figure
+  still does: this file has no per-model price table (adding one is out of
+  this file's scope — token counts are what the harness can observe
+  directly; $/token is a rate card that changes independently of any of
+  this), and the two `candidate-*` conditions can be priced differently per
+  token than the two `current-*` conditions, so a single blended rate would
+  misattribute cost across conditions even with real tokens in hand. Sandy's
+  own model calls (`relay-conversation.js`'s `anthropic.messages.stream`,
+  which `voice-relay-replay.js` calls into unmodified for the replay) go
+  straight to the Anthropic SDK and are NOT recorded in `llm_dispatch_log`
+  either way — that ledger is written only by calls that go through
   `server/services/llm/call.js` / `deep.js`, which Sandy's conversation loop
-  never uses, gate on or off. Read actual spend from the Anthropic console /
-  billing usage for the whole run's time window instead — and because the
-  runner interleaves all four conditions under the same API identity in one
-  run (see "Interleaving, rotation, and why there is no cold/warm label"
-  above), that console total is a benchmark-wide figure, not a per-condition
-  one. **To attribute cost to one condition**, run that condition alone —
+  never uses, gate on or off. For an exact dollar figure, read actual spend
+  from the Anthropic console / billing usage for the whole run's time
+  window — and because the runner interleaves all four conditions under the
+  same API identity in one run, that console total is still a
+  benchmark-wide dollar figure, not a per-condition one. **To attribute
+  dollar cost to one condition**, run that condition alone —
   `--only=<scenario ids>` narrows the fixture but still runs all four
   conditions; instead invoke `run-voice-relay-eval.js` directly once per
   condition (see "Running it" above for the one-condition command) with nothing
   else running against the same API identity in that window, and read the
-  console for each window separately. The ONE exception: with `--judge`, the
-  optional judge call does go through a ledgered `TEXT_POLICIES` lane, so
+  console for each window separately — or, now, just compare the reported
+  per-condition token counts directly, which needs no console at all. The
+  ONE exception: with `--judge`, the optional judge call does go through a
+  ledgered `TEXT_POLICIES` lane, so
   `llm_dispatch_log` may hold judge-call rows for a run if
   `GATE_LLM_CALL_LEDGER` was on — never the conversation's own model spend,
   and still not broken out per condition there either.

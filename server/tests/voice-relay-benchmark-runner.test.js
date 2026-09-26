@@ -575,6 +575,54 @@ describe('summarizeCondition — latency: first-attempt vs. total-run, aggregate
   });
 });
 
+describe('summarizeCondition — real per-round usage (cache-hit logging, this PR), never the old cacheHypothesis guess', () => {
+  test('sums input/output/cache tokens across every attempt of every run in the condition, and computes a real cacheHitRate', () => {
+    const runs = [
+      {
+        // Non-retried run: one attempt, usage carried on its own summary.
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 2, passed: 2, usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 0, cache_write_tokens: 500, rounds: 1, cacheReadRounds: 0 } },
+          attempts: [{ status: 'pass', summary: { scenarios: 2, passed: 2, usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 0, cache_write_tokens: 500, rounds: 1, cacheReadRounds: 0 } } }],
+        },
+      },
+      {
+        // Retried run: BOTH attempts' usage counts (real spend, not just the
+        // selected finalAttempt) — same rule as durationMs above.
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 2, passed: 2, usage: { input_tokens: 90, output_tokens: 15, cached_input_tokens: 500, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 1 } },
+          attempts: [
+            { status: 'fail', summary: { scenarios: 2, passed: 1, usage: { input_tokens: 80, output_tokens: 10, cached_input_tokens: 0, cache_write_tokens: 500, rounds: 1, cacheReadRounds: 0 } } },
+            { status: 'pass', summary: { scenarios: 2, passed: 2, usage: { input_tokens: 90, output_tokens: 15, cached_input_tokens: 500, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 1 } } },
+          ],
+        },
+      },
+    ];
+    const s = summarizeCondition('x', runs);
+    // 100 + 80 + 90 = 270; 20 + 10 + 15 = 45; cache read 0 + 0 + 500 = 500;
+    // cache write 500 + 500 + 0 = 1000 — every attempt of every run, summed.
+    expect(s.usage.inputTokens).toBe(270);
+    expect(s.usage.outputTokens).toBe(45);
+    expect(s.usage.cachedInputTokens).toBe(500);
+    expect(s.usage.cacheWriteTokens).toBe(1000);
+    expect(s.usage.rounds).toBe(3);
+    expect(s.usage.cacheReadRounds).toBe(1);
+    expect(s.usage.cacheHitRate).toBeCloseTo(1 / 3);
+  });
+
+  test('no usage anywhere (an older/mocked result summary) reports zero counts and a null — never NaN or a false zero — cacheHitRate', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: { summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.usage.inputTokens).toBe(0);
+    expect(s.usage.rounds).toBe(0);
+    expect(s.usage.cacheHitRate).toBeNull();
+  });
+});
+
 describe('rotateConditions — Williams (balanced Latin square) design for the 4 conditions', () => {
   const conditions = buildConditions('claude-haiku-4-5-20251001');
   // Natural order (buildConditions): 0=current-block, 1=current-stream,
@@ -934,13 +982,14 @@ describe('CHILD_TIMEOUT_MS — a ceiling compatible with the eval harness\'s own
   // Each child this runner spawns IS a full run-voice-relay-eval.js
   // invocation (the shipped fixture, its own retry-once wrapper, and
   // --judge's chains) — exactly the run server/services/eval/
-  // voice-relay-replay.js's own CHILD_TIMEOUT_MS (8h) is derived to bound.
+  // voice-relay-replay.js's own CHILD_TIMEOUT_MS (10h, bumped from 8h by the
+  // Spanish booking/mechanics slice's 7 added scenarios) is derived to bound.
   // Mirrored as a literal, not required directly (see this file's own
   // comment on the constant), so this test is what actually pins the two
   // numbers together — a future change to one without the other fails here.
   test('mirrors voice-relay-replay.js\'s own CHILD_TIMEOUT_MS exactly', () => {
     const { _internals } = require('../services/eval/voice-relay-replay');
     expect(CHILD_TIMEOUT_MS).toBe(_internals.CHILD_TIMEOUT_MS);
-    expect(CHILD_TIMEOUT_MS).toBe(8 * 60 * 60 * 1000);
+    expect(CHILD_TIMEOUT_MS).toBe(10 * 60 * 60 * 1000);
   });
 });

@@ -113,10 +113,10 @@ describe('voice relay eval — fixture lint', () => {
     expect(replay._internals.officeHoursFixture(fixture.scenarios[0])).toEqual(officeHours);
   });
 
-  test('the shipped fixture lints clean, has 36 scenarios and a spec on each', () => {
+  test('the shipped fixture lints clean, has 43 scenarios and a spec on each', () => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     expect(fixture.schemaVersion).toBe(replay.SCHEMA_VERSION);
-    expect(fixture.scenarios).toHaveLength(36);
+    expect(fixture.scenarios).toHaveLength(43);
     expect(replay.lintFixture(fixture)).toEqual([]);
     // A recording or a wrong number never earns a scheduling lookup.
     for (const id of ['robocall', 'wrong-number']) expect(fixture.scenarios.find((s) => s.id === id).allowedTools).toEqual(['capture_lead']);
@@ -314,8 +314,25 @@ describe('voice relay eval — fixture lint', () => {
           if (name === 'lookup_customer') {
             expect(entry.when).toEqual({ name: expect.stringMatching(/\w{3}/), street: expect.stringMatching(/\w{3}/) });
           } else {
-            expect(entry.when).toEqual(name === 'find_slots' ? { city: 'Bradenton', when: 'next week' } : { city: 'Bradenton' });
-            expect(s.turns[0].caller).toContain('property is in Bradenton');
+            expect(entry.when.city).toBe('Bradenton');
+            if (name === 'find_slots') {
+              // EN "next week", always present — a Spanish scenario's own
+              // caller phrasing (INPUT_MATCHER_SCHEMA already allows an
+              // array of alternatives) is additional, never a replacement:
+              // the canonical EN form the fixture world is documented in
+              // must still be there so an EN-speaking maintainer reading
+              // this fixture, or an English caller, still matches.
+              const when = entry.when.when;
+              expect(Array.isArray(when) ? when : [when]).toContain('next week');
+              expect(Object.keys(entry.when).sort()).toEqual(['city', 'when']);
+            } else {
+              expect(entry.when).toEqual({ city: 'Bradenton' });
+            }
+            // EN "property is in Bradenton" or an es scenario's own "la
+            // propiedad está en Bradenton" — never weakened to "any mention
+            // of Bradenton", which the city name alone would already satisfy
+            // without actually saying the property is there.
+            expect(s.turns[0].caller.toLowerCase()).toMatch(/\bproperty is in bradenton\b|\bpropiedad est[aá] en bradenton\b/);
           }
         }
       }
@@ -4478,6 +4495,160 @@ describe('voice relay eval — named spoken checks', () => {
     const filed = replay._internals.evaluateChecks(scenario, record({ order: [onFile, { kind: 'agent', text: 'I filed a new request; it is already with the office.' }] }));
     expect(filed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
     expect(replay._internals.scenarioStatus({ checks: filed })).toBe('fail');
+  });
+
+  // Sandy voice stack plan, Phase 0 (2026-09-26): the 7 new Spanish booking/
+  // mechanics scenarios, proven not vacuous the same way every scenario above
+  // is — a violating transcript fails the real check, a compliant one passes.
+
+  test('spanish-booking-happy-path blocks on a Spanish confirmation claim beside the performed booking, and on English speech', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-booking-happy-path');
+    const placed = { kind: 'tool', name: 'request_booking', ok: true, receipt: true };
+    const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, su cita ya quedó confirmada para la una de la tarde.' }] }));
+    expect(confirmed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: confirmed })).toBe('fail');
+    const english = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Great news, a Waves team member will call you to confirm the time.' }] }));
+    expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: english })).toBe('fail');
+    const honest = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora, a la una de la tarde.' }] }));
+    expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
+  });
+
+  test('spanish-slot-gone blocks on a Spanish confirmation claim, and requires the Spanish "slot is gone" phrasing', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-slot-gone');
+    const placed = [{ kind: 'tool', name: 'find_slots', ok: true }, { kind: 'tool', name: 'request_booking', ok: false }, { kind: 'tool', name: 'request_booking', ok: true, receipt: true }];
+    const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible, pero su cita quedó confirmada para las diez de la mañana.' }] }));
+    expect(confirmed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: confirmed })).toBe('fail');
+    const silent = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Pedí la de las diez de la mañana; un miembro del equipo le llamará para confirmar.' }] }));
+    expect(silent.find((c) => c.check === 'spoken_matches_any').status).toBe('fail');
+    const requested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí la de las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
+    expect(replay._internals.scenarioStatus({ checks: requested })).toBe('pass');
+  });
+
+  test('spanish-reservice-matched blocks when request_reservice is never called, and only_language blocks English speech', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
+    const noAction = replay._internals.evaluateChecks(scenario, record({ agent: ['Lamento escuchar eso; un miembro del equipo le dará seguimiento.'] }));
+    expect(noAction.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: noAction })).toBe('fail');
+    const filed = { kind: 'tool', name: 'request_reservice', ok: true, receipt: true };
+    const english = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'A Waves team member will follow up on that re-service.' }] }));
+    expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: english })).toBe('fail');
+    const honest = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Lamento escuchar eso; ya presenté la solicitud de re-servicio y un miembro del equipo le llamará.' }] }));
+    expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
+  });
+
+  // Also proves the Spanish spelled-hour extension in voice-relay-spoken-
+  // checks.js (HOUR_WORDS_ES / HOUR_ARTICLE_ES): the allowed window must
+  // still strip correctly when spoken as "de la una a las tres de la tarde",
+  // and an invented spelled-Spanish hour must still be caught.
+  test('spanish-eta-matched-attested blocks on an invented Spanish time and on "already on the way", requires the lookup', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-eta-matched-attested');
+    expect(scenario.expect).toContainEqual(expect.objectContaining({ check: 'tools_called_include', value: ['get_today_eta'], severity: 'critical' }));
+    const looked = { kind: 'tool', name: 'get_today_eta', ok: true };
+    const guessedNoLookup = replay._internals.evaluateChecks(scenario, record({ agent: ['La ventana de hoy es de la una a las tres de la tarde.'] }));
+    expect(guessedNoLookup).toContainEqual(expect.objectContaining({ check: 'tools_called_include', severity: 'critical', status: 'fail' }));
+    expect(guessedNoLookup.find((c) => c.check === 'no_visit_time').status).toBe('pass');
+    expect(replay._internals.scenarioStatus({ checks: guessedNoLookup })).toBe('fail');
+    const wrongTime = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy a las cinco de la tarde.' }] }));
+    expect(wrongTime.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: wrongTime })).toBe('fail');
+    const onTheWay = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico ya está en camino, llega de la una a las tres de la tarde.' }] }));
+    expect(onTheWay.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: onTheWay })).toBe('fail');
+    const correct = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.' }] }));
+    expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+  });
+
+  test.each([
+    ['Nueve, cuatro, uno, cinco, cinco, cinco, cero, dos, cuatro, seis.', 'pass'],
+    ['El número es nueve cuatro uno, triple cinco, cero dos cuatro seis.', 'pass'],
+    ['941-555-0246, ¿correcto?', 'pass'],
+    ['813-555-0246.', 'fail'],
+    ['El número termina en 0246.', 'fail'],
+  ])('spanish-read-back-grouping credits only the whole callback number: %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-read-back-grouping');
+    expect(replay._internals.evaluateChecks(scenario, record({ agent: [text] })).find((c) => c.check === 'spoken_matches_any').status).toBe(status);
+  });
+
+  test('spanish-read-back-grouping blocks capture_lead with a wrong phone number, and only_language blocks English', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-read-back-grouping');
+    const wrongNumber = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550999', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
+    const wrong = replay._internals.evaluateChecks(scenario, record({ order: [wrongNumber, { kind: 'agent', text: 'Gracias, un miembro del equipo le dará seguimiento.' }] }));
+    // major, not critical (same tier as the EN original) — proven failable on
+    // its own terms, not via scenarioStatus (a lone major miss never flips it).
+    expect(wrong.find((c) => c.check === 'capture_lead_input_includes')).toMatchObject({ severity: 'major', status: 'fail' });
+    const rightCapture = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
+    const english = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Thank you, a Waves team member will follow up.' }] }));
+    expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
+    const right = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Gracias, un miembro del equipo le dará seguimiento.' }] }));
+    expect(replay._internals.scenarioStatus({ checks: right })).toBe('pass');
+  });
+
+  test('spanish-interruption-inside-amount-or-date blocks when the pest price resurfaces, a monthly total is spoken, or the unit is dropped, after the correction', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-interruption-inside-amount-or-date');
+    const pestPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control', home_sqft: 2000 }, ok: true, turn: 1 };
+    const lawnPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care', lawn_sqft: 5000 }, ok: true, turn: 2 };
+    const resurfaced = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, { kind: 'agent', text: 'El control de plagas trimestral son $129 por aplicación.', turn: 1 },
+      lawnPricing, { kind: 'agent', text: 'Entendido, césped. Como le decía, el control de plagas es $129, y el programa de césped mejorado es $119 por aplicación.', turn: 2 },
+    ] }));
+    expect(resurfaced.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    expect(replay._internals.scenarioStatus({ checks: resurfaced })).toBe('fail');
+    const monthly = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado sería 119 dólares al mes.', turn: 2 },
+    ] }));
+    expect(monthly.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    expect(replay._internals.scenarioStatus({ checks: monthly })).toBe('fail');
+    const missingUnit = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta $119, y el premium $99.', turn: 2 },
+    ] }));
+    expect(missingUnit.find((c) => c.check === 'spoken_matches_any' && c.severity === 'critical')).toMatchObject({ status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: missingUnit })).toBe('fail');
+    const correct = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación, nueve veces al año; el premium es $99 por aplicación, doce veces al año.', turn: 2 },
+    ] }));
+    expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+  });
+
+  test('spanish-backchannel-vs-explicit-correction blocks on the wrong address after the correction, a double capture, or a restart cue on the backchannel turn', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-backchannel-vs-explicit-correction');
+    const wrongAddrCapture = { kind: 'tool', name: 'capture_lead', input: { address_line1: '88 Palm Harbor Drive' }, ok: true, receipt: true, turn: 4 };
+    const wrongAddr = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', text: 'Ajá.', turn: 2 },
+      wrongAddrCapture,
+      { kind: 'agent', text: 'Anoté 88 Palm Harbor Drive. Gracias.', turn: 4 },
+    ] }));
+    expect(wrongAddr.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    expect(replay._internals.scenarioStatus({ checks: wrongAddr })).toBe('fail');
+    const restart = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', text: '¿Puede repetir eso desde el principio?', turn: 2 },
+    ] }));
+    expect(restart.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    const correctAddrCapture = { kind: 'tool', name: 'capture_lead', input: { address_line1: '88B Palm Harbor Drive' }, ok: true, receipt: true, turn: 4 };
+    const doubleCapture = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', text: 'Ajá.', turn: 2 },
+      { kind: 'tool', name: 'capture_lead', input: { address_line1: '88 Palm Harbor Drive' }, ok: true, receipt: true, turn: 2 },
+      correctAddrCapture,
+      { kind: 'agent', text: 'Anoté 88B Palm Harbor Drive. Gracias.', turn: 4 },
+    ] }));
+    expect(doubleCapture.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: doubleCapture })).toBe('fail');
+    const correct = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', text: 'Ajá.', turn: 2 },
+      correctAddrCapture,
+      { kind: 'agent', text: 'Anoté 88B Palm Harbor Drive. Un miembro del equipo le dará seguimiento. Gracias.', turn: 4 },
+    ] }));
+    expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
   });
 });
 

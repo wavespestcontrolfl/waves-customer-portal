@@ -219,6 +219,12 @@ function amount_requires_unit(value, record, { spoken }) {
 
 const HOUR_WORDS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 const HOUR = `(?:1[0-2]|0?[1-9]|${HOUR_WORDS})`;
+// Spanish spelled clock hours 1–12, bare cardinal ("una", "dos" … "doce") —
+// used only where the surrounding pattern already requires a meridiem/
+// fraction cue or an "a las" lead-in right beside it (below), so the common
+// English word "once" ("once you call…") never collides: it is never
+// followed by "p.m."/"de la tarde"/etc, nor preceded by "a las".
+const HOUR_WORDS_ES = 'una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce';
 // A part of day after an hour, EN ("3 PM", "3 o'clock", "3 in the afternoon")
 // and ES ("3 de la tarde").
 const MERIDIEM = '(?:(?:a\\.?m\\.?|p\\.?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|de la (?:mañana|tarde|noche))(?![a-z]))';
@@ -230,9 +236,14 @@ const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|n
 const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
 const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
 const HOUR_WORD_MAP = HOUR_WORDS.split('|');
+// The article Spanish grammar fixes to each hour ("la una", "las dos" …
+// "las doce") — used only inside windowStripper's own narrow regex below,
+// where the article is part of how the window is actually said ("de la una
+// a las tres").
+const HOUR_ARTICLE_ES = Object.freeze({ 1: 'la una', 2: 'las dos', 3: 'las tres', 4: 'las cuatro', 5: 'las cinco', 6: 'las seis', 7: 'las siete', 8: 'las ocho', 9: 'las nueve', 10: 'las diez', 11: 'las once', 12: 'las doce' });
 // A window's hours are 24-hour in the fixture (13 is 1 PM) and spoken as 12-hour.
 const twelveHour = (h) => Number(h) % 12 || 12;
-const hourAlt = (h) => `(?:${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]})`;
+const hourAlt = (h) => `(?:${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]}|${HOUR_ARTICLE_ES[twelveHour(h)]})`;
 const meridiemOfHour = (h) => (Number(h) < 12 ? 'am' : 'pm');
 // The part of day a spoken meridiem names; "o'clock" names none.
 const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a\.?m|morning|mañana/.test(t) ? 'am' : /^p\.?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
@@ -244,8 +255,8 @@ const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a\
 const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:1[0-2]|0?[1-9])(?::[0-5]\\d)?\\s*${MERIDIEM}`, 'i'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
-  /\ba las?\s+(?:[01]?\d|2[0-3])(?::[0-5]\d)?\b/i,
-  new RegExp(`\\b(?:${HOUR_WORDS})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
+  new RegExp(`\\ba las?\\s+(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b`, 'i'),
+  new RegExp(`\\b(?:${HOUR_WORDS}|${HOUR_WORDS_ES})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
   new RegExp(`\\b(?:half|quarter)\\s+(?:past|to|after|before|till)\\s+${HOUR}\\b`, 'i'),
   new RegExp(`\\b${HOUR}[- ]ish\\b`, 'i'),
   new RegExp(`\\b(?:between|entre)\\s+${HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*(?:and|y)\\s+${HOUR}\\b`, 'i'),
