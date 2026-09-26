@@ -197,6 +197,10 @@ function stripDenials(text) {
     .join('\n');
 }
 
+// Subjectless Spanish poisoning ("se envenenó", "está envenenado") — kept out
+// of EMERGENCY_RE, whose trailing \b can't follow an accented letter.
+const SPANISH_POISONING_RE = /(?:^|[^\p{L}])(?:(?:se|me|nos|te)\s+envenen(?:[oó]|aron|amos|aste|[eé])|(?:est[aá]n?|estoy|estamos|fue|fueron|ha\s+sido|han\s+sido)\s+(?:\S+\s+)?envenenad[oa]s?)(?![\p{L}])/iu;
+
 function looksLikeEmergency(text) {
   // Denials are stripped one turn at a time, so a "no" ending one turn can
   // never swallow a statement in the next.
@@ -204,7 +208,7 @@ function looksLikeEmergency(text) {
   // Exposure shapes are judged one turn (line) at a time — "I ate lunch" in
   // history must not pair with "Which bug spray do you use?" now.
   const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn) || treatmentSymptom(turn) || affirmedAfterDenial(turn) || SPRAY_ON_PATIENT_RE.test(turn));
-  return EMERGENCY_RE.test(t) || exposure
+  return EMERGENCY_RE.test(t) || SPANISH_POISONING_RE.test(t) || exposure
     || t.split(/\n+/).some((turn) => BITE_STING_RE.test(turn) && REACTION_RE.test(turn.replace(NEGATED_REACTION_RE, ' ')));
 }
 

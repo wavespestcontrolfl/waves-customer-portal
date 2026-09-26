@@ -1952,6 +1952,9 @@ describe('looksLikeEmergency', () => {
     'My child took poison',
     'My dog took rat poison',
     'Mi hijo tomó veneno',
+    'Creo que se envenenó mi perro',
+    'Está envenenado',
+    'Me envenené con el producto',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2031,6 +2034,7 @@ describe('looksLikeEmergency', () => {
     'My kids are sick of ants after the treatment',
     "I need a doctor's office treated for roaches",
     'We need an ambulance station treated for termites',
+    '¿Cuánto cuesta quitar las ratas envenenadas?',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
