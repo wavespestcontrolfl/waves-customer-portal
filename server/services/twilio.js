@@ -874,6 +874,17 @@ const TwilioService = {
       const providerSmsMetadata = () => ({
         pre_handoff_stamp: true,
         ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
+        // Mirrors the same key on the primary sms_log insert below — a
+        // provider-handoff reservation this context captures is promoted
+        // in place (sms-suggest-mode.js's settleReplyHoldingReservation,
+        // metadata merged onto the SAME row) when the primary insert fails
+        // after Twilio already accepted. Without this here too, that
+        // promoted row would carry notificationEventKey but not
+        // billingDeliveryLeg, and a later replay's dedupe lookup
+        // (messaging/billing-text-leg-dedupe.js, scoped to
+        // billingDeliveryLeg==='sms') would never find it — reading a
+        // genuinely accepted send as unsent and re-texting the customer.
+        ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
         // Durable provenance: the operator typed (or edited) this body in the
         // Comms composer. message_type 'manual' alone is overloaded across
         // automated senders, so readers that need "a human wrote this"

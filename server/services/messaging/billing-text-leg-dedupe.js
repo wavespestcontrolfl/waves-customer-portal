@@ -22,19 +22,60 @@
  *
  * There is no unique index backing this lookup the way email_messages has
  * one for idempotency_key (adding one is a migration, and pushed
- * migrations are frozen — see docs), so correctness here comes from an
- * advisory lock, not a constraint: `withBillingTextLegLock` holds
- * pg_advisory_xact_lock('billing_text_leg:<customerId>:<notificationEventKey>')
- * across the check AND the actual provider handoff, so a second, genuinely
- * concurrent replay on the exact same key blocks until this attempt's
- * outcome — and, on acceptance, twilio.js's own sms_log insert — is
- * durably committed, rather than racing it. Holding a transaction across
- * the Twilio HTTP call is not a new shape in this codebase:
- * server/utils/customer-comms-lock.js's withSmsConsentLock already does
- * exactly this for other SMS callers (lead-response-tools.js,
- * reschedule-link-promises.js, visit-completion-summary.js) — "The
- * callback covers final authority reads and the SDK call only." This
- * reuses that same posture for a new, narrow key, not a new mechanism.
+ * migrations are frozen), so correctness comes from a NONBLOCKING CLAIM,
+ * not a constraint, and NOT from holding a transaction across the Twilio
+ * HTTP call: `DB_POOL_MAX`/knexfile's pool minimum is 2 in production, and
+ * holding a connection for a whole provider round trip would let two
+ * concurrent billing Text legs occupy both pool connections and stall a
+ * third caller on acquisition. Every DB touch here is a short, local
+ * transaction that commits (releasing its connection) BEFORE `send()` is
+ * ever called:
+ *
+ *   1. Inside one short transaction: pg_try_advisory_xact_lock (NON-
+ *      blocking — a caller that can't get it returns a schedulable
+ *      BILLING_TEXT_LEG_IN_FLIGHT hold instead of waiting on a connection),
+ *      then check for a prior ACCEPTED Text for this customer+notice (a
+ *      dedupe hit — see findAcceptedBillingTextLeg), then check for a
+ *      live (unexpired) claim someone else already holds for this exact
+ *      key (also BILLING_TEXT_LEG_IN_FLIGHT), else write our own claim row
+ *      and commit.
+ *   2. `send()` runs with NO connection held.
+ *   3. The claim is cleared (best-effort, logged) once send() returns an
+ *      outcome, accepted or refused — a future replay's step 1 lookup then
+ *      finds either the real accepted row (dedupe) or nothing (sends). If
+ *      send() THROWS, the claim stays: delivery is unknown, so it ages into
+ *      the stale-claim operator hold below rather than a resend.
+ *
+ * The claim is a plain sms_log row (no new table, no index) — the SAME
+ * table the reply/review-ask send reservations already use for exactly
+ * this "placeholder inserted just before the provider call" shape
+ * (sms-suggest-mode.js's createReplyHoldingReservation) — but with its OWN
+ * marker (`billing_text_leg_claim`), never one of REPLY_RESERVATION_MARKERS
+ * (review-ask-reservation.js): those markers are read directly (as literal
+ * strings, not the shared constant) by sms-suggest-mode.js's and
+ * sms-auto-send.js's own reply-in-flight/cleanup sweeps, which are scoped
+ * by PHONE thread, not by customer+notice — reusing one of those markers
+ * would make an unrelated billing text visible to (and possibly swept by)
+ * that machinery. Our own marker is structurally invisible to it, and to
+ * every other current sms_log reader: no reader in this codebase selects a
+ * bare 'sending' row without EITHER a status filter that already excludes
+ * it, a message_type/marker scope that cannot match ours, OR (the
+ * scheduled-SMS recovery sweeps in scheduler.js) `scheduled_for IS NOT
+ * NULL`, which this claim never sets. `findAcceptedBillingTextLeg` also
+ * calls `excludeUnresolvedSendReservations` on top (matching this
+ * codebase's sms_log general-reader source guard,
+ * server/tests/sms-log-general-reader-source-guard.test.js) even though
+ * its own status filter already excludes 'sending' rows, ours included.
+ *
+ * A claim can outlive its own send when the owning process crashes or is
+ * killed between claiming and settling. CLAIM_STALE_MS (5 minutes — far
+ * longer than a Twilio REST round trip or a pool-acquisition wait, and the
+ * same constant this module already uses for its own infra-failure retry
+ * delay) is the line: past it, delivery is genuinely UNKNOWN, so a later
+ * attempt returns a non-retryable held result instead of resending (which
+ * could double-text a customer whose earlier attempt actually went out) or
+ * silently dropping the notice. It logs an error naming the customer and
+ * key for operator review; nothing here clears a stale claim automatically.
  *
  * Scope: explicit billing Text legs ONLY —
  * metadata.billingDeliveryLeg === 'sms' with a non-empty
@@ -51,9 +92,28 @@ const { excludeUnresolvedSendReservations } = require('./review-ask-reservation'
 // A provider handoff Twilio genuinely accepted for this exact notice.
 // Never 'failed'/'blocked' (a refused attempt still owes a resend) and
 // never 'scheduled'/'sending' — a producer's own queued/in-flight replay
-// row for this same key IS the replay currently under way, not prior
-// acceptance evidence, and must not dedupe itself away.
+// row for this same key (or our own in-flight claim) IS the replay
+// currently under way, not prior acceptance evidence, and must not dedupe
+// itself away. A provider-handoff reservation Twilio accepted is promoted
+// to status 'sent' in place (sms-suggest-mode.js's
+// settleReplyHoldingReservation) with this leg's billingDeliveryLeg/
+// notificationEventKey carried over from twilio.js's providerSmsMetadata,
+// so it satisfies this same filter with no special case needed here.
 const ACCEPTED_STATUSES = ['queued', 'sent', 'delivered'];
+
+// Retry/hold windows. DEDUPE_RETRY_MS mirrors send-customer-message.js's
+// own DEFAULT_PROVIDER_RETRY_DELAY_MS (5 min) for an infra failure.
+// IN_FLIGHT_RETRY_MS is short — the attempt actually in flight is a single
+// Twilio round trip, seconds, not minutes. CLAIM_STALE_MS is documented at
+// the top of this file.
+const DEDUPE_RETRY_MS = 5 * 60 * 1000;
+const IN_FLIGHT_RETRY_MS = 2 * 60 * 1000;
+const CLAIM_STALE_MS = 5 * 60 * 1000;
+
+const CLAIM_MARKER = 'billing_text_leg_claim';
+// sms_log.from_phone is varchar(20) — this sentinel must fit (mirrors
+// push-channel-routing.js's own short 'push' sentinel for the same reason).
+const CLAIM_FROM_PHONE = 'billing-text-claim';
 
 function lockKey(customerId, notificationEventKey) {
   return `billing_text_leg:${customerId}:${notificationEventKey}`;
@@ -62,10 +122,9 @@ function lockKey(customerId, notificationEventKey) {
 // Durable evidence a Text leg for this exact customer + notice already
 // reached the provider. Status-scoped to ACCEPTED_STATUSES (excludes
 // 'sending'/'scheduled'), so an unresolved review-ask/reply send
-// reservation cannot match structurally either way —
-// excludeUnresolvedSendReservations applied on top regardless, matching
-// this codebase's sms_log general-reader source guard
-// (server/tests/sms-log-general-reader-source-guard.test.js).
+// reservation — or our own in-flight claim — cannot match structurally
+// either way; excludeUnresolvedSendReservations applied on top regardless
+// (see the file header).
 async function findAcceptedBillingTextLeg(conn, customerId, notificationEventKey) {
   return excludeUnresolvedSendReservations(
     conn('sms_log')
@@ -76,6 +135,60 @@ async function findAcceptedBillingTextLeg(conn, customerId, notificationEventKey
   )
     .orderBy('created_at', 'desc')
     .first(['twilio_sid', 'created_at']);
+}
+
+// A live (still 'sending') claim for this exact customer + notice — ours
+// or a concurrent attempt's. Never excludeUnresolvedSendReservations here:
+// this IS the in-flight row we're deliberately looking for, not a general
+// "recent messages" read.
+async function findLiveClaim(conn, customerId, notificationEventKey) {
+  return conn('sms_log')
+    .where({ customer_id: customerId, direction: 'outbound', status: 'sending' })
+    .whereRaw(`metadata->>'${CLAIM_MARKER}' = 'true'`)
+    .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
+    .orderBy('created_at', 'desc')
+    .first(['id', 'created_at']);
+}
+
+async function insertClaim(conn, customerId, notificationEventKey, input) {
+  const [inserted] = await conn('sms_log')
+    .insert({
+      customer_id: customerId,
+      direction: 'outbound',
+      from_phone: CLAIM_FROM_PHONE,
+      to_phone: String(input?.to || '').slice(0, 20),
+      message_body: '',
+      status: 'sending',
+      created_at: new Date(),
+      message_type: 'billing_text_leg_claim',
+      metadata: JSON.stringify({
+        [CLAIM_MARKER]: true,
+        billingDeliveryLeg: 'sms',
+        notificationEventKey,
+      }),
+    })
+    .returning('id');
+  return inserted?.id || inserted || null;
+}
+
+// Best-effort: whether or not it succeeds, the claim's only job (closing
+// the check-then-send race) is already done by the time this runs — send()
+// has already settled one way or another.
+async function releaseClaim(claimId) {
+  if (!claimId) return;
+  try {
+    await db('sms_log')
+      .where({ id: claimId, status: 'sending' })
+      .whereRaw(`metadata->>'${CLAIM_MARKER}' = 'true'`)
+      .del();
+  } catch (err) {
+    logger.warn(`[billing-text-leg-dedupe] claim release failed for claim ${claimId}: ${err.message}`);
+  }
+}
+
+function isStaleClaim(claim, now = Date.now()) {
+  const createdAt = claim?.created_at ? new Date(claim.created_at).getTime() : NaN;
+  return !Number.isFinite(createdAt) || now - createdAt >= CLAIM_STALE_MS;
 }
 
 // Same shape family as the Email/App deduped results (billing-channel-
@@ -97,23 +210,67 @@ function dedupedAcceptance(row) {
   };
 }
 
+// Schedulable: something else (a genuinely concurrent replay) is working
+// this exact key RIGHT NOW. In REPLAY_HOLD_CODES — the caller's replay
+// retries shortly rather than resending or giving up.
+function inFlightHold() {
+  return {
+    sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'BILLING_TEXT_LEG_IN_FLIGHT',
+    error: 'A concurrent attempt for this billing text is in flight', retryable: true, deferred: true,
+    nextAllowedAt: new Date(Date.now() + IN_FLIGHT_RETRY_MS).toISOString(),
+  };
+}
+
+// A claim outlived CLAIM_STALE_MS with no settlement — its owner almost
+// certainly crashed mid-send, and delivery is genuinely unknown. NOT in
+// REPLAY_HOLD_CODES and NOT retryable: this must surface to an operator,
+// never silently resend (a real prior send may have gone out) or silently
+// drop the notice.
+function staleClaimHold(claim, customerId, notificationEventKey) {
+  logger.error(
+    `[billing-text-leg-dedupe] stale claim (>${Math.round(CLAIM_STALE_MS / 60000)}m) for customer ${customerId}, `
+    + `key ${notificationEventKey} (claim id ${claim.id}, claimed at ${claim.created_at}) — `
+    + 'delivery is unknown; held for operator review, never auto-resent',
+  );
+  return {
+    sent: false, blocked: true, deliveryOutcome: 'uncertain', code: 'BILLING_TEXT_LEG_CLAIM_STALE',
+    reason: 'A prior attempt for this billing text did not settle — delivery is unknown and this notice is held for operator review',
+    retryable: false,
+  };
+}
+
+// Runs entirely inside one short transaction: the non-blocking lock, the
+// prior-acceptance lookup, the live-claim lookup, and (only if none of
+// those resolve it) the claim insert. Returns { outcome } when the caller
+// must not send (deduped / in-flight / stale), or { claimId } to proceed.
+async function claimOrResolve(trx, customerId, notificationEventKey, input) {
+  const acquired = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS locked', [lockKey(customerId, notificationEventKey)]);
+  const row = acquired?.rows?.[0];
+  const locked = row?.locked === true || row?.locked === 't';
+  if (!locked) return { outcome: inFlightHold() };
+
+  const prior = await findAcceptedBillingTextLeg(trx, customerId, notificationEventKey);
+  if (prior) return { outcome: dedupedAcceptance(prior) };
+
+  const liveClaim = await findLiveClaim(trx, customerId, notificationEventKey);
+  if (liveClaim) {
+    return { outcome: isStaleClaim(liveClaim) ? staleClaimHold(liveClaim, customerId, notificationEventKey) : inFlightHold() };
+  }
+
+  const claimId = await insertClaim(trx, customerId, notificationEventKey, input);
+  return { claimId };
+}
+
 /**
- * Runs an explicit billing Text leg's check-then-send under one advisory
- * lock. `send` is the caller's actual provider dispatch (a zero-arg
- * thunk) — invoked EXACTLY ONCE, whether or not this guard applies.
+ * Guards an explicit billing Text leg's check-then-send. `send` is the
+ * caller's actual provider dispatch (a zero-arg thunk) — invoked EXACTLY
+ * ONCE, whether or not this guard applies, and always with no database
+ * connection held by this module.
  *
  * Not an explicit billing Text leg (no billingDeliveryLeg === 'sms', no
  * notificationEventKey, or no customerId) -> `send()` runs unprotected,
- * byte-identical to before this lane — no lock, no lookup.
- *
- * An explicit billing Text leg with a prior accepted send for this exact
- * key -> `send()` never runs; the deduped acceptance is returned instead.
- * Otherwise the lock stays held across `send()` itself (the actual Twilio
- * handoff), so a second, truly concurrent replay on the SAME key blocks on
- * the lock rather than racing this one.
+ * byte-identical to before this lane — no lock, no lookup, no claim.
  */
-const DEDUPE_RETRY_MS = 5 * 60 * 1000;
-
 async function withBillingTextLegLock(input, send) {
   const metadata = input?.metadata || {};
   if (metadata.billingDeliveryLeg !== 'sms') return send();
@@ -121,27 +278,15 @@ async function withBillingTextLegLock(input, send) {
   const customerId = input?.customerId;
   if (!notificationEventKey || !customerId) return send();
 
-  // Tracks whether `send()` was already handed off before a throw, so the
-  // fail-open catch below can never invoke it a second time (double-send).
-  let sendInvoked = false;
-  const runSend = () => {
-    sendInvoked = true;
-    return send();
-  };
-
+  let claimId;
   try {
-    return await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [lockKey(customerId, notificationEventKey)]);
-      const prior = await findAcceptedBillingTextLeg(trx, customerId, notificationEventKey);
-      if (prior) return dedupedAcceptance(prior);
-      return runSend();
-    });
+    const claimed = await db.transaction((trx) => claimOrResolve(trx, customerId, notificationEventKey, input));
+    if (claimed.outcome) return claimed.outcome;
+    claimId = claimed.claimId;
   } catch (err) {
-    if (sendInvoked) throw err;
-    // The lock or the lookup failed before any send. Without the lookup we
-    // can't rule out a prior accepted text, so fail closed with a
-    // schedulable hold (in REPLAY_HOLD_CODES): nothing is sent now and the
-    // producer's replay retries once the database is reachable.
+    // The lock/lookup/claim step failed before send() was ever considered.
+    // Without it we can't rule out a prior accepted text, so fail CLOSED
+    // with a schedulable hold rather than sending unprotected.
     logger.warn(`[billing-text-leg-dedupe] lock/lookup failed before send, holding for retry: ${err.message}`);
     return {
       sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'BILLING_TEXT_DEDUPE_UNAVAILABLE',
@@ -149,10 +294,20 @@ async function withBillingTextLegLock(input, send) {
       nextAllowedAt: new Date(Date.now() + DEDUPE_RETRY_MS).toISOString(),
     };
   }
+
+  // Released only once send() RETURNS a settled outcome (accepted rows are
+  // already durable in sms_log by then). A throw means we cannot tell
+  // whether Twilio took the message, so the claim is deliberately left in
+  // place: it ages into staleClaimHold (operator review), never a resend.
+  const result = await send();
+  await releaseClaim(claimId);
+  return result;
 }
 
 module.exports = {
   withBillingTextLegLock,
   findAcceptedBillingTextLeg,
+  findLiveClaim,
   ACCEPTED_STATUSES,
+  CLAIM_STALE_MS,
 };
