@@ -1412,6 +1412,39 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/data`'s optional `consultationOffer: { url }` (consultation-first lane,
+owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
+and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)
+is the "Want us to come look first?" section's link to the SAME
+`/inspection/:token` self-booking page the recurring-lead new_lead email
+offers (`lead-consultation-email-block.js`) — this covers the estimate page
+only, never the email. Present only when: both gates are live; the estimate
+is in an open, customer-actionable state (never accepted/declined/expired/
+send_failed/unpublished/past-expiry, and never a staff draft or verified
+staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
+`softExit` use); `estimate_data.lead_linkage` is STRONG (`sid` or `stamp` —
+the same set the accept/decline handlers' own lead re-lock condition on); the
+linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
+customer is linked — that customer live and still on the lead's phone) and
+`leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
+probe (`inspection-public.js` `_internals.computeConsultationSlotsForLead`,
+the same one the email block uses) finds at least one open slot AT THIS
+ESTIMATE'S PROPERTY — the address the page resolved matches the estimate's
+(same street key, unit and zip); an out-of-area, unresolved, no-address,
+retired-catalog, no-open-times or other-property result omits the field.
+Quote-first only: never on an estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) or on a grouped estimate
+(`estimate_group_id`). Composed on the page's own first `/data` load only —
+never on an internal `?refresh=1` of a viewed estimate (the client carries
+the first load's offer forward) and never for a caller that does not opt in
+(`includeConsultationOffer`). The Intelligence Bar's `get_estimate_detail` projection drops
+`consultationOffer` (the URL is a booking bearer). The URL is
+`consultationUrlForLead(leadId)` with NO channel (unverified delivery — this
+is neither an SMS send, which asserts phone delivery, nor an email send);
+the endpoint makes NO write of any kind to mint it (no `createShortCode`, no
+DB insert) — a public GET stays read-only. Any lookup error, or any other
+ineligibility, omits the field entirely (never `null`); absent, the page
+renders byte-identical to before this field existed.
 Authored commercial proposals expose reviewed four-decimal quantities and unit
 rates, explicit unit labels, cent-rounded line amounts, and the fixed
 `validThrough` date in their normalized proposal and document output. Internal
