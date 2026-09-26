@@ -76,6 +76,29 @@ describe('rankRelatedPosts — ranking', () => {
     expect(rankRelatedPosts(target, candidates)).toEqual([]);
   });
 
+  test('generic service words alone never admit a candidate ("treatment", "control", "Florida", a city)', () => {
+    // Codex #4984 r4 P2: the hard link gate requires min(3, N) of these, so
+    // a generic-word false positive would force an unrelated link.
+    const target = { keyword: 'termite treatment in Florida', service: 'termite', city: 'Sarasota' };
+    const candidates = [
+      candidate({ id: 'a', title: 'Termite Bait Stations', path: '/termite/bait-stations/', keyword: 'termite bait stations', service: 'termite' }),
+      candidate({ id: 'b', title: 'Fire Ant Treatment Guide for Florida Homes', path: '/pest-control/fire-ant-treatment/', keyword: 'fire ant treatment', service: 'ants' }),
+      candidate({ id: 'c', title: 'Mosquito Control in Sarasota', path: '/mosquito/control-sarasota/', keyword: 'mosquito control sarasota', service: 'mosquito', city: 'Sarasota' }),
+    ];
+    expect(rankRelatedPosts(target, candidates).map((r) => r.path)).toEqual(['/termite/bait-stations/']);
+  });
+
+  test('two rows that resolve to one live URL are listed once', () => {
+    const target = { service: 'termite' };
+    const candidates = [
+      candidate({ id: 'a', title: 'Termite Bond Explained', path: '/termite/termite-bond/', service: 'termite' }),
+      candidate({ id: 'b', title: 'Termite Bond (legacy row)', path: 'https://www.wavespestcontrol.com/termite/termite-bond', service: 'termite' }),
+      candidate({ id: 'c', title: 'Drywood Termites', path: '/termite/drywood/', service: 'termite' }),
+    ];
+    const paths = rankRelatedPosts(target, candidates).map((r) => r.path);
+    expect(paths).toEqual(['/termite/drywood/', '/termite/termite-bond/']);
+  });
+
   test('deterministic tie-break: equal score sorts by title', () => {
     const target = { service: 'termite' };
     const candidates = [

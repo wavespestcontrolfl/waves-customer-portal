@@ -48,6 +48,8 @@ const {
   blankReferenceDefinitions,
   blankExpressionStringLiterals,
   blankNonRenderedMarkdown,
+  blankNonRenderedMarkdownWithDepths,
+  hubHostSet,
   normalizeInternalPath,
 } = require('./content-guardrails');
 
@@ -1065,13 +1067,18 @@ const RELATED_POSTS_LINK_MINIMUM = 3;
 // bare `[a]: /x/` definition nobody references must never satisfy this).
 // Raw HTML <a href> is out of scope: the writer's plain-Markdown-subset
 // contract already hard-blocks it elsewhere (body_syntax_supported).
+// Quoted attribute values are blanked too (the default attrValues: true):
+// `<InlineCTA headline="Read [A](/termite/a/)" />` renders that text, not
+// an anchor. Container depths are kept so a definition that opens a
+// blockquote or list item after prose still resolves.
 function realMarkdownLinkPaths(body) {
-  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(body), { attrValues: false });
-  const defs = markdownReferenceDefinitions(text);
+  const { text: rendered, depths, inList } = blankNonRenderedMarkdownWithDepths(body);
+  const text = blankExpressionStringLiterals(rendered);
+  const defs = markdownReferenceDefinitions(text, { depths, inList });
   // Scan with the definition lines blanked (offsets preserved): otherwise a
   // `[a]: /x/` line reads as a shortcut `[a]` usage of itself, and an
   // unused definition counts as a link.
-  const scanned = blankReferenceDefinitions(text);
+  const scanned = blankReferenceDefinitions(text, { depths, inList });
   const paths = new Set();
   for (const span of eachMarkdownLink(scanned)) {
     if (span.isImage) continue; // never a clickable anchor, inline or reference-style
@@ -1092,10 +1099,21 @@ function realMarkdownLinkPaths(body) {
     }
     // 'malformed' spans never resolve to a destination.
     if (!rawDest) continue;
-    const norm = normalizeInternalPath(rawDest);
+    const norm = normalizeInternalPath(firstPartyPathname(rawDest));
     if (norm) paths.add(norm);
   }
   return paths;
+}
+
+// An absolute URL on a Waves host (hub or spoke) is the same page as its
+// pathname, the way the UNKNOWN_INTERNAL_ROUTE gate reads it; any other
+// destination is returned unchanged.
+function firstPartyPathname(dest) {
+  try {
+    const u = new URL(String(dest || '').trim());
+    if (/^https?:$/.test(u.protocol) && hubHostSet().has(u.hostname.toLowerCase())) return u.pathname || '/';
+  } catch { /* not absolute */ }
+  return dest;
 }
 
 // HARD check (see PAGE_TYPE_CHECKS['supporting-blog'] above, weight 0 —
@@ -1111,14 +1129,21 @@ function checkRelatedPostsLinked(draft, brief) {
   const related = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
   if (!related.length) return { ok: true, reason: 'no_related_posts_on_brief' };
   const linkedPaths = realMarkdownLinkPaths(String(draft.body || ''));
+  // Distinct candidate PATHS, not rows: two brief entries that resolve to
+  // one URL are one post, so a single anchor can never count twice.
+  const candidates = new Map();
+  for (const post of related) {
+    const norm = normalizeInternalPath(firstPartyPathname(post?.path));
+    if (norm && !candidates.has(norm)) candidates.set(norm, post);
+  }
+  if (!candidates.size) return { ok: true, reason: 'no_related_posts_on_brief' };
   let linked = 0;
   const unlinked = [];
-  for (const post of related) {
-    const norm = normalizeInternalPath(post?.path);
-    if (norm && linkedPaths.has(norm)) linked++;
+  for (const [norm, post] of candidates) {
+    if (linkedPaths.has(norm)) linked++;
     else unlinked.push(post);
   }
-  const required = Math.min(RELATED_POSTS_LINK_MINIMUM, related.length);
+  const required = Math.min(RELATED_POSTS_LINK_MINIMUM, candidates.size);
   if (linked >= required) return { ok: true };
   // Actionable redraft text (Codex round-1 P2 on #4984: the prior weight-0
   // soft version could silently ship with fewer links than the brief
@@ -1131,7 +1156,7 @@ function checkRelatedPostsLinked(draft, brief) {
   const example = unlinked[0] ? ` — e.g. "${String(unlinked[0].title || 'untitled')}" (${unlinked[0].path || ''})` : '';
   return {
     ok: false,
-    reason: `Add natural in-text links to at least ${required} of the ${related.length} related posts in voice_constraints.related_posts where the topic comes up (linked ${linked} so far)${example}.`,
+    reason: `Add natural in-text links to at least ${required} of the ${candidates.size} related posts in voice_constraints.related_posts where the topic comes up (linked ${linked} so far)${example}.`,
   };
 }
 

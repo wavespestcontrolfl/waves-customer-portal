@@ -48,6 +48,18 @@ const STOP_WORDS = new Set([
   'my', 'your', 'our', 'this', 'that', 'near', 'me', 'us',
 ]);
 
+// Words nearly every service post shares ("termite treatment in Florida"
+// vs "fire ant control guide"). They still describe a post, but sharing
+// one never makes two posts related, so they never count as overlap.
+const GENERIC_TOPIC_TOKENS = new Set([
+  'pest', 'pests', 'control', 'treatment', 'treatments', 'service', 'services',
+  'company', 'companies', 'guide', 'tips', 'best', 'cost', 'costs', 'price',
+  'florida', 'swfl', 'southwest', 'get', 'rid', 'remove', 'removal',
+  'prevent', 'prevention', 'signs', 'identification', 'identify', 'home',
+  'homes', 'house', 'homeowner', 'homeowners', 'yard', 'professional',
+  'expert', 'local', 'year', 'season', 'seasonal',
+]);
+
 function extractTokens(text) {
   const out = new Set();
   const words = String(text || '')
@@ -128,9 +140,17 @@ function scoreCandidate(c, { targetEntities, targetTokens, targetCity }) {
     if (e && candidateEntities.has(e)) { entityScore = 100; break; }
   }
 
+  // City words are the same-city nudge's job below, and generic service
+  // words relate nothing, so neither counts as keyword overlap: a same-city
+  // or "…treatment in Florida" title must not admit an unrelated post
+  // (Codex #4984 r4 P2 — this list feeds a hard link-count gate).
+  const cityTokens = extractTokens(`${targetCity || ''} ${c.city || ''}`);
   const candidateTokens = extractTokens(`${c.keyword || ''} ${c.title || ''}`);
   let overlap = 0;
-  for (const t of targetTokens) if (candidateTokens.has(t)) overlap += 1;
+  for (const t of targetTokens) {
+    if (GENERIC_TOPIC_TOKENS.has(t) || cityTokens.has(t)) continue;
+    if (candidateTokens.has(t)) overlap += 1;
+  }
   const keywordScore = Math.min(overlap * 10, 60);
 
   const topicallyRelated = entityScore > 0 || keywordScore > 0;
@@ -173,7 +193,11 @@ function rankRelatedPosts(target = {}, candidates = [], { limit = RELATED_POSTS_
     scored.push({ title: c.title || null, path: normalizePathForCompare(c.path), keyword: c.keyword || null, _score: score });
   }
   scored.sort((a, b) => b._score - a._score || String(a.title || '').localeCompare(String(b.title || '')));
-  return scored.slice(0, limit).map(({ _score, ...rest }) => rest);
+  // Two rows can resolve to one live URL; the brief lists each page once
+  // (its best-scored row), so one anchor can't stand in for several posts.
+  const seenPaths = new Set();
+  const unique = scored.filter((r) => (seenPaths.has(r.path) ? false : seenPaths.add(r.path)));
+  return unique.slice(0, limit).map(({ _score, ...rest }) => rest);
 }
 
 function candidateFromRow(row) {
@@ -227,5 +251,5 @@ module.exports = {
   rankRelatedPosts,
   candidateFromRow,
   getRelatedPostsForBrief,
-  _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare },
+  _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };

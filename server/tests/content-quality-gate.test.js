@@ -558,6 +558,47 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       expect(result.ok).toBe(true);
     });
 
+    test('Markdown-shaped text inside a quoted component attribute does NOT count (Codex #4984 r4 P1)', () => {
+      const body = [
+        'Prose about termites.',
+        '',
+        '<InlineCTA headline="Read [A](/termite/a/)" />',
+        '<InlineCTA headline="Read [B](/termite/b/)" />',
+        "<InlineCTA headline='Read [C](/termite/c/)' />",
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+    });
+
+    test('an absolute Waves URL counts as its path, like the internal-route gate reads it (Codex #4984 r4 P1)', () => {
+      const body = 'See [A](https://www.wavespestcontrol.com/termite/a/), [B](https://wavespestcontrol.com/termite/b), and [C](/termite/c/).';
+      expect(checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } }).ok).toBe(true);
+      // Another site's URL with the same path is not our post.
+      const offsite = 'See [A](https://example.com/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      expect(checkRelatedPostsLinked({ body: offsite }, { voice_constraints: { related_posts: relatedPosts } }).reason).toMatch(/linked 2 so far/);
+    });
+
+    test('brief entries that resolve to one URL count once (Codex #4984 r4 P2)', () => {
+      const dupes = [
+        { title: 'A', path: '/termite/a/' },
+        { title: 'A again', path: '/termite/a' },
+        { title: 'A absolute', path: 'https://www.wavespestcontrol.com/termite/a/' },
+      ];
+      // One distinct post, so one link satisfies min(3, 1) — and the reason
+      // text never claims three posts.
+      expect(checkRelatedPostsLinked({ body: 'See [A](/termite/a/).' }, { voice_constraints: { related_posts: dupes } }).ok).toBe(true);
+      const withB = [...dupes, { title: 'B', path: '/termite/b/' }, { title: 'C', path: '/termite/c/' }];
+      const result = checkRelatedPostsLinked({ body: 'See [A](/termite/a/).' }, { voice_constraints: { related_posts: withB } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/at least 3 of the 3 related posts .*linked 1 so far/);
+    });
+
+    test('a definition that opens a blockquote right after prose still resolves (Codex #4984 r4 P2)', () => {
+      const body = ['Intro', '> [a]: /termite/a/', '', 'See [A], [B](/termite/b/), and [C](/termite/c/).'].join('\n');
+      expect(checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } }).ok).toBe(true);
+    });
+
     test('a full evaluate() run: fewer than required HARD-FAILS (ok:false) but never moves total_score', () => {
       const passingBody = 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.';
       const baseline = evaluate(
