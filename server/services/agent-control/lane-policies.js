@@ -173,6 +173,10 @@ const LANE_RUNTIME = {
   // offline (Codex r16): lawn_quality_gate fails open on a miss and lawn_challenge falls to the caller's symptom downgrade — one Anthropic request each, no second provider.
   lawn_quality_gate: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
   // offline (Codex r17): runPerception / runWriter await unbounded raw Gemini + OpenAI fetches before either fallback can run.
+  // Still unrecordable (#4884): only the Anthropic rungs record — runDiagnosis (legacy single-call rung) here and
+  // runNarrative (writer fallback) for lawn_diag_writer, via ledgerCall — while each lane's primary is a raw
+  // Gemini / OpenAI fetch outside the adapters. Marking them 'call' would read the unrecorded primary traffic as a
+  // silent lane.
   lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_challenge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.
