@@ -446,6 +446,7 @@ class ContentBriefBuilder {
     // the row to do_not_publish (the runner skips it) instead of drafting a
     // redundant refresh. Unreadable page → keep the seeded gaps.
     let citabilityResolved = false;
+    let citabilityIneligible = false;
     if (opp.bucket === 'citability_backfill') {
       const live = await require('./citability-backfill-seeder').rescanLive(opp).catch((err) => {
         logger.warn(`[brief-builder] citability live re-scan failed (opp ${opp.id}): ${err.message}`);
@@ -453,7 +454,8 @@ class ContentBriefBuilder {
       });
       if (live) {
         opp = { ...opp, signal_metadata: { ...(opp.signal_metadata || {}), citability_gaps: live.gaps, citability_scan: live.results } };
-        citabilityResolved = live.gaps.length === 0;
+        citabilityIneligible = !!live.ineligible;
+        citabilityResolved = !citabilityIneligible && live.gaps.length === 0;
       }
     }
 
@@ -469,8 +471,13 @@ class ContentBriefBuilder {
     const existingBriefVersions = await this._countExistingBriefs(opp.id);
 
     let decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
-    if (citabilityResolved) {
-      decision = { ...decision, action_type: 'do_not_publish', human_review_required: false, human_review_reason: 'citability_gaps_already_resolved' };
+    if (citabilityResolved || citabilityIneligible) {
+      decision = {
+        ...decision,
+        action_type: 'do_not_publish',
+        human_review_required: false,
+        human_review_reason: citabilityIneligible ? 'citability_target_not_indexable' : 'citability_gaps_already_resolved',
+      };
     }
 
     // Facts pack — the verified facts-bank facts the writer agent may cite.

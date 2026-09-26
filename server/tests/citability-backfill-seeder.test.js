@@ -172,6 +172,12 @@ describe('rescanLive — stale seeded rows are re-checked before drafting (Codex
     const r = await seeder.rescanLive({ ...opp, signal_metadata: { source_file: 'src/content/blog/termite/bait-vs-liquid.md' } }, { publisher });
     expect(r.gaps).toEqual(['named_sources', 'concrete_specifics']);
   });
+  test('a post that turned non-indexable while queued resolves as ineligible (Codex r7 P2)', async () => {
+    for (const frontmatter of [{ robots: 'noindex' }, { domains: ['some-spoke-domain.com'] }, { canonical: 'https://some-spoke-domain.com/x/' }, { canonical: '/termite/other/' }]) {
+      const publisher = { loadExistingPageBody: async () => ({ body: POOR.slice(FM().length), frontmatter: { title: 'T', ...frontmatter } }) };
+      expect(await seeder.rescanLive(opp, { publisher })).toEqual({ gaps: [], results: {}, ineligible: true });
+    }
+  });
   test('unreadable page → null (caller keeps the seeded gaps)', async () => {
     expect(await seeder.rescanLive(opp, { publisher: { loadExistingPageBody: async () => null } })).toBeNull();
     expect(await seeder.rescanLive({ ...opp, page_url: null }, { publisher: { loadExistingPageBody: jest.fn() } })).toBeNull();

@@ -1065,6 +1065,12 @@ describe('compose — citability backfill re-scans the live page first (Codex P2
     expect(out.decision.action_type).toBe('do_not_publish');
     expect(out.decision.human_review_reason).toBe('citability_gaps_already_resolved');
   });
+  test('a target that turned non-indexable → do_not_publish (Codex r7 P2)', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: [], results: {}, ineligible: true });
+    const out = await stubBuilder(opp).compose(7, { persist: false });
+    expect(out.decision.action_type).toBe('do_not_publish');
+    expect(out.decision.human_review_reason).toBe('citability_target_not_indexable');
+  });
   test('live gaps replace the seeded list', async () => {
     jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: ['comparison', 'how_to_choose'], results: {} });
     const out = await stubBuilder(opp).compose(7, { persist: false });

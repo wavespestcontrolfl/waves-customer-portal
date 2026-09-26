@@ -1266,9 +1266,16 @@ function howToChooseSectionCriteria(body) {
   let best = -1;
   for (let i = 0; i < lines.length; i += 1) {
     if (!/^##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(lines[i])) continue;
+    // Top-level criteria only: the first list item fixes the criterion
+    // indent; deeper (nested explanation) bullets never count (Codex r7 P2).
     let items = 0;
+    let topIndent = null;
     for (let j = i + 1; j < lines.length && !/^#{1,2}\s/.test(lines[j]); j += 1) {
-      if (/^\s*(?:[-*+]|\d+[.)])\s+\S/.test(lines[j])) items += 1;
+      const m = lines[j].match(/^(\s*)(?:[-*+]|\d+[.)])\s+\S/);
+      if (!m) continue;
+      const indent = m[1].replace(/\t/g, '    ').length;
+      if (topIndent === null || indent < topIndent) { topIndent = indent; items = 0; }
+      if (indent === topIndent) items += 1;
     }
     best = Math.max(best, items);
   }

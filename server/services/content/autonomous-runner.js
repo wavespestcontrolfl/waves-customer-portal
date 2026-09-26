@@ -1919,7 +1919,12 @@ class AutonomousRunner {
     if (!alreadyRetried) {
       let recorded = false;
       try {
-        recorded = await this._recordGateRetry(opp, skipReason, blocking, claimToken);
+        // Early gates (guardrails, topic targeting, comparison, editorial)
+        // return here BEFORE the quality gate runs, so its weight-0
+        // citability nudges would never reach this sole redraft (Codex r7
+        // P2). Append them as non-blocking findings.
+        const nudges = this._citabilityNudgeFindings(run, opp);
+        recorded = await this._recordGateRetry(opp, skipReason, [...(blocking || []), ...nudges], claimToken);
       } catch (err) {
         logger.warn(`[autonomous-runner] gate-retry record failed for ${opp.id}: ${err.message}`);
       }
@@ -1944,6 +1949,33 @@ class AutonomousRunner {
     });
     await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
     return finalized;
+  }
+
+  /**
+   * Weight-0 citability nudges for the current draft, shaped as retry
+   * findings. Blog targets only (supporting-blog runs, or citability
+   * backfill refreshes — a non-blog refresh target is resolved later, so
+   * other refreshes are left alone). Never throws.
+   */
+  _citabilityNudgeFindings(run, opp) {
+    try {
+      const draft = run?.draft_payload;
+      if (!draft || typeof draft !== 'object') return [];
+      const isBackfill = opp?.bucket === 'citability_backfill';
+      if (run.page_type !== 'supporting-blog' && !isBackfill) return [];
+      const gate = getQualityGate();
+      const checks = gate?._internals?.PAGE_TYPE_CHECKS?.['supporting-blog'] || [];
+      const out = [];
+      for (const c of checks) {
+        if (!c.name.startsWith('citability_') || c.isHard) continue;
+        const r = c.evaluate(draft, {}, {});
+        if (r && !r.ok) out.push({ severity: 'P3', code: c.name.toUpperCase(), message: r.reason || 'citability nudge' });
+      }
+      return out;
+    } catch (err) {
+      logger.warn(`[autonomous-runner] citability nudge collection failed: ${err.message}`);
+      return [];
+    }
   }
 
   /**

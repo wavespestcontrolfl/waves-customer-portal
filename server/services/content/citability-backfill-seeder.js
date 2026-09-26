@@ -189,7 +189,7 @@ function scanParsed({ frontmatter = {}, body = '', url, file = null }) {
  * Re-scan the LIVE page for a queued row just before its brief is composed.
  * Rows wait up to --per-day pacing days; a post fixed in between (manual
  * edit or another refresh) must not get a stale, redundant brief (Codex P2,
- * 2026-09-26). → { gaps, results } or null when the page can't be read
+ * 2026-09-26). → { gaps, results, ineligible } or null when the page can't be read
  * (caller keeps the seeded gaps; the refresh gate still fails closed
  * without a prior version).
  */
@@ -198,8 +198,17 @@ async function rescanLive(opportunity, { publisher = require('../content-astro/a
   if (!url || !publisher?.loadExistingPageBody) return null;
   const live = await publisher.loadExistingPageBody(url);
   if (!live || typeof live.body !== 'string') return null;
-  const scan = scanParsed({ frontmatter: live.frontmatter || {}, body: live.body, url, file: opportunity.signal_metadata?.source_file || null });
-  return { gaps: scan.gaps, results: scan.results };
+  // The seed-time eligibility filter can go stale over the paced wait: a
+  // post that turned noindex / spoke-rendered / off-hub or mismatched
+  // canonical must resolve without drafting (Codex r7 P2).
+  const link = require('./internal-link-planner')._internals;
+  const fmData = live.frontmatter || {};
+  if (link.sourceRendersOffHub(fmData) || link.canonicalPointsOffHub(fmData) || link.robotsNoindex(fmData)
+    || link.sourceCanonicalMismatch(fmData, url)) {
+    return { gaps: [], results: {}, ineligible: true };
+  }
+  const scan = scanParsed({ frontmatter: fmData, body: live.body, url, file: opportunity.signal_metadata?.source_file || null });
+  return { gaps: scan.gaps, results: scan.results, ineligible: false };
 }
 
 function dedupeKeyFor(url) {
