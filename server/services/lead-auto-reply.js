@@ -16,7 +16,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { sendCustomerMessage, normalizeRecipient } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
 /**
@@ -223,8 +223,12 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
 // any error (including inside hasPriorLeadAutoReply, which already fails
 // closed to "already sent") reports claimed:false, so the caller never
 // appends the opt-out line or stamps a claim it can't be sure it won.
-async function claimLeadFirstTouch(phoneFormatted, customerId, dbc = db) {
-  const phoneDigits = String(phoneFormatted || '').slice(-10);
+async function claimLeadFirstTouch(phone, customerId, dbc = db) {
+  // The messaging layer's own recipient normalizer: '(941) 555-0100' and
+  // '+19415550100' reach the same handset, so they must hit the same claim
+  // key and the same audit to_hash (the webhook already passes this form).
+  const phoneFormatted = normalizeRecipient(phone) || '';
+  const phoneDigits = phoneFormatted.slice(-10);
   try {
     if (await hasPriorLeadAutoReply(phoneFormatted, dbc)) {
       return { claimed: false, phoneDigits };

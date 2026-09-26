@@ -49,7 +49,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim } = require('../services/lead-auto-reply');
+const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim, claimLeadFirstTouch } = require('../services/lead-auto-reply');
 
 const PHONE = '+19415551234';
 const PHONE_HASH = crypto.createHash('sha256').update(PHONE, 'utf8').digest('hex');
@@ -187,5 +187,23 @@ describe('resolveLeadAutoReplyClaim', () => {
     dbc.__chain.del = jest.fn(async () => { throw new Error('pool exhausted'); });
     await expect(resolveLeadAutoReplyClaim('9415551234', { sent: false }, dbc)).resolves.toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fail closed'));
+  });
+});
+
+
+describe('claimLeadFirstTouch — normalizes the phone like the messaging layer', () => {
+  test.each(['(941) 555-1234', '941-555-1234', '9415551234', '+19415551234', '19415551234'])(
+    '%s hits the same claim key and audit hash as the canonical +19415551234',
+    async (phone) => {
+      db.__state.marker = async () => ({ phone_digits: '9415551234', twilio_sid: 'SM_existing' });
+      await expect(claimLeadFirstTouch(phone, 'cust-1')).resolves.toEqual({ claimed: false, phoneDigits: '9415551234' });
+      expect(db.__chains['lead_auto_reply_sends'].where).toHaveBeenCalledWith({ phone_digits: '9415551234' });
+    },
+  );
+
+  test('the audit leg hashes the normalized recipient, not the raw string', async () => {
+    db.__state.audit = async () => ({ id: 'a1' });
+    await expect(claimLeadFirstTouch('(941) 555-1234', 'cust-1')).resolves.toMatchObject({ claimed: false });
+    expect(db.__chains['messaging_audit_log'].where).toHaveBeenCalledWith({ entry_point: 'lead_webhook_auto_reply', to_hash: PHONE_HASH });
   });
 });
