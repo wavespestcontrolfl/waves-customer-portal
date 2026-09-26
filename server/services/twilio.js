@@ -1044,7 +1044,7 @@ const TwilioService = {
             return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',
               error: pushed.reason || 'push_attempt_failed', retryAfterMs: pushed.retryAfterMs };
           }
-          return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
+          return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable', ...(pushed.bellPersisted ? { bellPersisted: true } : {}) };
         }
         if (pushed.deliveryOutcome === 'uncertain') {
           return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',

@@ -5,7 +5,11 @@ jest.mock('../services/autopay-eligibility', () => ({
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ getCardExpiryExemptions: jest.fn() }));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({ invoiceStillCollectible: jest.fn() }));
-jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: jest.fn() }));
+jest.mock('../services/invoice-helpers', () => ({
+  selfPayAtDispatch: jest.fn(),
+  isInvoiceCollectibleStatus: jest.fn((status) => !['paid', 'void', 'prepaid'].includes(status)),
+  invoiceAmountDue: jest.fn((invoice) => Number(invoice.total)),
+}));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
 jest.mock('../services/previsit-balance-reminder', () => ({ currentDuesAllowanceCents: jest.fn(async () => 0) }));
 
@@ -248,6 +252,37 @@ describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
     currentDuesAllowanceCents.mockRejectedValueOnce(new Error('customers read failed'));
     await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
       .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
+  });
+});
+
+describe('annual-prepay payment reminder replay', () => {
+  const meta = { customer_id: customerId, source_entry_point: 'annual_prepay_payment_reminder', invoice_id: 'inv-1',
+    rendered_amount: '392.04', notificationEventKey: 'annual-prepay-payment:term-1:1', collections_ledger_id: 'own-email' };
+  const term = { id: 'term-1', customer_id: customerId, prepay_invoice_id: 'inv-1', status: 'payment_pending' };
+  const invoice = { id: 'inv-1', customer_id: customerId, status: 'sent', total: '392.04' };
+  const database = (patch = {}) => databaseWith({
+    annual_prepay_terms: [{ ...term, ...patch.term }], invoices: [{ ...invoice, ...patch.invoice }],
+    collections_contact_ledger: [],
+  });
+
+  test('replays while the term awaits payment and the invoice owes exactly the quoted amount', async () => {
+    await expect(billingEmailReplayEligible(meta, database())).resolves.toEqual({ eligible: true });
+  });
+
+  test.each([
+    ['the term was paid or cancelled', { term: { status: 'active' } }, 'annual-prepay-term-settled'],
+    ['the invoice was paid', { invoice: { status: 'paid' } }, 'annual-prepay-invoice-settled'],
+    ['the amount changed', { invoice: { total: '300.00' } }, 'annual-prepay-amount-changed'],
+  ])('refuses once %s', async (_label, patch, reason) => {
+    await expect(billingEmailReplayEligible(meta, database(patch))).resolves.toMatchObject({ eligible: false, reason });
+  });
+
+  test('gate-on rechecks the policy with the draft invoice amount as off-ledger debt', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    await billingEmailReplayEligible(meta, database());
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
+      invoiceId: null, channel: 'email', purpose: 'balance_reminder', offLedgerBalanceCents: 39204,
+    }));
   });
 });
 

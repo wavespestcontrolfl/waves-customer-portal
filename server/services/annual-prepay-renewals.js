@@ -4,7 +4,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
 
@@ -5364,6 +5364,380 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
   }
 }
 
+// Shared by the legacy (implicit-SMS) and explicit-channel payment-reminder
+// paths so the two can never drift on copy: the pay link, quoted amount, and
+// rendered SMS body are computed exactly once per attempt.
+async function buildPaymentReminderMessage({ claimedTerm, invoice, customer, amountDue }) {
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
+  const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+    kind: 'invoice',
+    entityType: 'invoices',
+    entityId: invoice.id,
+    customerId: customer.id,
+    codePrefix: invoiceShortCodePrefix(invoice),
+  });
+  const amountText = Number.isFinite(amountDue) && amountDue > 0
+    ? ` for $${amountDue.toFixed(2)}`
+    : '';
+  const body = await renderSmsTemplate(
+    'annual_prepay_payment_reminder',
+    {
+      first_name: customer.first_name || 'there',
+      amount_text: amountText,
+      first_visit_date: formatDateLabel(effectiveFirstVisitDate(claimedTerm)),
+      pay_link: payUrl,
+    },
+    { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
+  );
+  return { payUrl, amountText, body };
+}
+
+// One stable key per reminder EPISODE (this term's this reminder stage) — a
+// replay under the same key resumes the still-pending legs instead of
+// duplicating an already-accepted one. Deterministic from term id + daysOut
+// alone (never a timestamp), so every claim of the same stage hashes the
+// same key across cron runs/days.
+function paymentReminderEventKey(termId, daysOut) {
+  return `annual-prepay-payment:${termId}:${daysOut}`;
+}
+
+// Explicit per-customer billing-channel selection (router core, PR #4843 —
+// dark until GATE_BILLING_NOTIFICATION_CHANNELS). Each selected channel gets
+// its own collections-ledger row and its own delivery attempt through the
+// shared billing-reminder rail (billing-reminder-delivery.js), which owns
+// idempotent per-leg send/replay so a partial delivery (e.g. sms delivered,
+// email held) resumes correctly on a later cron run under the SAME event
+// key. No email leg is invented here — see the 'email' branch below.
+async function sendExplicitPaymentReminderChannels({
+  claimedTerm, invoice, customer, daysOut, amountDue, explicitChannels, opts,
+  sentCol, claimCol, releaseClaim, reverseReminderCredit,
+}) {
+  const { body } = await buildPaymentReminderMessage({ claimedTerm, invoice, customer, amountDue });
+  if (!body) {
+    logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
+    await reverseReminderCredit();
+    await releaseClaim();
+    return { sent: false, reason: 'missing_sms_template' };
+  }
+
+  // Same off-ledger carve-out as the legacy sms-only path (codex r7): this
+  // reminder's invoice is persisted 'draft' by the plan selector, which the
+  // collections eligibility loader never admits — invoiceId stays null and
+  // the validated plan amount rides offLedgerBalanceCents into the shared
+  // rail's per-leg policy check (which also excludes this episode's own
+  // earlier reservations from recent-contact spacing).
+  const { sendReminderChannels, reminderProgress } = require('./billing-reminder-delivery');
+  const source = 'annual_prepay_payment_reminder';
+  const eventKey = paymentReminderEventKey(claimedTerm.id, daysOut);
+  // "Was anything EVER delivered for this episode" (this run or an earlier
+  // one) gates the credit reversal below — the touch-DELIVERED rule from the
+  // legacy path (never undo a customer-visible send) applies the same way
+  // across a multi-day replay: once ANY leg reached the customer quoting the
+  // post-credit balance, this run's freshly-applied credit must stand even
+  // if a SIBLING leg (e.g. email) is still pending.
+  const priorProgress = await reminderProgress(customer.id, source, explicitChannels);
+  const priorEvent = priorProgress.find((event) => event.metadata.notificationEventKey === eventKey);
+  const hadPriorDelivery = !!(priorEvent && priorEvent.delivered.size > 0);
+  const sendLeg = (channel, ledger) => {
+    // Every leg goes through the canonical sender: the Email leg is the
+    // billing email adapter's billing.notice carrying this same reminder text
+    // (bound to its reservation for replay). Only the Text leg is addressed
+    // by phone; App and Email identify the recipient by customerId.
+    return sendCustomerMessage({
+      to: channel === 'sms' ? customer.phone : null,
+      body,
+      channel,
+      audience: 'customer',
+      purpose: 'payment_link',
+      customerId: customer.id,
+      invoiceId: invoice.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'annual_prepay_payment_reminder',
+      preDispatchCheck: invoiceStillOwedAsQuoted({ invoiceId: invoice.id, customerId: customer.id, amountDue }),
+      metadata: {
+        original_message_type: source,
+        annual_prepay_term_id: claimedTerm.id,
+        days_out: daysOut,
+        billingDeliveryCategory: 'billing',
+        // Replay contract: a retried Email re-checks the term, the invoice
+        // and this exact quoted amount (billing-email-replay-eligibility).
+        rendered_amount: amountDue.toFixed(2),
+        billingDeliveryLeg: channel,
+        notificationEventKey: eventKey,
+        ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
+        ...(channel === 'push' ? { appOnly: true } : {}),
+        ...(opts.metadata || {}),
+      },
+    });
+  };
+
+  // Provider acceptance is customer-visible even when its ledger stamp later
+  // fails (sendReminderChannels then holds the leg as
+  // REMINDER_ACCEPTANCE_UNSTAMPED and leaves it out of deliveredNow), or when
+  // the helper throws after an accepted leg: the customer saw the post-credit
+  // amount, so the credit must stand.
+  // An uncertain outcome (or a send that threw after dispatch) may also have
+  // reached the customer, so it keeps the credit too; a definite not_sent
+  // never does.
+  let acceptedNow = false;
+  let result;
+  try {
+    result = await sendReminderChannels({
+      customerId: customer.id,
+      invoiceId: null, // draft invoice: policy uses the off-ledger amount below
+      invoiceIds: [invoice.id], // ...but the ledger records the invoice it quotes
+      source,
+      purpose: 'balance_reminder',
+      eventKey,
+      channels: explicitChannels,
+      offLedgerBalanceCents: Math.round(amountDue * 100),
+      metadata: {
+        original_message_type: source,
+        annual_prepay_term_id: claimedTerm.id,
+        days_out: daysOut,
+      },
+      send: async (channel, ledger) => {
+        let outcome;
+        try {
+          outcome = await sendLeg(channel, ledger);
+        } catch (sendErr) {
+          // A throw carries the outcome it observed (a pre-dispatch throw is
+          // a definite not_sent): only an accepted or unknown one may have
+          // reached the customer.
+          if (classifyDeliveryCertainty(sendErr.providerOutcome) !== 'not_sent') acceptedNow = true;
+          throw sendErr;
+        }
+        if (classifyDeliveryCertainty(outcome) !== 'not_sent' && outcome?.deliveryOutcome) acceptedNow = true;
+        // An App leg that persisted the in-app bell reached the customer even
+        // though no device accepted the push: the bell quotes this amount.
+        if (outcome?.bellPersisted === true) acceptedNow = true;
+        return outcome;
+      },
+    });
+  } catch (err) {
+    if (!acceptedNow) throw err;
+    // A leg already reached the customer: keep the credit, leave the stage
+    // unstamped so a pending leg can resume, and report the touch.
+    logger.warn(`[annual-prepay] payment reminder rail failed after an accepted leg for term ${claimedTerm.id}: ${err.message}`);
+    await releaseClaim();
+    return { sent: true, termId: claimedTerm.id, complete: false };
+  }
+
+  // Only THIS run's reach decides whether THIS run's credit increment stands:
+  // an earlier delivery quoted the pre-increment balance.
+  const reachedNow = acceptedNow || result.deliveredNow.length > 0;
+  const anyDelivered = hadPriorDelivery || reachedNow;
+  if (result.deliveredNow.length) {
+    for (const channel of result.deliveredNow) {
+      await db('customer_interactions').insert({
+        customer_id: customer.id,
+        interaction_type: `${channel}_outbound`,
+        channel,
+        subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
+        body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start) via ${channel}`,
+      }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
+    }
+  }
+
+  // Nothing from THIS run may have reached the customer: this run's seam
+  // credit must not stay consumed (a prior delivery quoted the balance before
+  // it) — mirrors the legacy path's undelivered-touch reversal.
+  if (!reachedNow) await reverseReminderCredit();
+
+  if (result.complete) {
+    // Every selected leg settled (delivered or terminally resolved) — stamp
+    // the notice sent so the daily scan never re-claims this stage again.
+    try {
+      const sentAt = new Date();
+      await db('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .whereNull(sentCol)
+        .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt });
+    } catch (bookkeepingErr) {
+      logger.error(`[annual-prepay] payment reminder settled but sent-stamp failed for term ${claimedTerm.id}: ${bookkeepingErr.message}`);
+    }
+  } else {
+    // A leg is still pending (held/retryable — never recorded as delivered)
+    // — release the claim so tomorrow's scan re-selects this term and
+    // resumes the SAME episode under the SAME event key.
+    await releaseClaim();
+  }
+
+  return { sent: anyDelivered, termId: claimedTerm.id, complete: result.complete };
+}
+
+// Right before each explicit leg dispatches, re-read the prepay invoice: it
+// must still be this customer's, collectible, self-pay and owe exactly the
+// quoted amount. Any change holds the leg (retryable) so a paid, voided or
+// payer-assigned invoice never gets a stale pay-link reminder.
+function invoiceStillOwedAsQuoted({ invoiceId, customerId, amountDue }) {
+  const changed = (reason) => ({ ok: false, code: 'PREPAY_QUOTE_CHANGED', reason, retryable: true });
+  return async () => {
+    try {
+      const helpers = require('./invoice-helpers');
+      const live = await db('invoices').where({ id: invoiceId }).first();
+      if (!live || String(live.customer_id) !== String(customerId)
+        || !helpers.isInvoiceCollectibleStatus(live.status)
+        || live.payer_id || helpers.invoiceWithdrawnFromCustomer(live)
+        || Math.round(helpers.invoiceAmountDue(live) * 100) !== Math.round(amountDue * 100)) {
+        return changed(`prepay invoice ${invoiceId} changed before dispatch`);
+      }
+      return { ok: true };
+    } catch (err) {
+      return changed(`prepay invoice unreadable before dispatch: ${err.message}`);
+    }
+  };
+}
+
+// Explicit per-customer billing-channel selection (router core, PR #4843).
+// Returns null when the customer has no stored choice (the legacy SMS path
+// runs), else the explicit-rail result. An unreadable choice must not fall
+// through to the legacy SMS path (that would ignore a stored selection): the
+// attempt is undone and the next scan retries.
+async function routeExplicitPaymentReminder(ctx) {
+  let explicitChannels;
+  try {
+    // The property's own stored choice, read exactly as the send path reads it.
+    const { storedBillingChannels } = require('./billing-delivery-channels');
+    explicitChannels = await storedBillingChannels(ctx.customer.id, 'billing', db);
+  } catch (err) {
+    logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${ctx.customer.id}: ${err.message}`);
+    await ctx.reverseReminderCredit();
+    await ctx.releaseClaim();
+    return { sent: false, reason: 'notification_prefs_unavailable' };
+  }
+  if (!explicitChannels) return null;
+  return sendExplicitPaymentReminderChannels({ ...ctx, explicitChannels });
+}
+
+// Legacy delivery (no stored channel choice): one SMS reminder with its own
+// collections consult and record-then-send ledger row. Called inside
+// sendPaymentPendingReminder's try, whose catch undoes the attempt on a throw.
+async function sendLegacyPaymentReminderSms({
+  claimedTerm, invoice, customer, daysOut, amountDue, opts,
+  sentCol, claimCol, releaseClaim, reverseReminderCredit,
+}) {
+  if (!customer.phone) {
+    // The invoice email already carries the pay link (sent at accept, plus
+    // the follow-up sequence's email legs) — with no phone there is no SMS
+    // nudge to add. Mark sent so the daily cron doesn't re-claim forever;
+    // reverse the seam credit (no touch went out to consume it).
+    await reverseReminderCredit();
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .whereNull(sentCol)
+      .update({ [sentCol]: new Date(), [claimCol]: null, updated_at: new Date() });
+    return { sent: false, reason: 'no_phone' };
+  }
+
+  const { body } = await buildPaymentReminderMessage({ claimedTerm, invoice, customer, amountDue });
+  if (!body) {
+    logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
+    await reverseReminderCredit();
+    await releaseClaim();
+    return { sent: false, reason: 'missing_sms_template' };
+  }
+
+  // Collections policy consult (codex gh-r1): this reminder is a
+  // balance-outreach rail like the dunning engines — a do_not_text /
+  // collection_hold / bankruptcy customer must not receive it once the
+  // gate is on. Gate off ⇒ permitted without consulting, byte-identical.
+  // A denial is an expected hold, not a failure: release the claim so a
+  // later day retries once the hold clears.
+  const { collectionsChannelPermitted } = require('./collections/rail-guard');
+  // invoiceId stays null (codex r7): the plan selector persists this
+  // invoice as 'draft', which the eligibility loader never admits — the
+  // membership check would kill every prepay reminder under the gate.
+  // The validated plan amount rides the off-ledger carve-out instead;
+  // flags, suppression, and frequency windows all still apply.
+  const policyPermitted = await collectionsChannelPermitted({
+    customerId: customer.id,
+    invoiceId: null,
+    channel: 'sms',
+    purpose: 'balance_reminder',
+    offLedgerBalanceCents: Math.round(amountDue * 100),
+    logTag: 'annual-prepay',
+  });
+  if (!policyPermitted) {
+    await reverseReminderCredit();
+    await releaseClaim();
+    return { sent: false, reason: 'collections_policy_denied' };
+  }
+
+  // RECORD-THEN-SEND (always-on ledger discipline): the row precedes the
+  // delivery attempt; an insert failure skips the send and releases the
+  // claim for a later retry — no unledgered customer contact.
+  const ContactLedger = require('./collections/contact-ledger');
+  let prepayLedger;
+  try {
+    prepayLedger = await ContactLedger.recordContact({
+      customerId: customer.id,
+      channel: 'sms',
+      purpose: 'balance_reminder',
+      invoiceIds: [invoice.id],
+      source: 'annual_prepay_payment_reminder',
+      metadata: { annual_prepay_term_id: claimedTerm.id, days_out: daysOut },
+    });
+  } catch (ledgerErr) {
+    logger.warn(`[annual-prepay] payment reminder skipped for term ${claimedTerm.id} — contact ledger unavailable: ${ledgerErr.message}`);
+    await reverseReminderCredit();
+    await releaseClaim();
+    return { sent: false, reason: 'ledger_unavailable' };
+  }
+
+  const smsResult = await sendCustomerMessage({
+    to: customer.phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'payment_link',
+    customerId: customer.id,
+    invoiceId: invoice.id,
+    identityTrustLevel: 'phone_matches_customer',
+    entryPoint: 'annual_prepay_payment_reminder',
+    metadata: {
+      original_message_type: 'annual_prepay_payment_reminder',
+      annual_prepay_term_id: claimedTerm.id,
+      days_out: daysOut,
+      ...(opts.metadata || {}),
+    },
+  });
+  if (!smsResult.sent) {
+    await ContactLedger.markSendFailed(prepayLedger, { code: smsResult.code || smsResult.reason || 'send_failed' });
+    logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+    await reverseReminderCredit();
+    await releaseClaim();
+    return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
+  }
+
+  // Touch DELIVERED — everything past this point is bookkeeping and must
+  // never undo the customer-visible send: the text already quoted the
+  // post-credit balance, so reversing would make the link charge more than
+  // the reminder said, and re-claiming would re-text. Stamp failures log
+  // loudly and still report sent; the claim stays held (stale-claim TTL
+  // owns the rare retry).
+  try {
+    const sentAt = new Date();
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .whereNull(sentCol)
+      .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt });
+
+    await db('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: 'sms_outbound',
+      channel: 'sms',
+      subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
+      body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start)`,
+    }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
+  } catch (bookkeepingErr) {
+    logger.error(`[annual-prepay] payment reminder SENT but sent-stamp failed for term ${claimedTerm.id} — credit kept, claim held: ${bookkeepingErr.message}`);
+  }
+
+  return { sent: true, termId: claimedTerm.id };
+}
+
 async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   if (!(await annualPrepayTableExists())) return { sent: false, reason: 'table_missing' };
   const sentCol = paymentReminderColumnForDaysOut(daysOut);
@@ -5481,146 +5855,14 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       await releaseClaim();
       return { sent: false, reason: 'customer_missing_or_deleted' };
     }
-    if (!customer.phone) {
-      // The invoice email already carries the pay link (sent at accept, plus
-      // the follow-up sequence's email legs) — with no phone there is no SMS
-      // nudge to add. Mark sent so the daily cron doesn't re-claim forever;
-      // reverse the seam credit (no touch went out to consume it).
-      await reverseReminderCredit();
-      await db('annual_prepay_terms')
-        .where({ id: claimedTerm.id })
-        .whereNull(sentCol)
-        .update({ [sentCol]: new Date(), [claimCol]: null, updated_at: new Date() });
-      return { sent: false, reason: 'no_phone' };
-    }
 
-    const { publicPortalUrl } = require('../utils/portal-url');
-    const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
-    const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
-      kind: 'invoice',
-      entityType: 'invoices',
-      entityId: invoice.id,
-      customerId: customer.id,
-      codePrefix: invoiceShortCodePrefix(invoice),
-    });
-    const amountText = Number.isFinite(amountDue) && amountDue > 0
-      ? ` for $${amountDue.toFixed(2)}`
-      : '';
-
-    const body = await renderSmsTemplate(
-      'annual_prepay_payment_reminder',
-      {
-        first_name: customer.first_name || 'there',
-        amount_text: amountText,
-        first_visit_date: formatDateLabel(effectiveFirstVisitDate(claimedTerm)),
-        pay_link: payUrl,
-      },
-      { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
-    );
-    if (!body) {
-      logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
-      await reverseReminderCredit();
-      await releaseClaim();
-      return { sent: false, reason: 'missing_sms_template' };
-    }
-
-    // Collections policy consult (codex gh-r1): this reminder is a
-    // balance-outreach rail like the dunning engines — a do_not_text /
-    // collection_hold / bankruptcy customer must not receive it once the
-    // gate is on. Gate off ⇒ permitted without consulting, byte-identical.
-    // A denial is an expected hold, not a failure: release the claim so a
-    // later day retries once the hold clears.
-    const { collectionsChannelPermitted } = require('./collections/rail-guard');
-    // invoiceId stays null (codex r7): the plan selector persists this
-    // invoice as 'draft', which the eligibility loader never admits — the
-    // membership check would kill every prepay reminder under the gate.
-    // The validated plan amount rides the off-ledger carve-out instead;
-    // flags, suppression, and frequency windows all still apply.
-    const policyPermitted = await collectionsChannelPermitted({
-      customerId: customer.id,
-      invoiceId: null,
-      channel: 'sms',
-      purpose: 'balance_reminder',
-      offLedgerBalanceCents: Math.round(amountDue * 100),
-      logTag: 'annual-prepay',
-    });
-    if (!policyPermitted) {
-      await reverseReminderCredit();
-      await releaseClaim();
-      return { sent: false, reason: 'collections_policy_denied' };
-    }
-
-    // RECORD-THEN-SEND (always-on ledger discipline): the row precedes the
-    // delivery attempt; an insert failure skips the send and releases the
-    // claim for a later retry — no unledgered customer contact.
-    const ContactLedger = require('./collections/contact-ledger');
-    let prepayLedger;
-    try {
-      prepayLedger = await ContactLedger.recordContact({
-        customerId: customer.id,
-        channel: 'sms',
-        purpose: 'balance_reminder',
-        invoiceIds: [invoice.id],
-        source: 'annual_prepay_payment_reminder',
-        metadata: { annual_prepay_term_id: claimedTerm.id, days_out: daysOut },
-      });
-    } catch (ledgerErr) {
-      logger.warn(`[annual-prepay] payment reminder skipped for term ${claimedTerm.id} — contact ledger unavailable: ${ledgerErr.message}`);
-      await reverseReminderCredit();
-      await releaseClaim();
-      return { sent: false, reason: 'ledger_unavailable' };
-    }
-
-    const smsResult = await sendCustomerMessage({
-      to: customer.phone,
-      body,
-      channel: 'sms',
-      audience: 'customer',
-      purpose: 'payment_link',
-      customerId: customer.id,
-      invoiceId: invoice.id,
-      identityTrustLevel: 'phone_matches_customer',
-      entryPoint: 'annual_prepay_payment_reminder',
-      metadata: {
-        original_message_type: 'annual_prepay_payment_reminder',
-        annual_prepay_term_id: claimedTerm.id,
-        days_out: daysOut,
-        ...(opts.metadata || {}),
-      },
-    });
-    if (!smsResult.sent) {
-      await ContactLedger.markSendFailed(prepayLedger, { code: smsResult.code || smsResult.reason || 'send_failed' });
-      logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-      await reverseReminderCredit();
-      await releaseClaim();
-      return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
-    }
-
-    // Touch DELIVERED — everything past this point is bookkeeping and must
-    // never undo the customer-visible send: the text already quoted the
-    // post-credit balance, so reversing would make the link charge more than
-    // the reminder said, and re-claiming would re-text. Stamp failures log
-    // loudly and still report sent; the claim stays held (stale-claim TTL
-    // owns the rare retry).
-    try {
-      const sentAt = new Date();
-      await db('annual_prepay_terms')
-        .where({ id: claimedTerm.id })
-        .whereNull(sentCol)
-        .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt });
-
-      await db('customer_interactions').insert({
-        customer_id: customer.id,
-        interaction_type: 'sms_outbound',
-        channel: 'sms',
-        subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
-        body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start)`,
-      }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
-    } catch (bookkeepingErr) {
-      logger.error(`[annual-prepay] payment reminder SENT but sent-stamp failed for term ${claimedTerm.id} — credit kept, claim held: ${bookkeepingErr.message}`);
-    }
-
-    return { sent: true, termId: claimedTerm.id };
+    // Delivery phase: the customer's explicit channel choice, else the
+    // legacy SMS reminder.
+    const ctx = {
+      claimedTerm, invoice, customer, daysOut, amountDue, opts,
+      sentCol, claimCol, releaseClaim, reverseReminderCredit,
+    };
+    return (await routeExplicitPaymentReminder(ctx)) || await sendLegacyPaymentReminderSms(ctx);
   } catch (err) {
     // Only failures BEFORE any channel delivered reach here (the delivered
     // path swallows its bookkeeping errors above).
@@ -5628,6 +5870,43 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
     await releaseClaim();
     throw err;
   }
+}
+
+// Resume window for an explicit-channel reminder stage that is still open
+// (a held or retryable leg, or an attempt that failed before any reservation
+// was written — the scan runs once a day, so a released claim is otherwise
+// never re-selected once its target date passes). A stage resumes only on
+// the days after its own target and before the next smaller stage's target
+// (e.g. the 3-day stage resumes 2 days out; the 1-day stage has no window),
+// and only for customers with a stored billing channel choice: legacy SMS
+// reminders are never resumed. A settled stage is stamped sent and so is
+// never selected again.
+async function pendingExplicitEpisodeTerms({ today, daysOut, stageTerms }) {
+  const nextStage = Math.max(0, ...PAYMENT_REMINDER_DAYS.filter((days) => days < daysOut));
+  const resumeDates = [];
+  for (let days = nextStage + 1; days < daysOut; days++) resumeDates.push(addDaysYmd(today, days));
+  if (!resumeDates.length) return [];
+  // A resume read failure only skips resumption today; it must never take
+  // down the regular stage sends in the same scan.
+  let candidates;
+  try {
+    candidates = await stageTerms(resumeDates);
+  } catch (err) {
+    logger.warn(`[annual-prepay] payment reminder resume scan skipped for the ${daysOut}-day stage: ${err.message}`);
+    return [];
+  }
+  // The property's stored choice; an unreadable one skips only that term's
+  // resumption today.
+  const { storedBillingChannels } = require('./billing-delivery-channels');
+  const resumable = [];
+  for (const term of candidates) {
+    try {
+      if (await storedBillingChannels(term.customer_id, 'billing', db)) resumable.push(term);
+    } catch (err) {
+      logger.warn(`[annual-prepay] resume skipped for term ${term.id}: billing channel choice unreadable (${err.message})`);
+    }
+  }
+  return resumable;
 }
 
 async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
@@ -5642,7 +5921,7 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
     const cols = await annualPrepayColumns();
     if (!cols[sentCol] || !cols[claimCol]) continue; // migration not run yet
     const target = addDaysYmd(today, daysOut);
-    const terms = await db('annual_prepay_terms')
+    const stageTerms = (dates) => db('annual_prepay_terms')
       .where({ status: PAYMENT_PENDING_STATUS })
       .whereNotNull('prepay_invoice_id')
       .whereNull(sentCol)
@@ -5652,10 +5931,15 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
       .where(function firstVisitOn() {
         // Match the date the customer was actually promised. COALESCE keeps
         // legacy terms (no first_visit_date) firing off term_start.
-        if (cols.first_visit_date) this.whereRaw('COALESCE(first_visit_date, term_start) = ?', [target]);
-        else this.where('term_start', target);
+        if (cols.first_visit_date) {
+          if (dates.length === 1) this.whereRaw('COALESCE(first_visit_date, term_start) = ?', dates);
+          else this.whereIn(db.raw('COALESCE(first_visit_date, term_start)'), dates);
+        } else if (dates.length === 1) this.where('term_start', dates[0]);
+        else this.whereIn('term_start', dates);
       })
       .select('*');
+    const terms = await stageTerms([target]);
+    terms.push(...(await pendingExplicitEpisodeTerms({ today, daysOut, stageTerms })));
 
     for (const term of terms) {
       try {
@@ -5813,5 +6097,9 @@ module.exports = {
     detachCallbacksFromTerm,
     fileCoverageExceptionAfterCommit,
     resetCachesForTests,
+    paymentReminderEventKey,
+    buildPaymentReminderMessage,
+    invoiceStillOwedAsQuoted,
+    sendExplicitPaymentReminderChannels,
   },
 };

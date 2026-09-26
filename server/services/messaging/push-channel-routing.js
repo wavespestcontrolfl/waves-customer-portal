@@ -423,6 +423,15 @@ function hasDurableAppReplay(messageType, billingDeliveryCategory) {
     || ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType]);
 }
 
+// A persisted in-app bell is customer-visible even when no device accepts the
+// push. Only a bell inserted or refreshed by THIS attempt carries this
+// attempt's copy; a deduped unchanged bell still shows the earlier one.
+function bellReachedThisAttempt(appNotification) {
+  // A suppressed sentinel ({ id: null, suppressed: true }) inserted nothing.
+  if (!appNotification?.id || appNotification.suppressed === true) return false;
+  return appNotification.deduped !== true || appNotification.refreshed === true;
+}
+
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
@@ -484,7 +493,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         return { delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' };
       }
     }
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' };
+    // A persisted in-app bell is customer-visible even when no device accepts
+    // the push; callers that must not undo a seen notice read bellPersisted.
+    const bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
@@ -504,7 +516,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           retryAfterMs: appNotification.push.retryAfterMs || 60000 };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
-      return { delivered: false, deliveryOutcome: 'not_sent' };
+      return { delivered: false, deliveryOutcome: 'not_sent', ...bell };
     }
     deliveryOutcome = 'accepted';
     const acceptedAt = appNotification?.push?.deduped
@@ -676,6 +688,7 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
 }
 
 module.exports = {
+  bellReachedThisAttempt,
   wantsAppFirst,
   APP_FIRST_TYPES,
   decidePushRoute,

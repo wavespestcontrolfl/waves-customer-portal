@@ -120,4 +120,17 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
     expect(mockAttemptPushFirst).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no recipient'));
   });
+
+  test('explicitPushOnly: a persisted bell with no accepting device is reported as bellPersisted', async () => {
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', bellPersisted: true });
+    const result = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(result).toMatchObject({ success: false, appUnavailable: true, bellPersisted: true });
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' });
+    const bare = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(bare.bellPersisted).toBeUndefined();
+  });
 });

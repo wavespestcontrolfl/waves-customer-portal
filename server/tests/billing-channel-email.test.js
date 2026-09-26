@@ -158,6 +158,15 @@ describe('billing channel email adapter', () => {
     }));
   });
 
+  test('an annual-prepay replay context requires its invoice, quoted amount and reservation', () => {
+    const complete = { schema_version: 1, customer_id: 'cust-1', category: 'billing',
+      source_entry_point: 'annual_prepay_payment_reminder', notificationEventKey: 'annual-prepay-payment:term-1:1',
+      invoice_id: 'inv-1', rendered_amount: '392.04', collections_ledger_id: 'ledger-email-1' };
+    expect(sanitizeBillingReplayContext(complete)).toMatchObject({ invoice_id: 'inv-1', rendered_amount: '392.04' });
+    expect(sanitizeBillingReplayContext({ ...complete, rendered_amount: null })).toBeNull();
+    expect(sanitizeBillingReplayContext({ ...complete, collections_ledger_id: null })).toBeNull();
+  });
+
   test('refuses a previsit replay context without its visit pin or reservation', () => {
     const complete = { schema_version: 1, customer_id: 'cust-1', category: 'billing',
       source_entry_point: 'previsit_balance_reminder', notificationEventKey: 'previsit-balance:visit-1',

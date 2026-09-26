@@ -9,6 +9,7 @@ const SOURCES = new Set([
   'balance_reminder_late_payment_check',
   'late_payment_checker',
   'previsit_balance_reminder',
+  'annual_prepay_payment_reminder',
 ]);
 const CATEGORIES = new Set(['invoice', 'payment_issue', 'billing', 'payment_receipt']);
 const EXPIRY_STAGES = new Set(['expired', '7_day', '30_day', '60_day']);
@@ -68,6 +69,11 @@ function complete(context) {
   if (context.source_entry_point === 'balance_reminder_workflow') {
     return has('invoice_id', 'appointment_id', 'appointment_date',
       'appointment_service_type', 'appointment_rendered_on', 'collections_ledger_id');
+  }
+  // Annual-prepay payment reminder: its prepay invoice and the exact quoted
+  // amount, so a retry never re-sends a stale pay-link amount.
+  if (context.source_entry_point === 'annual_prepay_payment_reminder') {
+    return has('invoice_id', 'rendered_amount', 'collections_ledger_id');
   }
   // Aggregate previsit dues reminder: pinned to its visit, no single invoice.
   if (context.source_entry_point === 'previsit_balance_reminder') {
