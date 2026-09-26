@@ -314,6 +314,14 @@ function exactMatch(normalized, index) {
   return null;
 }
 
+// "flies" -> "fly", "termites" -> "termite"; "grass", "Latrodectus" and
+// "cactus" stay as they are.
+function singularName(name) {
+  if (/[^aeiou]ies$/.test(name)) return name.replace(/ies$/, 'y');
+  if (/(?:ss|us|is)$/.test(name)) return name;
+  return name.replace(/s$/, '');
+}
+
 // Fuzzy (whole-word substring) scan across MULTIPLE indices at once,
 // returning the single longest match overall — never the first index's
 // best match regardless of length. A longer, more specific name (an exact
@@ -328,13 +336,18 @@ function fuzzyScanAcross(normalized, indexed) {
   for (const { via, index } of indexed) {
     for (const [name, id] of index.entries()) {
       if (name.length < 4 && !SHORT_ALIASES.has(name)) continue;
-      if (best && name.length <= best.len) continue;
+      // A plural name ("termites") is matched and measured by its singular,
+      // so it still answers "a termite" and ties — rather than loses — to a
+      // singular alias of the same word, leaving index priority to decide
+      // (the group beats a species alias; Codex #4873 pre-push P1).
+      const stem = singularName(name);
+      if (best && stem.length <= best.len) continue;
       // "whitefly" also matches "whiteflies"; "larva" matches "larvae".
-      const pattern = name.endsWith('larva') ? `${name}e?`
-        : /[^aeiou]y$/.test(name) ? `${name.slice(0, -1)}(?:y|ies)`
-          : `${name}(?:s|es)?`;
+      const pattern = stem.endsWith('larva') ? `${stem}e?`
+        : /[^aeiou]y$/.test(stem) ? `${stem.slice(0, -1)}(?:y|ies)`
+          : `${stem}(?:s|es)?`;
       if (new RegExp(`\\b${pattern}\\b`).test(normalized)) {
-        best = { id, via, len: name.length };
+        best = { id, via, len: stem.length };
       }
     }
   }
@@ -392,6 +405,7 @@ function buildNameIndices() {
 
 const NAME_INDICES = buildNameIndices();
 const NAME_ORDER = ['scientific', 'node', 'alias', 'common'];
+const FUZZY_ORDER = ['scientific', 'common', 'node', 'alias'];
 
 /**
  * Resolve free text (from a model, or typed by a customer) to the catalog
@@ -417,7 +431,11 @@ function resolveName(text) {
     if (exact) return { node: getNode(exact), via };
   }
 
-  const fuzzy = fuzzyScanAcross(normalized, NAME_ORDER.map((via) => ({ via, index: NAME_INDICES[via].index })));
+  // On an equal-length fuzzy tie an entry's own common name ("drywood
+  // termite") is the most specific claim and beats its group's plural
+  // ("drywood termites"), while a group still beats a bare generic alias
+  // on one species ("termite" on subterranean termite).
+  const fuzzy = fuzzyScanAcross(normalized, FUZZY_ORDER.map((via) => ({ via, index: NAME_INDICES[via].index })));
   return fuzzy ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
 }
 

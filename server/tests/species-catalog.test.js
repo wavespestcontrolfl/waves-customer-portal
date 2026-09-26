@@ -359,6 +359,9 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('fire ants').node).toMatchObject({ level: 'subgroup', id: 'fire-ants' });
     expect(catalog.resolveName('termite').node).toMatchObject({ level: 'group', id: 'termites' });
     expect(catalog.resolveName('I think these are termites').node).toMatchObject({ level: 'group', id: 'termites' });
+    // A singular generic inside a sentence stays generic too (Codex #4873 pre-push P1).
+    expect(catalog.resolveName('I found a termite').node).toMatchObject({ level: 'group', id: 'termites' });
+    expect(catalog.resolveName('saw a fire ant by the pool').node).toMatchObject({ level: 'subgroup', id: 'fire-ants' });
     expect(catalog.resolveName('insect').node).toMatchObject({ level: 'category', id: 'insect' });
   });
 
