@@ -226,6 +226,8 @@ function reportsAskPrivacyHeaders(req, res, next) {
   }
   next();
 }
+// Also mounted app-level ahead of the global /api limiter and JSON parser
+// (server/index.js); kept here so the router is self-contained.
 router.use(reportsAskPrivacyHeaders);
 
 router.use(reportLimiter);
@@ -2493,5 +2495,6 @@ async function ensureReportToken(serviceRecordId) {
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
+module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;

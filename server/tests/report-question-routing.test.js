@@ -290,6 +290,24 @@ describe('service report — every shipped chip answers its own category (AW-06)
       .toBe(answerServiceReportQuestion({ question: 'Is my lawn getting better?', data: lawnData }));
   });
 
+  test.each([
+    'Is the treatment working?',
+    'Is the product helping?',
+  ])('bare effectiveness question naming the treatment gets the trend answer: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: lawnData }))
+      .toBe(answerServiceReportQuestion({ question: 'Is my lawn getting better?', data: lawnData }));
+  });
+
+  test('"What damage did you find?" on a pest report gets the findings answer', () => {
+    expect(answerServiceReportQuestion({ question: 'What damage did you find?', data: pestData }))
+      .toBe(answerServiceReportQuestion({ question: 'What did you find?', data: pestData }));
+  });
+
+  test('"Should I schedule my next appointment?" gets the appointment answer', () => {
+    expect(answerServiceReportQuestion({ question: 'Should I schedule my next appointment?', data: pestData, nextAppointment }))
+      .toMatch(/Your next appointment is/);
+  });
+
   test('explicit advice wording outranks a lawn-trend subject', () => {
     expect(answerServiceReportQuestion({ question: 'What do you recommend for the stress areas?', data: lawnData }))
       .toBe(answerServiceReportQuestion({ question: 'What do you recommend?', data: lawnData }));

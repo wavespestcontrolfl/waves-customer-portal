@@ -183,6 +183,21 @@ describe('Ask Waves privacy headers on both report ask endpoints (AW-06 addition
     });
   });
 
+  test('the exported middleware sets the headers when mounted ahead of an outer limiter (server/index.js order)', async () => {
+    const app = express();
+    app.use('/api/reports', reportsRouter.reportsAskPrivacyHeaders);
+    app.use('/api/', (_req, res) => res.status(429).json({ error: 'Too many requests' }));
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/api/reports/0123456789abcdef0123456789abcdef/ask`, { method: 'POST' });
+      expect(res.status).toBe(429);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   test('a whitelisted explicit intent on the project ask route short-circuits free-text routing', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({

@@ -534,12 +534,25 @@ function answerServiceReportQuestion({
   // trend branch below: a question that mentions both ("What was applied to
   // the weeds?", "What did you spray on the thin areas?") is asking about
   // the treatment, not the lawn trend, so treatment cues win when both match.
-  if (TREATMENT_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q)) {
-    return answerAppliedToday({ data });
+  if (TREATMENT_QUESTION_RE.test(q)) {
+    // "Is the treatment working?" asks about results, not what was applied.
+    return EFFECTIVENESS_RE.test(q) ? answerTrend({ data }) : answerAppliedToday({ data });
+  }
+
+  // Explicit scheduling wording outranks the broad advice phrases ("Should I
+  // schedule my next appointment?").
+  if (/\b(appointment|appt|schedule|scheduled|next service|next visit)\b/.test(q)) {
+    return answerNextAppointment({ nextAppointment });
   }
 
   if (ADVICE_RE.test(q)) {
     return answerNextSteps({ data, nextAppointment });
+  }
+
+  // Explicit findings wording outranks the broad lawn subjects ("What damage
+  // did you find?" on a pest report).
+  if (/\b(find|found|finding|findings)\b/.test(q)) {
+    return answerFindings({ data });
   }
 
   // AW-06: covers the lawn V2 insight chips too (water/weeds/damage/

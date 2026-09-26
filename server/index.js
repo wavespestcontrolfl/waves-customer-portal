@@ -414,6 +414,9 @@ app.use('/api/public/inspection', (req, res, next) => {
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+// Report ask privacy headers ahead of the global limiter and JSON parser, so
+// their 429/400/413 responses carry no-store/noindex too.
+app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders);
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
