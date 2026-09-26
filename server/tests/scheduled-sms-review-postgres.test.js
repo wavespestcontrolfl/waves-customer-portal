@@ -67,6 +67,42 @@ postgres('queued review ask settlement against migrated PostgreSQL', () => {
     expect(saved.metadata).toMatchObject({ finalize_pending: true, provider_message_id: 'SM-synthetic', entry_point: 'invoice_send_deferred' });
   });
 
+  test('a sibling-channel acceptance atomically settles with its finalization context', async () => {
+    const row = await message({
+      status: 'sending',
+      message_body: 'Invoice ready',
+      metadata: { entry_point: 'invoice_send_deferred', partial_fanout_retry: true },
+    });
+    const channelResults = {
+      email: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'email-synthetic' },
+      sms: { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_FAILURE' },
+    };
+
+    const result = await dispatchScheduledSms(row, row.metadata, async () => ({
+      ...channelResults.sms,
+      providerMessageId: 'template-disabled',
+      channelResults,
+    }), undefined, 3, { recipient: '+12025550102', body: 'Invoice ready' });
+
+    expect(result).toMatchObject({
+      sent: false,
+      deliveryOutcome: 'not_sent',
+      providerAccepted: true,
+      providerMessageId: null,
+    });
+    const saved = await trx('sms_log').where({ id: row.id }).first();
+    expect(saved.status).toBe('sent');
+    expect(saved.metadata).toMatchObject({
+      finalize_pending: true,
+      provider_message_id: null,
+      replay_finalize_context: {
+        channelResults,
+        recipient: '+12025550102',
+        body: 'Invoice ready',
+      },
+    });
+  });
+
   test('crash recovery keeps an enqueue time an earlier pass already saved (codex #4334)', async () => {
     const now = new Date();
     const queuedAt = new Date('2026-01-01T16:00:00Z');

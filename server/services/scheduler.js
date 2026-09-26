@@ -9,7 +9,13 @@ const logger = require('./logger');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
+const {
+  acceptedScheduledSms,
+  markScheduledSmsSent,
+  dispatchScheduledSms,
+  replayFinalizeContextFromMetadata,
+  scheduledProviderAccepted,
+} = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -23,6 +29,20 @@ const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
 const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
 const CONTENT_REGISTRY_LIVE_LIMIT = 300;
+
+function deferredReplayFinalizeContext(msg, claimMeta, sendResult, { retry = false } = {}) {
+  const replayContext = sendResult?.replayFinalizeContext
+    || replayFinalizeContextFromMetadata(claimMeta);
+  return {
+    ...(retry ? { retry: true } : {}),
+    customerId: msg.customer_id || null,
+    providerMessageId: sendResult?.providerMessageId ?? claimMeta.provider_message_id ?? null,
+    smsLogId: msg.id,
+    channelResults: replayContext.channelResults,
+    toPhone: replayContext.recipient,
+    body: replayContext.body,
+  };
+}
 
 function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}) {
   const type = String(messageType || '').toLowerCase();
@@ -3646,7 +3666,11 @@ function initScheduledJobs() {
             // finalizers that settle once-ever claims key on the accepted
             // SID, and retrying without it would release a claim for a
             // message Twilio already delivered.
-            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null })) || { ok: true };
+            const fin = (await finalizeDeferredReplay(
+              claimMeta.entry_point,
+              claimMeta,
+              deferredReplayFinalizeContext(msg, claimMeta, null, { retry: true }),
+            )) || { ok: true };
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
               // finalize_pending clears on BOTH outcomes or the stranded-
               // finalization sweep would convert this row forever.
@@ -4202,7 +4226,7 @@ function initScheduledJobs() {
             .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           };
           const smsResult = await dispatchScheduledSms(msg, claimMeta, sendReplay,
-          purpose, SCHEDULED_SMS_MAX_ATTEMPTS);
+          purpose, SCHEDULED_SMS_MAX_ATTEMPTS, { recipient: toPhone, body: msg.message_body });
           if (smsResult.scheduledHold) continue;
           const completedAt = new Date();
           const lawnPipelineRetryAt = claimMeta.entry_point === 'lawn_assessment_notification_deferred'
@@ -4214,10 +4238,10 @@ function initScheduledJobs() {
             && !Number.isNaN(new Date(smsResult.nextAllowedAt).getTime())
             ? new Date(smsResult.nextAllowedAt)
             : null;
-          if (smsResult.sent) {
+          if (scheduledProviderAccepted(smsResult)) {
             const { requiresDurableFinalize, finalizeDeferredReplay: finalizeReplay } = require('./messaging/deferred-replay-registry');
             const owesFinalization = requiresDurableFinalize(claimMeta.entry_point);
-            logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
+            logger.info(`[scheduled-sms] Settled scheduled delivery ${msg.id}`);
 
             // Deferred-replay finalization (registry): the state
             // transitions the immediate path would have run inline —
@@ -4228,7 +4252,11 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              const fin = await finalizeReplay(
+                claimMeta.entry_point,
+                { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null },
+                deferredReplayFinalizeContext(msg, claimMeta, smsResult),
+              );
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({
@@ -7283,4 +7311,5 @@ module.exports = {
   claimDueScheduledEstimates,
   recoverStaleScheduledEstimateClaims,
   markScheduledEstimateSendFailure,
+  deferredReplayFinalizeContext,
 };

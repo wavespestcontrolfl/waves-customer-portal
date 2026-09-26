@@ -19,7 +19,7 @@ jest.mock('../utils/cron-lock', () => ({
 }));
 jest.mock('../services/sms-operational-actions', () => ({ runSmsOperationalActions: jest.fn() }));
 
-const { runSmsRecoveryTick } = require('../services/scheduler');
+const { runSmsRecoveryTick, deferredReplayFinalizeContext } = require('../services/scheduler');
 const { recordMissedTick } = require('../utils/cron-lock');
 const { runSmsOperationalActions } = require('../services/sms-operational-actions');
 const logger = require('../services/logger');
@@ -43,5 +43,54 @@ describe('SMS profile-capture recovery tick', () => {
     runSmsOperationalActions.mockResolvedValue(result);
     expect(await runSmsRecoveryTick()).toEqual(result);
     expect(recordMissedTick).not.toHaveBeenCalled();
+  });
+});
+
+describe('scheduled replay finalization context', () => {
+  const msg = { id: 'sms-row-1', customer_id: 'customer-1' };
+  const channelResults = {
+    email: { sent: true, deliveryOutcome: 'accepted' },
+    sms: { sent: false, deliveryOutcome: 'not_sent', retryable: true },
+  };
+
+  test('the first finalizer call receives the accepted multi-channel result even when Text represents the result', () => {
+    expect(deferredReplayFinalizeContext(msg, {}, {
+      sent: false,
+      deliveryOutcome: 'not_sent',
+      providerAccepted: true,
+      providerMessageId: 'email-provider-1',
+      replayFinalizeContext: {
+        channelResults,
+        recipient: '+19415550101',
+        body: 'Invoice ready',
+      },
+    })).toEqual({
+      customerId: 'customer-1',
+      providerMessageId: 'email-provider-1',
+      smsLogId: 'sms-row-1',
+      channelResults,
+      toPhone: '+19415550101',
+      body: 'Invoice ready',
+    });
+  });
+
+  test('finalize_only reconstructs the same context from the settled row without a send result', () => {
+    const claimMeta = {
+      provider_message_id: 'email-provider-1',
+      replay_finalize_context: JSON.stringify({
+        channelResults,
+        recipient: '+19415550101',
+        body: 'Invoice ready',
+      }),
+    };
+    expect(deferredReplayFinalizeContext(msg, claimMeta, null, { retry: true })).toEqual({
+      retry: true,
+      customerId: 'customer-1',
+      providerMessageId: 'email-provider-1',
+      smsLogId: 'sms-row-1',
+      channelResults,
+      toPhone: '+19415550101',
+      body: 'Invoice ready',
+    });
   });
 });

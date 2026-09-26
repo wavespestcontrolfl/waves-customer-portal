@@ -16,13 +16,85 @@ const { requiresDurableFinalize } = require('./messaging/deferred-replay-registr
 // bundled completion row before that row's own marker gets stripped.
 const { REVIEW_ASK_MARKER, reserveForRequest } = require('./messaging/review-ask-reservation');
 
-async function acceptedScheduledSms(id, err) {
-  if (err?.providerOutcome?.deliveryOutcome === 'accepted') return err.providerOutcome;
+function acceptedChannelResult(result) {
+  if (!result?.channelResults || typeof result.channelResults !== 'object') return null;
+  return Object.values(result.channelResults).find(channel => (
+    channel?.sent === true && channel.deliveryOutcome === 'accepted'
+  )) || null;
+}
+
+function scheduledProviderAccepted(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (result.providerAccepted === true || result.deliveryOutcome === 'accepted') return true;
+  // Preserve the legacy scheduled-sender contract: sent:true without an
+  // explicit outcome means the provider accepted the handoff. An explicit
+  // not_sent/uncertain outcome never gets upgraded by this fallback.
+  if (result.sent === true && result.deliveryOutcome == null) return true;
+  return false;
+}
+
+function canFinalizeAcceptedChannelResults(meta) {
+  // A representative failure may settle only when this row belongs to the
+  // invoice partial-fanout retry rail. Its durable finalizer owns any
+  // unfinished sibling legs. Ordinary multi-channel billing entries have no
+  // such owner and must retain their existing retry/hold behavior.
+  return meta?.partial_fanout_retry === true && requiresDurableFinalize(meta.entry_point);
+}
+
+function replayFinalizeContextFromMetadata(meta) {
+  let context = meta?.replay_finalize_context;
+  if (typeof context === 'string') {
+    try { context = JSON.parse(context); } catch { return {}; }
+  }
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return {};
+  return {
+    ...(context.channelResults && typeof context.channelResults === 'object'
+      ? { channelResults: context.channelResults }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(context, 'recipient')
+      ? { recipient: context.recipient }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(context, 'body')
+      ? { body: context.body }
+      : {}),
+  };
+}
+
+function normalizeAcceptedScheduledResult(msg, meta, result, { recipient, body } = {}) {
+  const acceptedSibling = canFinalizeAcceptedChannelResults(meta) && acceptedChannelResult(result);
+  if (!scheduledProviderAccepted(result) && !acceptedSibling) return null;
+  const topLevelAccepted = result.deliveryOutcome === 'accepted'
+    || (result.sent === true && result.deliveryOutcome == null)
+    || (result.providerAccepted === true && !result.channelResults);
+  const replayFinalizeContext = result.channelResults && typeof result.channelResults === 'object'
+    ? {
+      channelResults: result.channelResults,
+      recipient: recipient ?? msg.to_phone ?? null,
+      body: body ?? msg.message_body ?? '',
+    }
+    : null;
+  return {
+    ...result,
+    providerAccepted: true,
+    // provider_message_id historically carries the representative provider
+    // handoff (normally a Twilio SID). A failed representative Text leg can
+    // carry a suppression sentinel while Email/App is the accepted sibling;
+    // never persist that sentinel as acceptance evidence.
+    providerMessageId: topLevelAccepted ? (result.providerMessageId || null) : null,
+    ...(replayFinalizeContext ? { replayFinalizeContext } : {}),
+  };
+}
+
+async function acceptedScheduledSms(id, err, meta) {
+  if (scheduledProviderAccepted(err?.providerOutcome)
+    || (canFinalizeAcceptedChannelResults(meta) && acceptedChannelResult(err?.providerOutcome))) {
+    return { ...err.providerOutcome, providerAccepted: true };
+  }
   const row = await db('sms_log').where({ direction: 'outbound' })
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(id)])
     .first('id', 'twilio_sid');
-  return row ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: row.twilio_sid || null } : null;
+  return row ? { sent: true, deliveryOutcome: 'accepted', providerAccepted: true, providerMessageId: row.twilio_sid || null } : null;
 }
 
 async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundled_review_request_id || meta.replay_purpose === 'review_request' || looksLikeReviewAsk(msg.message_body)) {
@@ -35,6 +107,10 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   if (requiresDurableFinalize(meta.entry_point)) {
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
     bindings.push(result.providerMessageId || null);
+    if (result.replayFinalizeContext) {
+      metadataSql += " || jsonb_build_object('replay_finalize_context', ?::jsonb)";
+      bindings.push(JSON.stringify(result.replayFinalizeContext));
+    }
   }
   if (reviewAsk) {
     metadataSql += " || jsonb_build_object('review_ask_delivered_at', ?::timestamptz)";
@@ -48,7 +124,7 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   });
 }
 
-async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
+async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3, replayContext) {
   let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id
     || meta.review_delivery_uncertain_exhausted === true || looksLikeReviewAsk(msg.message_body);
   const attemptsExhausted = (Number(meta.scheduled_sms_attempts) || 1) >= maxAttempts;
@@ -149,15 +225,19 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
       // terminal hooks) already treats it as sent, so the row must flip to
       // 'sent' here too or it strands in 'sending' until stale recovery.
       const deliveryOutcome = result?.deliveryOutcome || (result?.sent === true ? 'accepted' : undefined);
-      if (deliveryOutcome === 'not_sent' && result.sent) {
+      const acceptedResult = normalizeAcceptedScheduledResult(msg, meta, result, replayContext);
+      if (acceptedResult) {
+        result = acceptedResult;
+        await markScheduledSmsSent(msg, meta, acceptedResult, reviewAsk);
+      } else if (deliveryOutcome === 'not_sent') {
         // The scheduler owns the sending -> blocked transition and stamps
         // its durable terminal-hook obligation in that same update.
+        if (result.sent) {
+          await clearUnsentReservation();
+          return { ...result, sent: false, blocked: true, code: reviewAsk ? 'REVIEW_SEND_SUPPRESSED' : 'DELIVERY_SUPPRESSED' };
+        }
         await clearUnsentReservation();
-        return { ...result, sent: false, blocked: true, code: reviewAsk ? 'REVIEW_SEND_SUPPRESSED' : 'DELIVERY_SUPPRESSED' };
-      }
-      if (deliveryOutcome === 'not_sent') await clearUnsentReservation();
-      if (deliveryOutcome === 'accepted') await markScheduledSmsSent(msg, meta, result, reviewAsk);
-      if (reviewAsk && deliveryOutcome !== 'accepted' && deliveryOutcome !== 'not_sent') {
+      } else if (reviewAsk) {
         return holdUncertainReservation({ ...result, deliveryOutcome: 'uncertain' });
       }
       return result;
@@ -171,7 +251,7 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
       if (reviewAsk && !providerStarted) return holdReservationFailure();
       err.scheduledReviewAsk = reviewAsk;
       if (result) err.providerOutcome = result;
-      const accepted = await acceptedScheduledSms(msg.id, err);
+      const accepted = await acceptedScheduledSms(msg.id, err, meta);
       if (accepted) {
         err.providerOutcome = accepted;
         try {
@@ -270,4 +350,10 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   return { ...result, scheduledHold: true };
 }
 
-module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms };
+module.exports = {
+  acceptedScheduledSms,
+  markScheduledSmsSent,
+  dispatchScheduledSms,
+  replayFinalizeContextFromMetadata,
+  scheduledProviderAccepted,
+};

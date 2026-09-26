@@ -80,6 +80,9 @@ beforeEach(() => {
           if (patch.metadata?.sql.includes('finalize_pending')) {
             meta.finalize_pending = true;
             meta.provider_message_id = patch.metadata.bindings[0];
+            if (patch.metadata.sql.includes('replay_finalize_context')) {
+              meta.replay_finalize_context = JSON.parse(patch.metadata.bindings[1]);
+            }
           }
         }
         Object.assign(row, patch, { metadata: meta });
@@ -141,6 +144,82 @@ test('a non-review scheduled message keeps its provider and finalization behavio
   expect(await dispatchScheduledSms(row, row.metadata, send)).toMatchObject({ sent: true });
   expect(history.lastManualAskAt).not.toHaveBeenCalled();
   expect(row.status).toBe('sent');
+});
+
+test.each([
+  ['retryable', { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_FAILURE', providerMessageId: 'template-disabled' }],
+  ['unknown', { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_FAILURE', providerMessageId: 'ambiguous-provider-result' }],
+])('one accepted channel settles and preserves finalizer context when the representative Text result is %s', async (_label, representative) => {
+  row.message_body = 'Invoice ready';
+  row.to_phone = '+19415550100';
+  row.metadata.partial_fanout_retry = true;
+  const channelResults = {
+    email: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'email-accepted' },
+    sms: representative,
+  };
+  const result = await dispatchScheduledSms(row, row.metadata, async () => ({
+    ...representative,
+    channelResults,
+  }), undefined, 3, { recipient: '+19415550101', body: 'Invoice ready' });
+
+  expect(result).toMatchObject({
+    sent: false,
+    deliveryOutcome: representative.deliveryOutcome,
+    providerAccepted: true,
+    providerMessageId: null,
+  });
+  expect(row.status).toBe('sent');
+  expect(row.metadata).toMatchObject({
+    finalize_pending: true,
+    provider_message_id: null,
+    replay_finalize_context: {
+      channelResults,
+      recipient: '+19415550101',
+      body: 'Invoice ready',
+    },
+  });
+  const settlement = updates.find(({ patch }) => patch.status === 'sent').patch;
+  expect(settlement.metadata.sql).toContain("jsonb_build_object('finalize_pending'");
+  expect(settlement.metadata.sql).toContain("jsonb_build_object('replay_finalize_context'");
+});
+
+test('an accepted sibling does not settle a row without a partial-fanout finalizer', async () => {
+  row.message_body = 'Receipt ready';
+  row.metadata.entry_point = 'billing-receipt-test';
+  const channelResults = {
+    email: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'email-accepted' },
+    sms: { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_FAILURE' },
+  };
+
+  const result = await dispatchScheduledSms(row, row.metadata, async () => ({
+    ...channelResults.sms,
+    channelResults,
+  }), undefined, 3, { recipient: '+19415550101', body: 'Receipt ready' });
+
+  expect(result).toEqual({ ...channelResults.sms, channelResults });
+  expect(row.status).toBe('sending');
+  expect(row.metadata).not.toHaveProperty('finalize_pending');
+  expect(row.metadata).not.toHaveProperty('replay_finalize_context');
+});
+
+test.each([
+  ['retryable', { sent: false, deliveryOutcome: 'not_sent', retryable: true }],
+  ['unknown', { sent: false, deliveryOutcome: 'uncertain', retryable: true }],
+])('zero accepted channels preserve the %s outcome without settling', async (_label, representative) => {
+  row.message_body = 'Invoice ready';
+  const channelResults = {
+    email: { sent: false, deliveryOutcome: 'not_sent', retryable: true },
+    sms: representative,
+  };
+  const result = await dispatchScheduledSms(row, row.metadata, async () => ({
+    ...representative,
+    channelResults,
+  }), undefined, 3, { recipient: '+19415550101', body: 'Invoice ready' });
+
+  expect(result).toEqual({ ...representative, channelResults });
+  expect(row.status).toBe('sending');
+  expect(row.metadata).not.toHaveProperty('finalize_pending');
+  expect(row.metadata).not.toHaveProperty('replay_finalize_context');
 });
 
 test.each(['bundled', 'policy'])('%s guards a short-link-only review message', async kind => {

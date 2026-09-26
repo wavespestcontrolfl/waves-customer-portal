@@ -46,7 +46,8 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
     require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
   });
   expect(dispatchScheduledSms).toHaveBeenCalledWith(expect.objectContaining({ id: 'queue-row' }),
-    expect.objectContaining({ entry_point: 'fixture' }), expect.any(Function), 'appointment', 3);
+    expect.objectContaining({ entry_point: 'fixture' }), expect.any(Function), 'appointment', 3,
+    { recipient: 'fixture-phone', body: 'Current queued copy' });
   expect(dispatchDeferredReplay).toHaveBeenCalledWith('fixture', expect.objectContaining({
     scheduled_sms_log_id: 'queue-row', customer_id: 'row-customer',
   }), expect.any(Function));
