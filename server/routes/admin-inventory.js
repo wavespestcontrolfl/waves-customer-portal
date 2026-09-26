@@ -8,6 +8,7 @@ const inventoryOperations = require('../services/inventory-operations');
 const { restockMeta } = require('../services/inventory-restock-queue');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
 const { buildWaveGuardInventoryForecast } = require('../services/waveguard-inventory-forecast');
 const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
 const {
@@ -1805,7 +1806,8 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
   let responseText = '';
   let msg = await anthropic.messages.create({
     model: MODELS.FLAGSHIP,
-    max_tokens: 4000,
+    ...anthropicEffortConfig(MODELS.FLAGSHIP),
+    max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 4000),
     tools,
     messages: [{ role: 'user', content: prompt }],
   });
@@ -1822,7 +1824,8 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
     }));
     msg = await anthropic.messages.create({
       model: MODELS.FLAGSHIP,
-      max_tokens: 4000,
+      ...anthropicEffortConfig(MODELS.FLAGSHIP),
+      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 4000),
       tools,
       messages: [
         { role: 'user', content: prompt },
@@ -3579,7 +3582,8 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
 
     const msg = await anthropic.messages.create({
       model: MODELS.FLAGSHIP,
-      max_tokens: 2000,
+      ...anthropicEffortConfig(MODELS.FLAGSHIP),
+      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }],
     });
@@ -3604,7 +3608,8 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
 
       currentMsg = await anthropic.messages.create({
         model: MODELS.FLAGSHIP,
-        max_tokens: 2000,
+        ...anthropicEffortConfig(MODELS.FLAGSHIP),
+        max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [
           { role: 'user', content: prompt },
