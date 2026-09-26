@@ -1112,7 +1112,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(cursors['sms_operations.future_cursor']).toMatch(/^[a-f0-9-]{36}$/);
   });
 
-  test('Codex #4816 r15: a future row behind the cursor is revisited on the next tick once its customer has fresh visit activity', async () => {
+  test('Codex #4816 r15/r16: a future row behind the cursor is revisited on the next tick once its customer has fresh visit activity; the event page rotates', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
       quote: 'Please call me back', description: 'Please call me back' };
@@ -1142,6 +1142,16 @@ postgres('SMS commitments on PostgreSQL', () => {
     await parkCursor();
     await refreshSmsCommitments({ conn: mockPg, verify, now });
     expect(verify.mock.calls.map(([row]) => row.id)).toContain(target);
+    // Codex #4816 r16: all 30 rows are fresh; the event page rotates on its
+    // own cursor, so the next tick reaches the rows past its first 25 even
+    // with the future cursor parked where it cannot.
+    const ids = await mockPg('call_commitments').orderBy('id').pluck('id');
+    const last = ids[ids.length - 1];
+    expect(verify.mock.calls.map(([row]) => row.id)).not.toContain(last);
+    verify.mockClear();
+    await parkCursor();
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify.mock.calls.map(([row]) => row.id)).toContain(last);
     // Stale activity drops back to the cursor pages.
     verify.mockClear();
     await parkCursor();

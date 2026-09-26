@@ -607,11 +607,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     // Codex #4816 r15: the future cursor alone reaches a row only once per
     // wrap, so a visit event on a row behind it could wait many ticks. Rows
     // whose customer had visit activity in the last EVENT_LOOKBACK_MS get a
-    // cursor-less page of their own and are revisited every tick while the
-    // event is fresh.
-    { cursorKey: null, rows: await openRows().where('cc.due_at', '>', now)
-      .whereExists(recentVisitActivity(conn, new Date(now.getTime() - EVENT_LOOKBACK_MS), now))
-      .orderBy('cc.id').limit(PAGE).select('cc.*') },
+    // page of their own, revisited while the event is fresh. It rotates on
+    // its own cursor (r16): a fixed first 25 with unrelated activity must
+    // not pin the page for the whole lookback.
+    await page('sms_operations.event_cursor', (q) => q.where('cc.due_at', '>', now)
+      .whereExists(recentVisitActivity(conn, new Date(now.getTime() - EVENT_LOOKBACK_MS), now))),
   ];
   const rows = [...new Map(pages.flatMap((p) => p.rows).map((row) => [row.id, row])).values()];
   for (const row of rows) {
@@ -700,7 +700,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
     });
   }
-  for (const { cursorKey, rows: pageRows } of pages.filter((p) => p.cursorKey)) {
+  for (const { cursorKey, rows: pageRows } of pages) {
     const nextCursor = pageRows.length === PAGE ? pageRows[pageRows.length - 1].id : null;
     await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
       .onConflict('key').merge({ value: nextCursor, updated_at: now });
