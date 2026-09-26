@@ -61,6 +61,18 @@ describe('plaza "Bay" designator', () => {
     expect(scope.applies).toBe(true);
   });
 
+  test.each(['4400 Space Coast Blvd, Bradenton, FL 00000', '4400 Spc Coast Blvd, Bradenton, FL 00000'])(
+    '%s is a street, not a suite (Codex #4840 r12 P2)',
+    (address) => {
+      expect(resolveCommercialSuiteScope(plazaSuiteRecord(), address, 'office_retail', SUITE_SIZING_ON).applies).toBe(false);
+    },
+  );
+
+  test('a Space 12 plaza address is still suite-scoped', () => {
+    const scope = resolveCommercialSuiteScope(plazaSuiteRecord(), '4400 Test Commons Pkwy E Space 12, Bradenton, FL 00000', 'office_retail', SUITE_SIZING_ON);
+    expect(scope.applies).toBe(true);
+  });
+
   test('a Bay St street address is not suite-scoped', () => {
     const scope = resolveCommercialSuiteScope(plazaSuiteRecord(), '4400 Bay St, Bradenton, FL 00000', 'office_retail', SUITE_SIZING_ON);
     expect(scope.applies).toBe(false);

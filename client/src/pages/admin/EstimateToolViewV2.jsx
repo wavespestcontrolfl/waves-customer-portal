@@ -2666,6 +2666,13 @@ export default function EstimateToolViewV2({
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       if (formAddressRef.current.trim() !== address || verificationVersionRef.current !== version) return;
       setVerifySaveState((s) => ({ ...s, [field]: "saved" }));
+      // A verified size or story count is the operator's measurement, same
+      // as typing it: the next Generate prices it as measured, not as the
+      // lookup's estimate (Codex #4840 r12 P2).
+      const editedFlag = { squareFootage: "_homeSqFtEdited", stories: "_storiesEdited" }[field];
+      if (editedFlag) {
+        setForm((f) => (Number(f[key]) === value ? { ...f, [editedFlag]: true } : f));
+      }
     } catch {
       if (formAddressRef.current.trim() !== address || verificationVersionRef.current !== version) return;
       setVerifySaveState((s) => ({ ...s, [field]: "error" }));
@@ -3518,9 +3525,12 @@ export default function EstimateToolViewV2({
       // same guess, not a measurement: sent as one it would price termite
       // past the unmeasured-building manual quote (Codex #4840 r11 P1). A
       // typed footprint, or one from a license/verified size, still counts.
+      // Only a positive operator-entered home size makes an auto-filled
+      // footprint a measurement; a cleared box leaves the old default-derived
+      // value, which must not price either (Codex #4840 r12 P1).
       const termiteFootprintFromSuiteDefault = form._termiteFootprintAuto
         && enrichedProfile?.suiteSize?.source === "suite_type_default"
-        && !form._homeSqFtEdited;
+        && !(form._homeSqFtEdited && Number(form.homeSqFt) > 0);
       const termiteFootprintSqFt = termiteFootprintFromSuiteDefault
         ? undefined
         : parsePositiveNumber(form.termiteFootprintSqFt);
@@ -4072,7 +4082,15 @@ export default function EstimateToolViewV2({
     saveInFlightRef.current = true;
     setSaving(true);
     setSaveError("");
-    const savingForm = JSON.stringify(form);
+    // The suite default the server just priced (recomputed off the current
+    // business type) is what the inputs record, even when a same-turn save
+    // runs before setForm's sync lands (Codex #4840 r12 P1).
+    const pricedSuiteSqFt = Number(estimateToSave.property?.homeSqFt);
+    const savingInputs = enrichedProfile?.suiteSize?.source === "suite_type_default"
+      && !form._homeSqFtEdited && pricedSuiteSqFt > 0 && pricedSuiteSqFt !== Number(form.homeSqFt)
+      ? { ...form, homeSqFt: String(pricedSuiteSqFt) }
+      : form;
+    const savingForm = JSON.stringify(savingInputs);
     try {
       const E = estimateToSave;
       const quoteRequired = estimateRequiresQuote(E);
@@ -4093,7 +4111,7 @@ export default function EstimateToolViewV2({
         customerEmail: form.customerEmail || "",
         leadId: isEditRevision ? null : form.leadId || null,
         customerId: form.customerId || existingCustomerMatch?.id || null,
-        estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
+        estimateData: { inputs: savingInputs, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
         monthlyTotal,
         annualTotal: monthlyTotal * 12,
         onetimeTotal,

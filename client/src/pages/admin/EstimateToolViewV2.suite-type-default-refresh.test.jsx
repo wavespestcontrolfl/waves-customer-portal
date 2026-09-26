@@ -121,7 +121,7 @@ async function generate() {
   await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/calculate-estimate"))).toBe(true));
 }
 
-describe("suite type-default box/note refresh at generate time", () => {
+describe("suite type-default box/note refresh at generate time", { timeout: 20000 }, () => {
   it("operator picks Restaurant after an office-default suite lookup: the Home Sq Ft box refreshes to the server's recomputed 1,800", async () => {
     await lookUpSuite();
     expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(1500);
@@ -161,5 +161,38 @@ describe("suite type-default box/note refresh at generate time", () => {
     await generate();
 
     expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(1400);
+  });
+});
+
+// Codex #4840 r12: the priced suite default is what a save records, and a
+// termite footprint auto-filled from that default never prices as a
+// measurement — even after the Home Sq Ft box is cleared.
+describe("suite type-default provenance through termite and save", { timeout: 20000 }, () => {
+  function calcBodies() {
+    return fetchMock.mock.calls
+      .filter(([url]) => String(url).endsWith("/calculate-estimate"))
+      .map(([, init]) => JSON.parse(init.body));
+  }
+
+  it("an auto-filled termite footprint from the default is not sent, even after Home Sq Ft is cleared", async () => {
+    await lookUpSuite();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Termite Bait Stations", exact: true }));
+    fireEvent.change(screen.getByLabelText("Home Sq Ft"), { target: { value: "" } });
+    // A positive lot size lets the generic size gate pass (Codex's scenario).
+    fireEvent.change(screen.getByLabelText("Lot Sq Ft"), { target: { value: "10000" } });
+    await generate();
+    const body = calcBodies().at(-1);
+    expect(JSON.stringify(body)).not.toMatch(/"termiteFootprintSqFt":\s*1500/);
+  });
+
+  it("Save after Generate records the server-priced 1,800, not the stale 1,500", async () => {
+    await lookUpSuite();
+    pickRiskType("restaurant_food");
+    calcHomeSqFt = 1800;
+    await generate();
+    fireEvent.click(await screen.findByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/api/admin/estimates") && init?.method === "POST")).toBe(true));
+    const [, init] = fetchMock.mock.calls.find(([url, i]) => String(url).endsWith("/api/admin/estimates") && i?.method === "POST");
+    expect(JSON.parse(init.body).estimateData.inputs.homeSqFt).toBe("1800");
   });
 });

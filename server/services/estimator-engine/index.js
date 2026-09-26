@@ -2688,8 +2688,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                   || (effectiveParcelOk ? effectiveSignals.enriched?.commercialSubtype : null)
                   || null,
               }, { skipWebSearch: Boolean(lookupSuiteSize) });
-              if (suiteSize && !suiteSize.businessName && lookupSuiteSize?.businessName) {
-                suiteSize = { ...suiteSize, businessName: lookupSuiteSize.businessName };
+              // The re-resolve skips the web leg, so keep what the lookup's
+              // found: the business name and, independently, its type.
+              if (suiteSize) {
+                for (const field of ['businessName', 'businessType']) {
+                  if (!suiteSize[field] && lookupSuiteSize?.[field]) suiteSize = { ...suiteSize, [field]: lookupSuiteSize[field] };
+                }
               }
             }
             if (suiteSize && Number(suiteSize.value) > 0) {

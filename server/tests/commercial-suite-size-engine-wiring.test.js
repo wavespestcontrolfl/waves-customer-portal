@@ -186,11 +186,13 @@ describe('engine adoption of the lookup suite size (PR #4840: adopt license/veri
   // Primary review of PR #4840 r4 P2: intent.customer_name is the CALLER,
   // never the business — passing it as businessNameHint would mislabel
   // every resolved suite with the caller's own name.
-  test('businessNameHint is never the caller\'s name, and the lookup businessName fallback still runs', () => {
-    const block = src.slice(i, i + 2600);
+  test('businessNameHint is never the caller\'s name, and the lookup businessName/businessType fallback still runs', () => {
+    const block = src.slice(i, i + 2800);
     expect(block).toMatch(/businessNameHint:\s*null,/);
     expect(block).not.toMatch(/businessNameHint:\s*intent\.customer_name/);
-    expect(block).toMatch(/!suiteSize\.businessName && lookupSuiteSize\?\.businessName/);
+    // Codex #4840 r12 P2: the type is kept independently of the name.
+    expect(block).toMatch(/for \(const field of \['businessName', 'businessType'\]\)/);
+    expect(block).toMatch(/!suiteSize\[field\] && lookupSuiteSize\?\.\[field\]/);
   });
 });
 
