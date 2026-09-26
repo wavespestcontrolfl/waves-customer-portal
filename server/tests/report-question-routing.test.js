@@ -427,6 +427,18 @@ describe('service report — every shipped chip answers its own category (AW-06)
       .toBe(answerServiceReportQuestion({ question: 'When can my pets go back out?', data: pestData }));
   });
 
+  test.each([
+    'When are you spraying?',
+    'When are you treating the lawn?',
+  ])('a bare when-question about treating is scheduling: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Your next appointment is/);
+  });
+
+  test('"How did the treatment affect the pressure score?" gets the trend answer', () => {
+    expect(answerServiceReportQuestion({ question: 'How did the treatment affect the pressure score?', data: pestData }))
+      .not.toMatch(/Sources used: this service report/);
+  });
+
   test('"When is my next treatment after today?" goes to the appointment', () => {
     expect(answerServiceReportQuestion({ question: 'When is my next treatment after today?', data: pestData, nextAppointment }))
       .toMatch(/Your next appointment is/);

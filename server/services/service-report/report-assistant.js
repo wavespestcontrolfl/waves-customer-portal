@@ -32,7 +32,7 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
-const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming))\b/;
+const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
 const PAST_TENSE_RE = /\b(?:was|were|did|today|applied|sprayed|treated|used)\b/;
 // Past-tense verbs only — "today" anchors time but doesn't cancel an explicit
 // future cue ("When is my next treatment after today?").
@@ -74,7 +74,7 @@ function isReentryIntent(q) {
 }
 // Results questions ("Is the weed treatment working?") belong to the trend
 // answer even though they name the treatment.
-const EFFECTIVENESS_RE = /\b(working|improving|helping|trending|results?|better|worse)\b/;
+const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|chang\w*|decreas\w*)\b/;
 // Explicit advice wording outranks the broad lawn-trend subjects ("What do
 // you recommend for the stress areas?").
 const ADVICE_RE = /\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+action|next\s+step)\b/;
