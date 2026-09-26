@@ -330,6 +330,12 @@ describe('lead texts carry no sign-off', () => {
     expect(result).toMatchObject({ sent: true, message: 'Ants are very treatable this time of year.' });
   });
 
+  test('the text handed back matches the pipeline-normalized body (curly quotes, URL scheme)', async () => {
+    mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+    const result = await executeLeadTool('send_lead_response', { message: 'We\u2019ll text you \u2014 see https://wavespestcontrol.com/ants' }, context);
+    expect(result.message).toBe("We'll text you - see wavespestcontrol.com/ants");
+  });
+
   test('a message that is only a sign-off is refused before anything is sent', async () => {
     expect(await executeLeadTool('send_lead_response', { message: '— Adam, Waves Pest Control' }, context))
       .toMatchObject({ error: expect.any(String), validationError: true });

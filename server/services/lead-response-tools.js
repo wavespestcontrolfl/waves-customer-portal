@@ -22,6 +22,17 @@ const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
 // maxSegments for customer SMS; the send pipeline itself only advises).
 const LEAD_RESPONSE_MAX_SEGMENTS = 2;
 
+// The same body normalization sendCustomerMessage applies to lead SMS before
+// audit and dispatch (URL scheme stripped, typographic punctuation to GSM),
+// so what the agent gets back and what the report saves match what Twilio
+// received.
+function asSentSmsText(text) {
+  if (!text) return text;
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  return normalizeGsmPunctuation(stripSmsUrlScheme(text));
+}
+
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
   if (!context?.leadId || !context?.customerId) return { error: 'Missing assigned lead context', validationError: true };
@@ -452,7 +463,9 @@ async function executeLeadTool(toolName, input, context) {
         logger.info(`[lead-agent] Auto-sent response (customerId=${customer.id} leadId=${input.lead_id || 'n/a'} auditLogId=${result.auditLogId || 'n/a'})`);
         return {
           sent: true,
-          message, // the text actually sent (sign-off stripped) — save this, not the draft
+          // The text actually sent: sign-off stripped, then the send
+          // pipeline's own SMS normalization. Save this, not the draft.
+          message: asSentSmsText(message),
           to: customer.phone,
           name: customer.first_name,
           providerMessageId: result.providerMessageId,
@@ -668,7 +681,7 @@ async function executeLeadTool(toolName, input, context) {
             customer_id: input.customer_id,
             action_taken: input.action_taken,
             // Same addressee as the send, so the saved text matches what went out.
-            response_message: stripTrailingSignature(input.response_message, { addresseeFirstName: subject.customer?.first_name }) || null,
+            response_message: asSentSmsText(stripTrailingSignature(input.response_message, { addresseeFirstName: subject.customer?.first_name })) || null,
             response_time_seconds: input.response_time_seconds,
             triage_summary: input.triage_summary,
             follow_up_scheduled: input.follow_up_scheduled || false,
