@@ -3587,11 +3587,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (!entry || typeof entry !== 'object') return null;
         const scope = String(entry.scope || '').toLowerCase();
         if (scope !== 'interior' && scope !== 'exterior') return null;
+        const label = String(entry.label || '').trim() || null;
+        // Only governed non-spray actions can waive drying. Never trust a
+        // client exemption on a spray or arbitrary legacy action.
+        const nonDryingAction = reportServiceLine === 'pest' && [
+          'Applied gel bait in the recorded locations.',
+          'Applied dust to the recorded accessible voids.',
+        ].includes(label);
         return {
-          label: String(entry.label || '').trim() || null,
+          label,
           scope,
           treatmentApplied: entry.treatmentApplied === true,
-          ...(entry.dryDown === false ? { dryDown: false } : {}),
+          ...(nonDryingAction ? { dryDown: false } : {}),
         };
       })
       .filter(Boolean);
