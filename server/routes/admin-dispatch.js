@@ -25,7 +25,7 @@ const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, t
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 
-const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate, dateOnlyString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -354,34 +354,40 @@ function recommendationHistoryFromRecord(record = {}, visitLine = '') {
 async function loadPreviousRecommendations({ customerId, serviceType, serviceId, visitDay }) {
   if (!customerId || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDay || ''))) return [];
   const visitLine = detectServiceLine(serviceType);
-  const rows = await db('service_records')
-    .where({ customer_id: customerId, status: 'completed' })
-    .where('service_date', '<=', visitDay)
-    .orderBy('service_date', 'desc')
-    .orderBy('created_at', 'desc')
-    .orderBy('id', 'desc')
-    .limit(PREVIOUS_RECOMMENDATION_SCAN_LIMIT)
-    .select(
-      'id', 'scheduled_service_id', 'service_type', 'service_line', 'service_date',
-      'structured_notes', 'service_data',
-    )
-    .catch(() => []);
-  const priorVisits = rows
-    .filter((row) => String(row.scheduled_service_id || '') !== String(serviceId || ''))
-    .map((row) => ({ row, history: recommendationHistoryFromRecord(row, visitLine) }))
-    // Apply customer visibility before the three-visit bound so backfills,
-    // incomplete/suppressed primary reports, and internal-only companions
-    // cannot consume one of the customer's visible-history slots.
-    .filter(({ history }) => history.eligible)
-    .slice(0, PREVIOUS_RECOMMENDATION_VISIT_LIMIT);
   const output = [];
-  for (const { row, history } of priorVisits) {
-    const serviceDate = String(row.service_date instanceof Date
-      ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
-    for (const text of history.texts) {
-      output.push({ text, serviceDate, serviceRecordId: row.id });
-      if (output.length >= PREVIOUS_RECOMMENDATION_ITEM_LIMIT) return output;
+  let eligibleVisits = 0;
+  let offset = 0;
+  while (eligibleVisits < PREVIOUS_RECOMMENDATION_VISIT_LIMIT) {
+    const rows = await db('service_records')
+      .where({ customer_id: customerId, status: 'completed' })
+      .where('service_date', '<=', visitDay)
+      .orderBy('service_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .limit(PREVIOUS_RECOMMENDATION_SCAN_LIMIT)
+      .offset(offset)
+      .select(
+        'id', 'scheduled_service_id', 'service_type', 'service_line', 'service_date',
+        'structured_notes', 'service_data',
+      )
+      .catch(() => []);
+    for (const row of rows) {
+      if (String(row.scheduled_service_id || '') === String(serviceId || '')) continue;
+      const history = recommendationHistoryFromRecord(row, visitLine);
+      // Apply customer visibility before the three-visit bound so backfills,
+      // incomplete/suppressed primary reports, and internal-only companions
+      // cannot consume one of the customer's visible-history slots.
+      if (!history.eligible) continue;
+      eligibleVisits += 1;
+      const serviceDate = dateOnlyString(row.service_date) || '';
+      for (const text of history.texts) {
+        output.push({ text, serviceDate, serviceRecordId: row.id });
+        if (output.length >= PREVIOUS_RECOMMENDATION_ITEM_LIMIT) return output;
+      }
+      if (eligibleVisits >= PREVIOUS_RECOMMENDATION_VISIT_LIMIT) break;
     }
+    if (rows.length < PREVIOUS_RECOMMENDATION_SCAN_LIMIT) break;
+    offset += rows.length;
   }
   return output;
 }
@@ -412,9 +418,7 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     // The visit's calendar day as YYYY-MM-DD (same derivation the rest of
     // this file uses for scheduled_date) — never `new Date('YYYY-MM-DD')`,
     // which is UTC midnight, i.e. the previous ET evening.
-    const visitDay = svc.scheduled_date
-      ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
-      : null;
+    const visitDay = dateOnlyString(svc.scheduled_date) || null;
     const previousRecommendations = completionChoicesEnabled
       ? await loadPreviousRecommendations({
         customerId: svc.customer_id,
@@ -439,9 +443,11 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     // cutoff a day early through the Eastern evening. service_date is a
     // DATE column, so the bound is the ET day string itself.
     const sentSinceDay = etDateString(addETDays(new Date(), -90));
-    const [sentRows, prefs] = await Promise.all([
-      svc.customer_id
-        ? db('service_records')
+    let sentRows = [];
+    let prefs = null;
+    if (svc.customer_id) {
+      [sentRows, prefs] = await Promise.all([
+        db('service_records')
           .where({ customer_id: svc.customer_id })
           .whereRaw("structured_notes->'techTips' IS NOT NULL")
           // "sent" means the customer could open it: typedReportDelivery is
@@ -453,28 +459,24 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
           .where('service_date', '>=', sentSinceDay)
           .orderBy('service_date', 'desc')
           .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
-          .catch(() => [])
-        : [],
-      // The real settings, never irrigation_system (defaults on since
-      // 20260828000002 — proves nothing about the schedule the tip asks for).
-      svc.customer_id
-        ? db('property_preferences').where({ customer_id: svc.customer_id })
+          .catch(() => []),
+        // The real settings, never irrigation_system (defaults on since
+        // 20260828000002 — proves nothing about the schedule the tip asks for).
+        db('property_preferences').where({ customer_id: svc.customer_id })
           .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_system_type', 'irrigation_zones', 'rain_sensor', 'irrigation_confirmed_fields')
-          .catch(() => null)
-        : null,
-    ]);
+          .catch(() => null),
+      ]);
+    }
     // Newest first, so the first date seen per id is the most recent send.
     // Values are YYYY-MM-DD calendar days (service_date is a DATE column;
     // pg hands it back as a Date at UTC midnight) — the client formats the
     // day from its components, never through new Date().
-    const lastSent = {};
-    for (const row of sentRows) {
-      const day = String(row.service_date instanceof Date ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
-      const tips = Array.isArray(row.tech_tips) ? row.tech_tips : [];
-      for (const tip of tips) {
-        if (tip?.id && day && !lastSent[tip.id]) lastSent[tip.id] = day;
-      }
-    }
+    const lastSent = Object.fromEntries(sentRows.flatMap((row) => {
+      const day = dateOnlyString(row.service_date) || '';
+      return (Array.isArray(row.tech_tips) ? row.tech_tips : [])
+        .filter((tip) => tip?.id && day)
+        .map((tip) => [tip.id, day]);
+    }).reverse());
     res.json({
       available: true,
       completionChoicesEnabled,

@@ -78,13 +78,21 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
 // recommendation history then prior frozen tips; property_preferences → the
 // irrigation flag.
 function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, calls }) {
-  let serviceRecordRead = 0;
   return (table) => {
     calls.push(table);
     const chain = {};
     let throughDate = null;
-    const passthrough = ['whereRaw', 'orderBy', 'limit', 'select'];
+    let rowLimit = null;
+    let rowOffset = 0;
+    let recommendationRead = false;
+    const passthrough = ['whereRaw', 'orderBy'];
     for (const m of passthrough) chain[m] = () => chain;
+    chain.limit = (value) => { rowLimit = value; return chain; };
+    chain.offset = (value) => { rowOffset = value; return chain; };
+    chain.select = (...columns) => {
+      recommendationRead = columns.includes('id');
+      return chain;
+    };
     chain.where = (...args) => {
       if (table === 'service_records' && args[0] === 'service_date' && args[1] === '<=') {
         throughDate = args[2];
@@ -94,13 +102,13 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     chain.first = async () => (table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : null);
     chain.then = (resolve) => {
       if (table !== 'service_records') return Promise.resolve([]).then(resolve);
-      const reads = recommendationRows === null ? [sentRows] : [recommendationRows, sentRows];
-      const rows = reads[serviceRecordRead++] || [];
+      const rows = recommendationRead ? recommendationRows || [] : sentRows;
       const bounded = throughDate
         ? rows.filter((row) => String(row.service_date instanceof Date
           ? row.service_date.toISOString() : row.service_date || '').slice(0, 10) <= throughDate)
         : rows;
-      return Promise.resolve(bounded).then(resolve);
+      const page = rowLimit == null ? bounded : bounded.slice(rowOffset, rowOffset + rowLimit);
+      return Promise.resolve(page).then(resolve);
     };
     chain.catch = () => chain;
     return chain;
@@ -342,6 +350,71 @@ describe('GET /:serviceId/tech-tips', () => {
 
     expect(res.body.previousRecommendations).toHaveLength(12);
     expect(res.body.previousRecommendations.at(-1).text).toBe('Recommendation 12');
+  });
+
+  test('completion history paginates past more than 500 hidden visits and stops at three visible visits', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    const hiddenRows = Array.from({ length: 501 }, (_, index) => ({
+      id: `hidden-${index}`,
+      scheduled_service_id: `hidden-svc-${index}`,
+      service_line: 'mosquito',
+      service_date: '2026-08-10',
+      structured_notes: { typedReportDelivery: 'internal_only', formRecommendations: [`Hidden ${index}`] },
+    }));
+    const recommendationRows = [
+      ...hiddenRows,
+      {
+        id: 'older-primary', scheduled_service_id: 'older-primary-svc', service_line: 'mosquito', service_date: '2026-08-01',
+        structured_notes: { formRecommendations: ['Primary visible recommendation'] },
+      },
+      {
+        id: 'older-companion', scheduled_service_id: 'older-companion-svc', service_line: 'lawn', service_date: '2026-07-20',
+        structured_notes: { typedReportDelivery: 'internal_only', formRecommendations: ['Hidden lawn recommendation'] },
+        service_data: {
+          companionReportSnapshots: [{
+            type: 'mosquito_event', delivery: 'auto_send', nextStepChips: ['Companion visible recommendation'],
+          }],
+        },
+      },
+      {
+        id: 'third-visible', scheduled_service_id: 'third-visible-svc', service_line: 'mosquito', service_date: '2026-07-01',
+        structured_notes: { formRecommendations: ['Third visible recommendation'] },
+      },
+      {
+        id: 'fourth-visible', scheduled_service_id: 'fourth-visible-svc', service_line: 'mosquito', service_date: '2026-06-01',
+        structured_notes: { formRecommendations: ['Past visit bound'] },
+      },
+    ];
+    const calls = [];
+    mockDbCurrent = scriptedDb({ service: SERVICE, recommendationRows, calls });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([
+      { text: 'Primary visible recommendation', serviceDate: '2026-08-01', serviceRecordId: 'older-primary' },
+      { text: 'Companion visible recommendation', serviceDate: '2026-07-20', serviceRecordId: 'older-companion' },
+      { text: 'Third visible recommendation', serviceDate: '2026-07-01', serviceRecordId: 'third-visible' },
+    ]);
+    expect(JSON.stringify(res.body)).not.toMatch(/Hidden|Past visit bound/);
+    expect(calls.filter((table) => table === 'service_records')).toHaveLength(2);
+  });
+
+  test('completion history stops paginating when hidden history is exhausted', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    const recommendationRows = Array.from({ length: 501 }, (_, index) => ({
+      id: `hidden-${index}`,
+      scheduled_service_id: `hidden-svc-${index}`,
+      service_line: 'mosquito',
+      service_date: '2026-08-01',
+      structured_notes: { visitOutcome: 'incomplete', formRecommendations: [`Hidden ${index}`] },
+    }));
+    const calls = [];
+    mockDbCurrent = scriptedDb({ service: SERVICE, recommendationRows, calls });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([]);
+    expect(calls.filter((table) => table === 'service_records')).toHaveLength(2);
   });
 });
 
