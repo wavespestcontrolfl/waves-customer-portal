@@ -416,6 +416,12 @@ through the final public/PDF reconciliation; only `true` permits a drought
 hypothesis to be rewritten into a coverage finding. Localized-drought cards
 label an explicit technician finding `tech_confirmed`; automated coverage
 advice retains its `area_estimated` label.
+Lawn water insight provenance distinguishes calculated totals, area snapshots,
+photo signals, recorded applications and approved watering plans. Missing work
+or future-task evidence leaves those action fields empty, and the narrative
+overlay cannot rewrite them. Without an approved plan, a water estimate does not
+prescribe an irrigation change. Area-only wet-condition evidence carries no
+photo-observation claim.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots

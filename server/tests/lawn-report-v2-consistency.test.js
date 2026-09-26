@@ -142,6 +142,23 @@ describe('structured moisture evidence owns sprinkler advice', () => {
     expect(report.smsSummary).not.toMatch(/No action needed/);
   });
 
+  test('a lower-priority mowing task prevents the hero from declaring no action', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: baseAssessment({
+        ...CASES.healthy,
+        scores: { ...CASES.healthy.scores, fungusControl: 40 },
+      }),
+      mowingHeight: { heightIn: 2, status: 'below', band: { min: 3.5, max: 4 } },
+    });
+    expect(report.insights.map((card) => [card.category, card.customerAction])).toEqual([
+      ['water', ''],
+      ['mowing', 'Raise the mower one setting.'],
+    ]);
+    expect(report.snapshot.customerAction).toBeNull();
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.smsSummary).not.toMatch(/No action needed/);
+  });
+
   test.each([
     ['none', undefined, false],
     [null, undefined, false],
@@ -355,6 +372,16 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
     total_water_7day_inches: 4.9, target_water_inches_per_week: 1.25, confidence: 'high',
   };
 
+  test('missing water context remains safe for a minimal report and an area snapshot', () => {
+    const { mapWater } = require('../services/service-report/lawn-report-v2');
+    expect(() => buildLawnReportV2({ lawnAssessment: { scores: {} } })).not.toThrow();
+    expect(mapWater(null, WET_SNAPSHOT)).toMatchObject({
+      source: 'area_snapshot',
+      status: 'high',
+      weekPlan: null,
+    });
+  });
+
   test('a conflicting area snapshot is ignored end-to-end when property rainfall is known', () => {
     const assessment = deficitAssessment();
     const baseline = buildLawnReportV2({ lawnAssessment: assessment, applications: APPLICATIONS });
@@ -388,5 +415,8 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
     const noSnap = buildLawnReportV2({ lawnAssessment: assessment, applications: APPLICATIONS });
     // The snapshot is the only water signal here, so it must change the report.
     expect(withSnap.snapshot.rootCause).not.toEqual(noSnap.snapshot.rootCause);
+    const waterInsight = withSnap.insights.find((insight) => insight.category === 'water');
+    expect(waterInsight.provenance.findingSource).toBe('area_snapshot');
+    expect(waterInsight.whatWeSaw).not.toMatch(/photo assessment/i);
   });
 });
