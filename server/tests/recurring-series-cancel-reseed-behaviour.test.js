@@ -560,9 +560,9 @@ describe('the writing wrapper and the batch', () => {
       transitions: [{ id: 'eA', job_id: 'A', from_status: 'pending' }],
     };
     // retried with the same selection: A is already cancelled, B is the late cancel → B is part of {A, B}
-    expect((await intentFor([A, B], standing)).get('B')).toEqual({ rootId: '10', groupIds: ['A', 'B'] });
+    expect((await intentFor([A, B], standing)).get('B')).toEqual({ rootId: '10', groupIds: ['A', 'B'], reductionKey: 'batch:A,B' });
     // retried with just the failed row
-    expect((await intentFor([B], standing)).get('B')).toEqual({ rootId: '10', groupIds: ['A', 'B'] });
+    expect((await intentFor([B], standing)).get('B')).toEqual({ rootId: '10', groupIds: ['A', 'B'], reductionKey: 'batch:A,B' });
     // an earlier reduction that did NOT name B → B is a stand-alone cancel
     const other = { ...standing, declines: [{ metadata: JSON.stringify({ cancelled_service_id: 'A', recurring_parent_id: '10', episode_key: 'eA', batch_ids: ['A', 'C'] }) }] };
     expect((await intentFor([B], other)).has('B')).toBe(false);
@@ -571,7 +571,10 @@ describe('the writing wrapper and the batch', () => {
     expect((await intentFor([B], restored)).has('B')).toBe(false);
     // a fresh 2+ selection is still a reduction on its own
     const B2 = { ...B, id: 'B2' };
-    expect((await intentFor([B, B2], {})).get('B')).toEqual({ rootId: '10', groupIds: ['B', 'B2'] });
+    const fresh = await intentFor([B, B2], {});
+    expect(fresh.get('B')).toEqual({ rootId: '10', groupIds: ['B', 'B2'], reductionKey: expect.any(String) });
+    // one key names the whole selection, so each row's entry names the same reduction
+    expect(fresh.get('B2').reductionKey).toBe(fresh.get('B').reductionKey);
   });
 
   test('recordReseedDeclines: one row per cancelled visit, keyed on its CURRENT episode, carrying the whole reduction group', async () => {
@@ -580,7 +583,7 @@ describe('the writing wrapper and the batch', () => {
       transitions: [{ id: 73, job_id: 22, from_status: 'pending' }, { id: 70, job_id: 22, from_status: 'cancelled', to_status: 'pending' }, { id: 69, job_id: 22, from_status: 'confirmed' }],
     });
     await recordReseedDeclines(makeConn(handler), {
-      customerId: 5, rootId: 10, cancelledIds: [22], batchIds: [22, 24], reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel',
+      customerId: 5, rootId: 10, cancelledIds: [22], batchIds: [22, 24], reductionKey: 'K1', reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel',
     });
     const rows = inserted.filter((row) => row.__table === 'activity_log');
     expect(rows).toHaveLength(1);
@@ -588,7 +591,7 @@ describe('the writing wrapper and the batch', () => {
     expect(rows[0].description).toMatch(/^2 visits of one recurring plan cancelled together/);
     expect(JSON.parse(rows[0].metadata)).toEqual({
       cancelled_service_id: '22', recurring_parent_id: '10', episode_key: '73',
-      reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel', batch_ids: ['22', '24'],
+      reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel', batch_ids: ['22', '24'], reduction_key: 'K1',
     });
   });
 

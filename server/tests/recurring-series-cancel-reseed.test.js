@@ -283,11 +283,30 @@ describe('term / count math (pure)', () => {
     const { own, completing } = standingPlanReductions(entries, current);
     expect([...own].sort()).toEqual(['A', 'C']);
     // B never got an entry → cancelling it completes {A, B}; D has its own (non-standing) entry → judged by its own episode, not C's batch
-    expect([...completing.entries()]).toEqual([['B', ['A', 'B']]]);
+    expect([...completing.entries()]).toEqual([['B', { batchIds: ['A', 'B'], reductionKey: 'batch:A,B' }]]);
     // F: E's entry no longer stands (new episode), so its batch does not either
     expect(completing.has('F')).toBe(false);
     expect(standingPlanReductions([], new Map())).toEqual({ own: new Set(), completing: new Map() });
     expect(standingPlanReductions(entries, null).own.size).toBe(0);
+  });
+
+  test('standingPlanReductions: only an entry from the SAME reduction stops a batch member completing it — an older reduction of that row does not (pre-push audit P1)', () => {
+    // A was trimmed (K0) and restored; then bulk {A, B} (K1): B committed, A failed
+    const entries = [
+      { cancelled_service_id: 'A', episode_key: 'eA0', batch_ids: ['A'], reduction_key: 'K0' },
+      { cancelled_service_id: 'B', episode_key: 'eB', batch_ids: ['A', 'B'], reduction_key: 'K1' },
+    ];
+    const current = new Map([['A', null], ['B', 'eB']]);
+    expect(standingPlanReductions(entries, current).completing.get('A')).toEqual({ batchIds: ['A', 'B'], reductionKey: 'K1' });
+    // A later completed K1 (its own K1 entry), was restored, then cancelled on its own → stand-alone
+    const completed = [...entries, { cancelled_service_id: 'A', episode_key: 'eA1', batch_ids: ['A', 'B'], reduction_key: 'K1' }];
+    expect(standingPlanReductions(completed, new Map([['A', 'eA2'], ['B', 'eB']])).completing.has('A')).toBe(false);
+    // the same selection made twice is two reductions: the older one's entry does not block the newer
+    const again = [
+      { cancelled_service_id: 'A', episode_key: 'eA0', batch_ids: ['A', 'B'], reduction_key: 'K0' },
+      { cancelled_service_id: 'B', episode_key: 'eB1', batch_ids: ['A', 'B'], reduction_key: 'K2' },
+    ];
+    expect(standingPlanReductions(again, new Map([['A', null], ['B', 'eB1']])).completing.get('A')?.reductionKey).toBe('K2');
   });
 
   test('planReductionGroups: 2+ counting plan rows of one root in the request = a reduction; placeholders, boosters, callbacks and lone rows are not (pre-push audit P1)', () => {
@@ -493,7 +512,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(ledger).toBeLessThan(route.indexOf('cancelReseedIds.push(id)'));
     expect(trxClose).toBeGreaterThan(ledger);
     expect(route.slice(transition, trxClose)).toMatch(/const reduction = bulkPlanReductions\.get\(String\(id\)\);\s*if \(reduction && isCountingSourceStatus\(fromStatus\)\) \{/);
-    expect(route.slice(transition, trxClose)).toMatch(/batchIds: reduction\.groupIds,\s*reason: 'batch_series_cancel'/);
+    expect(route.slice(transition, trxClose)).toMatch(/batchIds: reduction\.groupIds, reductionKey: reduction\.reductionKey,\s*reason: 'batch_series_cancel'/);
     // written whatever the reseed gate says
     expect(route).not.toMatch(/cancelReseedsRecurringLive/);
     // the post-commit batch no longer writes the ledger (it would duplicate the in-trx rows)

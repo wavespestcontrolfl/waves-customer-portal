@@ -9925,7 +9925,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const reduction = bulkPlanReductions.get(String(id));
               if (reduction && isCountingSourceStatus(fromStatus)) {
                 await recordReseedDeclines(trx, {
-                  customerId: svc.customer_id, rootId: reduction.rootId, cancelledIds: [id], batchIds: reduction.groupIds,
+                  customerId: svc.customer_id, rootId: reduction.rootId, cancelledIds: [id], batchIds: reduction.groupIds, reductionKey: reduction.reductionKey,
                   reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel',
                 });
               }
@@ -18328,8 +18328,8 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
   const completedBatch = standing?.completing.get(String(cancelledServiceId));
   if (completedBatch) {
     await recordReseedDeclines(trx, {
-      customerId: parent.customer_id, rootId: parentId, cancelledIds: [cancelledServiceId], batchIds: completedBatch,
-      reason: 'batch_series_cancel', source: 'plan-reduction-completion',
+      customerId: parent.customer_id, rootId: parentId, cancelledIds: [cancelledServiceId],
+      batchIds: completedBatch.batchIds, reductionKey: completedBatch.reductionKey, reason: 'batch_series_cancel', source: 'plan-reduction-completion',
     });
     return 'completes_plan_reduction';
   }
@@ -18694,6 +18694,14 @@ async function readBulkPlanReductionIntent(conn, serviceIds) {
   const rows = await conn('scheduled_services').whereIn('id', serviceIds)
     .select('id', 'customer_id', 'status', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
   const intent = planReductionGroups(rows);
+  // One key per selected reduction (per series root), minted here so every
+  // row's ledger entry — each written in its own cancel transaction — names
+  // the same reduction.
+  const keyByRoot = new Map();
+  for (const reduction of intent.values()) {
+    if (!keyByRoot.has(reduction.rootId)) keyByRoot.set(reduction.rootId, require('crypto').randomUUID());
+    reduction.reductionKey = keyByRoot.get(reduction.rootId);
+  }
   const lone = (rows || []).filter((row) => isPlanSeriesRow(row) && isCountingSourceStatus(row.status) && !intent.has(String(row.id)));
   if (!lone.length) return intent;
   const standing = await readStandingPlanReductions(conn, {
@@ -18702,8 +18710,8 @@ async function readBulkPlanReductionIntent(conn, serviceIds) {
   });
   for (const row of lone) {
     const rootId = String(row.recurring_parent_id || row.id);
-    const batch = standing.get(rootId)?.completing.get(String(row.id));
-    if (batch) intent.set(String(row.id), { rootId, groupIds: batch });
+    const completed = standing.get(rootId)?.completing.get(String(row.id));
+    if (completed) intent.set(String(row.id), { rootId, groupIds: completed.batchIds, reductionKey: completed.reductionKey });
   }
   return intent;
 }
@@ -18722,13 +18730,17 @@ async function readBulkPlanReductionIntent(conn, serviceIds) {
 // commit together — no extra lock is needed for that, and none is taken
 // here (the bulk route's per-row transaction holds no series locks to
 // order against).
-async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, batchIds = null, reason, source }) {
+async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, batchIds = null, reductionKey = null, reason, source }) {
   const { cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const ids = [...new Set((cancelledIds || []).map(String))];
   if (!ids.length) return;
   // The whole reduction the row belongs to (the bulk route writes one row
   // per cancel transaction, but the group is the operator's selection).
   const group = batchIds ? [...new Set(batchIds.map(String))] : ids;
+  // The reduction's identity (standingPlanReductions): the bulk route mints
+  // one per selection and a completion reuses its reduction's; a trim is
+  // one reduction per call.
+  const key = reductionKey != null ? String(reductionKey) : require('crypto').randomUUID();
   const history = await conn('job_status_history')
     .whereIn('job_id', ids)
     .orderBy('transitioned_at', 'desc')
@@ -18748,7 +18760,7 @@ async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, ba
       : `${group.length} visits of one recurring plan cancelled together — treated as a plan reduction; this visit will not be added back automatically`,
     metadata: JSON.stringify({
       cancelled_service_id: id, recurring_parent_id: String(rootId), episode_key: episodeKeyFor(id),
-      reason, source, batch_ids: group,
+      reason, source, batch_ids: group, reduction_key: key,
     }),
   })));
 }
