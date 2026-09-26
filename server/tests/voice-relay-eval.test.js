@@ -47,6 +47,10 @@ function record({ agent = [], tools = [], endSession = null, order = null } = {}
 }
 
 const exp = (check, value, severity = 'major', adjudicated = false) => ({ check, value, severity, adjudicated });
+// Everything the read-back callers supply (Codex r10 on #4946: every field is
+// asserted), spread under the per-test phone/address a test varies.
+const RB_FULL_ES = { first_name: 'Diego', last_name: 'Fernández', city: 'Bradenton Beach', zip: '34217', email: 'diego.fernandez@example.com', requested_service: 'Control de plagas trimestral' };
+const RB_FULL_EN = { first_name: 'Marisol', last_name: 'Pena', city: 'Bradenton Beach', zip: '34217', email: 'marisol.pena@example.com', requested_service: 'quarterly pest control' };
 
 // The spoken prohibitions: the regex check and every named spoken check.
 const SPOKEN_PROHIBITIONS = new Set(['spoken_never_matches', 'amount_requires_unit', ...Object.keys(require('../services/eval/voice-relay-spoken-checks').SPOKEN_CHECK_RUNNERS)]);
@@ -946,7 +950,8 @@ describe('voice relay eval — each expect key', () => {
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
     const check = scenario.expect.filter((c) => c.check === 'spoken_matches_any')[index];
     expect(check.severity).toBe('critical');
-    const matches = (text) => check.value.some((source) => new RegExp(source, 'i').test(text));
+    const sources = Array.isArray(check.value) ? check.value : check.value.patterns;
+    const matches = (text) => sources.some((source) => new RegExp(source, 'i').test(text));
     for (const text of compliant) expect([text, matches(text)]).toEqual([text, true]);
     for (const text of violating) expect([text, matches(text)]).toEqual([text, false]);
   });
@@ -1054,6 +1059,36 @@ describe('voice relay eval — each expect key', () => {
       const lateFind = { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 3 };
       const gone = { kind: 'agent', turn: 3, text: es ? 'Ese horario ya no está disponible.' : 'Sorry, that one just got taken.' };
       expect(failing(id, [find1, s3, lateS1, lateFind, gone])).toContain('tool_input_includes');
+    });
+
+    // Codex r10: the booking's pending-confirmation promise only counts when
+    // spoken AFTER the booking receipt — never as a promise made beforehand.
+    test.each(['booking-happy-path', 'spanish-booking-happy-path'])('%s: the confirmation promise must follow the booking', (id) => {
+      const es = id.startsWith('spanish');
+      const check = load(id).expect.filter((c) => c.check === 'spoken_matches_any').find((c) => c.value && c.value.afterTool === 'request_booking');
+      expect(check).toBeTruthy();
+      expect(check.severity).toBe('critical');
+      const promise = { kind: 'agent', turn: 2, text: es ? 'Le vamos a llamar para confirmar.' : "We'll call you to confirm." };
+      const booked = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S2' }, ok: true, receipt: true, turn: 2 };
+      const run = replay._internals.runCheck;
+      expect(run(check, record({ order: [promise, booked] })).status).toBe('fail');
+      expect(run(check, record({ order: [booked, promise] })).status).toBe('pass');
+    });
+
+    // Codex r10: every detail the caller supplied must be captured exactly.
+    test.each([
+      ['spanish-read-back-grouping', { first_name: 'Diego', last_name: 'Fernández', address_line1: '348 Ohio Avenue', city: 'Bradenton Beach', zip: '34217', email: 'diego.fernandez@example.com', callback_phone: '941-555-0246', requested_service: 'Control de plagas trimestral' }],
+      ['read-back-grouping', { first_name: 'Marisol', last_name: 'Pena', address_line1: '1220 Gulf Drive North', city: 'Bradenton Beach', zip: '34217', email: 'marisol.pena@example.com', callback_phone: '941-555-0134', requested_service: 'quarterly pest control' }],
+    ])('%s: every supplied lead field is asserted', (id, full) => {
+      const check = load(id).expect.find((c) => c.check === 'capture_lead_input_asserts');
+      const run = replay._internals.runCheck;
+      const cap = (input) => record({ order: [{ kind: 'tool', name: 'capture_lead', input, ok: true, receipt: true }] });
+      expect(run(check, cap(full)).status).toBe('pass');
+      for (const field of ['first_name', 'last_name', 'email', 'city', 'zip', 'requested_service']) {
+        const partial = { ...full };
+        delete partial[field];
+        expect([field, run(check, cap(partial)).status]).toEqual([field, 'fail']);
+      }
     });
 
     test.each(['read-back-grouping', 'spanish-read-back-grouping'])('%s: the lead capture is blocking', (id) => {
@@ -4966,7 +5001,7 @@ describe('voice relay eval — named spoken checks', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'read-back-grouping');
     expect(scenario.expect.find((c) => c.check === 'spoken_matches_any').severity).toBe('critical');
-    const captured = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550134', address_line1: '1220 Gulf Drive North' }, ok: true, receipt: true };
+    const captured = { kind: 'tool', name: 'capture_lead', input: { ...RB_FULL_EN, callback_phone: '9415550134', address_line1: '1220 Gulf Drive North' }, ok: true, receipt: true };
     const silent = replay._internals.evaluateChecks(scenario, record({ order: [captured, { kind: 'agent', text: 'Thanks, a Waves team member will follow up.' }] }));
     expect(silent.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: silent })).toBe('fail');
@@ -5550,14 +5585,14 @@ describe('voice relay eval — named spoken checks', () => {
   test('spanish-read-back-grouping blocks capture_lead with a wrong phone number, and only_language blocks English', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-read-back-grouping');
-    const wrongNumber = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550999', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
+    const wrongNumber = { kind: 'tool', name: 'capture_lead', input: { ...RB_FULL_ES, callback_phone: '9415550999', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
     const wrong = replay._internals.evaluateChecks(scenario, record({ order: [wrongNumber, { kind: 'agent', text: 'Gracias, un miembro del equipo le dará seguimiento.' }] }));
     // Critical since Codex r9 on #4946 (the scenario's required action is an
     // exact lead capture), in parity with the EN original — a wrong number
     // now fails the scenario itself.
     expect(wrong.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: wrong })).toBe('fail');
-    const rightCapture = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
+    const rightCapture = { kind: 'tool', name: 'capture_lead', input: { ...RB_FULL_ES, callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
     const english = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Thank you, a Waves team member will follow up.' }] }));
     expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
     // Codex round-3 P1: the readback phrase is now critical (parity with the
@@ -5818,13 +5853,13 @@ describe('voice relay eval — named spoken checks', () => {
   // digit glued on, or a street missing/using the wrong suffix, used to
   // still substring-match and pass.
   test.each([
-    ['spanish-read-back-grouping', { callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, 'pass'],
-    ['spanish-read-back-grouping', { callback_phone: '99415550246', address_line1: '348 Ohio Avenue' }, 'fail'],
-    ['spanish-read-back-grouping', { callback_phone: '9415550246', address_line1: '3480 Ohio Avenue' }, 'fail'],
-    ['spanish-read-back-grouping', { callback_phone: '9415550246', address_line1: '348 Ohio Ave' }, 'pass'],
-    ['read-back-grouping', { callback_phone: '9415550134', address_line1: '1220 Gulf Drive North' }, 'pass'],
-    ['read-back-grouping', { callback_phone: '9415550134', address_line1: '1220 Gulf Drive' }, 'fail'],
-    ['read-back-grouping', { callback_phone: '19415550134', address_line1: '1220 Gulf Drive North' }, 'fail'],
+    ['spanish-read-back-grouping', { ...RB_FULL_ES, callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, 'pass'],
+    ['spanish-read-back-grouping', { ...RB_FULL_ES, callback_phone: '99415550246', address_line1: '348 Ohio Avenue' }, 'fail'],
+    ['spanish-read-back-grouping', { ...RB_FULL_ES, callback_phone: '9415550246', address_line1: '3480 Ohio Avenue' }, 'fail'],
+    ['spanish-read-back-grouping', { ...RB_FULL_ES, callback_phone: '9415550246', address_line1: '348 Ohio Ave' }, 'pass'],
+    ['read-back-grouping', { ...RB_FULL_EN, callback_phone: '9415550134', address_line1: '1220 Gulf Drive North' }, 'pass'],
+    ['read-back-grouping', { ...RB_FULL_EN, callback_phone: '9415550134', address_line1: '1220 Gulf Drive' }, 'fail'],
+    ['read-back-grouping', { ...RB_FULL_EN, callback_phone: '19415550134', address_line1: '1220 Gulf Drive North' }, 'fail'],
     ['spanish-capture', { first_name: 'Luis', city: 'Bradenton' }, 'pass'],
     ['spanish-capture', { first_name: 'Luisa', city: 'Bradenton' }, 'fail'],
     ['spanish-capture', { first_name: 'Luis', city: 'Bradentonville' }, 'fail'],

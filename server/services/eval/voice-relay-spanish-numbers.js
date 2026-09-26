@@ -174,8 +174,26 @@ const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(?:(d[oó]lares?|
 const PRICE_VERB_ES = '(?:cuestan?|costar[íi]an?|costar[áa]n?|valen?|salen?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a))';
 const PRICE_VERB_WORD_RUN_RE = new RegExp(`(\\b${PRICE_VERB_ES}\\s+(?:de\\s+)?)(${NUMBER_RUN_RE_SRC})`, 'gi');
 
+// Codex r10 on #4946: "ciento diecinueve con noventa y nueve por aplicación"
+// has no currency word or price verb, so the passes below would convert the
+// cents run on its own (it sits right before "por aplicación") and leave
+// "ciento diecinueve con 99" — whole and cents parsed as two figures. The
+// whole "<words> con <words|digits> (centavos)" phrase converts FIRST, in
+// one step, whenever it reads as a price (a whole of 10+, cents 1–99, and a
+// price context right after it).
+const WHOLE_AND_CENTS_WORDS_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})con\\s+(\\d{1,2}(?!\\d)\\s*|${NUMBER_RUN_RE_SRC})(?:centavos?\\s*)?(?=(?:d[oó]lares?\\b|por\\b|cada\\b|al\\b|[.,;!?]|$))`, 'gi');
+function convertWholeAndCents(text) {
+  return text.replace(WHOLE_AND_CENTS_WORDS_RE, (match, wholeRun, centsRun) => {
+    const whole = parseSpanishCardinal(wholeRun);
+    const t = centsRun.trim();
+    const cents = /^\d{1,2}$/.test(t) ? Number(t) : parseSpanishCardinal(t);
+    if (!Number.isFinite(whole) || whole < 10 || !Number.isInteger(cents) || cents < 1 || cents > 99) return match;
+    return `${whole}.${String(cents).padStart(2, '0')}${/\s$/.test(match) ? ' ' : ''}`;
+  });
+}
+
 function convertPriceWordRuns(text) {
-  const out = text.replace(PRICE_WORD_RUN_RE, (match, run, currencyWord) => {
+  const out = convertWholeAndCents(text).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount)) return match;
     if (currencyWord) return `${amount} ${currencyWord}`;

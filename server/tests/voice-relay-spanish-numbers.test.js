@@ -127,12 +127,16 @@ describe('normalizeSpanishSpokenText — cents merge into one amount', () => {
     ['Ciento diecinueve dólares con noventa y nueve centavos por aplicación.', '119.99 dólares por aplicación.'],
     ['El mejorado cuesta ciento diecinueve con noventa y nueve por aplicación.', 'El mejorado cuesta 119.99 por aplicación.'],
     ['El mejorado cuesta 119 dólares con 99 centavos por aplicación.', 'El mejorado cuesta 119.99 dólares por aplicación.'],
+    // Codex r10: no currency word, no price verb — still one amount.
+    ['El mejorado es ciento diecinueve con noventa y nueve por aplicación.', 'El mejorado es 119.99 por aplicación.'],
+    ['Ciento diecinueve con noventa y nueve dólares por aplicación.', '119.99 dólares por aplicación.'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });
   test.each([
     'Cuesta 119 dólares por aplicación.',
     'Cuesta 119 dólares con la aplicación incluida.',
+    'Viene con dos técnicos.',
   ])('leaves a non-cents "con" alone: %s', (input) => {
     expect(normalizeSpanishSpokenText(input)).toBe(input);
   });

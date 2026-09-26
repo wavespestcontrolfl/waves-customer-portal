@@ -654,6 +654,21 @@ describe('summarizeCondition — real per-round usage (cache-hit logging, this P
     expect(allCrashed.usage.complete).toBe(false);
   });
 
+  // Codex r10 on #4946: the usage container always exists, so completed
+  // model rounds that carried NO usage block are missing telemetry too.
+  test('successful model rounds without usage blocks mark the condition incomplete', () => {
+    const uninstrumented = {
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, modelRounds: 2, usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 } },
+        attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1, modelRounds: 2, usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 } } }],
+      },
+    };
+    const s = summarizeCondition('x', [uninstrumented]);
+    expect(s.usage.missingTelemetryRuns).toBe(1);
+    expect(s.usage.complete).toBe(false);
+  });
+
   test('no usage anywhere (an older/mocked result summary) reports zero counts and a null — never NaN or a false zero — cacheHitRate', () => {
     const runs = [{
       condition: 'x', ranOk: true, inconclusive: false,

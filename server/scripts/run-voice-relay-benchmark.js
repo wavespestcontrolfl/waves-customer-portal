@@ -437,8 +437,14 @@ function summarizeCondition(id, runs) {
   // from every aggregate), or a completed run with an attempt that carries
   // no usage block — still spent tokens this condition cannot count (Codex
   // pre-push, PR #4946). Any such run also makes the totals a lower bound.
+  // Codex r10: summarize() always creates the usage container, so its mere
+  // presence proves nothing — every successful model round (modelRounds)
+  // must have carried a usage block (usage.rounds), or an SDK/instrumentation
+  // regression would present zero tokens as complete data.
+  const instrumented = (a) => a && a.summary && a.summary.usage && typeof a.summary.usage === 'object'
+    && (a.summary.usage.rounds || 0) >= (a.summary.modelRounds || 0);
   const withTelemetry = completed.filter((r) => Array.isArray(r.result.attempts) && r.result.attempts.length > 0
-    && r.result.attempts.every((a) => a && a.summary && a.summary.usage && typeof a.summary.usage === 'object'));
+    && r.result.attempts.every(instrumented));
   usage.missingTelemetryRuns = runs.length - withTelemetry.length;
   usage.complete = usage.incompleteRounds === 0 && usage.missingTelemetryRuns === 0;
 

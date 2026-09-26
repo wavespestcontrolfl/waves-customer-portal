@@ -181,10 +181,14 @@
     },
     {
      "check": "spoken_matches_any",
-     "value": [
-      "\\b(?:will|['\u2019]ll|shall|going to|gonna)\\s+(?!not\\b|never\\b)(?:\\w+\\s+){0,4}?(?:follow up|reach out|call|text|contact|be in touch|get back|give you a call|touch base|confirm|lock it in)\\b",
-      "\\bnot (?:yet )?confirmed\\b|\\bpending\\b"
-     ],
+     "value": {
+      "patterns": [
+       "\\b(?:will|['\u2019]ll|shall|going to|gonna)\\s+(?!not\\b|never\\b)(?:\\w+\\s+){0,4}?(?:follow up|reach out|call|text|contact|be in touch|get back|give you a call|touch base|confirm|lock it in)\\b",
+       "\\bnot (?:yet )?confirmed\\b|\\bpending\\b"
+      ],
+      "fromTurn": 1,
+      "afterTool": "request_booking"
+     },
      "severity": "critical"
     },
     {
@@ -1849,15 +1853,19 @@
     },
     {
      "check": "spoken_matches_any",
-     "value": [
-      "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
-      "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
-      "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
-      "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
-      "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
-      "\\b(?:todav[i\u00ed]a\\s+)?no\\s+(?:est[a\u00e1]\\s+)?confirmad[ao]\\b|\\bpendiente\\b|\\bpara\\s+confirmar\\b"
-     ],
+     "value": {
+      "patterns": [
+       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
+       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
+       "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
+       "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+       "\\b(?:todav[i\u00ed]a\\s+)?no\\s+(?:est[a\u00e1]\\s+)?confirmad[ao]\\b|\\bpendiente\\b|\\bpara\\s+confirmar\\b"
+      ],
+      "fromTurn": 1,
+      "afterTool": "request_booking"
+     },
      "severity": "critical"
     },
     {
@@ -2512,6 +2520,12 @@
     {
      "check": "capture_lead_input_asserts",
      "value": {
+      "first_name": ["^\\s*diego\\s*$"],
+      "last_name": ["^\\s*fern[a\u00e1]ndez\\s*$"],
+      "email": ["^\\s*diego\\.fernandez@example\\.com\\s*$"],
+      "city": ["^\\s*bradenton\\s+beach\\s*$"],
+      "zip": ["^\\s*34217\\s*$"],
+      "requested_service": ["(?:control\\s+de\\s+plagas|pest\\s+control)[\\s\\S]*(?:trimestral|quarterly)", "(?:trimestral|quarterly)[\\s\\S]*(?:control\\s+de\\s+plagas|plagas|pest)"],
       "callback_phone": [
        "^\\s*9415550246\\s*$",
        "^\\s*941-555-0246\\s*$",
@@ -4457,6 +4471,12 @@
     {
      "check": "capture_lead_input_asserts",
      "value": {
+      "first_name": ["^\\s*marisol\\s*$"],
+      "last_name": ["^\\s*pe[n\u00f1]a\\s*$"],
+      "email": ["^\\s*marisol\\.pena@example\\.com\\s*$"],
+      "city": ["^\\s*bradenton\\s+beach\\s*$"],
+      "zip": ["^\\s*34217\\s*$"],
+      "requested_service": ["quarterly[\\s\\S]*pest", "pest[\\s\\S]*quarterly"],
       "callback_phone": [
        "^\\s*9415550134\\s*$",
        "^\\s*941-555-0134\\s*$",
