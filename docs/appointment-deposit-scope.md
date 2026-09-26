@@ -42,12 +42,12 @@ The link Adam is describing already exists end-to-end — minus the dollar amoun
 | Piece | State | Where |
 |---|---|---|
 | Per-appointment "secure your appointment" link (`/secure/:token`): saves card, records v10 consent, enrolls Auto Pay | Built, dark (`APPOINTMENT_CARD_REQUEST` + inactive `secure_appointment_card` SMS template) | `server/services/appointment-card-request.js`, `server/routes/secure-card-public.js`, `client/src/pages/SecureAppointmentPage.jsx` |
-| New Appointment sheet checkbox "Text card-on-file link (Auto Pay setup)" (the screenshot) | Built, hidden while lane dark | `CreateAppointmentModal.jsx:2566`, `admin-schedule.js:3731` |
+| New Appointment sheet checkbox "Text card-on-file link (Auto Pay setup)" (the screenshot) | Built, hidden while lane dark | `CreateAppointmentModal.jsx:6003`, `admin-schedule.js:19453` |
 | Per-visit admin "Text card / Auto Pay link" button + status card | Built | `SchedulePage.jsx:1201`, `MobileAppointmentDetailSheet.jsx:501`, `admin-schedule.js:7777` |
 | AI call pipeline auto-sends the same link post-booking | Built, wired | `call-recording-processor.js:9049` |
 | /book wizard inline card step | Built | `booking.js:2586` |
 | One-text-ever + one-request-per-visit idempotency, auto-secure from saved card, payer/first-time/priced-visit guards | Built | `appointment-card-request.js` |
-| $49 late-cancel/no-show fee disclosure on the invite + page | Built (fee sourced from `pricing_config.estimate_card_hold`) | `appointment-card-request.js:122` |
+| $75 late-cancel/no-show fee disclosure on the invite + page (raised from $49 by the 2026-08-01 ruling; already-disclosed $49 holds stay frozen at their consented amount) | Built (fee sourced from `pricing_config.estimate_card_hold`) | `appointment-card-request.js:122` |
 | Customer appointment page with one-tap pending→confirmed | Built, dark (`GATE_APPOINTMENT_PAGE`) | `appointment-public.js`, `AppointmentPage.jsx` |
 | Pay-and-save-in-one Stripe primitive (PaymentIntent + `setup_future_usage:'off_session'` → consent → enroll) | **Live** on the invoice pay page | `stripe.js:3312`, `pay-v2.js:896–994`, webhook mirror |
 | Deposit ledger machinery (face-value credit, negative `deposit_credit` invoice line, refund sweeps, dispute handling, card-surcharge quote/finalize) | Built for **estimates only**, retired dark | `estimate-deposits.js`, `estimate_deposits` table |
@@ -83,9 +83,14 @@ Light `APPOINTMENT_CARD_REQUEST` + activate the SMS template (and optionally
   (`chargeNoShowFee` requires an `estimate_card_holds` row), and the completion
   auto-charge fires only for `per_application` billing-mode customers
   (`admin-dispatch.js:7222`). A one-time customer's completion invoice goes out as
-  a pay link; the disclosed $49 fee has no automated charge path on this lane.
+  a pay link; the disclosed $75 fee has no automated charge path on this lane.
   The saved card + v10 consent still permit a manual office charge per disclosed
   terms.
+  **Update 2026-09-26:** one-time completion invoices now auto-charge the
+  /secure-consented card, capped at the visit's stamped estimated_price, behind
+  `GATE_APPT_CARD_COMPLETION_CHARGE` (`complete-scheduled-service.js:10773-10786`,
+  `feature-gates.js:65, 287`). The no-show/late-cancel fee still auto-charges
+  only for estimate card holds.
 
 ### Option B — deposit variant on the same lane (the build)
 Appointments flagged "deposit required, $X" send the same `/secure` link, but the

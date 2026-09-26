@@ -56,7 +56,7 @@ consent checkbox at card entry is the authorization artifact.
 | Autopay enrollment on consent (idempotent, ACH-health guarded, deferred while ACH processing) | Live | `server/services/autopay-enrollment.js`, pay-v2 `/consent` + `/setup-complete`, stripe-webhook mirror |
 | Per-application completion auto-charge (invoice minted at completion → saved method charged inline; decline falls back to pay-link SMS, non-blocking; STRIPE_CHARGED_DB_FAILED parks `processing`) | Live | `server/routes/admin-dispatch.js` (~4911–5025) |
 | Card-hold completion charge + no-show fee + recap path + fee settlement as paid refundable invoice | Built (behind `ONE_TIME_CARD_HOLD`) | `estimate-card-holds.js`, `admin-dispatch.js` (~5027–5049) |
-| Recurring card-on-file at accept, Auto Pay by default (dark: `RECURRING_CARD_ON_FILE`) | **Built and reverted** — never lit, no prod artifacts; clean restore available | PR #2668 (squash `ae2f2c5127`), reverted by PR #2671 (`068f64e`) |
+| Recurring card-on-file at accept, Auto Pay by default (dark: `RECURRING_CARD_ON_FILE`) | **Restored** (PR #2680, `e8f0cd6118`) — PR #2668 (squash `ae2f2c5127`) was reverted by PR #2671 (`068f64e`), then restored in code behind the flag | `server/services/recurring-card-on-file.js` |
 | Card-expiry warning cron (60-day lookahead) + pre-charge reminders (monthly mode only) | Live, SMS legs gated | `server/services/autopay-notifications.js`, `GATE_AUTOPAY_CUSTOMER_SMS` |
 | Deposit-abandonment recovery SMS (2–72h window, fail-closed) | Built, dark (`GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS`) — **pattern to copy**; no card-hold equivalent exists | `estimate-deposits.js` (`assessDepositFollowUpEligibility`), `estimate-follow-up.js` |
 | AI call-pipeline booking dedup (Call SID marker, appointment idempotency key, advisory lock, confirmation-SMS content dedup, known-caller re-confirmation guard) | Live | `server/services/call-recording-processor.js` (`findExistingCallAppointment` ~1732, booking ~5883+) |
@@ -116,6 +116,12 @@ heads-up per runbook §3.
 *Acceptance:* runbook §4 smoke test (all six steps) on owner-controlled estimates.
 
 ### Phase 2 — Restore #2668: recurring card-on-file at accept
+
+**Status update:** the restore shipped as PR #2680 (`e8f0cd6118`) — `recurring-card-on-file.js`
+exists and is wired into billing-cron, scheduler, estimate-follow-up, appointment-card-request,
+stripe-webhook and estimate-public, gated by `RECURRING_CARD_ON_FILE`.
+The steps below are retained as the spec-deltas record; check the restored module before
+re-applying any of them.
 
 `git revert 4e92ea07d` (the #2671 revert commit) on a feature branch, then apply
 spec deltas before lighting `RECURRING_CARD_ON_FILE`:

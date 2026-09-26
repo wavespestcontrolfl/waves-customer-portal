@@ -18,9 +18,9 @@ Single source of truth for what this engine prices, how, and with what constants
 | `DRIVE_TIME` | 20 min | Per-visit drive allowance baked into labor cost |
 | `ADMIN_ANNUAL` | $51 | Per-service/yr admin overhead (billing, scheduling, CRM) |
 | `MARGIN_FLOOR` | 35% | Margin REPORTING threshold for recurring lines (enforcement removed 2026-07-17 — owner ruling "forget all floors") |
-| `DIRECT_COST_RATIO_TARGET_TS` | 43% | Tree & Shrub direct-cost ratio target |
+| `MARGIN_TARGET_TS` | 45% | Tree & Shrub admin-inclusive margin target |
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
-| `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 3.99% added at checkout) |
+| `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 2.9% added at checkout) |
 
 **Service zones** (routing/metadata only; no pricing effect):
 
@@ -48,13 +48,13 @@ Single source of truth for what this engine prices, how, and with what constants
 | Service | Recurring? | One-Time? | Tier qualifier (WG)? |
 |---|---|---|---|
 | Pest Control | ✅ quarterly / bimonthly / monthly | ✅ | ✅ |
-| Lawn Care | ✅ basic/standard/enhanced/premium | ✅ per-treatment | ✅ |
+| Lawn Care | ✅ enhanced/premium (standard hidden 2026-09-24; basic retired 2026-08-04) | ✅ per-treatment | ✅ |
 | Tree & Shrub | ✅ standard/enhanced (light retired 2026-09-24) | — | ✅ |
 | Palm Injection | ✅ (4 treatment types) | — | ❌ flat credit only |
 | Mosquito | ✅ Seasonal/Monthly | ✅ treatable area | ✅ |
 | Termite Bait | ✅ monthly subscription | install only | ✅ |
 | Rodent | ✅ bait subscription + trapping | — | ❌ excluded from % |
-| WDO Inspection | — | ✅ (bracketed) | — |
+| WDO Inspection | — | ✅ ($250 flat) | — |
 | Specialty (plugging, top-dressing, dethatching, trenching, BoraCare, pre-slab Termidor, foam-drill, German roach, bed bug, flea, wasp, exclusion) | varies | mostly one-time | varies |
 
 ---
@@ -80,8 +80,8 @@ Tree density is excluded from pest control entirely: prices since 2026-07-16, an
 
 **Production diagnostics:** pest results include `productionDiagnostics` with estimated minutes, minute breakdown, `pricingConfidence` (`high`/`medium`/`low`), and `reviewReasons`. This is shadow-only and does not drive price until calibrated against Bouncie/on-site actuals.
 
-**Frequency discounts (v1 — currently live):** quarterly 1.00, bimonthly 0.85, monthly 0.70
-**v2 (experimental):** quarterly 1.00, bimonthly 0.88, monthly 0.78
+**Frequency discounts (v2 — currently live, owner directive 2026-07-23):** quarterly 1.00, bimonthly 0.88, monthly 0.78
+**v1 (replay-only, historical):** quarterly 1.00, bimonthly 0.85, monthly 0.70
 
 **Margin report (post-discount):** since the 2026-07-17 owner ruling ("forget all floors") the guard is REPORT-ONLY by default for Tree & Shrub and recurring pest. Discounts apply exactly as configured; the line reports displayed margin `(annual − costs.annualCost) / annual` as `finalMargin` plus `belowMarginFloor` / `belowProgramFloor` flags for the owner/estimator to judge — the signals compute UNCONDITIONALLY (the pest floor reference `programFloorAnnual` is always emitted), and the admin estimator renders them in its Pricing Review Notes panel. **Manual** owner discounts emit warn-only entries in `summary.marginWarnings` (`manual_discount_below_margin_floor`, `manual_discount_below_pest_program_floor`) and set `manualMarginWarning`/`manualFinalMargin` on the line — also unconditional, never capped. The pest post-discount program floor is DISARMED by default (`PEST.enforceFloorPostDiscount` false via migration 20260717120000); re-arming the DB flag (`pricing_config` `pest_base.enforce_floor_post_discount=true`) restores FULL enforcement end to end: `applyMarginGuard` lifts the saved WaveGuard-discounted pest total to the cadence floor, `service-pricing` stamps `programFloor*` tier metadata, and `estimate-public` clamps the public view/accept reprice to the same floor — save and accept always agree. The margin floor itself has no re-arm key and stays report-only.
 
@@ -91,7 +91,7 @@ Tree density is excluded from pest control entirely: prices since 2026-07-16, an
 
 **Formula:** bracket lookup by `(track, tier, sqft)` → linear interpolation between rows.
 
-**Tiers:** basic 4x/yr · standard 6x · enhanced 9x · premium 12x
+**Tiers:** enhanced 9x · premium 12x. Standard 6x is hidden from new quotes since 2026-09-24 (requests fall back to enhanced); basic 4x was retired 2026-08-04.
 
 **Tracks:** `st_augustine` · `bermuda` · `zoysia` · `bahia` (bracket tables in `constants.js:LAWN_BRACKETS`)
 
@@ -107,9 +107,9 @@ into `priceLawnCare`.
 
 ## 5. Tree & Shrub
 
-**Formula:** `annualDirectCost = materialCost + laborAnnual`, then `annualPrice = annualDirectCost / 0.43`.
+**Formula:** `annualDirectCost = materialCost + laborAnnual`, then `annualPrice = (annualDirectCost + ADMIN_ANNUAL) / (1 - 0.45)`, with the monthly price floored at the tier's pre-discount floor.
 
-Tree & Shrub uses a 43% direct-cost ratio target, not a 43% margin target. This usually produces roughly 50%+ service-level margin after admin before final discounts.
+Tree & Shrub uses a 45% admin-inclusive margin target (`TREE_SHRUB.marginTarget`), which replaced the retired v4.x 0.43 direct-cost ratio. Displayed margin equals 45% whenever the monthly floor does not bind.
 
 | Tier (sold) | Freq | Floor (monthly, pre-discount) |
 |---|---|---|
@@ -162,15 +162,15 @@ Palm injection pricing requires explicit `treatmentType` and positive integer `p
 
 **Formula:** `basePrices[mosquitoLotCategory][programIndex] × pressureMultiplier`, pressure capped at 2.0x.
 
-**Base prices by treatable area × program:**
+**Base prices by treatable area × program** (repriced 2026-08-08, owner directive: +5% across the board):
 
 | Treatable bucket | seasonal9 | monthly12 |
 |---|---|---|
-| SMALL (<8k sf) | $105 | $90 |
-| QUARTER (8k-12k sf) | $115 | $100 |
-| THIRD (12k-18k sf) | $130 | $115 |
-| HALF (18k-35k sf) | $155 | $135 |
-| ACRE (35k+ sf) | $195 | $175 |
+| SMALL (<8k sf) | $77 | $69 |
+| QUARTER (8k-12k sf) | $80 | $72 |
+| THIRD (12k-18k sf) | $83 | $77 |
+| HALF (18k-35k sf) | $90 | $81 |
+| ACRE (35k+ sf) | $102 | $90 |
 
 **Visits/yr:** seasonal9 = 9 · monthly12 = 12
 
@@ -180,14 +180,14 @@ Palm injection pricing requires explicit `treatmentType` and positive integer `p
 
 ## 8. Termite Bait
 
-**Install formula:** `stationCount × (stationCost + laborMaterial + misc) × installMultiplier` (1.75x) × `perimeterMultiplier`
+**Install formula:** `stationCount × (stationCost + laborMaterial + misc) × installMultiplier` (1.45x, set Apr 2026 after competitive review; prior 1.75x is retired) × `perimeterMultiplier`
 
 - Standard perimeter 1.25, complex 1.35
 - Station spacing 10 ft, min 8 stations
-- **Advance:** $14 station, $5.25 labor/material, $0.75 misc
+- **Advance:** $13.16 station, $5.25 labor/material, $0.75 misc
 - **Trelona:** $24 station, same labor/misc
 
-**Monitoring subscription:** Basic $35/mo, Premier $65/mo.
+**Monitoring subscription:** the former flat Basic($35)/Premier($65) tiers are retired. Priced by station count in 5-station brackets: `baseMonthly $19 + stepMonthly $5 × max(0, ceil(stations/5) − 2)` (≤10 stations → $19/mo · 11-15 → $24/mo · 16-20 → $29/mo · 21-25 → $34/mo · 26-30 → $39/mo …), displayed and billed per application (monthly × 12 ÷ 4 visits), checked and billed quarterly.
 
 ---
 
@@ -224,7 +224,7 @@ Standalone prices (customer not on WaveGuard). Applied via `pricePestControlOneT
 
 Then × 1.50 standalone multiplier on top of recurring per-app rate. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $115 floor re-applied.
 
-**Mosquito one-time:** based on mosquito treatable area, not gross lot. SMALL 0-7,500 = $225 · STANDARD 7,501-11,000 = $275 · LARGE 11,001-16,000 = $325 · XL 16,001-24,000 = $385 · ESTATE 24,001-32,000 = $425 · ACRE_CLASS 32,001-43,560 = $475 · OVER_ACRE = $475 + $75 per additional 10,000 sq ft and manual review. Add-ons: stations × $75 and Bti dunks × $15. Urgency and WaveGuard tier discounts do not apply.
+**Mosquito one-time:** based on mosquito treatable area, not gross lot (repriced 2026-08-08, owner directive: +5% across the board on buckets and the over-acre increment; the station/dunk add-ons are product-cost-linked and excluded from that raise). Anchor prices, interpolated between anchors: SMALL 7,500 sq ft = $156 · STANDARD 11,000 = $177 · LARGE 16,000 = $198 · XL 24,000 = $219 · ESTATE 32,000 = $251 · ACRE_CLASS 43,560 = $282 · OVER_ACRE = $282 + $42 per additional 10,000 sq ft and manual review. Add-ons: stations × $75 and Bti dunks × $15. Urgency and WaveGuard tier discounts do not apply.
 
 > **Note:** Public quote wizard (`public-quote.js`) is recurring-only. One-time and "not sure" frequencies divert to `/api/leads` (lead-webhook) for human triage — engine doesn't price them from the homepage form.
 
@@ -300,14 +300,14 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 | Flea initial | — | floor $185 (base $225) | follow-up floor $95 |
 | Wasp | — | tiered $150/$250/$435/$775 | free with recurring pest |
 | Exclusion | — | $150 | simple/moderate/advanced per-point ($37.50/$75/$150); inspection $85 |
-| WDO inspection | — | — | ≤2500 $175 · ≤3500 $200 · >3500 $225 |
+| WDO inspection | — | — | $250 flat |
 
 ---
 
 ## 14. Payment Adjustments
 
 **ACH discount:** retired (0%). Kept as a constant for legacy-caller safety.
-**Card surcharge:** 3.99% added at checkout, not baked into engine output.
+**Card surcharge:** 2.9% added at checkout, not baked into engine output.
 
 ---
 
@@ -320,4 +320,4 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 - TERMITE monitoring subscription pricing
 - RODENT bait subscription pricing
 - ONE_TIME pest multiplier (2.2× off quarterly) + floor rationale
-- TREE_SHRUB 43% target vs 35% global floor
+- TREE_SHRUB 45% target vs 35% global floor

@@ -48,22 +48,23 @@ If a change is unavoidable, raise/lower in 0.025 (2.5pp) increments and
 re-run `/admin/pricing-config/margin-check` against representative property
 profiles before shipping.
 
-### `MARGIN_TARGET_TS = 0.43`
+### `MARGIN_TARGET_TS = 0.45`
 **Where:** `constants.js` `GLOBAL.MARGIN_TARGET_TS`, used by
-`service-pricing.priceTreeShrub` as the divisor when back-calculating
-price from cost.
+`service-pricing.priceTreeShrub` as the admin-inclusive margin target when
+back-calculating price from cost: `price = (directCost + ADMIN_ANNUAL) / (1 - 0.45)`.
 
 **Why higher than the global floor.** Tree & Shrub material costs are the
 most volatile in the catalog (chemical spot pricing changes month-to-month
-on imidacloprid, propiconazole, paclobutrazol). The 43% target builds in
-an 8-point cushion above the 35% floor specifically to absorb material
+on imidacloprid, propiconazole, paclobutrazol). The 45% target builds in
+a cushion above the 35% floor specifically to absorb material
 swings without re-pricing the whole bracket.
 
-> **Naming caution.** `directCostRatioTarget` (0.43) is a *direct-cost ratio*,
-> not a margin target: price = directCost / 0.43, i.e. direct costs are
-> targeted at 43% of price, leaving ~57% gross before the admin allocation.
-> The code (`constants.js` `TREE_SHRUB.directCostRatioTarget`) is authoritative;
-> see its comment block for the full semantics.
+> **Naming caution.** The retired pre-v4.6 `directCostRatioTarget` (0.43) was
+> a *direct-cost ratio*, not a margin target: price = directCost / 0.43, i.e.
+> direct costs were targeted at 43% of price, leaving ~57% pre-admin gross on
+> an inflated material rate. `MARGIN_TARGET_TS` (0.45) replaced it as an
+> admin-inclusive margin target. The code (`constants.js` `GLOBAL.MARGIN_TARGET_TS`)
+> is authoritative; see its comment block for the full semantics.
 
 ### Tree & Shrub program cadence (tiers)
 **Where:** `constants.js` `TREE_SHRUB.tiers`, `recommendedTier`.
@@ -101,9 +102,9 @@ cadence, not markup.
 **How to change.** Visit cadence is a customer-facing program contract: a tier
 change needs a `pricing_changelog` entry and a baseline regen
 (`CAPTURE_BASELINE=1`). To lower list prices further without touching cadence,
-the lever is `directCostRatioTarget` (e.g. 0.43 → 0.50 trades ~7pp margin for
-~14% lower list); move it in a separate, deliberate step and re-run
-`/margin-check`.
+the lever is the admin-inclusive margin target (`pricing_config`
+`global_margin_target_ts`, default 0.45; lowering it trades margin for a lower
+list); move it in a separate, deliberate step and re-run `/margin-check`.
 
 ---
 
@@ -167,7 +168,7 @@ Rules in v4.3:
      commercial uses the same brackets but stays flat. A $99 one-time
      setup applies only to non-WaveGuard members (no other qualifying
      recurring service).
-   - `bed_bug_chemical` / `bed_bug_heat`: $50 flat WaveGuard credit
+   - `bed_bug_chemical` / `bed_bug_heat`: excluded, no flat credit (legacy keys)
    - `bora_care`, `pre_slab_termidor`, `german_roach_initial`,
      `pest_initial_roach`: no discount, no credit. These are non-waivable
      cost-recovery line items.
@@ -351,8 +352,10 @@ shadow-only until calibrated against Bouncie/time-tracking actuals.
 
 ### Lawn brackets — `LAWN_BRACKETS`
 **Where:** `constants.js`, separately for `st_augustine`, `bermuda`,
-`zoysia`, `bahia`. Each track has 12 size brackets × 4 service tiers
-(basic 4x/yr, standard 6x/yr, enhanced 9x/yr, premium 12x/yr).
+`zoysia`, `bahia`. Each track has 20 size brackets × 3 service tiers
+(standard 6x/yr, enhanced 9x/yr, premium 12x/yr). Basic 4x/yr was retired
+2026-08-04, and standard 6x/yr is hidden from new quotes (requests for
+it fall back to enhanced).
 
 **Rationale.** Bracketing is by lawn square footage with shade-adjusted
 turf factor (a 5,000 sqft heavily shaded lawn behaves like a 4,000 sqft
@@ -370,13 +373,12 @@ to SWFL-specific factors:
 UI. Changes write to the `lawn_pricing_brackets` table and bust the
 in-memory cache. Run `/margin-check` after any bracket move.
 
-### Mosquito tier prices — `MOSQUITO.basePrices`
-**Lot category × tier matrix.** Visits per year vary by tier
-(`bronze=12, silver=12, gold=15, platinum=17`). These tier visits
-intentionally don't all match — Platinum gets more visits, not just a
-discount on the same number — because the value prop at the top tier
-is a more aggressive treatment cadence during peak SWFL mosquito
-season (June–September).
+### Mosquito programs — `MOSQUITO.basePrices`
+**Lot category × program matrix.** Mosquito has two programs:
+`seasonal9` (9 visits/yr) and `monthly12` (12 visits/yr). The former
+WaveGuard tier names (bronze/silver/gold/platinum) survive only as a
+replay shim for old estimates — they no longer select mosquito visit
+counts or pricing.
 
 ### Other services
 Termite, rodent, palm, and specialty values follow the same pattern:
@@ -436,7 +438,7 @@ The following items are documented at a working level above but may
 benefit from deeper write-ups:
 - Composite discount cap policy decision (formalize cap, or stay
   margin-floor-driven only).
-- Per-service margin targets — Tree & Shrub uses 43% but the rest
+- Per-service margin targets — Tree & Shrub uses a 45% admin-inclusive target but the rest
   effectively use the global 35% floor as a target. Should other
   high-volatility services (e.g., specialty bed-bug heat) get explicit
   per-service targets above the floor?

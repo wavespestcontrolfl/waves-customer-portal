@@ -45,9 +45,11 @@ Sample sizes are too small to prove price is the reason these lines do not close
 | 3,000 | 274 | 19 | $773 | $419 | $29 | $87 | $1,121 | $348 + $38.65/app | $54/app |
 | 4,000 | 316 | 22 | $895 | $485 | $34 | $102 | $1,303 | $408 + $44.75/app | $54/app |
 
-Formula (verified by the audit calculator, 0 mismatches): install = round(stations × ($22.05 station + $5.25 labor/material + $0.75 misc) × 1.45); monitoring = $19/mo + $5 per 5-station bracket above 10, billed as monthly × 12 ÷ 4 per quarterly check; rental uplift = install ÷ 20 quarters, permanent.
+Formula (verified by the audit calculator, 0 mismatches): install = round(stations × ($22.05 station + $5.25 labor/material + $0.75 misc) × 1.45); monitoring = $19/mo + $5 per 5-station bracket above 10, billed as monthly × 12 ÷ 4 per quarterly check; rental uplift = install ÷ 20 quarters, permanent. **Update 2026-09-26:** resolved 2026-09-09 — `stationCost` is $24.00 and catalog-linked (`db-bridge.js:899`).
 
 > **Correction 2026-09-02 (owner supplier pricing):** the `$22.05` station cost is stale. The 16-count Trelona ATBS RFID box is now **$384.00 = $24.00/station** (pre-baited, per the constants comment). At $24.00 the 2,000 sf install above would be **$653**, not $610. The `$384/16` figure quoted as "cartridges" in the original draft of §2.3 was this station box; real cartridge pricing is in §7.
+>
+> **Update 2026-09-26:** this correction shipped 2026-09-09 — the constant is $24.00 and catalog-linked (`db-bridge.js:899`).
 
 ### 2.2 Market check (published Florida ranges, 2026)
 
@@ -116,7 +118,7 @@ The structured operating layer (`lawn_protocols` / windows / products, 2026.05) 
 |---|---|---|---|
 | **Bed area** (`bedArea`) | material $0.055/sf/yr (×0.75 light, ×1.25 9x) and labor bed ÷ 500 min per visit; explicit if typed, else lot × density % (light 10% / moderate 18% / heavy 25%, +5% complex), else 2,000 sf fallback with review | Snapshot 2.5TG **per 1,000 sf of beds** (2.3–4.6 lb by weed pressure) on 4 granular visits; 13-0-13 per 1,000 sf; costing basis "average property = 2,000 sf ornamental beds" | consistent unit (bed sf); the gap is **how it is measured** — 4 of 5 production T&S quotes used a fallback or lot guess |
 | **Tree count** (`treeCount`, non-palm) | material $4/tree/yr, labor 1.5 min/tree/visit; if absent, density estimate {light 3 / moderate 6 / heavy 10} | no per-tree term; foliar work is **per 100 gal of mix** (Kontos 1.7–3.4 fl oz/100 gal etc.) with a 20-gal-per-application basis | the protocol prices foliar by tank volume, the engine by count — a 20-tree property and a 6-tree property use the same 20 gal in the protocol |
-| **Palm count** (`palmCount`) | on the service line: folds into the tree terms ($4/yr + 1.5 min/visit each); at the property level (admin builder): **ignored** (INP-001); routine palm reserve knobs exist but are 0/0 | 8-2-12 palm fertilizer at **1.5 lb per 100 sf of canopy/root zone**, 3 in-window apps, on 4 granular visits; costing basis "400 sf palm canopy/root-zone area"; injections are add-ons only ($35/palm minimum, billed separately) | the protocol prices palms by **root-zone area**, the engine by **count**; $4/palm/yr ≈ 100 sf of root zone at $0.93/lb — so 1 palm ≈ 100 sf is the implicit conversion |
+| **Palm count** (`palmCount`) | on the service line: folds into the tree terms ($4/yr + 1.5 min/visit each); at the property level (admin builder): **ignored** (INP-001, **fixed in v4.8 as of 2026-09-26** — `property-lookup-v2.js:4167-4210`); routine palm reserve knobs exist but are 0/0 | 8-2-12 palm fertilizer at **1.5 lb per 100 sf of canopy/root zone**, 3 in-window apps, on 4 granular visits; costing basis "400 sf palm canopy/root-zone area"; injections are add-ons only ($35/palm minimum, billed separately) | the protocol prices palms by **root-zone area**, the engine by **count**; $4/palm/yr ≈ 100 sf of root zone at $0.93/lb — so 1 palm ≈ 100 sf is the implicit conversion |
 
 Proposed definitions for the owner to confirm (these are the definitions the numbers already assume, made explicit):
 
@@ -134,7 +136,7 @@ Proposed definitions for the owner to confirm (these are the definitions the num
 | +10 trees | $67.08 | +$168 | — |
 | +1 palm (service line) | $54.75 | +$20 | identical to a tree today |
 | +10 palms (service line) | $67.08 | +$168 | — |
-| +10 palms (admin builder, property level) | $53.08 | **$0** | INP-001 |
+| +10 palms (admin builder, property level) | $53.08 | **$0** | INP-001 (**fixed in v4.8 as of 2026-09-26**) |
 | difficult access | $61.08 | +$96 | +15 min/visit |
 | light 4x | $39.83 | −$159 | material ×0.75, 4 visits |
 | 9x | $70.17 | +$205 | material ×1.25, 9 visits |
@@ -189,7 +191,7 @@ Everything in this section came from Adam on 2026-09-02 after reading §§0–6,
 
 | Item | Pack price | Per unit | In code today | Drift |
 |---|---|---|---|---|
-| Trelona ATBS Annual Bait Station RFID, 16-count box (pre-baited) | $384.00 | **$24.00/station** | `stationCost 22.05` (`constants.js:1001`, from a $352.80 box) | +$1.95/station; catalog row already says $24.00 |
+| Trelona ATBS Annual Bait Station RFID, 16-count box (pre-baited) | $384.00 | **$24.00/station** | `stationCost 22.05` (`constants.js:1001`, from a $352.80 box) | +$1.95/station; catalog row already says $24.00. **Update 2026-09-26:** resolved 2026-09-09 — the constant is $24.00 and catalog-linked. |
 | Trelona Compressed Termite Bait, 6 cartridges | $64.17 | **$10.70/cartridge** | not in any price | replacements only |
 | Trelona Compressed Termite Bait, 25 cartridges | $170.75 | **$6.83/cartridge** | not in any price | best per-unit for a 15-station book |
 | Trelona Compressed Termite Bait, case 4 × 25 | $670.00 | **$6.70/cartridge** | not in any price | |

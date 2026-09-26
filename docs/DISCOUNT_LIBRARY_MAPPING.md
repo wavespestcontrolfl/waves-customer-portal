@@ -3,6 +3,11 @@
 
 > Canonical mapping from Square discount line items to `discounts.discount_key` in PostgreSQL.
 
+**Auto-Apply note (2026-09-26):** migration `20260424000017_disable_discount_auto_apply.js`
+seeded every row's `is_auto_apply` to **No** (manual only). The column stays
+admin-toggleable per row from the discounts UI, so live values may differ from
+the seeded default shown below.
+
 ---
 
 ### Square Catalog → DB Mapping
@@ -12,16 +17,16 @@
 | Custom Discount (Variable %) | `custom_percent` | percentage | 0 (set at apply) | None — admin assigned | No | — |
 | Custom Discount (Variable $) | `custom_dollar` | fixed_amount | 0 (set at apply) | None — admin assigned | No | — |
 | Family & Friends Discount | `family_friends` | percentage | 15% | Admin assigned | No | relationship |
-| Military Discount | `military` | percentage | 5% | `is_military` flag | Yes | — |
-| Multi-Home Discount | `multi_home` | percentage | 10% | `has_multi_home` flag | Yes | — |
+| Military Discount | `military` | percentage | 5% | `is_military` flag | No | — |
+| Multi-Home Discount | `multi_home` | percentage | 10% | `has_multi_home` flag | No | — |
 | New Customer Discount | `new_customer` | fixed_amount | $149.99 | No completed services | No | promo |
 | Pre-Payment Discount | `prepayment` | percentage | 5% | Prepayment flag | No | — |
-| WaveGuard Gold Discount | `waveguard_gold` | percentage | 15% | Gold tier | Yes | tier |
+| WaveGuard Gold Discount | `waveguard_gold` | percentage | 15% | Gold tier | No | tier |
 | WaveGuard Member Discount | `waveguard_member` | percentage | 15% | Any WaveGuard tier (Bronze+) | No | tier |
-| WaveGuard Member Discount (Termite Inspection) | `waveguard_member_wdo` | percentage | 100% | Any WaveGuard tier + WDO service | Yes | — |
-| WaveGuard Platinum Discount | `waveguard_platinum` | percentage | 20% | Platinum tier | Yes | tier |
+| WaveGuard Member Discount (Termite Inspection) | `waveguard_member_wdo` | percentage | 100% | Any WaveGuard tier + WDO service | No | — |
+| WaveGuard Platinum Discount | `waveguard_platinum` | percentage | 20% | Platinum tier | No | tier |
 | WaveGuard Referral | `referral` | fixed_amount | $25.00 | Referral flag | No | — |
-| WaveGuard Silver Discount | `waveguard_silver` | percentage | 10% | Silver tier | Yes | tier |
+| WaveGuard Silver Discount | `waveguard_silver` | percentage | 10% | Silver tier | No | tier |
 
 ### Also in DB (no Square equivalent)
 

@@ -4,7 +4,7 @@
 
 **Deferred to v4.4 termite refactor:** Full pricing formulas for bait station install, trench, Bora-Care, and pre-slab Termidor. The pre-session reference draft had structural inaccuracies on 4 of 6 services (fabricated HexPro system, misdescribed trench add-vs-replace semantics, missing labor terms on Bora-Care and pre-slab). Rather than patch mid-session, full coverage is deferred to the v4.4 refactor reference doc where formulas are being re-derived alongside the code changes.
 
-**Source of truth:** `server/services/pricing-engine/constants.js` (TERMITE + SPECIALTY.foamDrill blocks) + v2 equivalents in `server/services/pricing-engine-v2.js`.
+**Source of truth:** `server/services/pricing-engine/constants.js` (TERMITE + SPECIALTY.foamDrill blocks).
 
 ---
 
@@ -38,7 +38,7 @@ Tier-based by infestation scope (points = detection activity indicators).
 - Can cost: $39.08 (Termidor Foam, 21 oz)
 - Drill bits cost: $8
 - Labor rate: $35/hr
-- Floor: $250
+- Floor: $0 (removed 2026-06-25 — owner directive; true tiered cost flows through)
 - Margin divisor: 0.45 → 55% target margin
 
 **Formula:**
@@ -47,7 +47,7 @@ Tier-based by infestation scope (points = detection activity indicators).
 material_cost = (cans × $39.08) + $8 bits
 labor_cost    = labor_hrs × $35
 total_cost    = material_cost + labor_cost
-price         = max($250 floor, round(total_cost / 0.45))
+price         = round(total_cost / 0.45)
 ```
 
 **Worked examples (verified against code):**
@@ -56,7 +56,7 @@ Spot tier (1 can, 1.0 hr):
 - material_cost = $39.08 + $8 = $47.08
 - labor_cost = $35
 - total_cost = $82.08
-- raw price = $82.08 / 0.45 = $182 → clamped to **$250** (floor)
+- price = round($82.08 / 0.45) = **$182**
 
 Moderate tier (2 cans, 1.5 hrs):
 - material_cost = 2 × $39.08 + $8 = $86.16
