@@ -36,6 +36,13 @@
  * changed under us. Un-swept invoices keep their pay links and their own
  * dunning clocks exactly as today (oldest-invoice escalation — ruling #2).
  *
+ * Invoices for a visit that has not been performed yet are skipped (owner
+ * ruling 2026-09-26: never charge a client before the visit). An invoice
+ * linked to a visit is swept only once that visit is 'completed'; an unlinked
+ * invoice is swept only when its service_date is not in the future (ET). A
+ * bill minted ahead of its visit (estimate accept, setup fee) is collected by
+ * that visit's own completion charge instead.
+ *
  * Invoices whose follow-up sequence an admin explicitly STOPPED are skipped:
  * "stop dunning" (customer mailing a check, disputed bill) must also mean
  * "don't silently collect it off-session" — same signal previsit-balance
@@ -66,6 +73,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { logAutopay } = require('./autopay-log');
+const { etDateString } = require('../utils/datetime-et');
 
 const SWEEP_SOURCE = 'completion_balance_sweep';
 
@@ -90,6 +98,32 @@ async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
  * @param {string} paymentMethodId — payment_methods.id the completion charge used
  * @returns {{ charged: number, failed: number, skipped: number, considered: number }}
  */
+const dateOnly = (value) => (typeof value === 'string' ? value.slice(0, 10) : etDateString(new Date(value)));
+
+// Invoices whose visit hasn't happened yet (owner ruling 2026-09-26). A
+// linked visit must be 'completed'; a missing, cancelled or still-scheduled
+// visit means the service was not performed, so the bill waits.
+async function unperformedVisitInvoiceIds(invoices, { database = db, today = etDateString() } = {}) {
+  const visitIds = [...new Set(invoices.map((inv) => inv.scheduled_service_id).filter(Boolean).map(String))];
+  const performed = new Set();
+  if (visitIds.length) {
+    const rows = await database('scheduled_services')
+      .whereIn('id', visitIds)
+      .where({ status: 'completed' })
+      .select('id');
+    for (const row of rows) performed.add(String(row.id));
+  }
+  const skip = new Set();
+  for (const inv of invoices) {
+    if (inv.scheduled_service_id) {
+      if (!performed.has(String(inv.scheduled_service_id))) skip.add(String(inv.id));
+    } else if (inv.service_date && dateOnly(inv.service_date) > today) {
+      skip.add(String(inv.id));
+    }
+  }
+  return skip;
+}
+
 async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, paymentMethodId, triggerScheduledServiceId = null }) {
   const summary = { charged: 0, pending: 0, failed: 0, skipped: 0, considered: 0 };
   if (!isEnabled('completionBalanceSweep')) return { ...summary, gateOff: true };
@@ -104,6 +138,11 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
     if (stopped.size) {
       summary.skipped += candidates.filter((inv) => stopped.has(String(inv.id))).length;
       candidates = candidates.filter((inv) => !stopped.has(String(inv.id)));
+    }
+    const unperformed = await unperformedVisitInvoiceIds(candidates);
+    if (unperformed.size) {
+      summary.skipped += unperformed.size;
+      candidates = candidates.filter((inv) => !unperformed.has(String(inv.id)));
     }
   } catch (err) {
     logger.error(`[balance-sweep] candidate lookup failed for customer ${customerId}: ${err.message}`);
@@ -185,4 +224,4 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
   return summary;
 }
 
-module.exports = { runCompletionBalanceSweep, dunningStoppedInvoiceIds, SWEEP_SOURCE };
+module.exports = { runCompletionBalanceSweep, dunningStoppedInvoiceIds, unperformedVisitInvoiceIds, SWEEP_SOURCE };

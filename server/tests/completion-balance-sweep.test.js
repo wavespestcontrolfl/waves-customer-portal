@@ -12,6 +12,9 @@
  *   - STOP-ON-FAILURE: a decline/guard refusal ends the sweep; later
  *     invoices are not attempted
  *   - invoices with an admin-STOPPED follow-up sequence are skipped
+ *   - invoices for a visit not yet performed are skipped (owner ruling
+ *     2026-09-26): a linked visit must be 'completed'; an unlinked invoice
+ *     must not carry a future service_date
  *   - every outcome logs an autopay_log row under
  *     source 'completion_balance_sweep'
  *   - never throws (completion must not depend on the sweep)
@@ -28,14 +31,24 @@ jest.mock('../services/open-balance', () => ({
 }));
 
 const stoppedResults = { rows: [] };
+// scheduled_services lookups: every queried visit counts as completed unless
+// the test lists it here as not performed.
+const mockVisitState = { unperformed: new Set() };
 jest.mock('../models/db', () => {
-  const mkChain = () => {
+  const mkChain = (table) => {
     const q = {};
-    for (const m of ['whereIn', 'where', 'select']) q[m] = () => q;
-    q.then = (onOk, onErr) => Promise.resolve(stoppedResults.rows).then(onOk, onErr);
+    let ids = [];
+    q.whereIn = (_col, values) => { ids = values; return q; };
+    for (const m of ['where', 'select']) q[m] = () => q;
+    q.then = (onOk, onErr) => {
+      const rows = table === 'scheduled_services'
+        ? ids.filter((id) => !mockVisitState.unperformed.has(id)).map((id) => ({ id }))
+        : stoppedResults.rows;
+      return Promise.resolve(rows).then(onOk, onErr);
+    };
     return q;
   };
-  const dbFn = jest.fn(() => mkChain());
+  const dbFn = jest.fn((table) => mkChain(table));
   dbFn.raw = (sql) => sql;
   return dbFn;
 });
@@ -64,6 +77,7 @@ describe('completion balance sweep', () => {
     isEnabled.mockImplementation(() => true);
     openBalanceResults.rows = [];
     stoppedResults.rows = [];
+    mockVisitState.unperformed = new Set();
     mockCharge.mockImplementation(async () => ({ status: 'paid' }));
   });
 
@@ -187,6 +201,45 @@ describe('completion balance sweep', () => {
     const result = await runCompletionBalanceSweep(baseArgs);
     expect(result.charged).toBe(2);
     expect(mockCharge).toHaveBeenCalledTimes(2);
+  });
+
+  test('a bill for a visit that has not happened yet is never collected early', async () => {
+    // The Oct 2 pest bill minted at estimate accept must wait for Oct 2's
+    // own completion, not ride a lawn visit's Auto Pay charge.
+    openBalanceResults.rows = [
+      { id: 'future-visit', invoice_number: 'INV-1', subtotal: '106.20', total: '106.20', scheduled_service_id: 'svc-future' },
+      { id: 'done-visit', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: 'svc-done' },
+    ];
+    mockVisitState.unperformed = new Set(['svc-future']);
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(result.skipped).toBe(1);
+    expect(result.charged).toBe(1);
+    expect(mockCharge).toHaveBeenCalledTimes(1);
+    expect(mockCharge.mock.calls[0][0]).toBe('done-visit');
+  });
+
+  test('an unlinked invoice dated in the future waits; today or earlier is collected', async () => {
+    openBalanceResults.rows = [
+      { id: 'dated-future', invoice_number: 'INV-1', subtotal: '99.00', total: '99.00', scheduled_service_id: null, service_date: '2999-01-01' },
+      { id: 'dated-past', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00', scheduled_service_id: null, service_date: '2020-01-01' },
+    ];
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(result.skipped).toBe(1);
+    expect(mockCharge).toHaveBeenCalledTimes(1);
+    expect(mockCharge.mock.calls[0][0]).toBe('dated-past');
+  });
+
+  test('unperformedVisitInvoiceIds: only a completed visit releases its bill', async () => {
+    const { unperformedVisitInvoiceIds } = require('../services/completion-balance-sweep');
+    mockVisitState.unperformed = new Set(['svc-cancelled', 'svc-pending']);
+    const skip = await unperformedVisitInvoiceIds([
+      { id: 'a', scheduled_service_id: 'svc-done' },
+      { id: 'b', scheduled_service_id: 'svc-cancelled' },
+      { id: 'c', scheduled_service_id: 'svc-pending' },
+      { id: 'd', scheduled_service_id: null, service_date: new Date('2026-10-02T04:00:00Z') },
+      { id: 'e', scheduled_service_id: null, service_date: null },
+    ], { today: '2026-09-26' });
+    expect([...skip].sort()).toEqual(['b', 'c', 'd']);
   });
 
   test('missing method or customer → no-op, never throws', async () => {
