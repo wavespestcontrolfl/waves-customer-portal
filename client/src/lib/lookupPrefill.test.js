@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile } from "./lookupPrefill";
+import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "./lookupPrefill";
 
 describe("palm-count prefill gate", () => {
   it("prefills a server-trusted count", () => {
@@ -115,5 +115,93 @@ describe("plat-median prefill never saves as tech-verified", () => {
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980", _homeSqFtEdited: false }, { ...VACANT_WITH_MEDIAN, homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980" }, { homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian(null, VACANT_WITH_MEDIAN)).toBe(false);
+  });
+});
+
+describe("reopened estimate scrub (legacy-reopen follow-up to #4862 / #4871)", () => {
+  const UNIT = { residentialUnitLookup: { wholePropertyCategory: "RESIDENTIAL" } };
+  const UNIT_PARCEL = { lotSqFt: 400000, fieldVerifyFlags: [{ field: "lotSize", scope: "unit_parcel" }] };
+
+  it("seeds the unit flag and clears only auto-derived termite values", () => {
+    const { form, cleared } = scrubReopenedEstimateForm({
+      termiteFootprintSqFt: "725", _termiteFootprintAuto: true,
+      trenchingPerimeterLF: "140", _trenchingPerimeterAuto: false,
+      propertyType: "Condo",
+    }, UNIT);
+    expect(form._unitLookup).toBe(true);
+    expect(form.termiteFootprintSqFt).toBe("");
+    expect(form._termiteFootprintAuto).toBe(false);
+    expect(form.trenchingPerimeterLF).toBe("140");
+    expect(cleared).toEqual(["termite measurements"]);
+  });
+
+  it("clears the development's lot, bed area and copied flea area — never typed ones", () => {
+    const auto = scrubReopenedEstimateForm({
+      lotSqFt: "400000", bedArea: "6000", fleaExteriorAreaSqFt: "25000", fleaExteriorAreaSource: "AI_ESTIMATE",
+    }, UNIT_PARCEL);
+    expect(auto.form).toMatchObject({ lotSqFt: "", bedArea: "", fleaExteriorAreaSqFt: "0", fleaExteriorAreaSource: "UNKNOWN" });
+    expect(auto.cleared).toEqual(["lot size", "bed area", "flea exterior area"]);
+
+    const typed = scrubReopenedEstimateForm({
+      lotSqFt: "1500", _lotSqFtEdited: true, bedArea: "200", _manualFields: ["lotSqFt", "bedArea"],
+      fleaExteriorAreaSqFt: "300", fleaExteriorAreaSource: "MANUAL_OVERRIDE",
+    }, UNIT_PARCEL);
+    // A typed flea area keeps the AI_ESTIMATE source; _manualFields marks it (codex r4 P2).
+    const typedFlea = scrubReopenedEstimateForm({
+      fleaExteriorAreaSqFt: "900", fleaExteriorAreaSource: "AI_ESTIMATE", _manualFields: ["fleaExteriorAreaSqFt"],
+    }, UNIT_PARCEL);
+    expect(typedFlea.form.fleaExteriorAreaSqFt).toBe("900");
+    expect(typedFlea.cleared).toEqual([]);
+    expect(typed.form).toMatchObject({ lotSqFt: "1500", bedArea: "200", fleaExteriorAreaSqFt: "300" });
+    expect(typed.cleared).toEqual([]);
+  });
+
+  it("refuses a unit quote that estimated trenching from footprint (codex r1 P1)", () => {
+    const { form, cleared } = scrubReopenedEstimateForm(
+      { propertyType: "Condo", svcTrenching: true, trenchingEstimateFromFootprint: true }, UNIT);
+    expect(form.trenchingEstimateFromFootprint).toBe(false);
+    expect(cleared).toEqual(["trenching perimeter estimated from footprint"]);
+  });
+
+  it("leaves a unit staff retyped as a whole structure alone (codex r1 P2)", () => {
+    const input = { propertyType: "Single Family", termiteFootprintSqFt: "1200", _termiteFootprintAuto: true,
+      svcTrenching: true, trenchingEstimateFromFootprint: true };
+    const { form, cleared } = scrubReopenedEstimateForm(input, UNIT);
+    expect(form).toEqual({ ...input, _unitLookup: true });
+    expect(cleared).toEqual([]);
+  });
+
+  it("refuses a typed-lot price whose profile still carries the parcel's turf (codex r1 P1)", () => {
+    const { form, cleared } = scrubReopenedEstimateForm(
+      { lotSqFt: "1500", _lotSqFtEdited: true, _manualFields: ["lotSqFt"] },
+      { ...UNIT_PARCEL, estimatedTurfSf: 25000 });
+    expect(form.lotSqFt).toBe("1500");
+    expect(cleared).toEqual(["lawn and bed areas from the development's parcel"]);
+  });
+
+  it("keeps a price whose bed area the operator typed (pre-push P1)", () => {
+    // What buildTurfRequestProfile persists for a typed bed area on a scoped profile.
+    const { cleared } = scrubReopenedEstimateForm(
+      { bedArea: "200", _manualFields: ["bedArea"] },
+      { ...UNIT_PARCEL, estimatedBedAreaSf: 200, bedAreaSource: "manual" });
+    expect(cleared).toEqual([]);
+    expect(scrubReopenedEstimateForm({}, { ...UNIT_PARCEL, estimatedBedAreaSf: 6000, bedAreaSource: "estimated" }).cleared)
+      .toEqual(["lawn and bed areas from the development's parcel"]);
+    // The parcel's hardscape / bed percentages size the lot-fallback turf (codex r2 P1).
+    expect(scrubReopenedEstimateForm({ lotSqFt: "1500", _lotSqFtEdited: true },
+      { ...UNIT_PARCEL, imperviousSurfacePercent: 35 }).cleared)
+      .toEqual(["lawn and bed areas from the development's parcel"]);
+    // A stored 0% still priced the lot (codex r3 P1).
+    expect(scrubReopenedEstimateForm({ lotSqFt: "1500", _lotSqFtEdited: true },
+      { ...UNIT_PARCEL, imperviousSurfacePercent: 0 }).cleared)
+      .toEqual(["lawn and bed areas from the development's parcel"]);
+  });
+
+  it("leaves a whole-home estimate alone", () => {
+    const input = { lotSqFt: "9000", termiteFootprintSqFt: "1200", _termiteFootprintAuto: true };
+    const { form, cleared } = scrubReopenedEstimateForm(input, { lotSqFt: 9000 });
+    expect(form).toEqual(input);
+    expect(cleared).toEqual([]);
+    expect(scrubReopenedEstimateForm(input, null).cleared).toEqual([]);
   });
 });
