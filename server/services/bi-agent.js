@@ -67,20 +67,49 @@ function deadlineError(sessionId, deadline) {
   return Object.assign(new Error(`session ${sessionId} timed out at its ${new Date(deadline).toISOString()} deadline`), { code: 'session_timeout' });
 }
 
-async function apiCall(method, path, body) {
+async function apiCall(method, path, body, signal) {
   const res = await fetch(`${API_BASE}${path}`, {
     method, headers: {
       'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01',
       'anthropic-beta': BETA_HEADER, 'content-type': 'application/json',
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) throw Object.assign(new Error(`API ${res.status}: ${await res.text()}`), { status: res.status, code: `anthropic_${res.status}` });
   return res.json();
 }
 
-function sendSessionEvents(sessionId, events) {
-  return apiCall('POST', `/sessions/${sessionId}/events`, { events });
+function remainingMs(sessionId, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw deadlineError(sessionId, deadline);
+  return remaining;
+}
+
+// Every events POST is bounded by the run's deadline too: a stalled request
+// must not keep run() pending past it.
+async function sendSessionEvents(sessionId, events, deadline) {
+  const signal = AbortSignal.timeout(remainingMs(sessionId, deadline));
+  try {
+    return await apiCall('POST', `/sessions/${sessionId}/events`, { events }, signal);
+  } catch (err) {
+    if (signal.aborted) throw deadlineError(sessionId, deadline);
+    throw err;
+  }
+}
+
+// A local tool call cannot be cancelled, but the run stops waiting for it at
+// the deadline and starts no further tool after it.
+async function withinDeadline(promise, sessionId, deadline) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(deadlineError(sessionId, deadline)), remainingMs(sessionId, deadline));
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Opens the SSE fetch and returns once the response headers are in — the
@@ -111,7 +140,7 @@ async function openSessionStream(sessionId, deadline) {
     const errText = res.body ? await res.text() : '';
     throw Object.assign(new Error(`Stream ${res.status}: ${errText}`), { status: res.status, code: `anthropic_${res.status}` });
   }
-  return { res, timer };
+  return { res, timer, controller };
 }
 
 // Executes every pending custom tool use a requires_action idle names, then
@@ -119,7 +148,7 @@ async function openSessionStream(sessionId, deadline) {
 // in a single events call, not one per tool). An id with no pending entry is
 // logged and skipped — the run still sends the results it does have rather
 // than hanging on a name it never saw registered.
-async function runRequiresActionBatch(sessionId, eventIds, pendingCustomToolUses, executeToolUse) {
+async function runRequiresActionBatch(sessionId, deadline, eventIds, pendingCustomToolUses, executeToolUse) {
   const toolResultEvents = [];
   for (const toolUseId of eventIds) {
     const pending = pendingCustomToolUses.get(toolUseId);
@@ -131,7 +160,7 @@ async function runRequiresActionBatch(sessionId, eventIds, pendingCustomToolUses
     pendingCustomToolUses.delete(toolUseId);
     toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, threw));
   }
-  if (toolResultEvents.length) await sendSessionEvents(sessionId, toolResultEvents);
+  if (toolResultEvents.length) await sendSessionEvents(sessionId, toolResultEvents, deadline);
 }
 
 async function* readStreamFrames(sessionId, res, deadline) {
@@ -185,28 +214,32 @@ const BIAgent = {
     // time, not agent time, and stays out of the reported duration.
     let runEndedAt = null;
     let streamTimer = null;
+    let streamController = null;
     const deadline = Date.now() + resolveTimeoutMs();
 
     try {
       // Open the stream BEFORE the kickoff — the stream does not replay
       // events emitted before it opened.
-      const { res: streamRes, timer } = await openSessionStream(sessionId, deadline);
+      const { res: streamRes, timer, controller } = await openSessionStream(sessionId, deadline);
       streamTimer = timer;
+      streamController = controller;
 
-      await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
+      await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)], deadline);
 
       const pendingCustomToolUses = new Map();
 
       const executeToolUse = async (toolName, toolInput) => {
+        remainingMs(sessionId, deadline); // no tool starts after the deadline
         notify('pulling', `Tool: ${toolName}`);
         logger.info(`[bi-agent] Tool: ${toolName}`);
 
         let toolResult;
         let threw = false;
         try {
-          toolResult = await executeBITool(toolName, toolInput);
+          toolResult = await withinDeadline(executeBITool(toolName, toolInput), sessionId, deadline);
           if (toolName === 'send_briefing_sms' && toolResult.sent) smsSent = true;
         } catch (err) {
+          if (err?.code === 'session_timeout') throw err;
           toolResult = { error: `Tool failed: ${err.message}` };
           threw = true;
           logger.error(`[bi-agent] Tool ${toolName} error: ${err.message}`);
@@ -242,7 +275,7 @@ const BIAgent = {
           const stopType = stopReason?.type;
 
           if (stopType === 'requires_action') {
-            await runRequiresActionBatch(sessionId, stopReason?.event_ids || [], pendingCustomToolUses, executeToolUse);
+            await runRequiresActionBatch(sessionId, deadline, stopReason?.event_ids || [], pendingCustomToolUses, executeToolUse);
             continue;
           }
 
@@ -278,6 +311,10 @@ const BIAgent = {
       }
     } finally {
       if (streamTimer) clearTimeout(streamTimer);
+      // Close the SSE connection on every exit — including a kickoff POST
+      // that failed before the stream was ever read (a no-op once the reader
+      // has already finished).
+      streamController?.abort();
       runEndedAt = Date.now();
       await recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime, failure });
     }

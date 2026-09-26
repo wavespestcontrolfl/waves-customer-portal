@@ -332,6 +332,69 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(recorded()).toMatchObject({ failure: null });
   });
 
+  // Frames arrive without advancing the fake clock, then the stream stays
+  // open: only the real-time deadline timers (tool wait, POST signal) can
+  // end these runs — the per-frame deadline check never fires.
+  function openStreamBody(frames) {
+    const enc = new TextEncoder();
+    const chunks = frames.map(({ event, data }) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    return {
+      getReader: () => ({
+        read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : new Promise(() => {})),
+        cancel: async () => {},
+        releaseLock() {},
+      }),
+    };
+  }
+  function fetchWithOpenStream({ frames = [], onEventsPost }) {
+    const seen = {};
+    const fetchMock = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return onEventsPost(opts);
+      seen.streamSignal = opts.signal;
+      return Promise.resolve({ ok: true, status: 200, body: openStreamBody(frames) });
+    });
+    return { fetchMock, seen };
+  }
+
+  it('a tool that never returns ends the run at the deadline — session_timeout, no tool result sent', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    mockExecuteBITool.mockImplementation(() => new Promise(() => {}));
+    const { fetchMock } = fetchWithOpenStream({
+      frames: [customToolUse('tool-1', 'get_revenue_snapshot'), idle('requires_action', ['tool-1'])],
+      onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+    });
+    global.fetch = fetchMock;
+
+    const result = await load(path).run({ skipSMS: true });
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+    expect(result.toolsExecuted).toEqual([]);
+    expect(postsSent().filter(p => (p.body.events || []).some(e => e.type === 'user.custom_tool_result'))).toHaveLength(0);
+  });
+
+  it('an events POST that hangs is cut off at the deadline, and the open stream is closed', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: (opts) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))),
+    });
+    global.fetch = fetchMock;
+
+    await load(path).run({ skipSMS: true });
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+    expect(seen.streamSignal.aborted).toBe(true);
+  });
+
+  it('a kickoff POST that fails closes the already-open stream', async () => {
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: () => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }),
+    });
+    global.fetch = fetchMock;
+
+    await expect(load(path).run({ skipSMS: true })).rejects.toThrow(/API 500/);
+    expect(seen.streamSignal.aborted).toBe(true);
+    expect(recorded().failure).toBeTruthy();
+  });
+
   it('an idle with retries_exhausted is a failed run (session_idle_retries_exhausted)', async () => {
     global.fetch = fetchFor([text('partial'), idle('retries_exhausted'), text('never read')]);
     await load(path).run({ skipSMS: true });
