@@ -634,6 +634,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // agent kickoff takes it over.
     // One deadline object owns the lead's minute: settleLeadResponseAgentRun
     // takes it over (no second timer); until then it sends on its own.
+    // The intake state is seeded BEFORE the deadline is armed: the deadline
+    // can send the standard reply on its own while the owner-alert I/O
+    // below is still pending, and the customer's answer to it must already
+    // route through lead-intake.js.
+    if (leadAgentConfigured) await seedLeadIntakeState(customer.id);
     const leadFallbackDeadline = leadAgentConfigured
       // Counted from the request's arrival, so awaited work before this point
       // (the owner alert's provider calls) cannot stretch the lead's minute.
@@ -797,15 +802,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // agent's personal text is the one that goes out, the service-menu
       // state is cleared again at that send (clearServiceMenuIntakeState in
       // services/lead-auto-reply.js, called by send_lead_response).
-      try {
-        await db('customers').where({ id: customer.id }).update({
-          lead_intake_status: 'awaiting_service',
-        });
-      } catch (stateErr) {
-        // Non-fatal — the auto-reply was sent; worst case the next SMS
-        // falls through to the normal AI draft path.
-        logger.warn(`[lead-webhook] intake state seed failed: ${stateErr.message}`);
-      }
+      // With the agent configured it was already seeded before the lead's
+      // deadline was armed (above), so a reply that arrives before this
+      // point is never overwritten here.
+      if (!leadAgentConfigured) await seedLeadIntakeState(customer.id);
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
@@ -1881,6 +1881,17 @@ async function flushPendingLeadFallbacks(timeoutMs = 10000) {
   return pending.length;
 }
 
+
+// Seed the intake state machine so the customer's next inbound SMS gets
+// routed through services/lead-intake.js. Non-fatal: worst case the next SMS
+// falls through to the normal AI draft path.
+async function seedLeadIntakeState(customerId) {
+  try {
+    await db('customers').where({ id: customerId }).update({ lead_intake_status: 'awaiting_service' });
+  } catch (stateErr) {
+    logger.warn(`[lead-webhook] intake state seed failed: ${stateErr.message}`);
+  }
+}
 
 // The lead's one-minute deadline, started where the immediate reply is
 // skipped (the route registers the fallback for the shutdown flush from
