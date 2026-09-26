@@ -2,10 +2,11 @@
 // ADMIN-BUG-R13 (owner ruling 2026-09-26: auto-bill; an office alert when the
 // amount is unclear): completing an annual-prepay-covered visit that carries
 // a priced add-on billed nothing, said "all paid", and alerted no one. Now a
-// visit with no invoice history gets its add-ons billed alone through the
-// shared scheduled-invoice mint (the covered base never is), and a visit that
-// already has any other invoice — or an unclear amount — gets one office
-// alert naming it; the completion text never says "all paid" over either.
+// visit with no invoice at all and clearly priced add-ons gets them billed
+// alone through the shared scheduled-invoice mint (the covered base never
+// is), and anything else — an invoice already on the visit, an unclear
+// amount — gets one office alert; the completion text never says "all paid"
+// over it. Only a bill minted in the same pass is ever collected.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
@@ -228,7 +229,7 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   const settledCovered = async (f) => (await trx('invoices').where({ id: f.invoiceId }).first('status')).status;
 
   describe('no invoice history: the add-ons are billed alone', () => {
-    test('the add-ons are billed alone, the covered base is not, and the bill is recorded as this closeout\'s own', async () => {
+    test('the add-ons are billed alone and collected, and the covered base is not billed', async () => {
       const f = await coveredVisit();
       const out = await complete(f);
       expect(out).toMatchObject({ status: 200 });
@@ -240,21 +241,15 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(linesOf(bill).map((li) => li.client_id)).toEqual([`scheduled_${f.serviceId}_addon_${f.addonId}`]);
       expect(out.body?.invoiceId).toBe(bill.id);
       expect(out.body?.invoicePaymentActionRequired).toBe(true);
-      expect((await recordNotes(out.body.serviceRecordId)).annualPrepayAddonsInvoiceId).toBe(bill.id);
       expect(await addonsAlert(f)).toBeUndefined();
     });
 
     test('a visit-wide discount makes the add-ons\' share unclear — the office is alerted, nothing is guessed, and the text does not say "all paid"', async () => {
-      const f = await coveredVisit({ discountDollars: 9, secondAddon: true });
-      // One add-on still awaits its price: the alert names both reasons.
-      await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
-      await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON - 9 });
+      const f = await coveredVisit({ discountDollars: 9 });
       const out = await complete(f, { sendCompletionSms: true });
       expect(out).toMatchObject({ status: 200 });
       expect(await liveInvoices(f)).toHaveLength(0);
-      const { body } = await addonsAlert(f);
-      expect(body).toMatch(/no price yet/);
-      expect(body).toMatch(/visit-wide discount/);
+      expect((await addonsAlert(f)).body).toMatch(/visit-wide discount/);
       expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
     });
 
@@ -338,14 +333,14 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(calls.find((args) => String(args?.notes || '').startsWith('Add-ons beyond'))).toMatchObject({ skipAccrual: true });
     });
 
-    test('an add-on still awaiting its price is flagged to the office, never read as free — the priced one still bills', async () => {
+    test('an add-on still awaiting its price stops the bill — never read as free, never a partial bill beside it (GitHub r7 P1)', async () => {
       const f = await coveredVisit({ secondAddon: true });
       await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
       await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON });
       const out = await complete(f, { sendCompletionSms: true });
       expect(out).toMatchObject({ status: 200 });
-      expect((await liveInvoices(f)).map((i) => Number(i.total))).toEqual([ADDON]);
-      expect(await addonsAlert(f)).toBeTruthy();
+      expect(await liveInvoices(f)).toHaveLength(0);
+      expect((await addonsAlert(f)).body).toMatch(/no price yet/);
       expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
     });
 
@@ -430,7 +425,7 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   });
 
   describe('retries and holds', () => {
-    test('a resumed completion takes back its own add-ons bill — collected, never a second one', async () => {
+    test('a resumed completion that finds its own earlier add-ons bill never mints a second one, and leaves it to the office uncollected (GitHub r7 P1)', async () => {
       const f = await coveredVisit();
       const idempotencyKey = randomUUID();
       expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
@@ -439,12 +434,12 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       const retry = await complete(f, {}, { idempotencyKey });
       expect(retry).toMatchObject({ status: 200 });
       expect(retry.body?.invoiceId).toBe(bill.id);
-      expect(retry.body?.invoicePaymentActionRequired).toBe(true);
+      expect(retry.body?.invoicePaymentActionRequired).not.toBe(true);
       expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
-      expect(await addonsAlert(f)).toBeUndefined();
+      expect((await addonsAlert(f)).body).toMatch(/collected none/);
     });
 
-    test('a retry resumes a gate-on attempt\'s own bill even after the gate is turned off — never voided', async () => {
+    test('a retry after the gate is turned off still handles a gate-on attempt\'s bill as live — never voided as a covered-base invoice', async () => {
       const f = await coveredVisit();
       const idempotencyKey = randomUUID();
       expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
@@ -506,59 +501,18 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
     });
 
-    test('an unpriced add-on alert that did not land beside a minted bill is raised by the retry — the bill is taken back, not re-minted', async () => {
+    test('an unpriced add-on alert that did not land holds the closeout; the retry raises it and still bills nothing', async () => {
       const f = await coveredVisit({ secondAddon: true });
       await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
       await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON });
       const idempotencyKey = randomUUID();
       const held = await withFailure(failAlerts((key) => key === `annual_prepay_addons_unbilled:${f.serviceId}`), () => complete(f, {}, { idempotencyKey }));
       expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_alert_failed' } });
-      const [bill] = await liveInvoices(f);
+      expect(await liveInvoices(f)).toHaveLength(0);
       const retry = await complete(f, {}, { idempotencyKey });
       expect(retry).toMatchObject({ status: 200 });
-      expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
-      expect(retry.body?.invoiceId).toBe(bill.id);
+      expect(await liveInvoices(f)).toHaveLength(0);
       expect((await addonsAlert(f)).body).toMatch(/no price yet/);
-    });
-
-    test('a bill or add-ons changed after the bill was made leave it to the office on the retry — not collected as it stands, never re-minted', async () => {
-      const edits = {
-        // The office prices the second add-on before the retry.
-        'add-on priced': async (f) => {
-          await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: ADDON2, estimated_price: ADDON2 });
-          await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON + ADDON2 });
-        },
-        // The office adds the covered base to the bill before the retry.
-        'covered base added to the bill': async (f, bill) => trx('invoices').where({ id: bill.id }).update({
-          line_items: JSON.stringify([...linesOf(bill), baseLine(f)]), subtotal: ADDON + BASE, total: ADDON + BASE }),
-      };
-      for (const [name, edit] of Object.entries(edits)) {
-        const f = await coveredVisit({ secondAddon: true });
-        await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
-        await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON });
-        const idempotencyKey = randomUUID();
-        const held = await withFailure(failAlerts((key) => key === `annual_prepay_addons_unbilled:${f.serviceId}`), () => complete(f, {}, { idempotencyKey }));
-        expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_alert_failed' } });
-        const [bill] = await liveInvoices(f);
-        await edit(f, bill);
-        const retry = await complete(f, {}, { idempotencyKey });
-        expect(retry).toMatchObject({ status: 200 });
-        expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
-        expect({ name, collected: retry.body?.invoicePaymentActionRequired === true }).toEqual({ name, collected: false });
-        expect((await addonsAlert(f)).body).toMatch(/changed since bill/);
-      }
-    });
-
-    test('a bill minted but not recorded on the record is never billed twice — the retry leaves it to the office', async () => {
-      const f = await coveredVisit();
-      const idempotencyKey = randomUUID();
-      const first = await withFailure(failQuery('service_records', /\bmint\b/), () => complete(f, {}, { idempotencyKey }));
-      expect(first).toMatchObject({ status: 200 });
-      const [bill] = await liveInvoices(f);
-      await releaseForResume(f);
-      expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
-      expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
-      expect(await addonsAlert(f)).toBeTruthy();
     });
 
     test('a gate freeze that cannot be saved holds the closeout before any billing', async () => {
@@ -632,14 +586,14 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(await addonsAlert(f)).toBeTruthy();
     });
 
-    test('an office invoice billing only the add-ons stays owed with its pay link, and the office checks it covers them all', async () => {
+    test('an office invoice billing only the add-ons is kept but never collected by the completion — the office checks and sends it (GitHub r7 P1)', async () => {
       const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
       const out = await complete(f, { sendCompletionSms: true });
       expect(out).toMatchObject({ status: 200 });
       expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
-      expect(out.body?.invoiceId).toBe(f.invoiceId);
-      expect(out.body?.invoicePaymentActionRequired).toBe(true);
-      expect(await addonsAlert(f)).toBeTruthy();
+      expect(await settledCovered(f)).toBe('draft');
+      expect(out.body?.invoicePaymentActionRequired).not.toBe(true);
+      expect((await addonsAlert(f)).body).toMatch(/collected none/);
       expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
     });
 
@@ -824,6 +778,38 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       await releaseForResume(f);
       expect(await issuedCloseout()).toMatchObject({ status: 200 });
       expect(await liveInvoices(f)).toHaveLength(0);
+    });
+
+    test('an invoice-issued closeout whose invoice leaves out an add-on alerts the office — the issued invoice untouched, nothing billed beside it (GitHub r7 P1)', async () => {
+      const f = await coveredVisit({ daysAgo: 3, invoiceStatus: 'sent', invoiceLines: (x) => [baseLine(x)] });
+      const idempotencyKey = `invoice-issued:${f.invoiceId}`;
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const out = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey,
+        body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey },
+        actor: { techRole: 'admin', technicianId: f.techId, technician: null }, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
+      expect(out).toMatchObject({ status: 200 });
+      expect(await settledCovered(f)).toBe('sent');
+      expect((await trx('invoices').where({ customer_id: f.customerId })).map((i) => i.id)).toEqual([f.invoiceId]);
+      expect((await addonsAlert(f)).body).toMatch(/issued invoice/);
+    });
+
+    test('an invoice the completion selected that is not linked to the visit counts as history — no second bill beside it (GitHub r7 P1)', async () => {
+      const f = await coveredVisit();
+      const siblingId = randomUUID();
+      await trx('invoices').insert({ id: siblingId, customer_id: f.customerId, invoice_number: `TEST-${siblingId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''), status: 'paid', total: BASE + ADDON, subtotal: BASE + ADDON,
+        line_items: JSON.stringify([baseLine(f), addonLine(f)]) });
+      const sibling = await trx('invoices').where({ id: siblingId }).first();
+      const svc = await trx('scheduled_services').where({ id: f.serviceId }).first();
+      const { reconcileCoveredVisitInvoice } = require('../services/annual-prepay-addon-billing');
+      const out = await reconcileCoveredVisitInvoice({ svc, record: { id: randomUUID(), structured_notes: {} }, invoice: sibling,
+        payUrl: null, alreadyPaid: true, invoiceCreated: false, issuedInvoiceCloseout: null, recapReviewOnly: false, visitPerformed: true,
+        terminalCompletionInvoice: null, packetEffects: null, quietBackfill: false, serviceDate: null, portalUrl: 'https://portal.invalid',
+        mergeRecordNotesKeys: async () => {} });
+      expect(out.hold).toBeNull();
+      expect(out.extrasCollectible).toBe(false);
+      expect((await trx('invoices').where({ customer_id: f.customerId })).map((i) => i.id)).toEqual([siblingId]);
+      expect((await addonsAlert(f)).body).toContain(`TEST-${siblingId.slice(0, 8)} (paid)`);
     });
   });
 
