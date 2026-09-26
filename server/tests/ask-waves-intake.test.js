@@ -1874,3 +1874,26 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
     expect(worst).toBeLessThan(50);
   });
 });
+
+// Drift guard: this surface keeps its own chokepoint (the shared checker is
+// too slow per turn, #4905), so anything the shared reentrySafetyClaimFinding
+// flags must also be flagged here. A new wording added to the shared rules
+// that the intake chokepoint misses fails this test.
+describe('intake chokepoint never misses a claim the shared rule set flags', () => {
+  const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
+  const { intakeSafetyClaimSupplement } = _internals;
+  const corpus = [
+    'Our treatment is completely safe for pets.', 'The product is EPA-approved.',
+    'You can re-enter after 30 minutes.', 'It is harmless to children.',
+    'Pets can go outside after 2 hours.', 'This spray is non-toxic.',
+    'It is pet-friendly and safe for kids.', 'Totally safe once dry.',
+    'Kids can play on the lawn in 30 minutes.', 'Our products are 100% safe.',
+    'It poses no risk to your family.', 'Safe for the whole family.',
+    'It will not harm your pets.', 'Wait 4 hours before letting pets out.',
+    'The treatment dries in 20 minutes.', 'Es completamente seguro para sus mascotas.',
+    'Aprobado por la EPA.', 'Puede volver a entrar en 2 horas.',
+  ];
+  test.each(corpus)('%s', (text) => {
+    if (reentrySafetyClaimFinding(text)) expect(intakeSafetyClaimSupplement(text, '')).toBe(true);
+  });
+});
