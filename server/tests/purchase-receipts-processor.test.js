@@ -128,10 +128,12 @@ describe('classifyItem', () => {
     expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz' });
   });
 
-  test('no size in the title at all -> logged using the container_size alone', async () => {
-    mockState.match = { matched: true, product: taurus };
-    const result = await classifyItem({ title: 'Taurus SC Termiticide', quantity: 1 });
-    expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: taurus, receivedQty: 78, receivedUnit: 'fl_oz' });
+  test('no readable size: an exact alias (owner-vetted title) logs from container_size; a name-containment match is held', async () => {
+    mockState.match = { matched: true, product: taurus, matchType: 'alias' };
+    expect(await classifyItem({ title: 'Taurus SC Termiticide', quantity: 1 }))
+      .toEqual({ status: 'logged', productId: 'p-taurus', product: taurus, receivedQty: 78, receivedUnit: 'fl_oz' });
+    mockState.match = { matched: true, product: taurus, matchType: 'containment' };
+    expect(await classifyItem({ title: 'Taurus SC Termiticide', quantity: 1 })).toMatchObject({ status: 'size_mismatch' });
   });
 
   test('a weight container (lb) agrees with an "oz" title amount converted through the product\'s own dimension', async () => {
@@ -184,9 +186,20 @@ describe('classifyItem — reading the title\'s own size', () => {
     expect(await logged('Gentrol IGR 1 lb', '16 fl oz')).toMatchObject({ status: 'size_mismatch' });
   });
 
-  test('model numbers are not sizes: the real Gentrol title logs from the container', async () => {
-    expect(await logged('ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator, Orange', '16 fl oz'))
+  test('model numbers are not sizes: the real Gentrol title, once aliased, logs from the container', async () => {
+    mockState.match = { matched: true, product: product('16 fl oz'), matchType: 'alias' };
+    expect(await classifyItem({ title: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator, Orange', quantity: 1 }))
       .toMatchObject({ status: 'logged', receivedQty: 16 });
+  });
+
+  test.each([
+    ['Taurus SC 32-fl-oz', 'size_mismatch'], // hyphenated two-word unit is read (32 fl oz)
+    ['Taurus SC 500 cc', 'size_mismatch'], // cc is read as ml (16.9 fl oz)
+    ['Taurus SC 78-fl-oz', 'logged'],
+    ['Taurus SC 2307 cc', 'logged'], // 2307 ml is 78 fl oz
+    ['Taurus SC 2.3 dm3', 'size_mismatch'], // an unknown unit is never read as "no size"
+  ])('%s against a 78 fl oz container -> %s', async (title, status) => {
+    expect(await logged(title, '78 fl oz')).toMatchObject({ status });
   });
 });
 

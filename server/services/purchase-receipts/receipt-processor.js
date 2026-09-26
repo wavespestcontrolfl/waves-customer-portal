@@ -12,12 +12,15 @@
  * and a person decides.
  *
  * Title sizing is exception-based. A line auto-logs only when its title
- * makes no size claim, or exactly one size claim that agrees with the
- * catalog container, plus at most one recognized pack marker ("2 x 78 oz",
- * "(Pack of 2)", "2-Pack", "Case of 2", "Set of 2"). Any other pack or count
- * wording, two different sizes, or a size that disagrees with the container
- * is 'size_mismatch' — held for a person (sweep.js rings a bell), never a
- * guessed amount.
+ * carries exactly one readable size that agrees with the catalog container,
+ * plus at most one recognized pack marker ("2 x 78 oz", "(Pack of 2)",
+ * "2-Pack", "Case of 2", "Set of 2"). A title with no readable size logs
+ * from container_size alone only on an exact product_aliases match (the
+ * owner vetted that exact title); on a name-containment match it is held,
+ * so a size spelled in a unit this parser doesn't know is never read as
+ * "no size". Any other pack or count wording, two different sizes, or a
+ * size that disagrees with the container is 'size_mismatch' — held for a
+ * person (sweep.js rings a bell), never a guessed amount.
  *
  * Idempotency: purchase_receipt_lines is UNIQUE (vendor, order_number,
  * shipment_key, line_no) — shipment_key because one order can arrive as
@@ -86,20 +89,20 @@ const PLURAL_CONTAINER_RE = /(?:\b|(?<=\d))(?:bottles|jugs|tubes|bags|cans|pails
 // decimal or integer, with the unit adjacent ("96oz"), spaced ("96 oz") or
 // hyphenated ("2.5-Gallon"); an optional second word covers "fl oz". A
 // number glued to a word on its left ("EC3") is part of a name, not a size.
-const TITLE_SIZE_RE = /(?<![a-z\d./])(\d+\s+\d+\/\d+|\d+\/\d+|\d*\.\d+|\d+)[\s-]*([a-z]+)\.?(?:[\s.]*([a-z]+)\.?)?/gi;
+const TITLE_SIZE_RE = /(?<![a-z\d./])(\d+\s+\d+\/\d+|\d+\/\d+|\d*\.\d+|\d+)[\s-]*([a-z]+)\.?(?:[\s.-]*([a-z]+)\.?)?/gi;
 
 // Title unit spellings -> inventory-units.js units.
 const SIZE_UNITS = [
   [/^(?:fl ?oz|fluid ?ounces?)$/, 'fl_oz'],
-  [/^(?:oz|ounces?)$/, 'oz'],
-  [/^(?:gal|gallons?)$/, 'gal'],
-  [/^(?:qt|quarts?)$/, 'qt'],
-  [/^(?:pt|pints?)$/, 'pt'],
+  [/^(?:oz|ozs|ounces?)$/, 'oz'],
+  [/^(?:gal|gals|gallons?)$/, 'gal'],
+  [/^(?:qt|qts|quarts?)$/, 'qt'],
+  [/^(?:pt|pts|pints?)$/, 'pt'],
   [/^(?:lbs?|pounds?)$/, 'lb'],
   [/^(?:g|grams?)$/, 'g'],
   [/^(?:kg|kilograms?)$/, 'kg'],
-  [/^(?:ml|millilit(?:er|re)s?)$/, 'ml'],
-  [/^(?:l|lit(?:er|re)s?)$/, 'l'],
+  [/^(?:ml|cc|millilit(?:er|re)s?)$/, 'ml'],
+  [/^(?:l|ltrs?|lit(?:er|re)s?)$/, 'l'],
 ];
 
 function sizeUnit(words) {
@@ -141,20 +144,21 @@ function parseMultipack(title) {
 
 // How much product one ordered item carries, in the container's unit, or
 // null when the title's own size/pack wording can't be squared with the
-// catalog container.
-function amountPerItem(title, container) {
+// catalog container. aliasMatch: the title is an owner-vetted alias, the
+// one case where a title with no readable size may lean on container_size.
+function amountPerItem(title, container, aliasMatch) {
   const multipack = parseMultipack(title);
   const rest = multipack ? multipack.rest : title;
   if (PACK_CLAIM_RE.test(rest) || (!multipack && PLURAL_CONTAINER_RE.test(rest))) return null;
   const sizes = titleSizes(rest, container.unit);
   if (!sizes || sizes.length > 1) return null;
   const [size] = sizes;
-  if (!multipack) return size === undefined || sizesAgree(size, container.amount) ? container.amount : null;
-  if (size === undefined) return null;
+  if (size === undefined) return aliasMatch && !multipack ? container.amount : null;
+  const count = multipack ? multipack.count : 1;
   // The title's per-unit size is one catalog container: the pack multiplies containers.
-  if (sizesAgree(size, container.amount)) return multipack.count * container.amount;
+  if (sizesAgree(size, container.amount)) return count * container.amount;
   // The catalog container is already the whole pack.
-  return sizesAgree(size * multipack.count, container.amount) ? container.amount : null;
+  return multipack && sizesAgree(size * count, container.amount) ? container.amount : null;
 }
 
 // Pure classification (match + sizing, no writes). Exported for unit tests.
@@ -164,7 +168,7 @@ async function classifyItem(item, conn = db) {
   const { product } = match;
   const container = parsePackSize(product.container_size);
   if (!container) return { status: 'needs_size', productId: product.id, product };
-  const perItem = amountPerItem(String(item.title), container);
+  const perItem = amountPerItem(String(item.title), container, match.matchType === 'alias');
   if (perItem == null) return { status: 'size_mismatch', productId: product.id, product };
   return { status: 'logged', productId: product.id, product, receivedQty: round4(item.quantity * perItem), receivedUnit: container.unit };
 }

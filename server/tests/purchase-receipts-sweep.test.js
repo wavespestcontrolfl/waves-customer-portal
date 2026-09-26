@@ -147,7 +147,8 @@ describe('processReceiptEmail', () => {
     mockState.outcomes = [loggedTaurus({ hasOpenRestockRequest: true }), unmatched];
     const notify = jest.fn(async () => ({}));
     await processReceiptEmail(deliveredEmail, { notify });
-    expect(notify.mock.calls[0][2]).toContain('A restock request for Taurus SC is still open. Close it in the Intelligence Bar if this delivery covers it.');
+    // Cancel, never receive: receiving the request would add the delivery a second time.
+    expect(notify.mock.calls[0][2]).toContain('A restock request for Taurus SC is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.');
   });
 
   test.each([

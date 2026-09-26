@@ -82,8 +82,10 @@ async function ringLoggedBell(notifyAdmin, { email, item, outcome }) {
     + `(${item.quantity} × ${round(outcome.receivedQty / item.quantity)} ${unit})`;
   // Read-only note: this lane never writes a restock request (see
   // receipt-processor.js's header); a person decides whether this covers it.
+  // Cancel is the stock-neutral close — receiving the request would add
+  // this delivery a second time.
   if (outcome.hasOpenRestockRequest) {
-    body += ` A restock request for ${outcome.product.name} is still open. Close it in the Intelligence Bar if this delivery covers it.`;
+    body += ` A restock request for ${outcome.product.name} is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.`;
   }
   await notifyAdmin('inventory', 'Amazon delivery logged', body, {
     link: INVENTORY_LINK,
