@@ -5858,11 +5858,20 @@ async function pendingExplicitEpisodeTerms({ today, daysOut, stageTerms }) {
   const resumeDates = [];
   for (let days = nextStage + 1; days < daysOut; days++) resumeDates.push(addDaysYmd(today, days));
   if (!resumeDates.length) return [];
-  const candidates = await stageTerms(resumeDates);
-  if (!candidates.length) return [];
+  // A resume read failure only skips resumption today; it must never take
+  // down the regular stage sends in the same scan.
+  let candidates;
+  let prefs;
+  try {
+    candidates = await stageTerms(resumeDates);
+    if (!candidates.length) return [];
+    prefs = await db('notification_prefs')
+      .whereIn('customer_id', [...new Set(candidates.map((term) => term.customer_id))]);
+  } catch (err) {
+    logger.warn(`[annual-prepay] payment reminder resume scan skipped for the ${daysOut}-day stage: ${err.message}`);
+    return [];
+  }
   const { explicitBillingChannels } = require('./billing-delivery-channels');
-  const prefs = await db('notification_prefs')
-    .whereIn('customer_id', [...new Set(candidates.map((term) => term.customer_id))]);
   const explicitCustomers = new Set(prefs
     .filter((row) => explicitBillingChannels(row, 'billing') !== null)
     .map((row) => String(row.customer_id)));

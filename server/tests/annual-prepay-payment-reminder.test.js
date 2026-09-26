@@ -516,6 +516,26 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(explicitInvoiceQ.where).toHaveBeenCalledWith({ id: 'inv-1' });
     expect(unexpectedInvoiceQ.where).not.toHaveBeenCalled();
   });
+
+  test('a failed resume lookup skips resumption but still runs the 1-day stage', async () => {
+    const failingPrefs = query();
+    failingPrefs.whereIn = jest.fn(() => { throw new Error('connection reset'); });
+    const oneDayQ = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: [] })],
+      annual_prepay_terms: [
+        query({ columnInfo: REMINDER_COLS }),
+        query({ rows: [] }), // 3-day target date: none
+        query({ rows: [{ ...BASE_TERM, customer_id: 'cust-x', term_start: '2026-07-10' }] }), // resume candidates
+        oneDayQ, // 1-day target date
+      ],
+      notification_prefs: [failingPrefs],
+    });
+
+    await expect(AnnualPrepayRenewals.checkAndSendPaymentReminders({ today: '2026-07-08' }))
+      .resolves.toEqual({ sent: 0 });
+    expect(oneDayQ.where).toHaveBeenCalledWith('term_start', '2026-07-09');
+  });
 });
 
 // gh-r1 (2026-08-14): the reminder is a balance-outreach rail — policy
