@@ -47,6 +47,23 @@ function sameProperty(estimateAddress, pageAddress) {
   return Boolean(estZip) && estZip === normalizeZip(pageAddress.zip);
 }
 
+// The slot probe can resolve an address through the geocoder and a county
+// lookup (tens of seconds when a provider is slow). The offer is optional,
+// so it never waits past this budget (Codex #4918 r1 P2): the estimate
+// page's first load and the gone-quiet email send — one job in a
+// sequential batch holding the follow-up lock — go ahead without it. The
+// probe is read-only, so letting it finish in the background is harmless.
+const PROBE_BUDGET_MS = 3000;
+const PROBE_TIMED_OUT = Symbol('probe-timed-out');
+function withinProbeBudget(promise) {
+  let timer;
+  const budget = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(PROBE_TIMED_OUT), PROBE_BUDGET_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, budget]).finally(() => clearTimeout(timer));
+}
+
 // The lead an estimate belongs to. The link the admin estimate tool writes
 // is the lead-side pointer leads.estimate_id (estimate-lead-linkage.js reads
 // it for attribution); only estimator-engine call drafts and commercial
@@ -100,7 +117,11 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
   if (!leadWantsRecurringPlan(lead)) return null;
 
   const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
-  const result = await computeConsultationSlotsForLead(lead.id, { count: 1 });
+  const result = await withinProbeBudget(computeConsultationSlotsForLead(lead.id, { count: 1 }));
+  if (result === PROBE_TIMED_OUT) {
+    logger.warn(`[estimate-consultation-offer] slot probe exceeded ${PROBE_BUDGET_MS}ms for lead ${lead.id} — no offer`);
+    return null;
+  }
   if (!result.ok || result.slots.length === 0) return null;
   if (!sameProperty(estimate.address, result.address)) return null;
   return lead;
@@ -127,4 +148,4 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
 // estimate.engage_gone_quiet follow-up email's own consultation-offer
 // link, owner ruling 2026-09-26) — the same shared eligibility this
 // module's own page offer above already uses, never re-derived.
-module.exports = { buildEstimateConsultationOffer, estimateConsultationLead, _test: { sameProperty, linkedLeadIdFor } };
+module.exports = { buildEstimateConsultationOffer, estimateConsultationLead, _test: { sameProperty, linkedLeadIdFor, PROBE_BUDGET_MS } };

@@ -280,6 +280,19 @@ describe('buildEstimateConsultationOffer — happy path', () => {
     expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 
+  test('a slot probe that outlives its budget (slow geocoder) → null at the budget, never a hung page or send (Codex #4918 r1 P2)', async () => {
+    const { _test: { PROBE_BUDGET_MS } } = require('../services/estimate-consultation-offer');
+    jest.useFakeTimers();
+    try {
+      mockComputeConsultationSlotsForLead.mockReturnValue(new Promise(() => {})); // never settles
+      const pending = buildEstimateConsultationOffer(baseArgs());
+      await jest.advanceTimersByTimeAsync(PROBE_BUDGET_MS);
+      await expect(pending).resolves.toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('eligible but nothing to pick (out of area, retired catalog, no open times) → null', async () => {
     mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: false });
     expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();

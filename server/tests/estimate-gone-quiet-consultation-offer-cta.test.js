@@ -17,6 +17,8 @@ const EmailTemplates = require('../services/email-template-library');
 const migration = require('../models/migrations/20260926010000_estimate_gone_quiet_consultation_offer_cta');
 // Supersedes 20260926010000's marker idempotency (pre-push Codex P1: up → down → up).
 const reapply = require('../models/migrations/20260926010100_estimate_gone_quiet_consultation_offer_cta_reapply');
+// Final shape + non-destructive rollback (Codex #4918 r1 P2s).
+const normalize = require('../models/migrations/20260926010200_estimate_gone_quiet_consultation_offer_normalize');
 
 const { primaryCtaAnchorIndex, alreadyHasConsultationLink, NEW_VARIABLE, LINK_LABEL, MIGRATION } = migration._private;
 
@@ -41,6 +43,29 @@ describe('block-placement helpers (no DB)', () => {
     const after = [...before, { type: 'cta', variant: 'link', label: LINK_LABEL, url_variable: NEW_VARIABLE }];
     expect(alreadyHasConsultationLink(before)).toBe(false);
     expect(alreadyHasConsultationLink(after)).toBe(true);
+  });
+});
+
+describe('20260926010200 normalizedBlocks (no DB)', () => {
+  const { normalizedBlocks } = normalize._private;
+  const BUTTON = { type: 'cta', label: 'Take another look', url_variable: 'estimate_url' };
+  const CHIP = { type: 'cta', label: 'Products & safety', url: 'https://www.wavespestcontrol.com/products-and-safety' };
+  const STAFF_LINK = { type: 'cta', variant: 'link', label: 'Read our FAQ', url: 'https://www.wavespestcontrol.com/faq' };
+  const LINK = { type: 'cta', variant: 'link', label: LINK_LABEL, url_variable: NEW_VARIABLE };
+
+  test('anchors after the first NON-link CTA (the rendered button), never a link-style CTA above it', () => {
+    const out = normalizedBlocks([{ type: 'paragraph', content: 'x' }, STAFF_LINK, BUTTON, CHIP]);
+    expect(out.map((b) => b.label)).toEqual([undefined, 'Read our FAQ', 'Take another look', LINK_LABEL, 'Products & safety']);
+  });
+
+  test('moves a misplaced link and leaves exactly one', () => {
+    const out = normalizedBlocks([STAFF_LINK, LINK, BUTTON, LINK, CHIP]);
+    expect(out.filter((b) => b.url_variable === NEW_VARIABLE)).toHaveLength(1);
+    expect(out.findIndex((b) => b.url_variable === NEW_VARIABLE)).toBe(out.indexOf(BUTTON) + 1);
+  });
+
+  test('no button CTA at all → throws for manual review', () => {
+    expect(() => normalizedBlocks([STAFF_LINK, { type: 'paragraph', content: 'x' }])).toThrow(/no primary button CTA/);
   });
 });
 
@@ -553,6 +578,85 @@ const knexLib = require('knex');
       const published = (await activeState(trx, template.id)).active;
       await reapply.down(trx);
       expect((await trx('email_templates').where({ id: template.id }).first()).active_version_id).toBe(published.id);
+      await trx.rollback();
+    });
+  });
+
+  // The real deploy chain: all three migrations in order, and knex's reverse-order rollback.
+  async function upAll(trx) { await migration.up(trx); await reapply.up(trx); await normalize.up(trx); }
+  async function downAll(trx) { await normalize.down(trx); await reapply.down(trx); await migration.down(trx); }
+
+  test('full chain on a normal deploy: one link directly after the button, owned by 20260926010200, one active row', async () => {
+    await db.transaction(async (trx) => {
+      const { template } = await seedTemplate(trx);
+      await upAll(trx);
+      const state = await activeState(trx, template.id);
+      expect(state.active.validation_snapshot.migration).toBe('20260926010200');
+      expect(state.activeRowCount).toBe(1);
+      const blocks = state.active.blocks;
+      expect(blocks.filter((b) => b.url_variable === NEW_VARIABLE)).toHaveLength(1);
+      expect(blocks.findIndex((b) => b.url_variable === NEW_VARIABLE))
+        .toBe(blocks.findIndex((b) => b.url_variable === 'estimate_url') + 1);
+      await trx.rollback();
+    });
+  });
+
+  test('full-chain rollback never rewrites the curated template, and re-applying adds nothing (Codex #4918 r1 P2)', async () => {
+    await db.transaction(async (trx) => {
+      const { template } = await seedTemplate(trx);
+      await upAll(trx);
+      const before = await activeState(trx, template.id);
+      const versionsBefore = await trx('email_template_versions').where({ template_id: template.id }).orderBy('version_number');
+      await downAll(trx);
+      const after = await activeState(trx, template.id);
+      expect(after.active.id).toBe(before.active.id);
+      expect(after.activeRowCount).toBe(1);
+      expect((await trx('email_template_versions').where({ template_id: template.id }).orderBy('version_number')).map((v) => [v.id, v.status]))
+        .toEqual(versionsBefore.map((v) => [v.id, v.status]));
+      await upAll(trx);
+      expect((await activeState(trx, template.id)).active.id).toBe(before.active.id);
+      expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first())
+        .toEqual({ n: String(versionsBefore.length) });
+      await trx.rollback();
+    });
+  });
+
+  test('a link-style CTA a staff edit placed above the button: the chain lands the offer directly under the button', async () => {
+    await db.transaction(async (trx) => {
+      const { template, version } = await seedTemplate(trx);
+      const staffBlocks = [SEED_BLOCKS[0], { type: 'cta', variant: 'link', label: 'Read our FAQ', url: 'https://www.wavespestcontrol.com/faq' }, ...SEED_BLOCKS.slice(1)];
+      await trx('email_template_versions').where({ id: version.id }).update({ blocks: JSON.stringify(staffBlocks) });
+      await upAll(trx);
+      const blocks = (await activeState(trx, template.id)).active.blocks;
+      expect(blocks.findIndex((b) => b.url_variable === NEW_VARIABLE))
+        .toBe(blocks.findIndex((b) => b.url_variable === 'estimate_url') + 1);
+      expect(blocks.filter((b) => b.url_variable === NEW_VARIABLE)).toHaveLength(1);
+      await trx.rollback();
+    });
+  });
+
+  test('a custom plaintext body fails 20260926010200 for manual review and it writes nothing', async () => {
+    await db.transaction(async (trx) => {
+      const { template, version } = await seedTemplate(trx);
+      await trx('email_template_versions').where({ id: version.id }).update({ text_body: 'Hi {{first_name}}, staff-written plaintext.' });
+      await migration.up(trx);
+      await reapply.up(trx);
+      const beforeNormalize = await activeState(trx, template.id);
+      await expect(normalize.up(trx)).rejects.toThrow(/custom plaintext body/);
+      const afterNormalize = await activeState(trx, template.id);
+      expect(afterNormalize.active.id).toBe(beforeNormalize.active.id);
+      expect(afterNormalize.activeRowCount).toBe(1);
+      await trx.rollback();
+    });
+  });
+
+  test('20260926010200 is idempotent — a second run publishes nothing', async () => {
+    await db.transaction(async (trx) => {
+      const { template } = await seedTemplate(trx);
+      await upAll(trx);
+      const count = await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first();
+      await normalize.up(trx);
+      expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first()).toEqual(count);
       await trx.rollback();
     });
   });
