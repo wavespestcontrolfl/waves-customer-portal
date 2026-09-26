@@ -62,7 +62,8 @@ it('fills and explicitly saves a property, preserving a manually entered unit', 
 });
 
 it('replaces the primary address without carrying the old unit to another property', async () => {
-  render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} />);
+  const onCustomerMutation = vi.fn();
+  render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} onCustomerMutation={onCustomerMutation} />);
   fireEvent.click((await screen.findAllByRole('button', { name: /^edit$/i }))[0]);
   selectPlace(place());
   expect(screen.getByLabelText('Address')).toHaveValue('100 Example Street');
@@ -73,6 +74,7 @@ it('replaces the primary address without carrying the old unit to another proper
   fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
   await waitFor(() => expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
   expect(JSON.parse(fetchMock.mock.calls.find(([, o]) => o?.method === 'PUT')[1].body)).toMatchObject({ addressLine1: '100 Example Street', addressLine2: '', city: 'Sarasota', state: 'FL', zip: '34236' });
+  await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'fixture', action: 'update' }));
 });
 
 it.each(['gate', 'key'])('keeps manual entry available when the %s is absent', async (missing) => {

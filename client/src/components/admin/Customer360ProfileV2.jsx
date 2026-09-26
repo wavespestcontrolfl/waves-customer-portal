@@ -7250,6 +7250,7 @@ function CustomerProfileEditor({
   setEditErr,
   customerId,
   onClose,
+  onCustomerMutation,
   setSavingEdit,
   initialEditForm,
   reloadCustomer,
@@ -7460,6 +7461,7 @@ function CustomerProfileEditor({
                   await adminFetch(`/admin/customers/${customerId}`, {
                     method: "DELETE",
                   });
+                  onCustomerMutation?.({ customerId, action: "delete" });
                   setEditOpen(false);
                   onClose?.();
                 } catch (e) {
@@ -7518,6 +7520,7 @@ function CustomerProfileEditor({
                       method: "PUT",
                       body: JSON.stringify(payload),
                     });
+                    onCustomerMutation?.({ customerId, action: "update" });
                     await reloadCustomer();
                     setEditOpen(false);
                   } catch (e) {
@@ -9601,6 +9604,7 @@ function CustomerProfilePending({
 export default function Customer360ProfileV2({
   customerId,
   onClose,
+  onCustomerMutation,
   onSelectCustomer,
   initialTab = "overview",
   initialScheduledServiceId = null,
@@ -10148,6 +10152,7 @@ export default function Customer360ProfileV2({
             setEditErr={setEditErr}
             customerId={customerId}
             onClose={onClose}
+            onCustomerMutation={onCustomerMutation}
             setSavingEdit={setSavingEdit}
             initialEditForm={initialEditForm}
             reloadCustomer={reloadCustomer}

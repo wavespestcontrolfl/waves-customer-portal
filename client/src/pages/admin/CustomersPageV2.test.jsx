@@ -7,11 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
 vi.mock('../../components/admin/Customer360ProfileV2', () => ({
-  default: function Profile({ customerId, initialTab }) {
+  default: function Profile({ customerId, initialTab, onCustomerMutation }) {
     const [tab, setTab] = React.useState(initialTab);
     return <div data-testid="customer-profile">Profile {customerId}
       <span data-testid="profile-active-tab">{tab}</span>
       <button onClick={() => setTab('overview')}>Profile overview</button>
+      <button onClick={() => onCustomerMutation?.({ customerId, action: 'update' })}>Save profile address</button>
     </div>;
   },
 }));
@@ -187,6 +188,30 @@ describe('CustomersPageV2 workflow state', () => {
     await waitFor(() => expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('2'));
     expect(writes.map(({ method }) => method)).toEqual(['PUT', 'DELETE']);
     confirm.mockRestore();
+  });
+
+  it('refreshes the mounted overlay queue after quick-add and Customer 360 mutations', async () => {
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname === '/api/admin/customers' && options.method === 'POST') {
+        return response({ id: 'customer-new', firstName: 'New', lastName: 'Customer' });
+      }
+      return response(parsed.pathname === '/api/admin/customers' ? list : {});
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=overlay']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('0');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
+    const dialog = within(screen.getByRole('dialog'));
+    fireEvent.change(dialog.getByLabelText('First name *'), { target: { value: 'New' } });
+    fireEvent.change(dialog.getByLabelText('Phone *'), { target: { value: '5551234567' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Submit' }));
+    await waitFor(() => expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('1'));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Save profile address' }));
+    await waitFor(() => expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('2'));
   });
 
   it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {

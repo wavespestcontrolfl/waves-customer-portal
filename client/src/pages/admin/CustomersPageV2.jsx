@@ -1670,6 +1670,7 @@ function CustomersOverlayPage({
   selectedId,
   onSelect,
   onClose,
+  onCustomerMutation,
   initialTab,
   tabKey,
   children,
@@ -1686,6 +1687,7 @@ function CustomersOverlayPage({
           customerId={selectedId}
           onSelectCustomer={onSelect}
           onClose={onClose}
+          onCustomerMutation={onCustomerMutation}
         />
       )}
     </UiSurface>
@@ -1829,7 +1831,7 @@ export default function CustomersPageV2() {
   const attachNoticeTimerRef = useRef(null);
   useEffect(() => () => clearTimeout(attachNoticeTimerRef.current), []);
   const handleQuickAddCreated = (customer) => {
-    loadCustomers();
+    refreshCustomersAndGeocodeReview();
     if (view === "pipeline") loadPipeline();
     if (customer?.attachedToExistingAccount) {
       setAttachNotice(
@@ -2074,6 +2076,7 @@ export default function CustomersPageV2() {
       selectedId={selected360Id}
       onSelect={openCustomerProfile}
       onClose={closeCustomerProfile}
+      onCustomerMutation={refreshCustomersAndGeocodeReview}
       initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
       tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
       overlays={
