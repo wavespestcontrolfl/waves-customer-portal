@@ -555,25 +555,26 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
   });
 }
 
-// Codex #4816 r15–r17: visit activity for the row's customer, after the
-// source text, that the event page has not scanned yet — newer than the
-// sms_context.event_seen_at watermark stamped each time the page reaches the
-// row. The same activity loadSmsFulfillmentEvidence reads (creation,
-// completion, a status transition, a logged move); admissibility still
-// decides whether it answers the row. A watermark rather than a lookback
-// window or cursor: the page drains every pending event however many rows
-// qualify, a scanned row leaves it until new activity lands, and no event
-// expires unseen.
-function unseenVisitActivity(conn, now) {
-  const floor = "GREATEST(s.created_at, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, s.created_at))";
-  const unseen = (column) => (q) => q.where(column, '<=', now).whereRaw(`${column} > ${floor}`);
-  return conn('scheduled_services as v').select(conn.raw('1')).whereRaw('v.customer_id = s.customer_id')
-    .where(function recent() {
-      this.where(unseen('v.created_at')).orWhere(unseen('v.completed_at'))
-        .orWhereExists(conn('job_status_history as h').select(conn.raw('1')).whereRaw('h.job_id = v.id').where(unseen('h.transitioned_at')))
-        .orWhereExists(conn('reschedule_log as r').select(conn.raw('1')).whereRaw('r.scheduled_service_id = v.id').where(unseen('r.created_at')));
-    });
-}
+// Codex #4816 r15–r19: the newest visit activity for the row's customer,
+// after the source text, that the event page has not scanned yet — newer
+// than the sms_context.event_seen_at watermark. The same activity
+// loadSmsFulfillmentEvidence reads (creation, completion, a status
+// transition, a logged move); admissibility still decides whether it
+// answers the row. A watermark rather than a lookback window or cursor: the
+// page drains every pending event however many rows qualify, a scanned row
+// leaves it until new activity lands, and no event expires unseen. The
+// watermark advances only to the activity this read actually saw (as text,
+// keeping microseconds), never to the tick time, so a visit write that
+// commits after the read with an earlier timestamp stays unseen (r19).
+const UNSEEN_FLOOR = "GREATEST(s.created_at, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, s.created_at))";
+const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
+    SELECT v.created_at AS at FROM scheduled_services v WHERE v.customer_id = s.customer_id
+    UNION ALL SELECT v.completed_at FROM scheduled_services v WHERE v.customer_id = s.customer_id
+    UNION ALL SELECT h.transitioned_at FROM job_status_history h JOIN scheduled_services v ON v.id = h.job_id
+      WHERE v.customer_id = s.customer_id
+    UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
+      WHERE v.customer_id = s.customer_id
+  ) a WHERE a.at <= ? AND a.at > ${UNSEEN_FLOOR})`;
 
 // One open row: skip, verify, and close or bell. Returns what happened so
 // the caller can count it.
@@ -695,13 +696,15 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // A third page, ahead of the cursors: any open row (due, undated or
   // future) with unseen visit activity, so an event is checked on the next
   // tick wherever the cursors stand (Codex #4816 r15–r17).
-  const eventRows = await openRows().whereExists(unseenVisitActivity(conn, now)).orderBy('cc.id').limit(PAGE).select('cc.*');
+  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, [now]).orderBy('cc.id').limit(PAGE)
+    .select('cc.*', conn.raw(`${UNSEEN_VISIT_ACTIVITY}::text AS event_seen_through`, [now]));
+  const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at }) => [id, at]));
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
     await page('sms_operations.future_cursor', (q) => q.where('cc.due_at', '>', now)),
   ];
-  const eventIds = new Set(eventRows.map((row) => row.id));
-  const rows = [...new Map([...eventRows, ...pages.flatMap((p) => p.rows)].map((row) => [row.id, row])).values()];
+  const rows = [...new Map([...eventRows.map(({ event_seen_through: _at, ...row }) => row), ...pages.flatMap((p) => p.rows)]
+    .map((row) => [row.id, row])).values()];
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { ...counts, skipped: 'gate_off' };
     counts.scanned += 1;
@@ -712,9 +715,9 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     if (result.closed) counts.fulfilled += 1;
     // Stamped only after the row is handled: an error above, or a deferred
     // close, leaves its event pending for the next tick.
-    if (eventIds.has(row.id) && result.outcome !== 'deferred') {
+    if (seenThrough.has(row.id) && result.outcome !== 'deferred') {
       await conn('call_commitments').where({ id: row.id }).update({
-        sms_context: conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_seen_at}', to_jsonb(?::text))", [now.toISOString()]),
+        sms_context: conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_seen_at}', to_jsonb(?::text))", [seenThrough.get(row.id)]),
       });
     }
   }

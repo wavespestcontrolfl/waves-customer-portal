@@ -1147,7 +1147,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(verified()).toContain(target);
     expect(verified()).not.toContain(last);
     expect(verify.mock.calls.every(([, , opts]) => opts.eventOnly === true)).toBe(true);
-    expect((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).toBe(now.toISOString());
+    // Stamped through the activity actually read (the en-route transition), not the tick time.
+    expect(new Date((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).getTime()).toBe(after.getTime());
     // Tick 2: stamped rows leave the event page, so it drains the other five
     // (the parked future cursor cannot reach the last row this tick).
     await tick(new Date(now.getTime() + 1000));
@@ -1216,6 +1217,44 @@ postgres('SMS commitments on PostgreSQL', () => {
     verify.mockClear();
     await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
     expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+  });
+
+  test('Codex #4816 r19: a visit write committed after the read with an earlier timestamp is still unseen next tick', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    // Park the due cursor past the row before every tick (an empty page
+    // wraps it), so only the event page can reach the row.
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 60000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    await tick(now);
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+    // A transition stamped before that tick's time but committed after its read.
+    // Microsecond precision, as database-default timestamps carry.
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site',
+      transitioned_at: mockPg.raw("?::timestamptz + interval '456 microseconds'", [new Date(after.getTime() + 30000)]) });
+    await mockPg('scheduled_services').where({ id: visit.id }).update({ status: 'on_site' });
+    await tick(new Date(now.getTime() + 1000));
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+    // The watermark keeps those microseconds: the same event is not re-selected.
+    await tick(new Date(now.getTime() + 2000));
+    expect(verify).not.toHaveBeenCalled();
   });
 
   test('inside an open window a message witness waits for the deadline: no model call, no bell, then verified once due', async () => {
