@@ -11,7 +11,10 @@
  *    not been processed (no successor term minted from it); a processed one
  *    (successor exists) is refused and left untouched. Runs the guarded
  *    renewed → cancelled UPDATE (move 14) as real SQL.
- *  - P1: a fresh decline raises the dated station-retrieval task once.
+ *  - P1: a fresh decline raises the dated station-retrieval task once; a
+ *    decline BEFORE installation raises it once the installation anchor
+ *    commits (against the NEW term_end), and the daily sweep backstops a
+ *    term whose task was never settled — never twice.
  *
  * Mocks only '../models/db' (redirected to this scratch schema), the logger,
  * the admin bell, and the retrieval-task raiser (its own suites own its body).
@@ -149,8 +152,9 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask }));
     const Renewals = require('../services/annual-prepay-renewals');
+    const { anchorTermToInstallation } = require('../services/termite-annual-activation');
     return {
-      db, Renewals, notifyAdmin, raiseTermiteRetrievalTask,
+      db, Renewals, notifyAdmin, raiseTermiteRetrievalTask, anchorTermToInstallation,
     };
   }
 
@@ -301,5 +305,107 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     // The guarded UPDATE itself refuses too, even if a caller skipped the check.
     expect(await Renewals._private.supersedeRenewWithCustomerCancel({ termId: fx.term.id, conn: db })).toBeNull();
     expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+  });
+
+  // Codex #4940 r5 P1: declined BEFORE installation — no real end date to
+  // date the task against until the installation anchors the term.
+  test('decline before install, then the installation anchors: the task is raised once against the NEW term_end; re-anchor and sweep never duplicate it', async () => {
+    const {
+      db, Renewals, notifyAdmin, raiseTermiteRetrievalTask, anchorTermToInstallation,
+    } = await load();
+    const customerId = randomUUID();
+    const today = etToday();
+    const signedOn = addMonths(today, -1);
+    await db('customers').insert({ id: customerId, first_name: 'Jane', last_name: 'Doe' });
+    const [estimate] = await db('estimates').insert({ customer_id: customerId }).returning('*');
+    const [invoice] = await db('invoices').insert({ customer_id: customerId, status: 'paid', paid_at: new Date() }).returning('*');
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: customerId,
+      source_estimate_id: estimate.id,
+      prepay_invoice_id: invoice.id,
+      plan_label: 'WaveGuard Termite Annual Protection',
+      prepay_amount: 450,
+      coverage_service_type: 'Termite Monitoring Visit',
+      coverage_visit_count: 2,
+      coverage_cadence: 'annual',
+      term_start: signedOn,
+      term_end: addMonths(signedOn, 12),
+      status: 'active',
+      annual_plan_version: 'v3',
+      created_at: new Date(`${signedOn}T16:00:00Z`),
+    }).returning('*');
+
+    const declined = await Renewals.declineTermiteAnnualRenewal({ customerId, termId: term.id, today });
+    expect(declined).toEqual(expect.objectContaining({ ok: true, awaitsInstallation: true }));
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+    expect(notifyAdmin.mock.calls[0][2]).toContain('a dated retrieval task will be raised once the stations are installed');
+    // Nothing to sweep yet — still awaiting installation.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+
+    await db('scheduled_services').insert({
+      customer_id: customerId, source_estimate_id: estimate.id, status: 'completed',
+      service_type: 'Termite Bait Station Installation', scheduled_date: today,
+    });
+    const anchored = await anchorTermToInstallation({ termId: term.id, conn: db });
+    expect(anchored).toEqual(expect.objectContaining({ anchored: true, termStart: today, declinedRenewal: true }));
+    const newTermEnd = anchored.termEnd;
+    expect(newTermEnd).not.toBe(ymd(term.term_end));
+
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(customerId, null, {
+      retrieveAfter: newTermEnd, termId: term.id, episodeKey: 'portal_renewal_decline',
+    });
+    const marker = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).first();
+    expect(marker.metadata).toEqual(expect.objectContaining({ term_id: term.id, term_end: newTermEnd, outcome: 'raised' }));
+
+    // A second anchor attempt and the daily sweep are both no-ops.
+    expect(await anchorTermToInstallation({ termId: term.id, conn: db })).toEqual({ skipped: 'already_anchored' });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+  });
+
+  test('the daily sweep backstops an installed, portal-declined term whose task was never settled — once', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    // The decline committed (its activity row exists) but its raise never
+    // landed — e.g. the process died right after the commit.
+    await db('activity_log').insert({
+      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+    });
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, {
+      retrieveAfter: ymd(fx.term.term_end), termId: fx.term.id, episodeKey: 'portal_renewal_decline',
+    });
+  });
+
+  test('the sweep never touches a decline staff recorded (no portal-decline row) or a refunded one, and a failed raise is retried', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    const staffDeclined = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    const refunded = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await db('invoices').where({ id: refunded.invoice.id }).update({ status: 'overdue', paid_at: null });
+    const failing = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    for (const fx of [refunded, failing]) {
+      await db('activity_log').insert({
+        customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+      });
+    }
+    raiseTermiteRetrievalTask.mockRejectedValueOnce(new Error('notifications down'));
+
+    // Only the still-paid, portal-declined term is a candidate.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(failing.customerId, null, expect.any(Object));
+    expect(notifyAdmin.mock.calls.map((c) => c[2]).join(' ')).toContain('could not be raised yet');
+    // The failure left no marker, so the next sweep retries and settles it.
+    // The refunded term is never raised; staff's own decline is never a
+    // candidate.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(2);
+    expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).not.toContain(staffDeclined.customerId);
+    expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).not.toContain(refunded.customerId);
   });
 });

@@ -213,6 +213,7 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
         .update({ term_start: termStart, term_end: termEnd }).returning('*');
       return updated;
     });
+    const raiseRetrievalAfterAnchor = jest.fn(async () => ({ raised: true }));
     const refreshTermSnapshot = jest.fn(async (termId, conn) => {
       const term = await conn('annual_prepay_terms').where({ id: termId }).first();
       anchoredWhenRefreshed.push(Boolean(term.installation_anchored_at));
@@ -231,6 +232,10 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
         isPaidDecidedLapseTerm: actual.isPaidDecidedLapseTerm,
         createTermForAnnualPrepay,
         refreshTermSnapshot,
+        // The portal-decline station-retrieval raise (real SQL covered in
+        // termite-annual-renewal-decline-coverage-postgres.test.js).
+        raiseRetrievalAfterAnchor,
+        raisePendingDeclineRetrievalTasks: jest.fn(async () => ({ scanned: 0, raised: 0 })),
       };
     });
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
@@ -239,6 +244,7 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
       notifyAdmin,
       createTermForAnnualPrepay,
       refreshTermSnapshot,
+      raiseRetrievalAfterAnchor,
       anchoredWhenRefreshed,
       db,
     };
@@ -391,7 +397,7 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
   // 'cancel') still needs its already-paid coverage year anchored once the
   // installation happens; only the FUTURE renewal was refused.
   test('a term the customer declined to renew BEFORE installation still anchors once the installation completes', async () => {
-    const { sweep, createTermForAnnualPrepay, db } = load();
+    const { sweep, createTermForAnnualPrepay, raiseRetrievalAfterAnchor, db } = load();
     await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
     const install = await addVisit(db, { scheduled_date: '2026-10-14' });
 
@@ -406,6 +412,17 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     // window moved.
     expect(term.status).toBe('cancelled');
     expect(term.renewal_decision).toBe('cancel');
+    // Codex #4940 r5: once anchored (committed), the declined term's dated
+    // station-retrieval task is raised against its real term_end.
+    expect(raiseRetrievalAfterAnchor).toHaveBeenCalledTimes(1);
+    expect(raiseRetrievalAfterAnchor).toHaveBeenCalledWith(ids.termId);
+  });
+
+  test('an UNDECIDED term that anchors raises no decline retrieval task', async () => {
+    const { sweep, raiseRetrievalAfterAnchor, db } = load();
+    await addVisit(db, { scheduled_date: '2026-10-14' });
+    expect(await sweep()).toMatchObject({ anchored: 1 });
+    expect(raiseRetrievalAfterAnchor).not.toHaveBeenCalled();
   });
 
   // A void/refund 'cancelled' term (renewal_decision NULL — never a customer
@@ -716,6 +733,8 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
         isPaidDecidedLapseTerm: actual.isPaidDecidedLapseTerm,
         createTermForAnnualPrepay: jest.fn(),
         refreshTermSnapshot: jest.fn(),
+        raiseRetrievalAfterAnchor: jest.fn(),
+        raisePendingDeclineRetrievalTasks: jest.fn(async () => ({ scanned: 0, raised: 0 })),
       };
     });
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');

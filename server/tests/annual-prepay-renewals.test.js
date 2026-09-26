@@ -2643,10 +2643,17 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
     };
+    // Post-commit the raise re-reads the COMMITTED term, confirms the
+    // portal-decline row, finds no settled marker, re-checks it is paid,
+    // looks for another live plan, raises, then writes the settled marker.
+    let markerInsert;
     const freshDecline = (termRow, otherPlan = null) => {
+      const decided = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
+      markerInsert = query();
       setDbQueues({
-        annual_prepay_terms: [query({ first: termRow }), query({ returning: [{ ...termRow, status: 'cancelled', renewal_decision: 'cancel' }] }), query({ first: otherPlan })],
-        activity_log: [query()],
+        annual_prepay_terms: [query({ first: termRow }), query({ returning: [decided] }), query({ first: decided }), query({ first: otherPlan })],
+        activity_log: [query(), query({ first: { id: 'decline-row' } }), query({ first: null }), markerInsert],
+        'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
       return AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
@@ -2662,6 +2669,11 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       });
       expect(bellBody()).toContain('A dated station-retrieval task was raised for after');
       expect(bellBody()).not.toContain('no action needed');
+      // Settled: the persisted marker keeps the daily sweep off this term.
+      expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'termite_annual_decline_retrieval',
+        metadata: expect.objectContaining({ term_id: 'term-1', term_end: '2027-05-20', outcome: 'raised' }),
+      }));
     });
 
     test('an idempotent replay raises nothing', async () => {
@@ -2678,13 +2690,16 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     test('a term still awaiting installation raises none — the bell says the stations are not installed yet', async () => {
       await freshDecline({ ...anchored, installation_anchored_at: null, renewed_from_term_id: null });
       expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
-      expect(bellBody()).toContain('The stations are not installed yet, so no retrieval task was raised');
+      expect(bellBody()).toContain('a dated retrieval task will be raised once the stations are installed');
     });
 
     test('another live termite plan on the account: no automatic task, staff confirm which stations', async () => {
       await freshDecline(anchored, { id: 'term-other' });
       expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
       expect(bellBody()).toContain('another termite annual plan');
+      expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: expect.objectContaining({ outcome: 'other_termite_plan' }),
+      }));
     });
 
     test('a caller-supplied transaction (not yet committed) never raises the durable task — reported so the caller raises it after commit', async () => {
@@ -2702,11 +2717,12 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect(result.retrieval).toEqual({ raised: false, reason: 'caller_transaction' });
     });
 
-    test('a task failure never fails the committed decline — the bell says to create it by hand', async () => {
+    test('a task failure never fails the committed decline — no marker, so the daily sweep retries; the bell says so', async () => {
       raiseTermiteRetrievalTask.mockRejectedValueOnce(new Error('notifications down'));
       const result = await freshDecline(anchored);
       expect(result.ok).toBe(true);
-      expect(bellBody()).toContain('could not be raised — create it by hand');
+      expect(bellBody()).toContain('could not be raised yet — it is retried automatically each day');
+      expect(markerInsert.insert).not.toHaveBeenCalled();
     });
   });
 

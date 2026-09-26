@@ -582,12 +582,16 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     countersignScanned: 0, countersignReminded: 0,
     signatureNudgeScanned: 0, signatureNudged: 0,
     signatureExpireScanned: 0, signatureExpired: 0, signatureExpireFailed: 0,
+    declineRetrievalScanned: 0, declineRetrievalRaised: 0,
   };
   await retryAwaitingActivations({ conn, limit, counts });
   await retryUndeliveredInvoices({ conn, limit, counts });
   // Anchor BEFORE the handoff retry: a term whose installation already
   // happened needs no "schedule the installation" bell.
   await anchorInstalledTerms({ conn, limit, counts });
+  // After anchoring: a portal-declined term whose dated station-retrieval
+  // task was never settled (see raisePendingDeclineRetrievalTasks).
+  await retryDeclineRetrievalTasks({ counts });
   await retryInstallHandoffs({ conn, limit, counts });
   await remindPendingCountersignatures({ conn, limit, counts });
   // Nudge BEFORE hard expiry: an estimate whose link lapses on exactly the
@@ -992,7 +996,7 @@ async function installationPlanForEstimate(conn, estimateId) {
 }
 
 async function anchorTermToInstallation({ termId, conn = db }) {
-  return conn.transaction(async (trx) => {
+  const result = await conn.transaction(async (trx) => {
     const peek = await trx('annual_prepay_terms').where({ id: termId }).first('customer_id');
     if (!peek) return { skipped: 'term_not_found' };
     // The per-customer annual-prepay advisory lock every term writer holds
@@ -1060,9 +1064,29 @@ async function anchorTermToInstallation({ termId, conn = db }) {
       await AnnualPrepayRenewals.refreshTermSnapshot(term.id, trx);
     }
     return {
-      anchored: true, termId: term.id, termStart, termEnd, moved,
+      anchored: true,
+      termId: term.id,
+      termStart,
+      termEnd,
+      moved,
+      declinedRenewal: term.status === 'cancelled' && term.renewal_decision === 'cancel',
     };
   });
+  // Codex #4940 r5 P1: a term the customer declined online BEFORE its
+  // installation had no real term_end to date a station-retrieval task
+  // against — it has one now. Raised only AFTER the anchor commits and only
+  // when this call owned that transaction (raiseTermiteRetrievalTask writes
+  // on its own connection; a caller transaction could still roll back —
+  // the daily sweep then raises it). Never fails the anchor: a raise that
+  // cannot happen bells staff instead.
+  if (result?.anchored && result.declinedRenewal && !conn.isTransaction) {
+    try {
+      await require('./annual-prepay-renewals').raiseRetrievalAfterAnchor(result.termId);
+    } catch (err) {
+      logger.error(`[termite-annual-activation] decline retrieval task after anchor failed for term ${result.termId}: ${err.message}`);
+    }
+  }
+  return result;
 }
 
 async function anchorInstalledTerms({ conn, limit, counts }) {
@@ -1126,6 +1150,24 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
   } catch (err) {
     logger.error(`[termite-annual-activation] installation anchor scan failed: ${err.message}`);
     counts.anchorScanError = err.message;
+  }
+}
+
+// Codex #4940 r5 P1: backstop for the station-retrieval task of a term the
+// customer declined online — an anchor (or decline) that committed but whose
+// raise never landed. The candidate set is the PERSISTED marker's absence
+// (annual-prepay-renewals.js DECLINE_RETRIEVAL_ACTIVITY_ACTION), so a
+// settled term is never re-raised; the task's own dedupe key covers a lost
+// marker. Isolated from the other passes' failures.
+async function retryDeclineRetrievalTasks({ counts }) {
+  try {
+    const { raisePendingDeclineRetrievalTasks } = require('./annual-prepay-renewals');
+    const outcome = await raisePendingDeclineRetrievalTasks({ limit: 50 });
+    counts.declineRetrievalScanned = outcome?.scanned || 0;
+    counts.declineRetrievalRaised = outcome?.raised || 0;
+  } catch (err) {
+    logger.error(`[termite-annual-activation] decline retrieval sweep failed: ${err.message}`);
+    counts.declineRetrievalScanError = err.message;
   }
 }
 
