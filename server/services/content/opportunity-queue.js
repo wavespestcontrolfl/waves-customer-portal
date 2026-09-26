@@ -58,6 +58,21 @@ function listicleFamilyLaneOpen() {
   }
 }
 
+// Same kill-switch contract for the citability_backfill lane (2026-09-25):
+// the seeder's gate check fences WRITES; this fences CONSUMPTION, so turning
+// GATE_CITABILITY_BACKFILL off after a bad first batch stops already-queued
+// rows from being claimed at all — they sit pending and age out (45d) —
+// instead of continuing to open refresh PRs on live posts (Sonnet fallback
+// P1 on edd0f96d32). Fail CLOSED: unreadable gate = lane shut.
+function citabilityBackfillLaneOpen() {
+  try {
+    const { isEnabled } = require('../../config/feature-gates');
+    return isEnabled('citabilityBackfill') === true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // Lifetime claim budget per opportunity. A row that keeps failing returns
 // to pending (release / stale-claim recovery) and, as the top-scored row,
 // gets re-claimed by the daily batch forever — one wasted LLM dispatch per
@@ -120,6 +135,7 @@ class OpportunityQueue {
       // Same lane fence as claimNext (peek is consumed as "what the runner
       // can claim" — see listicleFamilyLaneOpen).
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
+      if (!citabilityBackfillLaneOpen()) q = q.whereNot('bucket', 'citability_backfill');
       if (minScore != null) {
         // Same action-aware floor as claimNext (including the
         // listicle_family blog-floor ride), so previews show exactly what
@@ -167,6 +183,8 @@ class OpportunityQueue {
     const whereExclude = exclude.length ? `AND NOT (id = ANY(?))` : '';
     // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
     const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
+    // See citabilityBackfillLaneOpen — gate-off backfill rows are unclaimable.
+    const whereCitabilityGate = citabilityBackfillLaneOpen() ? '' : `AND bucket <> 'citability_backfill'`;
 
     const result = await db.raw(
       `UPDATE opportunity_queue
@@ -206,6 +224,7 @@ class OpportunityQueue {
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}
+           ${whereCitabilityGate}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
@@ -492,4 +511,4 @@ function parseRow(row) {
 
 module.exports = new OpportunityQueue();
 module.exports.OpportunityQueue = OpportunityQueue;
-module.exports._internals = { parseRow, STALE_CLAIM_MS, maxClaimAttempts };
+module.exports._internals = { parseRow, STALE_CLAIM_MS, maxClaimAttempts, listicleFamilyLaneOpen, citabilityBackfillLaneOpen };

@@ -1766,6 +1766,9 @@ const gates = {
   // / how-to-choose). Default OFF in prod: the seeder's --dry-run scan
   // always works, but writes need GATE_CITABILITY_BACKFILL=true so the
   // first batch is eyeballed before the refresh lane starts consuming it.
+  // The same gate fences CONSUMPTION (opportunity-queue
+  // citabilityBackfillLaneOpen: claimNext/peek skip the bucket while off),
+  // so flipping it back off is a real kill switch for rows already queued.
   citabilityBackfill: isProd ? process.env.GATE_CITABILITY_BACKFILL === 'true' : true,
 
   // Listicle brief overlay — when a supporting-blog brief's query is
