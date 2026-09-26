@@ -1,4 +1,6 @@
-# Estimator pricing lane — plan A–D, revision 2 (for owner sign-off; nothing built)
+# Estimator pricing lane — plan A–D, revision 2 (for owner sign-off; nothing built as of 2026-09-03)
+
+**Update 2026-09-26:** PR A1 (termite BOM/cost basis, `--termite-plan` audit mode) has shipped. From PR C1, the translator fixes for INP-001, INP-002 and INP-004 have shipped (v4.8), and the admin builder now collects stinging inputs (INP-006); INP-003 (typed bed area still stamped `estimated`) and INP-005 (unvalidated numeric inputs) remain open. PR A2 (the plan on the prepay lane) has partly shipped, dark behind `GATE_TERMITE_ANNUAL_PLAN`: plan pricing, converter acceptance and the v3 agreement flow landed (#4811, #4819, #4842), but the added 45-day renewal notice is not built yet (`annual-prepay-renewals.js` still sends at 30/15/7 days, and `notice_45_sent_at` is schema-only). Every other lane below (A3 cont'd, B, C2+, D) is unchanged from this original plan.
 
 Baseline `origin/main` @ `66ecc95dc`, worktree `~/wt-pricing-audit` (audit artifacts untracked, uncommitted). Sources: `docs/estimator-pricing-audit.md`, `docs/estimator-pricing-audit-owner-followup-2026-09-02.md`, the protocol-completion and field-requirements docs, memory note `estimator-pricing-audit-2026-09-02`, four read-only code sweeps, one adversarial code review, and the external review Adam shared on 09-03 (ChatGPT "Review Pricing Plan"). Paths are under `server/services/pricing-engine/` unless stated; line numbers are at the baseline.
 
@@ -83,7 +85,7 @@ A 2,000 sf home today: **$610 install + $72 × 4 = $898 year one**, then $288/yr
 | Activity follow-up reserve | ASSUMED 0.25 extra visits/yr × $55 | $14 / yr |
 | **Steady-state annual cost** | | **≈ $137 / yr** |
 
-The replacement rate is a fraction of *installed cartridges* (two per station) replaced per annual service, label-driven (> 1/3 consumed or missing); 33% is a conservative planning input until the tech `/complete` product ledger records real swaps. PR A1 adds a `--termite-plan` mode to `scripts/audit-estimator-pricing.js` that prints setup × annual × replacement × minutes → year-one and steady-state margin (until then the script rejects the unknown flag).
+The replacement rate is a fraction of *installed cartridges* (two per station) replaced per annual service, label-driven (> 1/3 consumed or missing); 33% is a conservative planning input until the tech `/complete` product ledger records real swaps. PR A1 adds a `--termite-plan` mode to `scripts/audit-estimator-pricing.js` that prints setup × annual × replacement × minutes → year-one and steady-state margin (**shipped 2026-09-26 update:** the flag is implemented; the script still rejects any other unknown flag).
 
 Candidate price shapes (setup fee + annual protection, both prepaid):
 
