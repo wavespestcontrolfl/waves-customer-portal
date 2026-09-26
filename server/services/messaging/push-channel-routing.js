@@ -423,6 +423,13 @@ function hasDurableAppReplay(messageType, billingDeliveryCategory) {
     || ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType]);
 }
 
+// A persisted in-app bell is customer-visible even when no device accepts the
+// push. Only a bell inserted or refreshed by THIS attempt carries this
+// attempt's copy; a deduped unchanged bell still shows the earlier one.
+function bellReachedThisAttempt(appNotification) {
+  return !!appNotification && (appNotification.deduped !== true || appNotification.refreshed === true);
+}
+
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
@@ -486,7 +493,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     // A persisted in-app bell is customer-visible even when no device accepts
     // the push; callers that must not undo a seen notice read bellPersisted.
-    const bell = appNotification ? { bellPersisted: true } : {};
+    const bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
     if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
@@ -679,6 +686,7 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
 }
 
 module.exports = {
+  bellReachedThisAttempt,
   wantsAppFirst,
   APP_FIRST_TYPES,
   decidePushRoute,

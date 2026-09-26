@@ -5440,18 +5440,12 @@ async function sendExplicitPaymentReminderChannels({
   const priorEvent = priorProgress.find((event) => event.metadata.notificationEventKey === eventKey);
   const hadPriorDelivery = !!(priorEvent && priorEvent.delivered.size > 0);
   const sendLeg = (channel, ledger) => {
-    if (channel === 'email') {
-      // No email template exists for this reminder (billing.previsit_balance
-      // is documented as never sent for one-time invoice debt, which an
-      // annual prepay invoice is). Settle the leg as a terminal
-      // template_unavailable refusal rather than inventing customer-facing
-      // copy or retrying a leg that can never send; the invoice email
-      // already carries the pay link.
-      logger.warn(`[annual-prepay] payment reminder has no email template; Email leg resolved for term ${claimedTerm.id}`);
-      return Promise.resolve({ ok: false, skipped: true, reason: 'template_unavailable' });
-    }
+    // Every leg goes through the canonical sender: the Email leg is the
+    // billing email adapter's billing.notice carrying this same reminder text
+    // (bound to its reservation for replay). Only the Text leg is addressed
+    // by phone; App and Email identify the recipient by customerId.
     return sendCustomerMessage({
-      to: customer.phone,
+      to: channel === 'sms' ? customer.phone : null,
       body,
       channel,
       audience: 'customer',
@@ -5465,6 +5459,10 @@ async function sendExplicitPaymentReminderChannels({
         original_message_type: source,
         annual_prepay_term_id: claimedTerm.id,
         days_out: daysOut,
+        billingDeliveryCategory: 'billing',
+        // Replay contract: a retried Email re-checks the term, the invoice
+        // and this exact quoted amount (billing-email-replay-eligibility).
+        rendered_amount: amountDue.toFixed(2),
         billingDeliveryLeg: channel,
         notificationEventKey: eventKey,
         ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),

@@ -211,3 +211,15 @@ describe('policy table hygiene', () => {
     }
   });
 });
+
+describe('bellReachedThisAttempt', () => {
+  const { bellReachedThisAttempt } = require('../services/messaging/push-channel-routing');
+  test('a newly inserted or refreshed bell reached the customer on this attempt', () => {
+    expect(bellReachedThisAttempt({ id: 'n-1', deduped: false })).toBe(true);
+    expect(bellReachedThisAttempt({ id: 'n-1', deduped: true, refreshed: true })).toBe(true);
+  });
+  test('a deduped unchanged bell, or none, did not', () => {
+    expect(bellReachedThisAttempt({ id: 'n-1', deduped: true })).toBe(false);
+    expect(bellReachedThisAttempt(null)).toBe(false);
+  });
+});

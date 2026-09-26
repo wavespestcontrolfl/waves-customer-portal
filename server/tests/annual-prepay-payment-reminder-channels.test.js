@@ -247,25 +247,28 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms' }));
   });
 
-  test("(b) ['email'] — email leg only, ledger channel 'email', leg stays pending (no invented copy)", async () => {
+  test("(b) ['email'] — the Email leg goes through the billing email adapter with this reminder's text", async () => {
     setDbQueues(standardQueues({ prefs: { billing_channels: ['email'] } }));
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
+      channel: 'email', to: null, body: 'pay reminder body', entryPoint: 'annual_prepay_payment_reminder',
+      metadata: expect.objectContaining({
+        billingDeliveryLeg: 'email', billingDeliveryCategory: 'billing',
+        notificationEventKey: _private.paymentReminderEventKey('term-1', 1),
+        collections_ledger_id: global.__ledgerStore[0].id, rendered_amount: '392.04',
+      }),
+    });
     expect(global.__ledgerStore).toHaveLength(1);
-    expect(global.__ledgerStore[0]).toEqual(expect.objectContaining({
-      channel: 'email',
-      customer_id: 'cust-1',
-      source: 'annual_prepay_payment_reminder',
-    }));
-    expect(global.__ledgerStore[0].metadata).toEqual(expect.objectContaining({ send_failed: true }));
-    // No email template exists for this reminder: the leg settles as a
-    // terminal template_unavailable refusal (never delivered, never looped).
-    expect(result).toEqual({ sent: false, termId: 'term-1', complete: true });
+    expect(global.__ledgerStore[0]).toEqual(expect.objectContaining({ channel: 'email', source: 'annual_prepay_payment_reminder' }));
+    expect(global.__ledgerStore[0].metadata.delivered).toBe(true);
+    expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
   });
 
-  test("(c) ['sms','email'] — two ledger rows share one event key; sms delivers, template-less email leg settles", async () => {
+  test("(c) ['sms','email'] — two ledger rows share one event key; both legs deliver", async () => {
     setDbQueues(standardQueues({ prefs: { billing_channels: ['email', 'sms'] } }));
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 
@@ -273,16 +276,11 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
 
     expect(global.__ledgerStore).toHaveLength(2);
     const byChannel = Object.fromEntries(global.__ledgerStore.map((r) => [r.channel, r]));
-    expect(byChannel.email).toBeTruthy();
-    expect(byChannel.sms).toBeTruthy();
-    const emailKey = byChannel.email.metadata.notificationEventKey;
-    const smsKey = byChannel.sms.metadata.notificationEventKey;
-    expect(emailKey).toBe(smsKey);
-    expect(emailKey).toBe(_private.paymentReminderEventKey('term-1', 1));
+    expect(byChannel.email.metadata.notificationEventKey).toBe(byChannel.sms.metadata.notificationEventKey);
+    expect(byChannel.email.metadata.notificationEventKey).toBe(_private.paymentReminderEventKey('term-1', 1));
     expect(byChannel.sms.metadata.delivered).toBe(true);
-    expect(byChannel.email.metadata.delivered).not.toBe(true);
-    // sms delivered ⇒ a customer-visible touch happened ⇒ sent:true, but the
-    // episode is not complete (email leg still open) ⇒ not stamped, retried.
+    expect(byChannel.email.metadata.delivered).toBe(true);
+    expect(sendCustomerMessage.mock.calls.find(([args]) => args.channel === 'sms')[0].to).toBe('+15550001111');
     expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
   });
 
@@ -321,15 +319,16 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
 
   test('(e) one leg failing terminally does not mark the other delivered, and vice versa', async () => {
     setDbQueues(standardQueues({ prefs: { billing_channels: ['email', 'sms'] } }));
-    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted' }); // sms
-    // email leg always returns the honest no-template stub (never invented copy)
+    sendCustomerMessage.mockImplementation(async ({ channel }) => (channel === 'sms'
+      ? { sent: true, deliveryOutcome: 'accepted' }
+      : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'EMAIL_SUPPRESSED', reason: 'Suppressed: bounce' }));
 
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
     const byChannel = Object.fromEntries(global.__ledgerStore.map((r) => [r.channel, r]));
     expect(byChannel.sms.metadata.delivered).toBe(true);
     expect(byChannel.email.metadata.delivered).not.toBe(true);
-    expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
+    expect(result).toMatchObject({ sent: true, termId: 'term-1' });
   });
 
   test('collections policy denial on every selected channel reverses the credit and releases the claim (no ledger write)', async () => {
@@ -425,11 +424,14 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     });
     autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 25 });
     setDbQueues(standardQueues({ prefs: { billing_channels: ['sms', 'email'] } }));
+    // The Email leg is refused before any provider handoff: nothing new goes out.
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'EMAIL_SUPPRESSED' });
 
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
-    // Text is never re-sent; the template-less Email settles; nothing new went out.
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Text is never re-sent (already delivered); only the Email leg is attempted.
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].channel).toBe('email');
     expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 25 }));
     expect(result).toMatchObject({ sent: true });
   });

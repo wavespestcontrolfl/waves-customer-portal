@@ -147,6 +147,29 @@ async function balanceReminderVisitRefusal(meta, database) {
   return null;
 }
 
+// A retried annual-prepay payment reminder Email: the term must still await
+// payment, the prepay invoice must still be collectible and owe exactly the
+// quoted amount, and (gate on) the collections policy must still allow the
+// draft invoice's amount as off-ledger debt, excluding this episode.
+async function annualPrepayReminderRefusal(meta, database) {
+  if (meta.source_entry_point !== 'annual_prepay_payment_reminder') return null;
+  const term = await database('annual_prepay_terms')
+    .where({ prepay_invoice_id: meta.invoice_id, customer_id: meta.customer_id }).first('status');
+  if (term?.status !== 'payment_pending') return refused('annual-prepay-term-settled');
+  const invoice = await database('invoices').where({ id: meta.invoice_id, customer_id: meta.customer_id }).first();
+  const helpers = require('../invoice-helpers');
+  if (!invoice || !helpers.isInvoiceCollectibleStatus(invoice.status)) return refused('annual-prepay-invoice-settled');
+  const amountDue = helpers.invoiceAmountDue(invoice);
+  if (amountDue.toFixed(2) !== meta.rendered_amount) return refused('annual-prepay-amount-changed');
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
+  const permitted = await require('../collections/rail-guard').collectionsChannelPermitted({
+    customerId: meta.customer_id, invoiceId: null, channel: 'email', purpose: 'balance_reminder',
+    offLedgerBalanceCents: Math.round(amountDue * 100), logTag: 'billing-email-obligation-replay',
+    excludeLedgerIds: await persistedLedgerExclusions(meta, database), detail: true, database,
+  });
+  return permitted?.allowed === true ? null : refused('collections-policy-denied', permitted?.durable !== true);
+}
+
 async function invoiceRefusal(meta, database) {
   if (!meta.invoice_id) return null;
   if (INVOICE_GUARDS.has(meta.source_entry_point)) {
@@ -192,7 +215,8 @@ async function collectionsPolicyRefusal(meta, database) {
 
 async function billingEmailReplayEligible(meta, database = db) {
   try {
-    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, collectionsPolicyRefusal];
+    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, annualPrepayReminderRefusal,
+      invoiceRefusal, collectionsPolicyRefusal];
     for (const check of checks) {
       const refusal = await check(meta || {}, database);
       if (refusal) return refusal;
