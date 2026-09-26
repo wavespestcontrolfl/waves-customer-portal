@@ -19,8 +19,6 @@ const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../co
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
-const PROVIDER_REQUEST_NOT_STARTED_PREFIX = 'Provider request not started: ';
-const PROVIDER_OUTCOME_UNKNOWN_PREFIX = 'Provider outcome unknown: ';
 const DEDUPE_STATUSES = new Set([
   'sent',
   'delivered',
@@ -851,51 +849,6 @@ function shouldRetryExistingMessage(message) {
   return !DEDUPE_STATUSES.has(String(message?.status || '').toLowerCase());
 }
 
-// The provider retry worker owns its schedule and every claim it has moved to
-// queued. A direct idempotent send must not recycle those rows through the
-// ordinary failed/stale-queued retry path: the worker may already be at the
-// provider boundary, and an exhausted row can represent an unknown outcome.
-function providerRetryHoldErrorForExistingMessage(message) {
-  const status = String(message?.status || '').toLowerCase();
-  let deliveryOutcome;
-  let reason;
-  let retryable = false;
-  if (status === 'queued' && Number(message?.provider_retry_count || 0) > 0) {
-    deliveryOutcome = 'uncertain';
-    reason = 'provider_retry_in_progress';
-  } else if (status === 'failed' && message?.provider_retry_exhausted_at
-      && !String(message.error_message || '').startsWith(PROVIDER_REQUEST_NOT_STARTED_PREFIX)) {
-    deliveryOutcome = 'uncertain';
-    reason = 'provider_retry_exhausted';
-  } else if (status === 'failed' && message?.provider_retry_next_at) {
-    // A retry schedule only proves ownership. The preceding provider failure
-    // may have been a timeout/5xx with an unknown acceptance outcome.
-    deliveryOutcome = 'uncertain';
-    reason = 'provider_retry_scheduled';
-    retryable = true;
-  } else {
-    return null;
-  }
-  const providerOutcome = {
-    sent: false,
-    held: true,
-    retryable,
-    providerAttempted: false,
-    deliveryOutcome,
-    reason,
-    emailMessageId: message.id,
-  };
-  return Object.assign(new Error(`email send held by ${reason}`), {
-    code: 'EMAIL_PROVIDER_RETRY_HELD',
-    status: 409,
-    held: true,
-    retryable,
-    deliveryOutcome,
-    reason,
-    providerOutcome,
-  });
-}
-
 // Postgres unique_violation (email_messages.idempotency_key). Two overlapping
 // callers (e.g. retried Stripe webhooks) can both pass the pre-insert dedupe
 // check, then race on the unique index. The loser should resolve against the
@@ -986,33 +939,6 @@ async function resolveIdempotencyCollision(err, idempotencyKey) {
   const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
   if (existing && !shouldRetryExistingMessage(existing)) {
     return dedupedResultForExistingMessage(existing);
-  }
-  throw inFlightCollisionError(idempotencyKey);
-}
-
-// Claim an ordinary retry only if the row is still the exact attempt observed
-// by the preflight read. This fences both sendTemplate callers and the provider
-// retry worker, which replace send_attempt_token when they take ownership.
-function retryClaimQuery(message) {
-  const query = db('email_messages')
-    .where({ id: message.id, status: message.status })
-    // A provider-block webhook can schedule a failed row without changing
-    // its status or attempt token. Keep that schedule in the provider rail.
-    .whereNull('provider_retry_next_at');
-  if (message.provider_retry_exhausted_at == null) query.whereNull('provider_retry_exhausted_at');
-  else {
-    query.where({ provider_retry_exhausted_at: message.provider_retry_exhausted_at });
-    if (message.error_message == null) query.whereNull('error_message');
-    else query.where({ error_message: message.error_message });
-  }
-  if (message.send_attempt_token == null) return query.whereNull('send_attempt_token');
-  return query.where({ send_attempt_token: message.send_attempt_token });
-}
-
-async function resolveRetryClaimLoss(retryMessage, idempotencyKey) {
-  const current = await db('email_messages').where({ id: retryMessage.id }).first();
-  if (current && !shouldRetryExistingMessage(current)) {
-    return dedupedResultForExistingMessage(current);
   }
   throw inFlightCollisionError(idempotencyKey);
 }
@@ -1167,8 +1093,6 @@ async function sendTemplate({
     if (existing && !shouldRetryExistingMessage(existing)) {
       return dedupedResultForExistingMessage(existing);
     }
-    const providerRetryHold = providerRetryHoldErrorForExistingMessage(existing);
-    if (providerRetryHold) throw providerRetryHold;
     // A concurrent caller may have committed a `queued` row that is still
     // mid-flight (queued, not yet dispatched to SendGrid). Reclaiming it as a
     // retry here would re-send and duplicate, so surface a retryable collision;
@@ -1316,8 +1240,7 @@ async function sendTemplate({
       };
       let blocked;
       if (retryMessage) {
-        [blocked] = await retryClaimQuery(retryMessage).update(blockedPayload).returning('*');
-        if (!blocked) return await resolveRetryClaimLoss(retryMessage, idempotencyKey);
+        [blocked] = await db('email_messages').where({ id: retryMessage.id }).update(blockedPayload).returning('*');
       } else {
         try {
           [blocked] = await db('email_messages').insert(blockedPayload).returning('*');
@@ -1344,16 +1267,10 @@ async function sendTemplate({
     error_message: null,
     queued_at: new Date(),
     updated_at: new Date(),
-    ...(retryMessage?.provider_retry_exhausted_at ? {
-      provider_retry_count: 0,
-      provider_retry_next_at: null,
-      provider_retry_exhausted_at: null,
-    } : {}),
   };
   let message;
   if (retryMessage) {
-    [message] = await retryClaimQuery(retryMessage).update(queuedPayload).returning('*');
-    if (!message) return await resolveRetryClaimLoss(retryMessage, idempotencyKey);
+    [message] = await db('email_messages').where({ id: retryMessage.id }).update(queuedPayload).returning('*');
   } else {
     try {
       [message] = await db('email_messages').insert(queuedPayload).returning('*');
@@ -1680,8 +1597,6 @@ module.exports = {
   shouldRetryExistingMessage,
   queuedRowInFlight,
   ABORTED_BEFORE_DISPATCH,
-  PROVIDER_REQUEST_NOT_STARTED_PREFIX,
-  PROVIDER_OUTCOME_UNKNOWN_PREFIX,
   QUEUED_IN_FLIGHT_MS,
   createDraftVersion,
   publishVersion,

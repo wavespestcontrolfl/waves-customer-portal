@@ -75,6 +75,7 @@ const {
   reconcileNewsletterSendStatus,
   handleNewsletterEvent,
   handleEmailMessageEvent,
+  staleEmailSuppressionGroupKey,
   newsletterSuppressionGroupKeyForEvent,
 } = sendgridWebhook;
 
@@ -1508,14 +1509,6 @@ describe('email template send history webhook updates', () => {
     });
   });
 
-  test('a later provider block cannot erase an earlier unknown provider outcome', () => {
-    const prior = 'Provider outcome unknown: earlier request timed out';
-    expect(computeEmailMessageEventUpdates({ event: 'blocked', response: 'later definite block' }, fresh({
-      recipient_email_snapshot: 'customer@example.com', subject_snapshot: 'Tracked email',
-      suppression_group_key_snapshot: 'service_operational', provider_retry_count: 1, error_message: prior,
-    }), now)).toMatchObject({ status: 'failed', error_message: prior });
-  });
-
   test('complaints and unsubscribes update customer-facing send history status', () => {
     expect(computeEmailMessageEventUpdates({ event: 'spamreport' }, fresh(), now)).toEqual({
       status: 'spam_report',
@@ -1533,6 +1526,26 @@ describe('email template send history webhook updates', () => {
     expect(computeEmailMessageEventUpdates({ event: 'open' }, fresh({ opened_at: now }), now)).toBeNull();
     expect(computeEmailMessageEventUpdates({ event: 'click' }, fresh({ clicked_at: now }), now)).toBeNull();
     expect(computeEmailMessageEventUpdates({ event: 'spamreport' }, fresh({ complained_at: now }), now)).toBeNull();
+  });
+
+  test('stale group opt-outs keep a compatible precise scope and reject no-ASM snapshots', () => {
+    const oldNewsletter = process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+    const oldService = process.env.SENDGRID_ASM_GROUP_SERVICE;
+    process.env.SENDGRID_ASM_GROUP_NEWSLETTER = '101';
+    process.env.SENDGRID_ASM_GROUP_SERVICE = '202';
+    try {
+      expect(staleEmailSuppressionGroupKey({ event: 'group_unsubscribe', asm_group_id: 101 }, 'marketing_referral'))
+        .toBe('marketing_referral');
+      expect(staleEmailSuppressionGroupKey({ event: 'group_unsubscribe', asm_group_id: 202 }, 'transactional_required'))
+        .toBe('service_operational');
+      expect(staleEmailSuppressionGroupKey({ event: 'group_unsubscribe', asm_group_id: 101 }, 'service_operational'))
+        .toBe('marketing_newsletter');
+    } finally {
+      if (oldNewsletter === undefined) delete process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+      else process.env.SENDGRID_ASM_GROUP_NEWSLETTER = oldNewsletter;
+      if (oldService === undefined) delete process.env.SENDGRID_ASM_GROUP_SERVICE;
+      else process.env.SENDGRID_ASM_GROUP_SERVICE = oldService;
+    }
   });
 
   function attemptAwareClient(currentToken) {

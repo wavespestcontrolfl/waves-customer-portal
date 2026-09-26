@@ -402,13 +402,7 @@ async function handleEvent(ev) {
   if (suppressionOnlyEmailMessage) {
     await processWebhookEvent(ev, messageId, email, async (trx) => {
       const snapshotGroup = await groupKeyForEmailMessage(suppressionOnlyEmailMessage, trx);
-      const asmGroup = automationSuppressionGroupKeyForEvent(ev);
-      // Keep precise streams such as marketing_referral when they agree with
-      // SendGrid's broad marketing/service ASM lane. If a rewritten row now
-      // points at the other lane, prefer the signed event's lane.
-      const sameLane = !asmGroup || !snapshotGroup
-        || String(asmGroup).startsWith('marketing_') === String(snapshotGroup).startsWith('marketing_');
-      const groupKey = sameLane ? (snapshotGroup || asmGroup) : asmGroup;
+      const groupKey = staleEmailSuppressionGroupKey(ev, snapshotGroup);
       await recordEmailSuppressionForEvent(ev, suppressionOnlyEmailMessage, groupKey, eventOccurredAt(ev), trx);
     });
     return;
@@ -628,15 +622,12 @@ function eventOccurredAt(ev, fallback = new Date()) {
 
 function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
   if (providerRetry.isProviderBlockedEvent(ev)) {
-    const providerReason = (ev.reason || ev.response || ev.type || '').toString().slice(0, 1000);
     return {
       // Provider/IP/content rejection, not a bad recipient address. `failed`
       // remains retryable when the owning workflow runs again and, unlike
       // `bounced`, does not claim that the mailbox itself is invalid.
       status: 'failed',
-      error_message: providerRetry.providerOutcomeWasUncertain(message)
-        ? message.error_message
-        : providerReason,
+      error_message: (ev.reason || ev.response || ev.type || '').toString().slice(0, 1000),
       ...providerRetry.retryStateForProviderBlock(message, now),
       updated_at: now,
     };
@@ -725,6 +716,18 @@ function automationSuppressionGroupKeyForEvent(ev) {
   if (gid && gid === String(process.env.SENDGRID_ASM_GROUP_NEWSLETTER || '')) return 'marketing_newsletter';
   if (gid && gid === String(process.env.SENDGRID_ASM_GROUP_SERVICE || '')) return 'service_operational';
   return null;
+}
+
+function staleEmailSuppressionGroupKey(ev, snapshotGroup) {
+  const precise = String(snapshotGroup || '').trim().toLowerCase() || null;
+  const asmGroup = automationSuppressionGroupKeyForEvent(ev);
+  if (!asmGroup) return precise;
+  // transactional_required is sent with ASM group 0, so a signed service ASM
+  // event cannot belong to that snapshot. Other precise keys remain valid
+  // only within the same broad marketing/service lane.
+  if (!precise || precise === 'transactional_required') return asmGroup;
+  const sameLane = precise.startsWith('marketing_') === asmGroup.startsWith('marketing_');
+  return sameLane ? precise : asmGroup;
 }
 
 async function groupKeyForEmailMessage(message, client = db) {
@@ -837,18 +840,22 @@ async function handleEmailMessageEvent(ev, message, client = db) {
   });
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
-  let attemptMatched = true;
+  const attempt = client('email_messages').where({ id: message.id });
+  if (message.send_attempt_token == null) attempt.whereNull('send_attempt_token');
+  else attempt.where({ send_attempt_token: message.send_attempt_token });
+  let attemptMatched;
   if (updates) {
     // The row was resolved before the event transaction began. A direct retry
     // or provider-retry claim can replace its attempt token in that gap; fence
     // this mutation to the resolved attempt so the stale event cannot fail or
     // schedule the new attempt. Legacy rows with no token remain compatible,
     // but only while the current row is still null-tokened.
-    const mutation = client('email_messages').where({ id: message.id });
-    if (message.send_attempt_token == null) mutation.whereNull('send_attempt_token');
-    else mutation.where({ send_attempt_token: message.send_attempt_token });
-    const matched = await mutation.update(updates);
+    const matched = await attempt.update(updates);
     attemptMatched = Number(matched) > 0;
+  } else {
+    // Repeated bounce/delivery events can still trigger recovery. Retained
+    // timestamps make their row update a no-op, not proof of attempt ownership.
+    attemptMatched = Boolean(await attempt.forUpdate().first('id'));
   }
   if (attemptMatched) await reconcileSummaryForEmailEvent(ev, message, updates, client);
   // Address-level provider signals remain valid even when this event lost the
@@ -1092,5 +1099,6 @@ module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
 module.exports.handleNewsletterEvent = handleNewsletterEvent;
 module.exports.handleEmailMessageEvent = handleEmailMessageEvent;
 module.exports.handleEvent = handleEvent;
+module.exports.staleEmailSuppressionGroupKey = staleEmailSuppressionGroupKey;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;
 module.exports.shouldRecordNewsletterSuppression = shouldRecordNewsletterSuppression;
