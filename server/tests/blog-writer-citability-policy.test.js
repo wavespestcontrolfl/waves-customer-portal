@@ -34,7 +34,10 @@ describe('writer-agent-config CITABILITY section', () => {
   });
 
   test('ties the comparison and how-to-choose rules to the ComparisonTable CATEGORY mode', () => {
-    expect(system).toMatch(/render ONE <ComparisonTable> in CATEGORY mode/);
+    expect(system).toMatch(/render ONE <ComparisonTable> with the decision/);
+    expect(system).toMatch(/CATEGORY mode is the default/);
+    // The named-competitor exception survives (Codex P2, 2026-09-26).
+    expect(system).toMatch(/keeps NAMED-COMPETITOR mode/);
     expect(system).toMatch(/H2 that reads\s+"How to choose/);
     expect(system).toMatch(/Do NOT bolt a generic "DIY vs pro" table/);
   });

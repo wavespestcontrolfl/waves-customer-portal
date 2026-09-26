@@ -411,8 +411,10 @@ licenses an invented number, product, competitor, or source:
   never softened into an adjective.
 - [CITABILITY_COMPARISON] When the reader faces two or more real paths — DIY
   versus calling a professional, two product classes, treat-now versus wait,
-  one-time versus recurring — render ONE <ComparisonTable> in CATEGORY mode
-  with the decision criteria as rows, on ANY post type. A decision,
+  one-time versus recurring — render ONE <ComparisonTable> with the decision
+  criteria as rows, on ANY post type. CATEGORY mode is the default; a brief
+  that specifically needs named businesses keeps NAMED-COMPETITOR mode under
+  the BUYER'S-GUIDE COMPARISON rules below. A decision,
   comparison, or cost post always has this table (its post_type contract).
   Do NOT bolt a generic "DIY vs pro" table onto a post whose reader faces no
   choice; the no-filler visual rule wins.

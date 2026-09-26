@@ -1386,15 +1386,37 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(r.reason).toBe('no_named_source_attribution');
   });
 
+  test('named_sources recognizes any attributed proper-noun source, never our own company', () => {
+    expect(checkCitabilityNamedSources({ body: 'According to the Florida Forest Service, drought raises fire risk.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Rainfall totals, per NOAA, ran above normal.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Data from Mote Marine Laboratory shows red tide peaks in fall.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Texas A&M University Extension notes fire ants mound after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to Waves Pest Control, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to experts, ants are common.' }).ok).toBe(false);
+  });
+
   test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {
     expect(countConcreteSpecifics('Mow St. Augustine at 3.5–4 inches and water 1/2 inch per week; wait 10-14 days between applications.')).toBe(3);
     expect(countConcreteSpecifics('It costs $120 and we were founded in 2024; here are 3 ways.')).toBe(0);
     // '%' is not a word char, so a trailing \b after it never matched (fallback auditor P2, 2026-09-25).
     expect(countConcreteSpecifics('Chinch bug damage covered 20% of the lawn and 35 % of the swale.')).toBe(2);
-    expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches. Water 30 minutes. Reapply in 6 weeks.' }).ok).toBe(true);
+  });
+
+  test('concrete_specifics is not a quota: one supported number passes, a vague stand-in with none fails', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Reapply in 6 weeks.' }).ok).toBe(true);
+    // No measurement and no softening — nothing visible to nudge on.
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mud daubers are solitary wasps that rarely sting.' }).ok).toBe(true);
     const r = checkCitabilityConcreteSpecifics({ body: 'Mow tall. Water deeply. Reapply in a few weeks.' });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('only_0_concrete_measurements_need_3+');
+    expect(r.reason).toMatch(/^vague_qualifier_without_measurement:/);
+  });
+
+  test('concrete_specifics on refresh: dropping measurements the prior page stated is a nudge', () => {
+    const prev = { body: 'Mow at 4 inches. Water 30 minutes. Reapply in 6 weeks.' };
+    const r = checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches. Water well.' }, {}, { previousVersion: prev });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('refresh_dropped_measurements_3_to_1');
+    expect(checkCitabilityConcreteSpecifics({ body: `${prev.body} Wait 2 days after rain.` }, {}, { previousVersion: prev }).ok).toBe(true);
   });
 
   test('comparison: a post that frames no choice passes without a table', () => {
@@ -1417,7 +1439,7 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityComparison(draft).ok).toBe(false);
     expect(checkCitabilityHowToChoose(draft).ok).toBe(false);
     expect(checkCitabilityHowToChoose(draft).reason).toBe('no_how_to_choose_section');
-    const fixed = { ...draft, body: '<ComparisonTable columns={["a","b"]} rows={[]} />\n\n## How to choose between bait and liquid\n- If you see mud tubes → liquid.' };
+    const fixed = { ...draft, body: '<ComparisonTable columns={["a","b"]} rows={[]} />\n\n## How to choose between bait and liquid\n- If you see mud tubes → liquid.\n- If the slab is inaccessible → bait.\n- If a sale is pending → liquid for the WDO clearance.' };
     expect(checkCitabilityComparison(fixed).ok).toBe(true);
     expect(checkCitabilityHowToChoose(fixed).ok).toBe(true);
   });
@@ -1428,15 +1450,26 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityHowToChoose(plain).reason).toBe('no_comparison_to_choose_from');
     const tableOnly = { frontmatter: { post_type: 'diagnostic' }, body: '<ComparisonTable columns={["a"]} rows={[]} />\n## Next steps\nText.' };
     expect(checkCitabilityHowToChoose(tableOnly).ok).toBe(false);
-    const withHeading = { ...tableOnly, body: `${tableOnly.body}\n## Which option fits your situation\n- If X → Y` };
+    const withHeading = { ...tableOnly, body: `${tableOnly.body}\n## Which option fits your situation\n- If X → Y\n- If Z → W\n1. If Q → R` };
     expect(checkCitabilityHowToChoose(withHeading).ok).toBe(true);
+  });
+
+  test('how_to_choose requires an H2 with 3+ criteria — not an H3, not prose (Codex P2)', () => {
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    const bullets = '- If A → B\n- If C → D\n- If E → F';
+    const h3 = checkCitabilityHowToChoose({ body: `${table}### How to choose\n${bullets}` });
+    expect(h3).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+    const prose = checkCitabilityHowToChoose({ body: `${table}## How to choose\nPick what fits.\n## FAQ\n- a\n- b\n- c` });
+    expect(prose).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+    // H3 subsections inside the H2 stay part of it.
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n### Signs\n${bullets}` }).ok).toBe(true);
   });
 
   test('evaluate(): citability misses surface in soft_failures but never change ok/score', () => {
     const r = evaluate(
       fullDraft({
         title: 'Bait vs. Spray for Ghost Ants in Bradenton',
-        body: 'Ghost ants trail after afternoon storms in Bradenton and Sarasota. Experts say they like moisture. See our [pest control services](/pest-control-services/) for treatment options. You should watch your sink area; your lanai too; you can wait and you will see them again.\n\nFAQ\n- Do they bite?\n- No.',
+        body: 'Ghost ants trail after afternoon storms in Bradenton and Sarasota. Experts say they like moisture. See our [pest control services](/pest-control-services/) for treatment options. You should watch your sink area; your lanai too; you can wait a few weeks and you will see them again.\n\nFAQ\n- Do they bite?\n- No.',
       }),
       brief({ page_type: 'supporting-blog' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }

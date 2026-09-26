@@ -1123,7 +1123,7 @@ function draftPostType(draft) {
 // SOURCE-attribution list, not a brand list: PRO_PRODUCT_TERMS stay banned in
 // recommendation context and competitor names live only inside the
 // ComparisonTable, so neither may count toward this nudge.
-const NAMED_SOURCE_RE = /\b(?:UF\s*\/\s*IFAS|IFAS|University of Florida|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|(?:[A-Z][a-z]+ County )?Mosquito (?:Control|Management)|(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label)\b/;
+const NAMED_SOURCE_RE = /\b(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|(?:[A-Z][\w&.]+ )+(?:State )?University Extension|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|(?:[A-Z][a-z]+ County )?Mosquito (?:Control|Management)|(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label)\b/;
 
 // Refresh lane: the runner stamps target_page_type 'page' for non-blog
 // targets (service/city pages), where the blog citability contract does not
@@ -1132,10 +1132,26 @@ function nonBlogTarget(brief) {
   return brief?.target_page_type === 'page';
 }
 
+// Attribution to ANY proper-noun source ("according to the Florida Forest
+// Service", "data from NOAA", "per Mote Marine Laboratory"): the writer
+// contract asks for the SPECIFIC authority the evidence came from, so the
+// hardcoded list above cannot be exhaustive (Codex P2, 2026-09-26). The
+// source must start with a capital; our own company never counts as the
+// authority behind a claim.
+const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
+const OWN_COMPANY_RE = /^Waves\b/;
+
+function hasAttributedSource(body) {
+  for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
+    if (!OWN_COMPANY_RE.test(m[1])) return true;
+  }
+  return false;
+}
+
 function checkCitabilityNamedSources(draft, brief) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const body = String(draft.body || '');
-  if (NAMED_SOURCE_RE.test(body)) return { ok: true };
+  if (NAMED_SOURCE_RE.test(body) || hasAttributedSource(body)) return { ok: true };
   return { ok: false, reason: 'no_named_source_attribution' };
 }
 
@@ -1145,17 +1161,34 @@ function checkCitabilityNamedSources(draft, brief) {
 // extractable measurements the nudge is after. Ranges ("3.5–4 inches",
 // "10-14 days") count once.
 const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?\s?(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
-const CONCRETE_SPECIFICS_MIN = 3;
+
+// Vague stand-ins for a measurement — the prompt's own examples ("tall",
+// "a couple of weeks", "deeply"). Softening is what the nudge targets.
+const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while)\b/i;
 
 function countConcreteSpecifics(body) {
   return (String(body || '').match(CONCRETE_SPECIFIC_RE) || []).length;
 }
 
-function checkCitabilityConcreteSpecifics(draft, brief) {
+// NOT a count quota (Codex P2, 2026-09-26): a fixed minimum fired on every
+// brief whose evidence held fewer measurements, pressuring a redraft toward
+// invented numbers. The gate cannot see the writer's tool evidence, so it
+// flags only what is visible as softening: a refresh that states fewer
+// measurements than the page it replaces, or a draft with no measurement at
+// all that leans on a vague stand-in instead.
+function checkCitabilityConcreteSpecifics(draft, brief, context) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const n = countConcreteSpecifics(draft.body);
-  if (n >= CONCRETE_SPECIFICS_MIN) return { ok: true };
-  return { ok: false, reason: `only_${n}_concrete_measurements_need_${CONCRETE_SPECIFICS_MIN}+` };
+  const prev = context?.previousVersion?.body;
+  if (prev != null) {
+    const before = countConcreteSpecifics(prev);
+    if (n < before) return { ok: false, reason: `refresh_dropped_measurements_${before}_to_${n}` };
+  }
+  if (n === 0) {
+    const vague = String(draft.body || '').match(VAGUE_QUALIFIER_RE);
+    if (vague) return { ok: false, reason: `vague_qualifier_without_measurement:${vague[0].toLowerCase()}` };
+  }
+  return { ok: true };
 }
 
 const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
@@ -1190,13 +1223,34 @@ function checkCitabilityComparison(draft, brief) {
 
 const HOW_TO_CHOOSE_HEADING_RE = /\b(?:how to (?:choose|pick|decide)|choosing (?:between|the right|a|your)|which (?:one|option|approach|method|plan|treatment|service)[^\n]{0,40}\b(?:right|fits?|for you|for your)|what to (?:weigh|look for|consider)|decision (?:guide|checklist)|fits your situation)\b/i;
 
+const HOW_TO_CHOOSE_MIN_CRITERIA = 3;
+
+// The contract is an H2 carrying 3–5 bulleted criteria (Codex P2,
+// 2026-09-26): an H3, or an H2 over plain prose, is not the extractable
+// structure the nudge measures. Criteria = list items before the next H1/H2.
+function howToChooseSectionCriteria(body) {
+  const lines = String(body || '').split(/\r?\n/);
+  let best = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(lines[i])) continue;
+    let items = 0;
+    for (let j = i + 1; j < lines.length && !/^#{1,2}\s/.test(lines[j]); j += 1) {
+      if (/^\s*(?:[-*+]|\d+[.)])\s+\S/.test(lines[j])) items += 1;
+    }
+    best = Math.max(best, items);
+  }
+  return best; // -1 = no H2 found
+}
+
 function checkCitabilityHowToChoose(draft, brief) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const body = String(draft.body || '');
   const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body);
   if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
-  if (headingLines(body).some((h) => HOW_TO_CHOOSE_HEADING_RE.test(h))) return { ok: true };
-  return { ok: false, reason: 'no_how_to_choose_section' };
+  const criteria = howToChooseSectionCriteria(body);
+  if (criteria < 0) return { ok: false, reason: 'no_how_to_choose_section' };
+  if (criteria < HOW_TO_CHOOSE_MIN_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_need_${HOW_TO_CHOOSE_MIN_CRITERIA}+` };
+  return { ok: true };
 }
 
 // ── metadata checks ─────────────────────────────────────────────────

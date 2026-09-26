@@ -48,13 +48,15 @@ Per UF/IFAS, subterranean termites swarm after rain when soil stays above 70 deg
 
 ## How to choose between bait and liquid
 - If you see mud tubes on the slab → liquid.
+- If the slab is hard to drill → bait.
+- If a home sale needs a WDO clearance soon → liquid.
 `;
 
 function corpus() {
   return [
     { file: 'src/content/blog/termite/bait-vs-liquid.mdx', url: '/termite/bait-vs-liquid/', body: POOR },
     { file: 'src/content/blog/termite/bait-vs-liquid-good.mdx', url: '/termite/bait-vs-liquid-good/', body: GOOD },
-    { file: 'src/content/blog/pest-control/mud-daubers.mdx', url: '/pest-control/mud-daubers/', body: '---\ntitle: "Do Mud Daubers Sting?"\ncategory: "pest-control"\n---\n## Short answer\nRarely. They are solitary wasps.\n' },
+    { file: 'src/content/blog/pest-control/mud-daubers.mdx', url: '/pest-control/mud-daubers/', body: '---\ntitle: "Do Mud Daubers Sting?"\ncategory: "pest-control"\n---\n## Short answer\nRarely. They are solitary wasps; nests go quiet after a few weeks.\n' },
     { file: 'src/content/services/pest-control.md', url: '/pest-control/', body: '---\ntitle: "Pest Control"\n---\nNo sources, no numbers.' },
   ];
 }
@@ -70,6 +72,7 @@ describe('scanPost — same four heuristics as the quality gate', () => {
   });
   test('a post that frames no choice never gets comparison / how_to_choose gaps', () => {
     const r = seeder.scanPost(corpus()[2]);
+    // "a few weeks" with no measurement → concrete_specifics (softening, not a quota).
     expect(r.gaps).toEqual(['named_sources', 'concrete_specifics']);
   });
   test('serviceForPost maps the astro category, then related_services, then pest', () => {
