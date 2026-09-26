@@ -777,21 +777,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // below. The guard sends the standard reply at the deadline even if
     // that work stalls before the agent is ever started, and the fallback
     // is registered for a deploy's shutdown flush from this point on.
-    let leadFallbackDeadlineAt = null;
-    let leadFallbackGuard = null;
-    if (leadAgentConfigured) {
-      leadFallbackDeadlineAt = Date.now() + LEAD_AGENT_FALLBACK_AFTER_MS;
-      pendingLeadFallbacks.set(sendFallbackAutoReply, null);
-      // If the guard itself sends (the agent was never started), it also
-      // drops the registration, unless settleLeadResponseAgentRun has since
-      // taken it over (its entry then carries the run's completion).
-      leadFallbackGuard = setTimeout(() => {
-        void sendFallbackAutoReply().finally(() => {
-          if (pendingLeadFallbacks.get(sendFallbackAutoReply) === null) pendingLeadFallbacks.delete(sendFallbackAutoReply);
-        });
-      }, LEAD_AGENT_FALLBACK_AFTER_MS);
-      leadFallbackGuard.unref?.();
-    }
+    // One deadline object owns the lead's minute: settleLeadResponseAgentRun
+    // takes it over (no second timer); until then it sends on its own.
+    const leadFallbackDeadline = leadAgentConfigured
+      ? createLeadFallbackDeadline(sendFallbackAutoReply, LEAD_AGENT_FALLBACK_AFTER_MS)
+      : null;
     try {
       if (!leadAgentConfigured) {
         await sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource });
@@ -1208,12 +1198,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         pageUrl: pageUrl || '',
         formName: formName || '',
       });
-      if (leadFallbackGuard) clearTimeout(leadFallbackGuard);
       void settleLeadResponseAgentRun({
         agentConfigured: leadAgentConfigured,
         processLead,
         sendFallback: sendFallbackAutoReply,
-        ...(leadFallbackDeadlineAt ? { fallbackAfterMs: Math.max(0, leadFallbackDeadlineAt - Date.now()) } : {}),
+        ...(leadFallbackDeadline ? { deadline: leadFallbackDeadline.takeOver() } : {}),
         onError: err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`),
       }).catch(err => logger.error(`[lead-agent] Fallback chain error for customer ${customer.id}: ${err?.code || err?.name || 'error'}`));
     } catch (e) {
@@ -1221,8 +1210,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // A synchronous require/init throw also means "the agent didn't
       // send" — arm the fallback the same as any other non-auto_sent
       // outcome when the agent was otherwise configured.
-      if (leadFallbackGuard) clearTimeout(leadFallbackGuard);
+      leadFallbackDeadline?.cancel();
       if (leadAgentConfigured) {
+        // Registered for the shutdown flush while this immediate send runs.
+        pendingLeadFallbacks.set(sendFallbackAutoReply, null);
         void sendFallbackAutoReply().finally(() => pendingLeadFallbacks.delete(sendFallbackAutoReply));
       }
     }
@@ -1888,20 +1879,56 @@ async function flushPendingLeadFallbacks(timeoutMs = 10000) {
 }
 
 
-async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
+// The lead's one-minute deadline, started where the immediate reply is
+// skipped (the route registers the fallback for the shutdown flush from
+// then on). Until settleLeadResponseAgentRun takes it over, the deadline
+// sends the fallback itself (the agent was never started) and drops the
+// registration; after takeOver it only signals, so there is one timer.
+function createLeadFallbackDeadline(sendFallback, ms) {
+  pendingLeadFallbacks.set(sendFallback, null);
+  let owned = false;
+  let fired = false;
+  let signal;
+  const reached = new Promise((resolve) => { signal = resolve; });
+  const timer = setTimeout(() => {
+    fired = true;
+    if (!owned) {
+      void Promise.resolve().then(sendFallback).finally(() => {
+        if (pendingLeadFallbacks.get(sendFallback) === null) pendingLeadFallbacks.delete(sendFallback);
+      });
+    }
+    signal({ timedOut: true, alreadySent: !owned });
+  }, ms);
+  timer.unref?.();
+  return {
+    takeOver() {
+      owned = true;
+      return { reached, alreadySent: fired, cancel: () => clearTimeout(timer) };
+    },
+    cancel() {
+      clearTimeout(timer);
+      if (pendingLeadFallbacks.get(sendFallback) === null) pendingLeadFallbacks.delete(sendFallback);
+    },
+  };
+}
+
+async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, deadline = null, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
   if (!agentConfigured) {
     return processLead().catch(err => onError(err));
   }
   let markFinished;
   pendingLeadFallbacks.set(sendFallback, new Promise((resolve) => { markFinished = resolve; }));
+  // The route's deadline when given (one timer for the lead's minute), else
+  // this call's own.
   let timer;
-  const timedOut = new Promise((resolve) => {
+  const timedOut = deadline ? deadline.reached : new Promise((resolve) => {
     timer = setTimeout(() => resolve({ timedOut: true }), fallbackAfterMs);
     timer.unref?.();
   });
   const run = Promise.resolve().then(processLead).then(outcome => ({ outcome }), err => ({ err }));
   const settled = await Promise.race([run, timedOut]);
   clearTimeout(timer);
+  deadline?.cancel();
   // The fallback stays registered for the shutdown flush until its last
   // send attempt has settled, not just until the agent's run has.
   const done = () => { pendingLeadFallbacks.delete(sendFallback); markFinished(); };
@@ -1922,6 +1949,9 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
       if (outcome?.actionTaken === 'auto_sent') return done();
       return finalFallback();
     }).catch(lateErr => onError(lateErr));
+    // The deadline already sent before this run took it over: no second try
+    // now (the late retry above still covers an agent that releases).
+    if (deadline?.alreadySent) return undefined;
     return sendFallback();
   }
   if (settled.err) onError(settled.err);
@@ -1982,6 +2012,7 @@ module.exports._test = {
   flushPendingLeadFallbacks,
   pendingLeadFallbacks,
   singleFlight,
+  createLeadFallbackDeadline,
   LEAD_AGENT_FALLBACK_AFTER_MS,
   applyLeadEstimateAutomationGate,
   determineLeadSource,

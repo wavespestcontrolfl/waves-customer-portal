@@ -20,7 +20,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 
 const { _test } = require('../routes/lead-webhook');
-const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS, flushPendingLeadFallbacks, pendingLeadFallbacks, singleFlight } = _test;
+const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS, flushPendingLeadFallbacks, pendingLeadFallbacks, singleFlight, createLeadFallbackDeadline } = _test;
 
 // Runs that never settle stay registered in the module-level registry.
 beforeEach(() => pendingLeadFallbacks.clear());
@@ -280,5 +280,62 @@ describe('a permanently stalled agent run', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('createLeadFallbackDeadline (one timer for the lead\'s minute)', () => {
+  const tick = (ms) => new Promise(r => setTimeout(r, ms));
+
+  test('the agent never started: the deadline sends once and drops its registration', async () => {
+    const send = jest.fn(async () => {});
+    const sendFallback = singleFlight(send);
+    createLeadFallbackDeadline(sendFallback, 10);
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(true);
+    await tick(30);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
+  });
+
+  test('taken over before it fires: the run\'s timeout sends exactly once (no second timer)', async () => {
+    const send = jest.fn(async () => {});
+    const sendFallback = singleFlight(send);
+    const deadline = createLeadFallbackDeadline(sendFallback, 20);
+    const processLead = jest.fn(() => new Promise(() => {}));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn(), deadline: deadline.takeOver() });
+    await tick(30);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('already fired when taken over (slow estimate work): no second attempt', async () => {
+    const send = jest.fn(async () => {});
+    const sendFallback = singleFlight(send);
+    const deadline = createLeadFallbackDeadline(sendFallback, 5);
+    await tick(20);
+    expect(send).toHaveBeenCalledTimes(1);
+    const processLead = jest.fn(() => new Promise(() => {}));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn(), deadline: deadline.takeOver() });
+    await tick(10);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('taken over, agent sends in time: no fallback at all', async () => {
+    const send = jest.fn(async () => {});
+    const sendFallback = singleFlight(send);
+    const deadline = createLeadFallbackDeadline(sendFallback, 30);
+    const processLead = jest.fn(async () => ({ actionTaken: 'auto_sent' }));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn(), deadline: deadline.takeOver() });
+    await tick(50);
+    expect(send).not.toHaveBeenCalled();
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
+  });
+
+  test('cancel (init throw path) clears the timer and the placeholder registration', async () => {
+    const send = jest.fn(async () => {});
+    const sendFallback = singleFlight(send);
+    const deadline = createLeadFallbackDeadline(sendFallback, 10);
+    deadline.cancel();
+    await tick(30);
+    expect(send).not.toHaveBeenCalled();
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
   });
 });
