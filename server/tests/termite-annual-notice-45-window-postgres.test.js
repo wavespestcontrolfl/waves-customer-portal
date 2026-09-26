@@ -269,6 +269,63 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
     });
   });
 
+  // Codex #4921 pre-push P1: the persisted-acceptance probes, against real
+  // Postgres jsonb/regex semantics. Only a provider-ACCEPTED termite SMS for
+  // THIS customer+term+rung counts (a real Twilio SID, no blocked_code, a
+  // sent_at); the email probe reads the exact idempotency key the sender
+  // uses, and only an accepted status counts.
+  test('priorTermiteSmsAcceptance / findAcceptedTermiteRenewalReminder: earliest accepted send for this term+rung only', async () => {
+    const { db } = fixture;
+    await db.raw(`CREATE TABLE messaging_audit_log (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id uuid, channel text, provider text, blocked_code text,
+      provider_message_id text, sent_at timestamptz, metadata jsonb
+    )`);
+    await db.raw(`CREATE TABLE email_messages (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      idempotency_key text UNIQUE, status text, sent_at timestamptz
+    )`);
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { _private } = require('../services/annual-prepay-renewals');
+    const AccountMembershipEmail = require('../services/account-membership-email');
+
+    const customerId = randomUUID();
+    const termId = randomUUID();
+    const sid = (c) => `SM${c.repeat(32)}`;
+    const meta = (fields) => ({ original_message_type: 'termite_annual_renewal_notice', annual_prepay_term_id: termId, days_out: 45, ...fields });
+    const row = (fields) => ({ customer_id: customerId, channel: 'sms', provider: 'twilio', blocked_code: null, ...fields, metadata: JSON.stringify(fields.metadata || meta({})) });
+    const t = (iso) => new Date(iso);
+    await db('messaging_audit_log').insert([
+      // Not evidence: owner kill switch, uncertain (no SID), blocked, other rung, other term, other type, other customer.
+      row({ provider_message_id: 'owner-silence', sent_at: t('2026-09-20T12:00:00Z') }),
+      row({ provider_message_id: null, sent_at: t('2026-09-20T12:00:00Z') }),
+      row({ provider_message_id: sid('b'), sent_at: t('2026-09-20T12:00:00Z'), blocked_code: 'QUIET_HOURS' }),
+      row({ provider_message_id: sid('c'), sent_at: t('2026-09-20T12:00:00Z'), metadata: meta({ days_out: 30 }) }),
+      row({ provider_message_id: sid('d'), sent_at: t('2026-09-20T12:00:00Z'), metadata: meta({ annual_prepay_term_id: randomUUID() }) }),
+      row({ provider_message_id: sid('e'), sent_at: t('2026-09-20T12:00:00Z'), metadata: meta({ original_message_type: 'annual_prepay_renewal_reminder' }) }),
+      { ...row({ provider_message_id: sid('f'), sent_at: t('2026-09-20T12:00:00Z') }), customer_id: randomUUID() },
+      // Evidence: two accepted sends — the EARLIEST wins.
+      row({ provider_message_id: sid('1'), sent_at: t('2026-09-27T12:00:00Z') }),
+      row({ provider_message_id: sid('2'), sent_at: t('2026-09-26T12:00:00Z') }),
+    ]);
+    const term = { id: termId, customer_id: customerId, term_end: '2026-11-10' };
+    await expect(_private.priorTermiteSmsAcceptance(term, 45)).resolves.toEqual(t('2026-09-26T12:00:00Z'));
+    await expect(_private.priorTermiteSmsAcceptance(term, 30)).resolves.toEqual(t('2026-09-20T12:00:00Z'));
+    await expect(_private.priorTermiteSmsAcceptance({ ...term, id: randomUUID() }, 45)).resolves.toBeNull();
+
+    const key = (daysOut) => `membership.termite_renewal_reminder:${termId}:${daysOut}:2026-11-10`;
+    await db('email_messages').insert([
+      { idempotency_key: key(45), status: 'delivered', sent_at: t('2026-09-26T13:00:00Z') },
+      { idempotency_key: key(30), status: 'failed', sent_at: null },
+    ]);
+    const lookup = (daysOut) => AccountMembershipEmail.findAcceptedTermiteRenewalReminder({
+      customerId, termId, daysOut, renewalDate: '2026-11-10',
+    });
+    await expect(lookup(45)).resolves.toEqual({ sentAt: t('2026-09-26T13:00:00Z') });
+    await expect(lookup(30)).resolves.toBeNull();
+  });
+
   test('witness column: on time (>= threshold days out) stamps the rung\'s own sent_at; a late send stamps the rung\'s own late column', () => {
     jest.doMock('../models/db', () => fixture.db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -382,7 +439,7 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(), classifyDeliveryCertainty: jest.fn() }));
     jest.doMock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
-    jest.doMock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn() }));
+    jest.doMock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn(), findAcceptedTermiteRenewalReminder: jest.fn(async () => null) }));
     jest.doMock('../services/cancellation-resolution', () => ({ cancelFlowV2Enabled: jest.fn(() => true) }));
     const notifyAdmin = jest.fn();
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
@@ -479,7 +536,7 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(), classifyDeliveryCertainty: jest.fn() }));
     jest.doMock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
-    jest.doMock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn() }));
+    jest.doMock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn(), findAcceptedTermiteRenewalReminder: jest.fn(async () => null) }));
     jest.doMock('../services/cancellation-resolution', () => ({ cancelFlowV2Enabled: jest.fn(() => true) }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n' }) }));
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');

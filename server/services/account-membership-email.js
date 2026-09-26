@@ -891,6 +891,30 @@ async function sendMembershipRenewalReminder({
 // (build brief slice 5). 15/7 days out still use the generic
 // sendMembershipRenewalReminder for a termite term too; only the 45/30-day
 // rungs carry the auto-renew/cancel disclosure this sends.
+// The ONE idempotency key a termite renewal reminder is sent under — shared
+// by the sender below and findAcceptedTermiteRenewalReminder so the two can
+// never drift apart.
+function termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }) {
+  return `membership.termite_renewal_reminder:${termId || customerId}:${daysOut || 'notice'}:${stableEventKey(renewalDate)}`;
+}
+
+// Statuses that prove the provider ACCEPTED the email (mirrors
+// email-template-library's dedupedResultForExistingMessage "sent" set).
+const ACCEPTED_EMAIL_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
+
+// Codex #4921 pre-push P1: read-only lookup of an ALREADY-ACCEPTED termite
+// renewal reminder for this term+rung, so the renewal sweep can recover the
+// original acceptance time before deciding whether to send anything at all.
+// Returns { sentAt } or null. A query error is NOT swallowed — the caller
+// must treat "could not check" differently from "never sent".
+async function findAcceptedTermiteRenewalReminder({ customerId, termId, daysOut, renewalDate } = {}) {
+  const row = await db('email_messages')
+    .where({ idempotency_key: termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }) })
+    .first('status', 'sent_at');
+  if (!row || !row.sent_at || !ACCEPTED_EMAIL_STATUSES.includes(String(row.status || '').toLowerCase())) return null;
+  return { sentAt: row.sent_at };
+}
+
 async function sendTermiteRenewalReminder({
   customerId,
   termId = null,
@@ -932,7 +956,7 @@ async function sendTermiteRenewalReminder({
         : '',
     },
     idempotencyKey: idempotencyKey
-      || `membership.termite_renewal_reminder:${termId || customerId}:${daysOut || 'notice'}:${stableEventKey(renewalDate)}`,
+      || termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }),
     categories: ['membership_renewal_reminder', 'termite_annual_plan'],
     metadata: { annual_prepay_term_id: termId, days_out: daysOut },
   });
@@ -1026,6 +1050,7 @@ module.exports = {
   sendMembershipUpdated,
   sendMembershipRenewalReminder,
   sendTermiteRenewalReminder,
+  findAcceptedTermiteRenewalReminder,
   sendMembershipCanceled,
   sendMembershipPaused,
   sendMembershipReactivated,

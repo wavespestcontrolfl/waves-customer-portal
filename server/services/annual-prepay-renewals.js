@@ -5740,6 +5740,24 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       // late-escalation retry pass re-rings it if this bell fails.
       if (lateCol) await fileTermiteLateNoticeException(claimedTerm, opts.alsoRecordMissedRung);
     };
+    // Codex #4921 pre-push P1: recover persisted acceptance evidence for
+    // THIS term+rung BEFORE sending or classifying anything. An earlier
+    // attempt whose SMS (or email) the provider accepted, but whose witness
+    // stamp then failed, must not be re-texted and must not be re-witnessed
+    // at today's (possibly late) time — it is stamped from the ORIGINAL
+    // acceptance, on time or late accordingly, and nothing is sent. A lookup
+    // ERROR throws here: the catch below releases the claim and rethrows,
+    // so the attempt aborts and retries next run — never a re-send and
+    // never a late stamp on an unknown.
+    if (termiteRung) {
+      const prior = await priorTermiteNoticeAcceptance(claimedTerm, daysOut);
+      if (prior) {
+        logger.info(`[annual-prepay] termite ${daysOut}-day notice for term ${claimedTerm.id} was already accepted (${prior.channel}) at ${prior.at.toISOString()}; stamping from that, not re-sending`);
+        await markNoticeSent(prior.at);
+        return { sent: true, termId: claimedTerm.id, channel: prior.channel, recovered: true };
+      }
+    }
+
     // Email-only delivery: the witness lands only on a confirmed email send.
     const deliverByEmail = async (reason, extra = {}) => {
       const email = await sendRenewalEmail();
@@ -5819,6 +5837,50 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     if (!noticeRecorded) await releaseClaim();
     throw err;
   }
+}
+
+// Codex #4921 pre-push P1: the earliest provider-ACCEPTED termite renewal
+// SMS for this term+rung, from messaging_audit_log (every send attempt the
+// wrapper sees; metadata carries the annual_prepay_term_id / days_out /
+// original_message_type that sendTermNoticeSms stamps). The audit row keeps
+// no deliveryOutcome, so acceptance is proven by a real Twilio message SID —
+// the owner kill switch records 'owner-silence', an uncertain handoff
+// records no SID, and a blocked attempt records blocked_code. Errors
+// propagate (see sendCustomerTermNotice).
+const TWILIO_MESSAGE_SID_RE = '^(SM|MM)[0-9a-fA-F]{32}$';
+async function priorTermiteSmsAcceptance(term, daysOut) {
+  const row = await db('messaging_audit_log')
+    .where({ customer_id: term.customer_id, channel: 'sms', provider: 'twilio' })
+    .whereNull('blocked_code')
+    .whereNotNull('sent_at')
+    .whereRaw("metadata->>'original_message_type' = ?", ['termite_annual_renewal_notice'])
+    .whereRaw("metadata->>'annual_prepay_term_id' = ?", [String(term.id)])
+    .whereRaw("metadata->>'days_out' = ?", [String(Number(daysOut))])
+    .whereRaw('provider_message_id ~ ?', [TWILIO_MESSAGE_SID_RE])
+    .orderBy('sent_at', 'asc')
+    .first('sent_at');
+  return row?.sent_at ? new Date(row.sent_at) : null;
+}
+
+// Earliest persisted acceptance (SMS or email) for this term+rung, or null.
+// A time in the future or unparseable is ignored (never a witness).
+async function priorTermiteNoticeAcceptance(term, daysOut) {
+  const smsAt = await priorTermiteSmsAcceptance(term, daysOut);
+  const email = await AccountMembershipEmail.findAcceptedTermiteRenewalReminder({
+    customerId: term.customer_id,
+    termId: term.id,
+    daysOut,
+    renewalDate: term.term_end,
+  });
+  const emailAt = email?.sentAt ? new Date(email.sentAt) : null;
+  const now = Date.now();
+  const candidates = [
+    { channel: 'sms', at: smsAt },
+    { channel: 'email', at: emailAt },
+  ].filter((c) => c.at && !Number.isNaN(c.at.getTime()) && c.at.getTime() <= now);
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a.at - b.at);
+  return candidates[0];
 }
 
 // ── Termite annual-plan notice obligations: ONE pass, both rungs ──────────
@@ -6770,6 +6832,8 @@ module.exports = {
     fileTermiteMissedNoticeException,
     termiteUndeliveredNoticeEscalationCandidates,
     termiteUndeliveredRungs,
+    priorTermiteSmsAcceptance,
+    priorTermiteNoticeAcceptance,
     fileTermiteUndeliveredNoticeException,
     originalEmailAcceptance,
     TERMITE_45_UNDELIVERED_ESCALATION_COLUMN,
