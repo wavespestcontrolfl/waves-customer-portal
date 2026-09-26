@@ -317,6 +317,41 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       .toMatchObject({ lat: null, lng: null, zone: null });
   });
 
+  test('a decision without current pin provenance still clears explicitly primary-linked routes', async () => {
+    const parentId = randomUUID();
+    const linkedId = randomUUID();
+    const independentId = randomUUID();
+    await trx('scheduled_services').insert([
+      visitRow(parentId, {
+        property_id: PRIMARY_ID, status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { appointment_address: {
+          property_id: PRIMARY_ID,
+          service_address_line1: ADDRESS.address_line1,
+          service_address_line2: ADDRESS.address_line2,
+          service_address_city: ADDRESS.city,
+          service_address_state: ADDRESS.state,
+          service_address_zip: ADDRESS.zip,
+          lat: 27.45, lng: -82.45, zone: 'legacy',
+        } },
+      }),
+      visitRow(linkedId, { property_id: PRIMARY_ID, lat: 27.45, lng: -82.45, route_order: 5 }),
+      visitRow(independentId, { lat: 27.45, lng: -82.45, route_order: 6 }),
+    ]);
+
+    const locked = await context({ includeProtected: true, verifyPin: false });
+    await expect(clearMatchingPins(trx, customer, primary, {}, locked)).resolves.toEqual({
+      customer: 0, property: 0, visits: 1, templates: 1, visitIds: [linkedId],
+    });
+    expect(await trx('scheduled_services').where({ id: linkedId }).first()).toMatchObject({
+      lat: null, lng: null, route_order: null,
+    });
+    expect(await trx('scheduled_services').where({ id: independentId }).first()).toMatchObject({
+      lat: '27.450000', lng: '-82.450000', route_order: 6,
+    });
+    expect(recurringServiceAddress(await trx('scheduled_services').where({ id: parentId }).first()))
+      .toMatchObject({ lat: null, lng: null, zone: null });
+  });
+
   test('visit membership changes are part of the post-lock fence', async () => {
     const rowId = randomUUID();
     const visitId = randomUUID();

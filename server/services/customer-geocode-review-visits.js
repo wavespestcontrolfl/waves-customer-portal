@@ -267,26 +267,22 @@ async function updatePrimaryVisits(trx, customer, primary, after, latitude, long
 }
 
 async function clearMatchingPins(trx, customer, primary, storedReview, visitContext) {
-  if (storedReview?.latitude == null || storedReview?.longitude == null) {
-    return { customer: 0, property: 0, visits: 0, templates: 0, visitIds: [] };
-  }
-  const latitude = Number(storedReview.latitude);
-  const longitude = Number(storedReview.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return { customer: 0, property: 0, visits: 0, templates: 0, visitIds: [] };
-  }
-  const customerCount = await trx('customers')
+  const latitude = Number(storedReview?.latitude);
+  const longitude = Number(storedReview?.longitude);
+  const hasRejectedPin = storedReview?.latitude != null && storedReview?.longitude != null
+    && Number.isFinite(latitude) && Number.isFinite(longitude);
+  const customerCount = hasRejectedPin ? await trx('customers')
     .where({ id: customer.id, latitude, longitude })
-    .update({ latitude: null, longitude: null, updated_at: new Date() });
-  const propertyCount = await trx('customer_properties')
+    .update({ latitude: null, longitude: null, updated_at: new Date() }) : 0;
+  const propertyCount = hasRejectedPin ? await trx('customer_properties')
     .where({ id: primary.id, customer_id: customer.id, active: true, is_primary: true, latitude, longitude })
-    .update({ latitude: null, longitude: null, updated_at: new Date() });
+    .update({ latitude: null, longitude: null, updated_at: new Date() }) : 0;
   const visitLatitude = pinAtScale(latitude, 6);
   const visitLongitude = pinAtScale(longitude, 6);
   const visitIds = visitContext.visits
     .filter(row => visitMatchesPrimary(row, customer, primary))
     .filter(row => (row.property_id != null && String(row.property_id) === String(primary.id))
-      || (pinAtScale(row.lat, 6) === visitLatitude && pinAtScale(row.lng, 6) === visitLongitude))
+      || (hasRejectedPin && pinAtScale(row.lat, 6) === visitLatitude && pinAtScale(row.lng, 6) === visitLongitude))
     .map(row => row.id);
   const visits = visitIds.length ? await trx('scheduled_services')
     .whereIn('id', visitIds)
@@ -299,7 +295,7 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
     const effective = { ...parent, ...recurringServiceAddress(parent) };
     if (!visitMatchesPrimary(effective, customer, primary)
       || ((effective.property_id == null || String(effective.property_id) !== String(primary.id))
-        && (pinAtScale(effective.lat, 6) !== visitLatitude
+        && (!hasRejectedPin || pinAtScale(effective.lat, 6) !== visitLatitude
           || pinAtScale(effective.lng, 6) !== visitLongitude))) continue;
     templates += await trx('scheduled_services')
       .where({ id: parent.id, customer_id: customer.id })
