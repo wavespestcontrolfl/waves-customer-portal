@@ -3954,6 +3954,24 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
     );
   }
 
+  if (nextStep === 'offer_closed') {
+    // Slice 3b: the customer never signed the annual agreement within the
+    // 45-day window, so the offer closed automatically — nothing was
+    // billed or booked. Never re-show the sign-your-agreement copy; the
+    // signing link is dead.
+    return (
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${ESTIMATE_MUTED}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          This plan offer has closed.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          The signing window closed before a signature came in. Nothing was charged or booked. Contact Waves
+          if you'd still like the annual plan — we're happy to send a new quote.
+        </div>
+      </div>
+    );
+  }
+
   if (nextStep === 'site_confirmation') {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.

@@ -43,6 +43,13 @@ const { addMonthsSameDay, dateOnlyString } = require('../utils/date-only');
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const DEFAULT_ANNUAL_PLAN_VERSION = 'v3';
 
+// Slice 3b ("abandoned signature"): a parked estimate whose customer never
+// signs must not stay 'awaiting_signature' forever. Measured from the PARK
+// time (annual_plan_deferred_invoice.parkedAt), falling back to
+// estimates.accepted_at for the rare row missing that stamp (pre-dates the
+// deferred-invoice snapshot, or a malformed context) — never "never expires".
+const ANNUAL_SIGNATURE_ABANDON_DAYS = 45;
+
 function parseJsonish(raw) {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
@@ -69,6 +76,20 @@ function sourceEstimateIdFromContract(contract) {
 function acceptContextFromEstimate(estimate) {
   const context = parseJsonish(estimate?.annual_plan_deferred_invoice);
   return context && typeof context === 'object' ? context : {};
+}
+
+// Slice 3b: the abandon-window clock starts at the PARK (the accept-time
+// deferral), not the estimate's original creation — a customer who took a
+// week to accept still gets the full window from the moment their agreement
+// went out. Falls back to accepted_at for a row whose deferred-invoice
+// context is missing or unreadable, so a malformed snapshot never means "no
+// clock at all".
+function parkedAtForEstimate(estimate) {
+  const parkedAtRaw = acceptContextFromEstimate(estimate).parkedAt;
+  const parkedAt = parkedAtRaw ? new Date(parkedAtRaw) : null;
+  if (parkedAt && !Number.isNaN(parkedAt.getTime())) return parkedAt;
+  const acceptedAt = estimate?.accepted_at ? new Date(estimate.accepted_at) : null;
+  return acceptedAt && !Number.isNaN(acceptedAt.getTime()) ? acceptedAt : null;
 }
 
 // The accept-time opts the park persisted, replayed verbatim; an absent
@@ -509,7 +530,7 @@ async function collectOrDeliverAnnualInvoice({
   return { charge, invoiceDelivery: delivery.invoiceDelivery, ok: delivery.ok };
 }
 
-// The daily sweep (6:10am cron), four independent bounded passes — one
+// The daily sweep (6:10am cron), six independent bounded passes — one
 // pass's failure never stops the next:
 //   1. retryAwaitingActivations — re-drives a signed-but-unactivated plan
 //   2. retryUndeliveredInvoices — collects / delivers an activated invoice
@@ -518,6 +539,10 @@ async function collectOrDeliverAnnualInvoice({
 //      installation (codex round 4)
 //   4. retryInstallHandoffs — re-rings a scheduling handoff that never
 //      durably landed (codex round 4)
+//   5. remindExpiredSignatureLinks — slice 3b: nudges staff once per
+//      lapsed signing link on a still-open parked estimate
+//   6. expireAbandonedSignatures — slice 3b: closes out a parked estimate
+//      whose customer never signed within ANNUAL_SIGNATURE_ABANDON_DAYS
 async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}) {
   const counts = {
     scanned: 0, activated: 0, skipped: 0, failed: 0,
@@ -525,6 +550,8 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     anchorScanned: 0, anchored: 0, anchorFailed: 0,
     handoffScanned: 0, handedOff: 0, handoffFailed: 0,
     countersignScanned: 0, countersignReminded: 0,
+    signatureNudgeScanned: 0, signatureNudged: 0,
+    signatureExpireScanned: 0, signatureExpired: 0, signatureExpireFailed: 0,
   };
   await retryAwaitingActivations({ conn, limit, counts });
   await retryUndeliveredInvoices({ conn, limit, counts });
@@ -533,6 +560,13 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
   await anchorInstalledTerms({ conn, limit, counts });
   await retryInstallHandoffs({ conn, limit, counts });
   await remindPendingCountersignatures({ conn, limit, counts });
+  // Nudge BEFORE hard expiry: an estimate whose link lapses on exactly the
+  // 45th day gets one last "resend or it closes" bell in the same tick its
+  // hard-expiry check would otherwise fire on — order costs nothing (they
+  // key off different, non-overlapping evidence) but reads more sensibly in
+  // the log.
+  await remindExpiredSignatureLinks({ conn, limit, counts });
+  await expireAbandonedSignatures({ conn, limit, counts });
   return counts;
 }
 
@@ -1046,9 +1080,213 @@ async function retryInstallHandoffs({ conn, limit, counts }) {
   }
 }
 
+// ---- slice 3b: abandoned-signature nudge + hard expiry -----------------
+// A sign-before-pay park has NO deadline of its own — the customer's signing
+// link is what lapses, on the same TTL every other document-lifecycle
+// contract uses (contracts.js CONTRACT_TOKEN_TTL_DAYS, minted by
+// termite-program-agreement.js's issuance). The 6:10am document-lifecycle
+// cron runs expireDocumentRequests() BEFORE this module's own reconcile
+// (scheduler.js: "expiration FIRST — the termite sweeps key off 'expired'
+// stamps"), which flips a lapsed contract's own `status` column to literal
+// 'expired' — but that flip is cosmetic to shareLinkWritableStatuses (still
+// resendable) and carries no deadline of its own. Both passes below read
+// share_token_expires_at / the park time directly rather than depend on that
+// ordering, so they behave identically whether or not expireDocumentRequests
+// ran first (e.g. a test driving reconcileTermiteAnnualActivations alone).
+
+// Nudge: rings ONE admin bell per contract + its CURRENT share_token_expires_at
+// the moment that link lapses unsigned, so staff can resend before the hard
+// 45-day close (below) retires it for good. Excludes a contract superseded
+// by a newer one for the SAME estimate (a re-issued agreement's own expiry
+// is what matters going forward, never the stale draft it replaced) and any
+// terminal contract (signed/cancelled/voided — nothing to nudge about).
+// dedupeKey bakes in the expiry timestamp itself: a staff resend mints a
+// fresh share_token_expires_at on the SAME row, so a later lapse of THAT
+// link is a distinct key and rings again — never suppressed by the first
+// bell's dedupe record.
+async function remindExpiredSignatureLinks({ conn, limit, counts }) {
+  try {
+    const candidates = await conn('estimates as e')
+      .join('customer_contracts as cc', function annualAgreementForEstimate() {
+        this.on(conn.raw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text"))
+          .andOnVal('cc.document_template_key', ANNUAL_TEMPLATE_KEY);
+      })
+      .where('e.annual_plan_activation_status', 'awaiting_signature')
+      .whereNotIn('cc.status', ['signed', 'cancelled', 'voided'])
+      .whereNotNull('cc.share_token_expires_at')
+      .where('cc.share_token_expires_at', '<', conn.fn.now())
+      .whereNotExists(function newerAgreementExists() {
+        this.select(conn.raw('1')).from('customer_contracts as cc2')
+          .where('cc2.document_template_key', ANNUAL_TEMPLATE_KEY)
+          .whereRaw("cc2.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text")
+          .whereRaw('cc2.created_at > cc.created_at');
+      })
+      .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice', 'e.accepted_at', 'cc.id as contract_id', 'cc.share_token_expires_at')
+      .orderBy('cc.share_token_expires_at', 'asc')
+      .limit(limit);
+    counts.signatureNudgeScanned = candidates.length;
+    const NotificationService = require('./notification-service');
+    for (const row of candidates) {
+      try {
+        const parkedAt = parkedAtForEstimate(row);
+        const closeDate = parkedAt
+          ? etDateString(new Date(parkedAt.getTime() + ANNUAL_SIGNATURE_ABANDON_DAYS * 24 * 60 * 60 * 1000))
+          : null;
+        const closeClause = closeDate
+          ? `or let it close out automatically on ${closeDate} if it stays unsigned`
+          : 'or let it close out automatically if it stays unsigned';
+        const expiresAtKey = new Date(row.share_token_expires_at).toISOString();
+        const bell = await NotificationService.notifyAdmin(
+          'customer',
+          'Termite annual plan signing link expired',
+          `The signing link for the Waves Subterranean Termite Protection annual agreement (estimate #${row.estimate_id}) expired before the customer signed. Resend it from the Contracts page, ${closeClause}.`,
+          {
+            icon: '⚠️',
+            link: '/admin/contracts?tab=requests',
+            bell: true,
+            dedupeKey: `termite-annual-signature-expiry-nudge:${row.contract_id}:${expiresAtKey}`,
+            metadata: { estimateId: row.estimate_id, contractId: row.contract_id },
+          },
+        );
+        if (bell && !bell.deduped && !bell.suppressed) counts.signatureNudged += 1;
+      } catch (err) {
+        logger.warn(`[termite-annual-activation] signature-expiry nudge failed for estimate ${row.estimate_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] signature-expiry nudge scan failed: ${err.message}`);
+    counts.signatureNudgeScanError = err.message;
+  }
+}
+
+// Hard expiry: an estimate parked more than ANNUAL_SIGNATURE_ABANDON_DAYS
+// ago and STILL unsigned closes out for good — never billed, never booked,
+// so nothing to undo. Locked customer-before-estimate (the shared order
+// admin-contracts.js's cancel route and /:token/sign hold), THEN the
+// estimate row FOR UPDATE (activateTermiteAnnualPlanForSignedContract's own
+// lock) so a signature committing concurrently on another connection either
+// wins outright (already 'activated' by the time this transaction gets the
+// estimate lock) or is re-checked for explicitly below (a signed contract
+// recorded a beat before this transaction's own re-check, but after this
+// row was selected as a candidate) — either way the customer's actual
+// signature is never overridden by this administrative close-out.
+async function expireAbandonedSignature({ estimateId, conn = db }) {
+  return conn.transaction(async (trx) => {
+    const peek = await trx('estimates').where({ id: estimateId }).first('id', 'customer_id');
+    if (!peek) return { skipped: 'estimate_not_found' };
+    if (peek.customer_id) {
+      await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
+    }
+    const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+    if (!estimate) return { skipped: 'estimate_not_found' };
+    if (estimate.annual_plan_activation_status !== 'awaiting_signature') {
+      // Already activated (a signature won the race), already expired by a
+      // prior attempt, or never parked — nothing to do either way.
+      return { skipped: estimate.annual_plan_activation_status || 'not_awaiting_signature' };
+    }
+    // Belt + braces beside the status re-check above: a signed contract
+    // that hasn't yet run its activation transaction (e.g. queued just
+    // behind this one) must still block the close-out — activation reads
+    // this exact evidence too.
+    const signedContract = await trx('customer_contracts')
+      .where({ document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed' })
+      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimateId)])
+      .first('id');
+    if (signedContract) return { skipped: 'signed' };
+
+    const expiredCount = await trx('estimates')
+      .where({ id: estimateId, annual_plan_activation_status: 'awaiting_signature' })
+      .update({ annual_plan_activation_status: 'signature_expired' });
+    if (!expiredCount) return { skipped: 'race' };
+
+    // Retire every UNSIGNED annual agreement for this estimate — same
+    // supersession pattern as retireSamePropertyOpenAgreements
+    // (termite-program-agreement.js): terminal 'cancelled', share link
+    // burned, an audit event recorded. Never touches a signed one (excluded
+    // by the WHERE, and the check above already refused if one exists).
+    const openAgreements = await trx('customer_contracts')
+      .where({ document_template_key: ANNUAL_TEMPLATE_KEY })
+      .whereNotIn('status', ['signed', 'cancelled', 'voided'])
+      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimateId)])
+      .forUpdate();
+    const now = new Date();
+    let retiredCount = 0;
+    for (const row of openAgreements) {
+      const cancelled = await trx('customer_contracts')
+        .where({ id: row.id })
+        .whereNotIn('status', ['signed', 'cancelled', 'voided'])
+        .update({
+          status: 'cancelled',
+          cancelled_at: now,
+          cancelled_reason: `Signing window closed — not signed within ${ANNUAL_SIGNATURE_ABANDON_DAYS} days of accepting`,
+          share_token_hash: null,
+          share_token_expires_at: null,
+          updated_at: now,
+        });
+      if (!cancelled) continue;
+      retiredCount += 1;
+      await trx('customer_contract_events').insert({
+        contract_id: row.id,
+        customer_id: estimate.customer_id,
+        event_type: 'cancelled',
+        actor_type: 'system',
+        metadata: JSON.stringify({ reason: 'annual_plan_signature_expired', estimateId, abandonDays: ANNUAL_SIGNATURE_ABANDON_DAYS }),
+      });
+    }
+    return { expired: true, retiredCount, customerId: estimate.customer_id };
+  });
+}
+
+async function expireAbandonedSignatures({ conn, limit, counts }) {
+  try {
+    const cutoff = new Date(Date.now() - ANNUAL_SIGNATURE_ABANDON_DAYS * 24 * 60 * 60 * 1000);
+    // Parked-time evidence: the JSON parkedAt stamp, falling back to
+    // accepted_at in SQL exactly like parkedAtForEstimate does in JS (kept
+    // in sync deliberately — this WHERE decides the candidate set, the JS
+    // helper decides the per-row verdict inside the locked transaction).
+    const parkedAtExpr = "COALESCE((e.annual_plan_deferred_invoice ->> 'parkedAt')::timestamptz, e.accepted_at)";
+    const candidates = await conn('estimates as e')
+      .where('e.annual_plan_activation_status', 'awaiting_signature')
+      .whereRaw(`${parkedAtExpr} IS NOT NULL`)
+      .whereRaw(`${parkedAtExpr} < ?`, [cutoff])
+      .orderByRaw(`${parkedAtExpr} asc`)
+      .select('e.id as estimate_id')
+      .limit(limit);
+    counts.signatureExpireScanned = candidates.length;
+    const NotificationService = require('./notification-service');
+    for (const row of candidates) {
+      try {
+        const result = await expireAbandonedSignature({ estimateId: row.estimate_id, conn });
+        if (result?.expired) {
+          counts.signatureExpired += 1;
+          await NotificationService.notifyAdmin(
+            'estimate',
+            'Termite annual plan offer closed — never signed',
+            `The Waves Subterranean Termite Protection annual plan offer for estimate #${row.estimate_id} closed automatically after ${ANNUAL_SIGNATURE_ABANDON_DAYS} days unsigned. Nothing was billed or booked. Re-quote the customer if they still want the plan.`,
+            {
+              icon: '⚠️',
+              link: `/admin/estimates?estimateId=${row.estimate_id}`,
+              bell: true,
+              dedupeKey: `termite-annual-signature-expiry:${row.estimate_id}`,
+              metadata: { estimateId: row.estimate_id },
+            },
+          );
+        }
+      } catch (err) {
+        counts.signatureExpireFailed += 1;
+        logger.error(`[termite-annual-activation] signature hard-expiry failed for estimate ${row.estimate_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] signature hard-expiry scan failed: ${err.message}`);
+    counts.signatureExpireScanError = err.message;
+  }
+}
+
 module.exports = {
   activateTermiteAnnualPlanForSignedContract,
   anchorTermToInstallation,
   reconcileTermiteAnnualActivations,
   ANNUAL_TEMPLATE_KEY,
+  ANNUAL_SIGNATURE_ABANDON_DAYS,
 };

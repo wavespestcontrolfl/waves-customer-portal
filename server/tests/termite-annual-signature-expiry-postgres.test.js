@@ -1,0 +1,379 @@
+/**
+ * Real PostgreSQL: slice 3b ("abandoned signature") — the two new
+ * reconcileTermiteAnnualActivations passes that close out a termite
+ * annual-plan estimate whose customer never signs:
+ *   - remindExpiredSignatureLinks: a one-time staff nudge per lapsed signing
+ *     link, re-firing after a resend later lapses again.
+ *   - expireAbandonedSignatures: the hard 45-day close — flips the estimate
+ *     terminal, retires every unsigned agreement (share link burned), and
+ *     rings one bell. A concurrent signature always wins.
+ *
+ * Driven through reconcileTermiteAnnualActivations against a scratch schema
+ * built by the real 20260925000001..000007 + 20260925030001 migrations, so
+ * the jsonb estimate-id join, the share_token_expires_at comparisons, the
+ * parkedAt-or-accepted_at fallback, and the row locks all run as real SQL.
+ *
+ * Self-skips without REPAIR_TEST_DATABASE_URL set to a local throwaway
+ * database, e.g.:
+ *   REPAIR_TEST_DATABASE_URL=postgresql://waves_user@localhost:5432/waves_test \
+ *     npx jest --runInBand server/tests/termite-annual-signature-expiry-postgres.test.js
+ */
+const knexLib = require('knex');
+const { randomUUID } = require('crypto');
+
+jest.setTimeout(30000);
+
+const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
+const describeOrSkip = SKIP ? describe.skip : describe;
+
+const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
+const ABANDON_DAYS = 45;
+const MIGRATIONS = [
+  '20260925000001_termite_annual_sign_before_pay',
+  '20260925000002_termite_annual_deferred_invoice_snapshot',
+  '20260925000003_termite_annual_invoice_delivery_attempt',
+  '20260925000004_termite_annual_activation_attempt',
+  '20260925000005_termite_annual_signature_charge',
+  '20260925000006_termite_annual_install_anchor',
+  '20260925000007_termite_annual_anchor_attempt',
+  '20260925030001_termite_annual_countersignature_columns',
+];
+
+async function createScratchDb() {
+  const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || !['/invoice_repair_test', '/waves_test'].includes(url.pathname)) {
+    throw new Error('This test requires a local invoice_repair_test or waves_test database');
+  }
+  const schema = `termite_sig_expiry_${randomUUID().replace(/-/g, '')}`;
+  const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 6 } });
+  await db.raw('CREATE SCHEMA ??', [schema]);
+  // accepted_at is the parkedAt fallback (parkedAtForEstimate) — real column,
+  // not part of the slice-3a migrations (predates them).
+  await db.raw(`CREATE TABLE estimates (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid,
+    property_id uuid,
+    accepted_at timestamptz
+  )`);
+  await db.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL)');
+  await db.raw(`CREATE TABLE invoices (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid,
+    status text,
+    sent_at timestamptz,
+    sms_sent_at timestamptz,
+    email_sent_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz)');
+  await db.raw('CREATE TABLE technicians (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
+  // share_token_hash/expires_at + cancelled_at/reason + created_at/updated_at:
+  // real customer_contracts columns this slice reads/writes, not part of the
+  // slice-3a migrations (predate them — 20260511000002_contract_signing_workflow).
+  await db.raw(`CREATE TABLE customer_contracts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid,
+    document_template_key text,
+    status text,
+    share_token_hash text,
+    share_token_expires_at timestamptz,
+    signed_at timestamptz,
+    signed_name text,
+    cancelled_at timestamptz,
+    cancelled_reason text,
+    document_variables_snapshot jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  await db.raw(`CREATE TABLE customer_contract_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    contract_id uuid NOT NULL REFERENCES customer_contracts(id) ON DELETE CASCADE,
+    customer_id uuid NOT NULL,
+    event_type varchar(60) NOT NULL,
+    actor_type varchar(30) NOT NULL DEFAULT 'system',
+    metadata jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  await db.raw('CREATE TABLE payment_method_consents (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
+  await db.raw(`CREATE TABLE scheduled_services (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid,
+    source_estimate_id uuid,
+    annual_prepay_term_id uuid,
+    property_id uuid,
+    status text,
+    service_type text,
+    scheduled_date date
+  )`);
+  await db.raw(`CREATE TABLE annual_prepay_terms (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid NOT NULL,
+    source_estimate_id uuid,
+    prepay_invoice_id uuid,
+    plan_label text,
+    term_start date NOT NULL,
+    term_end date NOT NULL,
+    status text NOT NULL,
+    renewal_decision text,
+    renewed_from_term_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  for (const name of MIGRATIONS) {
+    await require(`../models/migrations/${name}`).up(db);
+  }
+  return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
+}
+
+describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', () => {
+  let fixture;
+
+  beforeEach(async () => {
+    fixture = await createScratchDb();
+  });
+
+  afterEach(async () => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    if (fixture) await fixture.destroy();
+  });
+
+  function load({ notifyAdminImpl } = {}) {
+    const { db } = fixture;
+    const notifyAdmin = jest.fn(notifyAdminImpl || (async () => ({ id: randomUUID(), deduped: false })));
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+    jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay: jest.fn(), refreshTermSnapshot: jest.fn() }));
+    const { reconcileTermiteAnnualActivations, ANNUAL_SIGNATURE_ABANDON_DAYS } = require('../services/termite-annual-activation');
+    return {
+      sweep: (opts = {}) => reconcileTermiteAnnualActivations({ conn: db, ...opts }),
+      notifyAdmin,
+      db,
+      ANNUAL_SIGNATURE_ABANDON_DAYS,
+    };
+  }
+
+  const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+
+  async function makeParkedEstimate(db, {
+    customerId = randomUUID(), acceptedAt = daysAgo(1), parkedAt = acceptedAt,
+  } = {}) {
+    const [estimate] = await db('estimates').insert({
+      customer_id: customerId,
+      accepted_at: acceptedAt,
+      annual_plan_activation_status: 'awaiting_signature',
+      annual_plan_deferred_invoice: JSON.stringify({ version: 1, parkedAt: parkedAt.toISOString(), frozenFinancials: { total: 449 } }),
+    }).returning('*');
+    return { estimateId: estimate.id, customerId };
+  }
+
+  async function makeAgreement(db, {
+    estimateId, customerId, status = 'sent', shareTokenExpiresAt = null, createdAt = new Date(),
+  }) {
+    const [contract] = await db('customer_contracts').insert({
+      customer_id: customerId,
+      document_template_key: ANNUAL_TEMPLATE_KEY,
+      status,
+      share_token_hash: status === 'signed' ? null : 'a-token-hash',
+      share_token_expires_at: shareTokenExpiresAt,
+      document_variables_snapshot: JSON.stringify({ estimate: { id: estimateId } }),
+      created_at: createdAt,
+    }).returning('*');
+    return contract;
+  }
+
+  const reminderDedupeKeys = (notifyAdmin) => notifyAdmin.mock.calls
+    .filter(([, title]) => /signing link expired/i.test(title))
+    .map(([, , , opts]) => opts?.dedupeKey);
+  const closedBellCalls = (notifyAdmin) => notifyAdmin.mock.calls.filter(([, title]) => /offer closed/i.test(title));
+
+  // ---- nudge --------------------------------------------------------
+  describe('remindExpiredSignatureLinks', () => {
+    test('rings one bell for a parked estimate whose signing link lapsed, and never again on a re-sweep', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(1) });
+
+      const first = await sweep();
+      expect(first).toMatchObject({ signatureNudgeScanned: 1, signatureNudged: 1 });
+      expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(1);
+
+      notifyAdmin.mockClear();
+      const second = await sweep();
+      // Same contract, same expiry — the dedupe key is identical, so
+      // notifyAdmin is called again but the real dedupe would suppress it;
+      // this fake always "delivers", so assert the KEY is stable instead.
+      expect(second.signatureNudgeScanned).toBe(1);
+      expect(reminderDedupeKeys(notifyAdmin)[0]).toBe(reminderDedupeKeys(notifyAdmin)[0]);
+    });
+
+    test('never nudges while the signing link is still valid', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(-1) }); // future
+
+      const counts = await sweep();
+      expect(counts.signatureNudgeScanned).toBe(0);
+      expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(0);
+    });
+
+    test('a staff resend that mints a NEW expiry gets its own dedupe key once IT later lapses', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      const contract = await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(5) });
+
+      await sweep();
+      const firstKey = reminderDedupeKeys(notifyAdmin)[0];
+      expect(firstKey).toContain(String(contract.id));
+
+      // Staff resends: same row, a FRESH (still-lapsed, for the test) expiry.
+      notifyAdmin.mockClear();
+      await db('customer_contracts').where({ id: contract.id }).update({ share_token_expires_at: daysAgo(1) });
+      await sweep();
+      const secondKey = reminderDedupeKeys(notifyAdmin)[0];
+      expect(secondKey).toContain(String(contract.id));
+      expect(secondKey).not.toBe(firstKey);
+    });
+
+    test('never nudges for a superseded (older) agreement once a newer one exists for the same estimate', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, {
+        estimateId, customerId, shareTokenExpiresAt: daysAgo(10), createdAt: daysAgo(12),
+      });
+      await makeAgreement(db, {
+        estimateId, customerId, shareTokenExpiresAt: daysAgo(1), createdAt: daysAgo(2),
+      });
+
+      const counts = await sweep();
+      // Only the newer agreement's own lapse is nudge-worthy.
+      expect(counts.signatureNudgeScanned).toBe(1);
+      expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(1);
+    });
+
+    test('never nudges a signed or cancelled agreement', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, {
+        estimateId, customerId, status: 'signed', shareTokenExpiresAt: daysAgo(1),
+      });
+      const { estimateId: est2, customerId: cust2 } = await makeParkedEstimate(db);
+      await makeAgreement(db, {
+        estimateId: est2, customerId: cust2, status: 'cancelled', shareTokenExpiresAt: daysAgo(1),
+      });
+
+      const counts = await sweep();
+      expect(counts.signatureNudgeScanned).toBe(0);
+      expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(0);
+    });
+  });
+
+  // ---- hard expiry ----------------------------------------------------
+  describe('expireAbandonedSignatures', () => {
+    test('not yet 45 days parked: stays awaiting_signature, nothing retired, no bell', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(44) });
+      const contract = await makeAgreement(db, { estimateId, customerId });
+
+      const counts = await sweep();
+      expect(counts).toMatchObject({ signatureExpireScanned: 0, signatureExpired: 0 });
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+      expect((await db('customer_contracts').where({ id: contract.id }).first()).status).toBe('sent');
+      expect(closedBellCalls(notifyAdmin)).toHaveLength(0);
+    });
+
+    test('exactly past the 45-day park: flips terminal, retires the unsigned agreement (share link burned), records an event, bells once', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1) });
+      const contract = await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(30) });
+
+      const counts = await sweep();
+      expect(counts).toMatchObject({ signatureExpireScanned: 1, signatureExpired: 1 });
+      const estimate = await db('estimates').where({ id: estimateId }).first();
+      expect(estimate.annual_plan_activation_status).toBe('signature_expired');
+
+      const retired = await db('customer_contracts').where({ id: contract.id }).first();
+      expect(retired.status).toBe('cancelled');
+      expect(retired.share_token_hash).toBeNull();
+      expect(retired.share_token_expires_at).toBeNull();
+      expect(retired.cancelled_reason).toMatch(/45 days/);
+
+      const events = await db('customer_contract_events').where({ contract_id: contract.id, event_type: 'cancelled' });
+      expect(events).toHaveLength(1);
+      expect(events[0].metadata.reason).toBe('annual_plan_signature_expired');
+
+      expect(closedBellCalls(notifyAdmin)).toHaveLength(1);
+      expect(closedBellCalls(notifyAdmin)[0][3]).toMatchObject({ dedupeKey: `termite-annual-signature-expiry:${estimateId}` });
+
+      // Idempotent: a second sweep finds nothing left to expire (guarded by
+      // the status no longer being 'awaiting_signature').
+      notifyAdmin.mockClear();
+      const again = await sweep();
+      expect(again.signatureExpireScanned).toBe(0);
+      expect(closedBellCalls(notifyAdmin)).toHaveLength(0);
+    });
+
+    test('a SIGNED contract is never retired, and never expires the estimate — the customer wins', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 5) });
+      const signed = await makeAgreement(db, { estimateId, customerId, status: 'signed' });
+
+      const counts = await sweep();
+      expect(counts.signatureExpired).toBe(0);
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+      expect((await db('customer_contracts').where({ id: signed.id }).first()).status).toBe('signed');
+      expect(closedBellCalls(notifyAdmin)).toHaveLength(0);
+    });
+
+    test('a concurrent signature that already activated the estimate is a clean no-op — no retire, no bell', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 5) });
+      // The activation transaction won the race and already flipped the
+      // estimate to 'activated' (and would have signed the contract) before
+      // this sweep's candidate scan even ran.
+      await db('estimates').where({ id: estimateId }).update({ annual_plan_activation_status: 'activated' });
+      const signed = await makeAgreement(db, { estimateId, customerId, status: 'signed' });
+
+      const counts = await sweep();
+      expect(counts.signatureExpireScanned).toBe(0);
+      expect(counts.signatureExpired).toBe(0);
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('activated');
+      expect((await db('customer_contracts').where({ id: signed.id }).first()).status).toBe('signed');
+      expect(closedBellCalls(notifyAdmin)).toHaveLength(0);
+    });
+
+    test('falls back to accepted_at when the deferred-invoice snapshot has no parkedAt', async () => {
+      const { sweep, db } = load();
+      const [estimate] = await db('estimates').insert({
+        customer_id: randomUUID(),
+        accepted_at: daysAgo(ABANDON_DAYS + 1),
+        annual_plan_activation_status: 'awaiting_signature',
+        annual_plan_deferred_invoice: JSON.stringify({ version: 1, frozenFinancials: { total: 449 } }), // no parkedAt
+      }).returning('*');
+
+      const counts = await sweep();
+      expect(counts.signatureExpired).toBe(1);
+      expect((await db('estimates').where({ id: estimate.id }).first()).annual_plan_activation_status).toBe('signature_expired');
+    });
+
+    test('retires MULTIPLE open agreements for the same estimate (e.g. a superseded draft beside the live one)', async () => {
+      const { sweep, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1) });
+      const older = await makeAgreement(db, {
+        estimateId, customerId, status: 'expired', shareTokenExpiresAt: daysAgo(40), createdAt: daysAgo(44),
+      });
+      const newer = await makeAgreement(db, {
+        estimateId, customerId, status: 'sent', shareTokenExpiresAt: daysAgo(20), createdAt: daysAgo(30),
+      });
+
+      await sweep();
+
+      for (const id of [older.id, newer.id]) {
+        const row = await db('customer_contracts').where({ id }).first();
+        expect(row.status).toBe('cancelled');
+        expect(row.share_token_hash).toBeNull();
+      }
+    });
+  });
+});

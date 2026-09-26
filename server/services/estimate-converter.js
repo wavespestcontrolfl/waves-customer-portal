@@ -4314,8 +4314,19 @@ function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm)
   // annualPlanActivationStatus='activated' — and
   // termite-annual-activation.js's own defense-in-depth check then throws
   // and rolls back a signed contract's conversion forever.
+  // Slice 3b: 'signature_expired' is ALSO a persisted, authoritative stamp
+  // (the customer never signed within the abandon window) — it must route
+  // here exactly like 'awaiting_signature' / 'activated' rather than fall
+  // through to the live-gate/delivered-offer check below. Without this, a
+  // gate disabled after the plan expired (or an estimate with no delivered-
+  // offer stamp) would let a re-run of convertEstimate treat the row as an
+  // ORDINARY accept and run the full standard conversion against a plan
+  // that already closed — never the intended outcome. parkTermiteAnnualPlanAccept
+  // (below) is what actually decides what a re-run of a 'signature_expired'
+  // estimate does; this only ensures every re-run reaches that decision.
   if (estimate.annual_plan_activation_status === 'awaiting_signature'
-    || estimate.annual_plan_activation_status === 'activated') return true;
+    || estimate.annual_plan_activation_status === 'activated'
+    || estimate.annual_plan_activation_status === 'signature_expired') return true;
   return termiteAnnualPlanSelectionEnabled() || annualPlanHasDeliveredOffer(estimate);
 }
 
@@ -4470,6 +4481,20 @@ async function parkTermiteAnnualPlanAccept({
   }
   if (estimate.annual_plan_activation_status === 'awaiting_signature' && estimate.annual_plan_deferred_invoice) {
     return { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: parkedDeferredTotal(estimate.annual_plan_deferred_invoice) };
+  }
+  // Slice 3b, deliberate decision: a 'signature_expired' estimate NEVER
+  // silently re-parks or re-opens here, no matter how many times
+  // convertEstimate is re-run against it (a stray retry, a webhook replay,
+  // an operator re-triggering acceptance). The 45-day close is meant to be
+  // final — "re-quote if the customer still wants it" (a NEW estimate),
+  // never "re-accept the same one and the clock resets". Re-opening THIS
+  // exact estimate is not offered as a path in this slice; if the owner
+  // later wants a deliberate staff "reinstate" action, it should be an
+  // explicit endpoint that clears annual_plan_activation_status back to
+  // NULL (not routed through this accept-time park helper) so it can carry
+  // its own audit trail and can't be triggered by an ordinary retry.
+  if (estimate.annual_plan_activation_status === 'signature_expired') {
+    return { annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null };
   }
   // Codex round-3 P1: freeze the customer-accepted pricing NOW, before any
   // tier/pipeline work runs — never park without it. A failure here fails

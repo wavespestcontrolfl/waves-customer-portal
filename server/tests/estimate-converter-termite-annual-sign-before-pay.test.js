@@ -270,6 +270,46 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(estimateUpdate).not.toHaveBeenCalled();
     });
 
+    test('slice 3b: signature_expired (closed unsigned) — no-ops entirely, never re-parks, never re-opens, no total reported', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const customerUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: true,
+        estimateUpdate,
+        customerUpdate,
+        priorActivationStatus: 'signature_expired',
+        // Even a lingering deferred-invoice snapshot (the closed estimate
+        // keeps its historical frozen figures) must not be replayed as a
+        // total — the offer is closed, there is nothing left to quote.
+        priorDeferredInvoice: { version: 1, parkedAt: '2026-08-01T00:00:00.000Z', frozenFinancials: { total: 449 } },
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', convertOpts);
+
+      expect(result).toEqual({ annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null });
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+      expect(customerUpdate).not.toHaveBeenCalled();
+      expect(estimateUpdate).not.toHaveBeenCalled();
+    });
+
+    test('slice 3b: signature_expired still routes here even with the live gate OFF and no delivered-offer stamp — never falls through to an ordinary re-accept', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: false,
+        hasDeliveredOffer: false,
+        estimateUpdate,
+        priorActivationStatus: 'signature_expired',
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', convertOpts);
+
+      expect(result).toEqual({ annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null });
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+      expect(estimateUpdate).not.toHaveBeenCalled();
+    });
+
     test('pre-push P1: re-run while still awaiting_signature keeps the ORIGINAL accept-context — no re-park, no term, no invoice', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
       const original = {
@@ -630,5 +670,13 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     expect(typeof EstimateConverter.isTermiteAnnualSignBeforePayAccept).toBe('function');
     expect(EstimateConverter.isTermiteAnnualSignBeforePayAccept({}, {}, 'prepay_annual')).toBe(true);
     expect(EstimateConverter.isTermiteAnnualSignBeforePayAccept({}, {}, 'standard')).toBe(false);
+    // Slice 3b: the persisted 'signature_expired' stamp is authoritative
+    // exactly like 'awaiting_signature' / 'activated' — even with the live
+    // gate on (irrelevant here either way), a closed estimate must always
+    // route to parkTermiteAnnualPlanAccept's terminal no-op, never the
+    // ordinary conversion body.
+    expect(EstimateConverter.isTermiteAnnualSignBeforePayAccept(
+      { annual_plan_activation_status: 'signature_expired' }, {}, 'prepay_annual',
+    )).toBe(true);
   });
 });

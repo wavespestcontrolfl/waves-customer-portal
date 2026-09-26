@@ -702,6 +702,16 @@ function isAnnualPlanEstimate(estData) {
 // after activation), or the sign-before-pay deferral stamp on the estimate
 // (exists from the accept transaction on; column-guarded because it ships in
 // a later slice). true / false / 'error' like isAnnualPrepayAccept.
+// Slice 3b: only these two deferral-stamp values are DURABLE evidence of a
+// live (or completed) sign-before-pay park. 'signature_expired' is a
+// PERSISTED annual_plan_activation_status too, but it means the offer
+// closed unsigned — it must never license issuing or reissuing an annual
+// agreement, or prepaid auto-renewal wording, for this estimate again. A
+// bare truthy check here would treat 'signature_expired' the same as
+// 'awaiting_signature', which would let the reconciliation sweeps keep
+// drafting v3 agreements for an estimate whose plan already closed.
+const DURABLE_ANNUAL_PLAN_STAMPS = ['awaiting_signature', 'activated'];
+
 async function annualPlanDurableEvidence(estimate, conn = db) {
   if (!estimate?.id) return false;
   try {
@@ -714,10 +724,10 @@ async function annualPlanDurableEvidence(estimate, conn = db) {
       .whereNotIn('status', TERMINAL_PREPAY_TERM_STATUSES)
       .first('id');
     if (term) return true;
-    if (estimate.annual_plan_activation_status) return true;
+    if (DURABLE_ANNUAL_PLAN_STAMPS.includes(estimate.annual_plan_activation_status)) return true;
     if (await conn.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
       const row = await conn('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
-      return !!row?.annual_plan_activation_status;
+      return DURABLE_ANNUAL_PLAN_STAMPS.includes(row?.annual_plan_activation_status);
     }
     return false;
   } catch (err) {
