@@ -341,6 +341,28 @@ async function applyVisitPropertyToggles(state, input, dbh) {
   }
 }
 
+// Explicit billing channel arrays are ACCOUNT-level: routes/notifications.js
+// persists them only on the primary profile. A sibling property's own row
+// never carries them, so the fan-out and this validator's fresh per-leg
+// re-read must see the primary's arrays or a sibling's explicit leg reads
+// as "choice changed" and is held forever. Only these arrays are overlaid
+// (every other preference stays per-property). An unreadable owner throws
+// into the caller's lookup-failure handling (fail closed).
+const ACCOUNT_BILLING_ARRAY_COLUMNS = Object.values(require('../../billing-delivery-channels').BILLING_DELIVERY_FIELDS);
+
+async function overlayAccountBillingChannels(state, customerId, dbh) {
+  if (!state.prefs || !state.customer?.account_id) return;
+  const { resolvePrimaryProfileId } = require('../../account-properties');
+  const ownerId = await resolvePrimaryProfileId(
+    { customerId, accountId: state.customer.account_id }, dbh, { onError: 'throw' },
+  );
+  if (!ownerId || String(ownerId) === String(customerId)) return;
+  const primary = await dbh('notification_prefs').where({ customer_id: ownerId }).first(...ACCOUNT_BILLING_ARRAY_COLUMNS);
+  const overlay = {};
+  for (const column of ACCOUNT_BILLING_ARRAY_COLUMNS) overlay[column] = primary ? primary[column] ?? null : null;
+  state.prefs = { ...state.prefs, ...overlay };
+}
+
 async function loadContactState(input, dbh = db) {
   // lookupFailed signals a transient DB error during the consent
   // lookup. The validator distinguishes this from a clean "no record
@@ -352,7 +374,8 @@ async function loadContactState(input, dbh = db) {
   if (input.customerId) {
     try {
       state.prefs = await dbh('notification_prefs').where({ customer_id: input.customerId }).first();
-      state.customer = await dbh('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
+      state.customer = await dbh('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'account_id');
+      await overlayAccountBillingChannels(state, input.customerId, dbh);
     } catch (err) {
       if (dbh.isTransaction) throw err; // Required handoff read: an aborted transaction cannot authorize a send.
       logger.warn(`[messaging:consent] customer lookup failed: ${err.message}`);
