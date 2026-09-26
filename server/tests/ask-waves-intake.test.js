@@ -257,6 +257,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Keep pets inside until dawn after treatment.', ''],
     ['You may re-enter at sunrise.', ''],
     ['Stay off the treated lawn until dark.', ''],
+    ['Avoid going outside until 4 PM after treatment.', ''],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
@@ -757,12 +758,6 @@ describe('normalizeIntakeResult', () => {
       { reply: 'We use Talak and it costs $45 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
       'openai',
       'Which rat poison do you use and what does it cost?',
-    'The roach put a bait pellet in its mouth',
-    'La hormiga se metió el cebo en la boca',
-    'Which hospital do you service?',
-    'We need pest control at the hospital',
-    'I work in the hospital and need roach control',
-    "I found bait in the roach's mouth",
     );
     expect(out.reply).toMatch(/Get my price/);
   });
@@ -1550,6 +1545,9 @@ describe('looksLikeEmergency', () => {
     'My bird ate rat poison',
     'My child was exposed to pesticide',
     'My child breathed pesticide fumes',
+    'My child drank weed killer',
+    'A mi hijo le cayó pesticida en los ojos',
+    'my dog licked the roach spray',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
   ])('flags urgent/medical text: %s', (text) => {
@@ -1575,6 +1573,14 @@ describe('looksLikeEmergency', () => {
     'mi hijo comió la cena y hay hormigas',
     'My child was stung but has no swelling',
     'stung yesterday, no rash and no fever',
+    'The roach put a bait pellet in its mouth',
+    'La hormiga se metió el cebo en la boca',
+    'Which hospital do you service?',
+    'We need pest control at the hospital',
+    'I work in the hospital and need roach control',
+    "I found bait in the roach's mouth",
+    'I am not allergic; I just need the wasp nest removed',
+    'There was no allergic reaction after the sting',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
