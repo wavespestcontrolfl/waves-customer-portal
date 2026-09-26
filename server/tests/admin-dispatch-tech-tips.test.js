@@ -405,6 +405,56 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(JSON.stringify(res.body)).not.toMatch(/Raw value|Raw first|Raw second/);
   });
 
+  test.each([
+    ['exclusion_recommendation', 'Not needed at this time', 'No exclusion work is needed at this time.'],
+    ['recommended_service', 'No service needed at this time', 'No service needed at this time'],
+    ['exclusion_recommendation', 'Completed previously', 'Exclusion repairs were completed previously.'],
+  ])('completion history excludes governed no-action %s=%s from legacy and frozen snapshots', async (fieldKey, value, customerValueLabel) => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: { ...SERVICE, service_type: 'Rodent Trapping' },
+      recommendationRows: [{
+        id: 'rodent-history', scheduled_service_id: 'prior-rodent', service_line: 'rodent', service_date: '2026-08-01',
+        service_data: {
+          typedReportSnapshot: { values: { [fieldKey]: value, sanitation_recommendations: ['Keep trash bins closed'] } },
+          companionReportSnapshots: [{
+            type: 'rodent_trapping', delivery: 'auto_send',
+            values: { [fieldKey]: value, exclusion_recommendation: value },
+            findings: [{ fieldKey, value, customerValueLabel }],
+          }],
+        },
+      }],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([
+      { text: 'Keep trash bins closed', serviceDate: '2026-08-01', serviceRecordId: 'rodent-history' },
+    ]);
+  });
+
+  test('completion history retains positive governed rodent recommendations', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: { ...SERVICE, service_type: 'Rodent Trapping' },
+      recommendationRows: [{
+        id: 'rodent-history', scheduled_service_id: 'prior-rodent', service_line: 'rodent', service_date: '2026-08-01',
+        service_data: {
+          typedReportSnapshot: { values: { exclusion_recommendation: 'Recommended after activity stops', recommended_service: 'Sanitation cleanup' } },
+        },
+      }],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([
+      { text: 'Exclusion repairs are recommended to reduce rodent access once trapping activity stops.', serviceDate: '2026-08-01', serviceRecordId: 'rodent-history' },
+      { text: 'Sanitation cleanup', serviceDate: '2026-08-01', serviceRecordId: 'rodent-history' },
+    ]);
+  });
+
   test('completion history counts scheduled visits once, deduplicates sibling text, and treats unlinked records separately', async () => {
     process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
     mockDbCurrent = scriptedDb({

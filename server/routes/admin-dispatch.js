@@ -289,7 +289,9 @@ const PREVIOUS_RECOMMENDATION_VISIT_LIMIT = 3;
 const PREVIOUS_RECOMMENDATION_ITEM_LIMIT = 12;
 const PREVIOUS_RECOMMENDATION_SCAN_LIMIT = 500;
 const RECOMMENDATION_FIELD_PATTERN = /(^|_)(?:recommendation|recommendations|recommended)(?:_|$)/i;
-const NEGATIVE_RECOMMENDATION_PATTERN = /^(?:no|false|none|not recommended)$/i;
+// Governed rodent options include no-action and already-completed states.
+// Neither is a recommendation to carry into a later visit.
+const NEGATIVE_RECOMMENDATION_PATTERN = /^(?:no|false|none|not recommended|not needed at this time|no service needed at this time|completed previously)$/i;
 
 function recommendationTextValues(value) {
   const values = Array.isArray(value) ? value : [value];
