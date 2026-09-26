@@ -57,7 +57,7 @@ const STRONG_LEAD_LINKAGES = ['sid', 'stamp'];
 
 // Whether the estimate's property is the one the /inspection page would book
 // at (Codex #4853 r2 P1) — the page's own profileMatchesAddress rule: same
-// canonical street, same unit, same zip when both carry one. A grouped
+// canonical street, same unit, and the same zip. A grouped
 // estimate or a staff address revision keeps the lead link but not the
 // lead's address, and must not book a consultation at another property.
 function sameProperty(estimateAddress, pageAddress) {
@@ -68,9 +68,12 @@ function sameProperty(estimateAddress, pageAddress) {
   if (!key || streetKey(pageAddress.line1) !== key) return false;
   const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
   if (unitOf(estLine1, null) !== unitOf(pageAddress.line1, pageAddress.line2)) return false;
+  // Locality evidence is required (Codex #4853 r3 P0): the page's rule
+  // takes an equal zip or nearby coordinates, and the estimate carries no
+  // coordinates — so both zips must be present and equal. "100 Main St"
+  // exists in more than one town.
   const estZip = normalizeZip(est.zip);
-  const pageZip = normalizeZip(pageAddress.zip);
-  return !estZip || !pageZip || estZip === pageZip;
+  return Boolean(estZip) && estZip === normalizeZip(pageAddress.zip);
 }
 
 async function buildEstimateConsultationOffer({

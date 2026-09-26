@@ -4344,7 +4344,10 @@ export function carryRefreshProjections(prev, body, isRefresh) {
   if (!isRefresh || body?.cta?.terminalState != null) return body;
   const carried = {};
   if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
-  if (prev?.consultationOffer && !body.consultationOffer) carried.consultationOffer = prev.consultationOffer;
+  // The offer is bound to the property it was matched against (GH codex
+  // #4853 r3 P0): a staff revision to another address drops it.
+  if (prev?.consultationOffer && !body.consultationOffer
+    && prev?.estimate?.address === body?.estimate?.address) carried.consultationOffer = prev.consultationOffer;
   return Object.keys(carried).length ? { ...body, ...carried } : body;
 }
 

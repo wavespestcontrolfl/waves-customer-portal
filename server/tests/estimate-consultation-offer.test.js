@@ -215,9 +215,18 @@ describe('buildEstimateConsultationOffer — happy path', () => {
     expect(await buildEstimateConsultationOffer(baseArgs({ estimateAddress }))).toBeNull();
   });
 
-  test('the same property written differently (St vs Street, no zip) still matches', async () => {
-    const result = await buildEstimateConsultationOffer(baseArgs({ estimateAddress: '123 palm street, Bradenton FL' }));
+  test('the same property written differently (St vs Street, case) still matches', async () => {
+    const result = await buildEstimateConsultationOffer(baseArgs({ estimateAddress: '123 palm street, Bradenton, FL 34205' }));
     expect(result?.url).toContain('/inspection/');
+  });
+
+  test('no locality evidence (a zip missing on either side) → null — the same street exists in other towns', async () => {
+    expect(await buildEstimateConsultationOffer(baseArgs({ estimateAddress: '123 Palm St, Sarasota, FL' }))).toBeNull();
+    mockComputeConsultationSlotsForLead.mockResolvedValue({
+      ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false,
+      address: { ...PAGE_ADDRESS, zip: null },
+    });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 
   test('eligible but nothing to pick (out of area, retired catalog, no open times) → null', async () => {

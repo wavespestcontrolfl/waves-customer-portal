@@ -53,8 +53,15 @@ describe('carryRefreshProjections', () => {
   const visit = { previousViewedAt: '2026-09-20T12:00:00Z' };
 
   it('a refresh keeps the first load\'s consultation offer (the server composes it on the first load only)', () => {
-    const next = carryRefreshProjections({ consultationOffer: offer }, { cta: {} }, true);
+    const estimate = { address: '123 Palm St, Bradenton, FL 34205' };
+    const next = carryRefreshProjections({ consultationOffer: offer, estimate }, { cta: {}, estimate: { ...estimate } }, true);
     expect(next.consultationOffer).toBe(offer);
+  });
+
+  it('a refresh after staff moved the estimate to another property drops the offer', () => {
+    const prev = { consultationOffer: offer, estimate: { address: '123 Palm St, Bradenton, FL 34205' } };
+    const body = { cta: {}, estimate: { address: '900 Other Rd, Bradenton, FL 34205' } };
+    expect(carryRefreshProjections(prev, body, true).consultationOffer).toBeUndefined();
   });
 
   it('a refresh keeps returnVisit the same way', () => {
