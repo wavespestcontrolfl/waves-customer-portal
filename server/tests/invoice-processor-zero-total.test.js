@@ -41,3 +41,11 @@ test('a missing total still falls back to the classifier amount', async () => {
   await processVendorInvoice(EMAIL, CLASSIFICATION);
   expect(mockWrites.find(([t, op]) => t === 'expenses' && op === 'insert')).toEqual(['expenses', 'insert', expect.objectContaining({ amount: 412.5 })]);
 });
+
+test('a long vendor name / classifier invoice number is clipped to the expense columns, not a failed insert', async () => {
+  extraction({ invoice_date: '2026-09-20', total: 25 });
+  await processVendorInvoice(EMAIL, { extracted: { vendor_name: 'V'.repeat(250), invoice_number: 'N'.repeat(400) } });
+  const [, , row] = mockWrites.find(([t, op]) => t === 'expenses' && op === 'insert');
+  expect(row.description.length).toBeLessThanOrEqual(300);
+  expect(row.vendor_name.length).toBeLessThanOrEqual(200);
+});

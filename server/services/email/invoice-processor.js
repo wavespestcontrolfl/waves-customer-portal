@@ -37,6 +37,7 @@ function isUsableInvoiceTotal(total) {
 // #4884). A zero or negative total is a real value (e.g. a credit memo) that
 // simply creates no expense. Returns { invoice, degraded }; invoice is null
 // when the reply is not an object.
+const INVOICE_NUMBER_MAX = 64;
 function readParsedInvoice(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { invoice: null, degraded: true };
   let degraded = false;
@@ -52,7 +53,10 @@ function readParsedInvoice(raw) {
   if (present(raw.invoice_number)) {
     const n = typeof raw.invoice_number === 'string' || (typeof raw.invoice_number === 'number' && Number.isFinite(raw.invoice_number))
       ? String(raw.invoice_number).trim() : '';
-    if (n) invoice.invoice_number = n;
+    // A real invoice number is short; an OCR run-on long enough to push the
+    // expense description past its varchar(300) failed the insert after the
+    // call was accepted (Codex r19 on #4884).
+    if (n && n.length <= INVOICE_NUMBER_MAX) invoice.invoice_number = n;
     else degraded = true;
   }
   invoice.invoice_date = null;
@@ -212,11 +216,14 @@ async function processVendorInvoice(email, classification) {
       }
 
       const [expense] = await db('expenses').insert({
-        description: `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`,
+        // Column limits (description varchar 300, vendor_name varchar 200): the
+        // vendor name and the classifier's own invoice number are not bounded
+        // upstream, so clip here rather than fail the insert.
+        description: `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`.slice(0, 300),
         amount,
         tax_deductible_amount: deductibleAmount,
         category_id: categoryRow?.id || null,
-        vendor_name: vendorName,
+        vendor_name: String(vendorName).slice(0, 200),
         expense_date: invoiceDate,
         tax_year: taxYear,
         quarter,

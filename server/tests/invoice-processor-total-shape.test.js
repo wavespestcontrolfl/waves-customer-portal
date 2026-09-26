@@ -86,3 +86,17 @@ describe('readParsedInvoice', () => {
     expect(readParsedInvoice([]).invoice).toBeNull();
   });
 });
+
+// Codex r19 on #4884: an OCR run-on invoice number long enough to push the
+// expense description past varchar(300) failed the insert after acceptance.
+describe('readParsedInvoice — invoice number length', () => {
+  const { readParsedInvoice } = require('../services/email/invoice-processor');
+  test('a run-on invoice number is dropped (classifier figure used) and degrades', () => {
+    const { invoice, degraded } = readParsedInvoice({ invoice_number: 'X'.repeat(300), total: 10 });
+    expect(invoice.invoice_number).toBeNull();
+    expect(degraded).toBe(true);
+  });
+  test('a normal-length invoice number is kept', () => {
+    expect(readParsedInvoice({ invoice_number: 'INV-2026-000123', total: 10 }).invoice.invoice_number).toBe('INV-2026-000123');
+  });
+});

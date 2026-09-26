@@ -51,6 +51,14 @@ const TAX_ALERT_LISTS = {
   compliance_alerts: { label: 'alert', priority: 'severity', amount: null, text: ['action', 'deadline'] },
   deduction_gaps: { label: 'deduction', priority: null, amount: 'estimated_value', text: ['how_to_claim', 'irs_reference'] },
 };
+// The other two stored lists (JSON columns): regulation_changes is rendered
+// field by field on the Tax page (rc.change / impact / action_required /
+// source / effective_date as React children — an object throws there), and
+// action_items is stored alongside it (Codex r19 on #4884).
+const TAX_DISPLAY_LISTS = {
+  regulation_changes: { label: 'change', text: ['impact', 'action_required', 'source', 'effective_date', 'url'] },
+  action_items: { label: 'action', text: ['priority', 'deadline', 'estimated_impact', 'category'] },
+};
 const TAX_PRIORITIES = new Set(['high', 'medium', 'low']);
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 
@@ -105,7 +113,7 @@ function normalizeTaxReportHeader(report) {
   return degraded;
 }
 
-// Cleans the three alert lists in place; returns true when anything present
+// Cleans the three alert lists and the two display lists in place; returns true when anything present
 // was off-contract (the caller fails the row but keeps the usable report).
 function normalizeTaxAlerts(report) {
   let degraded = false;
@@ -125,6 +133,21 @@ function normalizeTaxAlerts(report) {
         out[spec.amount] = taxAmount(item[spec.amount]);
         if (out[spec.amount] === null) degraded = true;
       }
+      for (const field of spec.text) {
+        const v = item[field];
+        if (v === undefined || v === null || typeof v === 'string' || typeof v === 'number') continue;
+        out[field] = null;
+        degraded = true;
+      }
+      return [out];
+    });
+  }
+  for (const [key, spec] of Object.entries(TAX_DISPLAY_LISTS)) {
+    if (!Array.isArray(report[key])) continue;
+    report[key] = report[key].flatMap((item) => {
+      const label = typeof item[spec.label] === 'string' ? item[spec.label].trim() : '';
+      if (!label) { degraded = true; return []; }
+      const out = { ...item, [spec.label]: label };
       for (const field of spec.text) {
         const v = item[field];
         if (v === undefined || v === null || typeof v === 'string' || typeof v === 'number') continue;

@@ -117,3 +117,30 @@ describe('normalizeTaxReportHeader', () => {
     expect(report.report_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
+
+// Codex r19 on #4884: the Tax page renders regulation_changes field by field
+// (rc.change etc. as React children), so an object there threw; action_items
+// is stored alongside it.
+describe('normalizeTaxAlerts — display lists', () => {
+  test('a clean regulation change / action item is kept and not degraded', () => {
+    const report = {
+      executive_summary: 'ok',
+      regulation_changes: [{ source: 'FL DOR', change: 'Rate change', effective_date: '2027-01-01', impact: 'Small', action_required: 'None', url: 'https://floridarevenue.com' }],
+      action_items: [{ priority: 'high', action: 'File 1040-ES', deadline: '2027-01-15', estimated_impact: 1200, category: 'compliance' }],
+    };
+    expect(normalizeTaxAlerts(report)).toBe(false);
+    expect(report.regulation_changes).toHaveLength(1);
+    expect(report.action_items).toHaveLength(1);
+  });
+
+  test('an object in a rendered field is nulled and degrades; an item without its label is dropped', () => {
+    const report = {
+      executive_summary: 'ok',
+      regulation_changes: [{ change: {}, impact: 'x' }, { change: 'Keep me', impact: { level: 'high' } }],
+      action_items: [{ priority: 'high' }, { action: 'Do it', deadline: ['soon'] }],
+    };
+    expect(normalizeTaxAlerts(report)).toBe(true);
+    expect(report.regulation_changes).toEqual([{ change: 'Keep me', impact: null }]);
+    expect(report.action_items).toEqual([{ action: 'Do it', deadline: null }]);
+  });
+});
