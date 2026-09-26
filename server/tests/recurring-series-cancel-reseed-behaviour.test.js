@@ -42,7 +42,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
   reseedRecurringSeriesAfterCancel, reseedRecurringSeriesAfterCancelBatch,
-  readReseedCandidate, reseedRefusal, reseedTermShortfall, probeReseedOverlaps, stampReseed, recordReseedDeclines,
+  readReseedCandidate, reseedRefusal, reseedTermShortfall, probeReseedOverlaps, stampReseed, recordReseedDeclines, readBulkPlanReductionIntent,
   RESEED_STALE_READ_ATTEMPTS,
 } = adminScheduleRouter._test;
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
@@ -223,9 +223,42 @@ describe('reseedRefusal — every refusal actually executes', () => {
     expect(await reseedRefusal(trx, { parent: PARENT, parentId: PARENT.id, cancelledServiceId: CANCELLED.id, cols: COLS })).toBe(reason);
   });
 
-  test('batch_series_cancel: a decline recorded against THIS cancellation episode refuses a later single-id replay (pre-push audit P1)', async () => {
-    const { handler } = scenario({ declined: { id: 'decl-1' } });
-    expect(await reseedRefusal(makeConn(handler), { parent: PARENT, parentId: PARENT.id, cancelledServiceId: CANCELLED.id, cols: COLS, episodeKey: '7' })).toBe('batch_series_cancel');
+  const ledgerEntry = (id, episode, batch) => ({ metadata: JSON.stringify({ cancelled_service_id: String(id), recurring_parent_id: '10', episode_key: episode, batch_ids: batch.map(String) }) });
+  const refuse = (over) => {
+    const sc = scenario(over);
+    return { sc, run: () => reseedRefusal(makeConn(sc.handler), { parent: PARENT, parentId: PARENT.id, cancelledServiceId: CANCELLED.id, cols: COLS }) };
+  };
+
+  test('batch_series_cancel: its own ledger entry for THIS cancel episode refuses a later single-id replay (pre-push audit P1)', async () => {
+    const { run } = refuse({
+      declines: [ledgerEntry(22, 'E7', [22, 23])],
+      transitions: [{ id: 'E7', job_id: 22, from_status: 'pending' }],
+    });
+    expect(await run()).toBe('batch_series_cancel');
+  });
+
+  test('completes_plan_reduction: named in a standing reduction it never got an entry for (its bulk cancel failed back then) → refused, and its own entry is recorded (Codex r10 P1)', async () => {
+    const { sc, run } = refuse({
+      declines: [ledgerEntry(21, 'E5', [21, 22])],
+      transitions: [{ id: 'E5', job_id: 21, from_status: 'pending' }, { id: 'E9', job_id: 22, from_status: 'pending' }],
+    });
+    expect(await run()).toBe('completes_plan_reduction');
+    const rows = sc.inserted.filter((row) => row.__table === 'activity_log');
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].metadata)).toMatchObject({
+      cancelled_service_id: '22', recurring_parent_id: '10', episode_key: 'E9', batch_ids: ['21', '22'], reason: 'batch_series_cancel', source: 'plan-reduction-completion',
+    });
+  });
+
+  test('a reduction whose own row was since RESTORED no longer stands — the replay is judged on the normal rules', async () => {
+    const { run } = refuse({
+      declines: [ledgerEntry(21, 'E5', [21, 22])],
+      // 21: cancelled in E5, then restored (newest row leaves 'cancelled') → no current episode
+      transitions: [{ id: 'E6', job_id: 21, from_status: 'cancelled', to_status: 'pending' }, { id: 'E5', job_id: 21, from_status: 'pending' }, { id: 'E9', job_id: 22, from_status: 'pending' }],
+      customer: { id: 5, active: false, deleted_at: null, service_paused_at: null, pipeline_stage: 'active_customer' },
+    });
+    // it got past the ledger to the customer rules
+    expect(await run()).toBe('customer_inactive');
   });
 
   test('the prepay try-lock is the annual-prepay namespace keyed on the customer, taken on the trx', async () => {
@@ -303,6 +336,22 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
       transitions: [{ id: 'E1', job_id: 102, from_status: 'pending', notes: 'Recurring plan shortened to 3 visits from Edit appointment' }],
     });
     expect(trim.anchorFloor).toEqual({ scheduled_date: daysOut(30) });
+  });
+
+  test('the append anchor: a later cancel that COMPLETED a standing reduction (named in its batch, no entry of its own) is a reduction too (Codex r10 P1)', async () => {
+    const series = rows(1, [
+      { id: 102, status: 'cancelled', scheduled_date: daysOut(200), is_recurring: true, recurring_parent_id: 10 },
+      { id: 103, status: 'cancelled', scheduled_date: daysOut(290), is_recurring: true, recurring_parent_id: 10 },
+    ]);
+    const transitions = [{ id: 'E1', job_id: 102, from_status: 'pending' }, { id: 'E2', job_id: 103, from_status: 'pending' }];
+    // no ledger: both later cancels are single skips → the end is the last of them
+    expect((await run({ seriesRows: series, transitions })).anchorFloor).toEqual({ scheduled_date: daysOut(290) });
+    // 102's reduction named 103 too (103's cancel failed then, done later) → both are the reduction; the plan ends at the live row
+    const out = await run({
+      seriesRows: series, transitions,
+      declines: [{ metadata: JSON.stringify({ cancelled_service_id: '102', recurring_parent_id: '10', episode_key: 'E1', batch_ids: ['102', '103'] }) }],
+    });
+    expect(out.anchorFloor).toEqual({ scheduled_date: daysOut(30) });
   });
 
   test('an auto-dispatched row is slotted by its due date, not its moved scheduled_date (Codex r8 P2)', async () => {
@@ -493,6 +542,36 @@ describe('the writing wrapper and the batch', () => {
     const only = await reseedRecurringSeriesAfterCancelBatch(conn, [], { source: 'test', retryIds: [22] });
     expect(only.results).toHaveLength(1);
     expect(only.results[0].skipped).toBe('series_stopped');
+  });
+
+  test('readBulkPlanReductionIntent: a partially failed bulk reduction retried (same selection, or just the failed row) keeps its intent (Codex r10 P1)', async () => {
+    const A = { id: 'A', customer_id: 5, status: 'cancelled', is_recurring: true, recurring_parent_id: 10 };
+    const B = { id: 'B', customer_id: 5, status: 'pending', is_recurring: true, recurring_parent_id: 10 };
+    const intentFor = async (selection, over) => {
+      const { handler } = scenario(over);
+      const conn = makeConn((q) => {
+        if (q.table === 'scheduled_services' && q.op === 'await') return selection;
+        return handler(q);
+      });
+      return readBulkPlanReductionIntent(conn, selection.map((row) => row.id));
+    };
+    const standing = {
+      declines: [{ metadata: JSON.stringify({ cancelled_service_id: 'A', recurring_parent_id: '10', episode_key: 'eA', batch_ids: ['A', 'B'] }) }],
+      transitions: [{ id: 'eA', job_id: 'A', from_status: 'pending' }],
+    };
+    // retried with the same selection: A is already cancelled, B is the late cancel → B is part of {A, B}
+    expect((await intentFor([A, B], standing)).get('B')).toEqual({ rootId: '10', groupIds: ['A', 'B'] });
+    // retried with just the failed row
+    expect((await intentFor([B], standing)).get('B')).toEqual({ rootId: '10', groupIds: ['A', 'B'] });
+    // an earlier reduction that did NOT name B → B is a stand-alone cancel
+    const other = { ...standing, declines: [{ metadata: JSON.stringify({ cancelled_service_id: 'A', recurring_parent_id: '10', episode_key: 'eA', batch_ids: ['A', 'C'] }) }] };
+    expect((await intentFor([B], other)).has('B')).toBe(false);
+    // A since restored → the reduction no longer stands
+    const restored = { ...standing, transitions: [{ id: 'eA2', job_id: 'A', from_status: 'cancelled', to_status: 'pending' }, { id: 'eA', job_id: 'A', from_status: 'pending' }] };
+    expect((await intentFor([B], restored)).has('B')).toBe(false);
+    // a fresh 2+ selection is still a reduction on its own
+    const B2 = { ...B, id: 'B2' };
+    expect((await intentFor([B, B2], {})).get('B')).toEqual({ rootId: '10', groupIds: ['B', 'B2'] });
   });
 
   test('recordReseedDeclines: one row per cancelled visit, keyed on its CURRENT episode, carrying the whole reduction group', async () => {

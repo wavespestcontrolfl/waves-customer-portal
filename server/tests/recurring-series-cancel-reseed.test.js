@@ -25,7 +25,7 @@ const adminSchedule = require('../routes/admin-schedule');
 const gates = require('../config/feature-gates');
 const {
   runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, assignPlanTerms, countTermVisits,
-  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor, laterCancelledPlanRowIds, isTrimTransitionNote, planReductionGroups,
+  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor, laterCancelledPlanRowIds, isTrimTransitionNote, planReductionGroups, standingPlanReductions,
   COUNTING_SOURCE_STATUSES,
 } = require('../services/recurring-series-cancel-reseed');
 
@@ -272,6 +272,24 @@ describe('term / count math (pure)', () => {
     ], today)).toBe(2);
   });
 
+  test('standingPlanReductions: own entries stand while their row is still cancelled in that episode; batch members without an entry of their own COMPLETE it (Codex r10 P1)', () => {
+    const entries = [
+      { cancelled_service_id: 'A', episode_key: 'eA', batch_ids: ['A', 'B'] },   // bulk {A, B}: A committed, B failed
+      { cancelled_service_id: 'C', episode_key: 'eC', batch_ids: ['C', 'D'] },   // bulk {C, D}: both committed…
+      { cancelled_service_id: 'D', episode_key: 'eD', batch_ids: ['C', 'D'] },   // …D since restored (no current episode)
+      { cancelled_service_id: 'E', episode_key: 'eE1', batch_ids: ['E', 'F'] },  // E restored, then cancelled on its own (eE2)
+    ];
+    const current = new Map([['A', 'eA'], ['C', 'eC'], ['D', null], ['E', 'eE2']]);
+    const { own, completing } = standingPlanReductions(entries, current);
+    expect([...own].sort()).toEqual(['A', 'C']);
+    // B never got an entry → cancelling it completes {A, B}; D has its own (non-standing) entry → judged by its own episode, not C's batch
+    expect([...completing.entries()]).toEqual([['B', ['A', 'B']]]);
+    // F: E's entry no longer stands (new episode), so its batch does not either
+    expect(completing.has('F')).toBe(false);
+    expect(standingPlanReductions([], new Map())).toEqual({ own: new Set(), completing: new Map() });
+    expect(standingPlanReductions(entries, null).own.size).toBe(0);
+  });
+
   test('planReductionGroups: 2+ counting plan rows of one root in the request = a reduction; placeholders, boosters, callbacks and lone rows are not (pre-push audit P1)', () => {
     const rows = [
       { id: 'a1', status: 'pending', is_recurring: true, recurring_parent_id: 'A' },
@@ -460,7 +478,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
 
   test('bulk cancel: plan-reduction intent is read BEFORE the loop and each row\'s ledger row is written INSIDE its own cancel transaction, ungated (pre-push audit P1)', () => {
     const route = schedule.slice(schedule.indexOf("router.post('/bulk-action'"), schedule.indexOf("serviceIds: cancelReseedIds, retryIds: cancelReseedRetryIds, source: 'admin-schedule-bulk-cancel'"));
-    const intent = route.indexOf("? planReductionGroups(await db('scheduled_services').whereIn('id', serviceIds)");
+    const intent = route.indexOf("const bulkPlanReductions = action === 'cancel' ? await readBulkPlanReductionIntent(db, serviceIds) : new Map();");
     const loop = route.indexOf('for (const id of serviceIds) {');
     expect(intent).toBeGreaterThan(-1);
     expect(intent).toBeLessThan(loop);
@@ -552,7 +570,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const body = lockedBody();
     const lock = body.indexOf('acquireRecurringSeriesMaintenanceLock(trx, parentId)');
     const comms = body.indexOf('const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);');
-    const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, episodeKey: fresh.episodeKey })');
+    const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols })');
     const term = body.indexOf('await reseedTermShortfall(trx, { parent, parentId, cancelled, cols })');
     const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor })');
     expect(addFn()).toMatch(/reconcileRecurringSeriesVisitCount\(trx, \{/);
@@ -599,6 +617,12 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(r).toMatch(/if \(!advisoryTryLockAcquired\(prepayLockResult\)\) return 'annual_prepay_busy';/);
     expect(r).toMatch(/topupCustomerSkipReason\(customer\)/);
     expect(r).toMatch(/whereRaw\("metadata->>'cancelled_service_id' = \?", \[String\(cancelledServiceId\)\]\)/);
+    // the plan-reduction ledger sits between the stamp and the customers row lock; a completion records its own entry before refusing
+    const ledger = r.indexOf('await readStandingPlanReductions(trx, {');
+    expect(ledger).toBeGreaterThan(stamp);
+    expect(ledger).toBeLessThan(forUpdate);
+    expect(r).toMatch(/if \(standing\?\.own\.has\(String\(cancelledServiceId\)\)\) return 'batch_series_cancel';/);
+    expect(r).toMatch(/if \(completedBatch\) \{\s*await recordReseedDeclines\(trx, \{[\s\S]*?\}\);\s*return 'completes_plan_reduction';/);
   });
 
   test('term: membership by cadence SLOT over plan rows (exception + callback fields selected), stamps pin earlier re-adds, "nothing upcoming" read from the plan rows themselves', () => {

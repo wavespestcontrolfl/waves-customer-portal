@@ -287,6 +287,35 @@ function isTrimTransitionNote(notes) {
   return typeof notes === 'string' && TRIM_TRANSITION_NOTE.test(notes);
 }
 
+// Which rows of ONE plan belong to a STANDING plan reduction, from that
+// plan's ledger entries (recordReseedDeclines: { cancelled_service_id,
+// episode_key, batch_ids }) and the current cancel episode of each entry's
+// own row:
+//   - `own`: a row whose own entry matches its current episode — the
+//     reduction cancelled it and it is still cancelled in that episode;
+//   - `completing`: a row named in a standing entry's batch that has NO
+//     entry of its own — its cancel failed (or never ran) when the reduction
+//     was made (Codex #4814 r10 P1: a partial bulk reduction retried), so
+//     cancelling it now COMPLETES that reduction; mapped to that batch.
+// An entry whose row was since restored, or re-cancelled on its own (a new
+// episode), no longer stands — and neither does its batch.
+function standingPlanReductions(entries, currentEpisodeById) {
+  const withOwnEntry = new Set((entries || []).map((entry) => String(entry.cancelled_service_id)));
+  const own = new Set();
+  const completing = new Map();
+  for (const entry of entries || []) {
+    const id = String(entry.cancelled_service_id);
+    const current = currentEpisodeById ? currentEpisodeById.get(id) : null;
+    if (current == null || entry.episode_key == null || String(entry.episode_key) !== String(current)) continue;
+    own.add(id);
+    const batch = (entry.batch_ids || []).map(String);
+    for (const member of batch) {
+      if (!withOwnEntry.has(member) && !completing.has(member)) completing.set(member, batch);
+    }
+  }
+  return { own, completing };
+}
+
 // Plan-reduction INTENT of a bulk cancel request (pre-push audit P1 on
 // d3e302202d): the rows the operator selected that are plan rows in a
 // counting state, grouped by series root; a root with 2+ of them is a
@@ -359,6 +388,7 @@ module.exports = {
   laterCancelledPlanRowIds,
   isTrimTransitionNote,
   planReductionGroups,
+  standingPlanReductions,
   hasUpcomingPlanRow,
   countUpcomingPlanRows,
   NON_COUNTING_STATUSES,

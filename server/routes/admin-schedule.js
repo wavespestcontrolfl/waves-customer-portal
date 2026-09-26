@@ -9353,11 +9353,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // Bar / dispatch) could add it back. Each such row writes its "don't add
     // back" ledger row INSIDE its own cancel transaction (below), whatever
     // the reseed gate says.
-    const { planReductionGroups, isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
-    const bulkPlanReductions = action === 'cancel'
-      ? planReductionGroups(await db('scheduled_services').whereIn('id', serviceIds)
-        .select('id', 'status', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'))
-      : new Map();
+    const { isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
+    const bulkPlanReductions = action === 'cancel' ? await readBulkPlanReductionIntent(db, serviceIds) : new Map();
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -18302,7 +18299,7 @@ async function readReseedCandidate(trx, cancelledServiceId) {
 // lock in the top-up's order: stopped-plan ledger, the idempotency stamp,
 // customer eligibility (customers row FOR UPDATE), the annual-prepay
 // TRY-lock, then the series rules. Returns the skip reason or null.
-async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, episodeKey = null }) {
+async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }) {
   const stopped = await readStoppedRecurringRoots(trx, [parent.customer_id]);
   if (stopped.has(parentId)) return 'series_stopped';
   // Idempotent per cancelled visit (fallback auditor P1): the added visit
@@ -18315,17 +18312,24 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, 
     .whereRaw("metadata->>'cancelled_service_id' = ?", [String(cancelledServiceId)])
     .first('id');
   if (alreadyReseeded) return 'already_reseeded';
-  // A bulk cancel that took 2+ visits of this plan in one action declined
-  // the reseed as a plan reduction, and recorded it against this
-  // cancellation episode (pre-push audit P1): a later same-status replay of
-  // ONE of those ids (Intelligence Bar / dispatch) must not undo that.
-  if (episodeKey) {
-    const declined = await trx('activity_log')
-      .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed_declined' })
-      .whereRaw("metadata->>'cancelled_service_id' = ?", [String(cancelledServiceId)])
-      .whereRaw("metadata->>'episode_key' = ?", [String(episodeKey)])
-      .first('id');
-    if (declined) return 'batch_series_cancel';
+  // A deliberate plan reduction (the ledger — a bulk cancel of 2+ visits of
+  // this plan, or a visit-count trim) must never be undone by a replay of
+  // one of its cancels through dispatch / the Intelligence Bar (pre-push
+  // audit P1s). A visit named in a standing reduction whose own cancel
+  // failed back then COMPLETES that reduction now (Codex r10 P1); it gets
+  // its own ledger entry here, in this transaction, so a later restore +
+  // single re-cancel is judged by its own episode.
+  const standing = (await readStandingPlanReductions(trx, {
+    customerIds: [parent.customer_id], parentIds: new Set([String(parentId)]),
+  })).get(String(parentId));
+  if (standing?.own.has(String(cancelledServiceId))) return 'batch_series_cancel';
+  const completedBatch = standing?.completing.get(String(cancelledServiceId));
+  if (completedBatch) {
+    await recordReseedDeclines(trx, {
+      customerId: parent.customer_id, rootId: parentId, cancelledIds: [cancelledServiceId], batchIds: completedBatch,
+      reason: 'batch_series_cancel', source: 'plan-reduction-completion',
+    });
+    return 'completes_plan_reduction';
   }
   const customer = await trx('customers').where({ id: parent.customer_id })
     .forUpdate()
@@ -18345,33 +18349,65 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, 
   return topupSeriesSkipReason(trx, parent, parentId, cols);
 }
 
-// Which of `candidateIds` (cancelled plan rows) were cancelled as a deliberate
-// plan REDUCTION in their CURRENT cancellation episode: on the ledger
-// (recordReseedDeclines — id + episode key, so an un-cancel + single
-// re-cancel is not mistaken for the old reduction), or entered through the
-// visit-count trim's own audit note (a trim made before the ledger existed).
+// The plan-reduction ledger, read as STANDING reductions per series root
+// (standingPlanReductions): every `recurring_cancel_reseed_declined` entry
+// for these customers (optionally only these roots), plus the current
+// cancel episode of each entry's own row. One reader for the three places
+// that ask "was this cancel a deliberate shortening?": the reseed refusal,
+// the append anchor and the bulk route's intent.
+async function readStandingPlanReductions(conn, { customerIds, parentIds = null }) {
+  const { cancelEpisodeSourceStatus, standingPlanReductions } = require('../services/recurring-series-cancel-reseed');
+  const customers = [...new Set((customerIds || []).filter((id) => id != null).map(String))];
+  if (!customers.length) return new Map();
+  const rows = await conn('activity_log')
+    .where({ action: 'recurring_cancel_reseed_declined' })
+    .whereIn('customer_id', customers)
+    .select('metadata');
+  const byParent = new Map();
+  for (const row of rows || []) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    if (meta.cancelled_service_id == null || meta.recurring_parent_id == null) continue;
+    const parentId = String(meta.recurring_parent_id);
+    if (parentIds && !parentIds.has(parentId)) continue;
+    if (!byParent.has(parentId)) byParent.set(parentId, []);
+    byParent.get(parentId).push(meta);
+  }
+  if (!byParent.size) return new Map();
+  const ownerIds = [...new Set([...byParent.values()].flat().map((meta) => String(meta.cancelled_service_id)))];
+  const history = await conn('job_status_history')
+    .whereIn('job_id', ownerIds)
+    .orderBy('transitioned_at', 'desc')
+    .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at');
+  const currentEpisodeById = new Map(ownerIds.map((id) => {
+    const episode = cancelEpisodeSourceStatus((history || []).filter((row) => String(row.job_id) === id));
+    return [id, episode ? episode.episodeKey : null];
+  }));
+  const out = new Map();
+  for (const [parentId, entries] of byParent) out.set(parentId, standingPlanReductions(entries, currentEpisodeById));
+  return out;
+}
+
+// Which of `candidateIds` (cancelled plan rows) belong to a deliberate plan
+// REDUCTION: a standing ledger reduction (their own entry for the current
+// episode, or named in a standing batch they never got an entry of their
+// own for — readStandingPlanReductions), or entered through the visit-count
+// trim's own audit note (a trim made before the ledger existed).
 async function readPlanReductionIds(trx, { customerId, parentId, candidateIds }) {
   const ids = [...new Set((candidateIds || []).map(String))];
   if (!ids.length) return new Set();
   const { cancelEpisodeSourceStatus, isTrimTransitionNote } = require('../services/recurring-series-cancel-reseed');
-  const declines = await trx('activity_log')
-    .where({ customer_id: customerId, action: 'recurring_cancel_reseed_declined' })
-    .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
-    .select('metadata');
-  const declined = new Set();
-  for (const row of declines || []) {
-    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    if (meta.cancelled_service_id != null) declined.add(`${meta.cancelled_service_id}|${meta.episode_key == null ? '' : meta.episode_key}`);
-  }
+  const standing = (await readStandingPlanReductions(trx, {
+    customerIds: [customerId], parentIds: new Set([String(parentId)]),
+  })).get(String(parentId));
   const history = await trx('job_status_history')
     .whereIn('job_id', ids)
     .orderBy('transitioned_at', 'desc')
     .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at', 'notes');
   const out = new Set();
   for (const id of ids) {
+    if (standing && (standing.own.has(id) || standing.completing.has(id))) { out.add(id); continue; }
     const episode = cancelEpisodeSourceStatus((history || []).filter((row) => String(row.job_id) === id));
-    if (!episode) continue;
-    if (declined.has(`${id}|${episode.episodeKey == null ? '' : episode.episodeKey}`) || isTrimTransitionNote(episode.notes)) out.add(id);
+    if (episode && isTrimTransitionNote(episode.notes)) out.add(id);
   }
   return out;
 }
@@ -18574,7 +18610,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   if (parent.is_recurring !== true || !parent.recurring_pattern) return { added: [], skipped: 'not_recurring' };
   if (String(parent.customer_id) !== String(cancelled.customer_id)) return { added: [], skipped: 'owner_mismatch' };
 
-  const refusal = await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, episodeKey: fresh.episodeKey });
+  const refusal = await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols });
   if (refusal) return { added: [], skipped: refusal };
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
@@ -18644,6 +18680,32 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
 // more of the same plan in one bulk cancel is the operator shortening or
 // ending that plan (fallback auditor P1 on def6002a84) — never something to
 // refill. Each single reseed opens its own transaction (the writer above).
+// A bulk cancel request's plan-reduction INTENT, read before its per-row
+// cancel transactions: 2+ counting plan rows of one series in the selection
+// (planReductionGroups), plus any counting row that COMPLETES a standing
+// reduction — named in an earlier reduction's batch whose own cancel failed
+// or never ran then (Codex #4814 r10 P1: a partially failed bulk reduction
+// retried with the same selection, or with just its failed rows, must not
+// turn the late cancel into a stand-alone one that gets added back).
+async function readBulkPlanReductionIntent(conn, serviceIds) {
+  const { planReductionGroups, isPlanSeriesRow, isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
+  const rows = await conn('scheduled_services').whereIn('id', serviceIds)
+    .select('id', 'customer_id', 'status', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+  const intent = planReductionGroups(rows);
+  const lone = (rows || []).filter((row) => isPlanSeriesRow(row) && isCountingSourceStatus(row.status) && !intent.has(String(row.id)));
+  if (!lone.length) return intent;
+  const standing = await readStandingPlanReductions(conn, {
+    customerIds: lone.map((row) => row.customer_id),
+    parentIds: new Set(lone.map((row) => String(row.recurring_parent_id || row.id))),
+  });
+  for (const row of lone) {
+    const rootId = String(row.recurring_parent_id || row.id);
+    const batch = standing.get(rootId)?.completing.get(String(row.id));
+    if (batch) intent.set(String(row.id), { rootId, groupIds: batch });
+  }
+  return intent;
+}
+
 // The plan-reduction ledger — the ONE chokepoint every writer that cancels
 // plan visits as a deliberate SHORTENING goes through (pre-push audit P1s:
 // the batch cancel, then the visit-count trim, each let a later same-status
@@ -24394,6 +24456,8 @@ router._test = {
   reseedRecurringSeriesAfterCancel,
   reseedRecurringSeriesAfterCancelBatch,
   recordReseedDeclines,
+  readStandingPlanReductions,
+  readBulkPlanReductionIntent,
   readReseedCandidate,
   reseedRefusal,
   reseedTermShortfall,
