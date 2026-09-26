@@ -716,6 +716,13 @@ const LABEL_SAFETY_QUESTION_PATTERN = /\b(safe|pets?|dogs?|cats?|kids?|child|chi
 // once support rows exist — at the empty-support gate they are too often
 // scheduling, coverage or lawn-condition words ("When is my application?",
 // "Do you spray inside?", "Why is my lawn dry?").
+// Payment / account security questions ("Is it safe to enter my credit card
+// here?") use "safe" too, but are not pesticide-safety questions — they must
+// not be force-routed to the label-safety fallback at the empty-support gate.
+const PAYMENT_SECURITY_PATTERN = /\b(?:credit|debit|card|cards|payment|payments|pay|paying|checkout|billing|bank|ach|stripe|password|login|account|personal\s+info\w*|my\s+info\w*|data|privacy|secure|security|encrypt\w*|scam|fraud)\b/i;
+// A payment question that also names a pesticide subject ("Is it safe for my
+// kids? I already paid") stays on the safety route.
+const PESTICIDE_SUBJECT_PATTERN = /\b(?:pets?|dogs?|cats?|kids?|child\w*|babies|baby|spray\w*|pesticid\w*|chemicals?|products?|treat\w*|re-?ent\w*|dry|drying|label)\b/i;
 const APPLICATION_WORD_PATTERN = /\b(?:applied|application|chemicals?|products?|spray|label|dry|dries|dried|drying)\b/i;
 // Broadens LABEL_SAFETY_QUESTION_PATTERN with generic service-family words
 // (lawn/pest/inside/outside/etc.) that name a topic but not a safety intent
@@ -1534,7 +1541,8 @@ async function answerEstimateQuestion({
   // family-word pattern keeps the original `&& supportRows(context).length`
   // requirement, so it still routes deterministically whenever the estimate
   // actually has matching support rows, exactly as before this round.
-  if (LABEL_SAFETY_QUESTION_PATTERN.test(cleanQuestion)
+  const paymentOnly = PAYMENT_SECURITY_PATTERN.test(cleanQuestion) && !PESTICIDE_SUBJECT_PATTERN.test(cleanQuestion);
+  if ((LABEL_SAFETY_QUESTION_PATTERN.test(cleanQuestion) && !paymentOnly)
     || (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),

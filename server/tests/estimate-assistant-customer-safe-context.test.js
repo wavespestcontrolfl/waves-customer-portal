@@ -184,4 +184,32 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(result.source).toBe('openai');
   });
+
+  test.each([
+    'Is it safe to enter my credit card here?',
+    'Is my payment information safe?',
+  ])('payment-security question "%s" with empty support reaches the model, not the pesticide fallback', async (question) => {
+    dispatch.mockResolvedValue({ ok: true, provider: 'openai', text: 'Payments are processed securely by Stripe.' });
+    const result = await answerEstimateQuestion({
+      database: null,
+      question,
+      estimate: { id: 'synthetic-estimate-7', token: 'synthetic-token-7', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'pest_control', label: 'Pest Control' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.source).toBe('openai');
+  });
+
+  test('a pesticide question that also mentions paying stays on the safety route', async () => {
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'Is it safe for my kids? I already paid with my card.',
+      estimate: { id: 'synthetic-estimate-8', token: 'synthetic-token-8', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'pest_control', label: 'Pest Control' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result.source).toBe('fallback');
+  });
 });
