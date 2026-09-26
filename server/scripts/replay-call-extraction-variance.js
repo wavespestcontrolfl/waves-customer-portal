@@ -919,10 +919,6 @@ function compareScheduledService(scheduled, currentFlat, includeValues) {
     }));
 }
 
-function contactPhoneForCall(call) {
-  return String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
-}
-
 // The stored AV verdict was computed for the HISTORICAL extraction's address.
 // It transfers to another extraction only when that extraction states the
 // same address (codex round-11 P1) — a re-extraction that changes the street
@@ -1153,6 +1149,12 @@ async function loadCandidateCalls(db, options) {
     'from_phone',
     'to_phone',
     'direction',
+    // Needed for resolveCallContactPhone to correctly resolve a
+    // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
+    // instead of the staff cell that dialed out — buildFailOpenRoutingContext
+    // now derives identity through that resolver (Codex #4933 r1 P2).
+    'metadata',
+    'source',
     'processing_status',
     'transcription',
     'ai_extraction',
@@ -1164,8 +1166,9 @@ async function loadCandidateCalls(db, options) {
     'transcription_provider',
     'transcription_model',
     'recording_url',
-    // Feeds the on-file fail-open context the live gate receives (round-21 P2).
-    'customer_id',
+    // customer_id is no longer selected (Codex #4933 r3 P2): the linked
+    // customer is now resolved via resolveKnownCallerCustomer (contactPhone
+    // + operator override), which never reads that column.
     // The persisted on-file address verdict a new lead was judged by
     // (buildFailOpenRoutingContext replays it — #4685 r3 P1).
     'ai_validation',
@@ -1227,7 +1230,17 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
 
 async function replayCall(call, context) {
   const { helpers, CRP, db, scheduledColumns, includeValues, retranscribe, fixtureCaseByCallId } = context;
-  const contactPhone = contactPhoneForCall(call);
+  // Codex #4933 r2 P1: derive contactPhone through the SAME resolver
+  // production uses for the ENTIRE pass (call-recording-processor.js's own
+  // `contactPhone` is `resolveCallContactPhone(call)`, no extractedPhone) —
+  // a naive to_phone/from_phone-by-direction guess gets a
+  // lead-webhook-auto-bridge row wrong (to_phone is the staff cell) and, on
+  // malformed/missing metadata, silently omits caller_phone_missing where
+  // production would raise it. This ONE value feeds every routing/flag/
+  // extraction call below (computeDeterministicTriageFlags, canAutoRoute,
+  // extractCallDataV2, the retranscription context) — a single source of
+  // truth, matching production's own single `contactPhone` const.
+  const contactPhone = CRP.resolveCallContactPhone(call);
   const legacyFlat = parseJson(call.ai_extraction, {}) || {};
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
@@ -1261,18 +1274,33 @@ async function replayCall(call, context) {
   // same env gate, the caller ANI, and whether the linked customer has a
   // verified on-file address (codex round-21 P2). Read-only; a lookup failure
   // degrades to no context, which is the pre-existing (stricter) behavior.
-  // Production's own builder, not an approximation: fail-open is inbound-only
-  // and the on-file lane is limited to actively-served pipeline stages, so a
-  // local "has an address" test over-granted it (local pre-push audit P1).
-  const linkedCustomer = call.customer_id
-    ? await db('customers').where({ id: call.customer_id })
-      .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-      .catch(() => null)
-    : null;
+  // Production's own builder, not an approximation: outbound is scoped to
+  // address recovery only and the on-file lane is limited to actively-served
+  // pipeline stages, so a local "has an address" test over-granted it (local
+  // pre-push audit P1; owner ruling 2026-09-26 + Codex #4933 r1 widened/
+  // rescoped outbound — see buildFailOpenRoutingContext).
+  // Codex #4933 r3 P2: the linked customer is now selected the SAME way
+  // production's Step 2 pre-lookup selects it — an operator relink outranks
+  // the phone lookup, an explicit unlink is no known caller at all — never
+  // read straight off call.customer_id, which can disagree with that live
+  // selection (a relink since the row was fetched, or — the concrete miss
+  // this round found — a lead-webhook-auto-bridge row whose contactPhone
+  // came back null from broken metadata: production has NO knownCaller and
+  // holds; the old call.customer_id shortcut kept using the stale link and
+  // reported an auto-route).
+  // { db } (Codex #4933 r3 P1): this script's own connection is already
+  // production's shared ../models/db singleton (the default `db` above), so
+  // this is a no-op in practice — passed explicitly for defensiveness and
+  // consistency with the other two scripts, whose connection genuinely
+  // differs.
+  const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone, { db }).catch(() => null);
+  // buildFailOpenRoutingContext resolves its OWN identity internally via
+  // resolveCallContactPhone(call) too (Codex #4933 r1 P2) — same value as
+  // `contactPhone` above (r2 P1 fix), computed independently since neither
+  // side has a genuine extractedPhone signal to pass.
   const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
     call,
     customer: linkedCustomer,
-    contactPhone,
     failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
   });
   // The verdict was computed for the persisted (prior) extraction — it always

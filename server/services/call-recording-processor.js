@@ -1365,6 +1365,28 @@ function failOpenKnownCustomer(knownCaller) {
   };
 }
 
+// Owner ruling (2026-09-26) scoped outbound fail-open to the on-file ADDRESS
+// recovery only (Codex #4933 r1 P1) — never the confidence exemptions in
+// canAutoRouteDecision, which both key off knownCustomer.addressOnly
+// (knownCustomerConfidenceTrusted / failOpenLowConfidence, call-triage-flags.js).
+// Forcing addressOnly true here reuses that EXISTING lever exactly the way a
+// new lead's validated on-file address already does (trustValidatedNewLeadAddress
+// / applyOnFileAddressVerdict) — hasAddress is untouched, so the address flags
+// still clear on outbound, but the two confidence exemptions now read
+// addressOnly === true and hold on outbound exactly like they do for a new
+// lead. A no-op for inbound (outbound=false) and for a customer already
+// addressOnly (nothing to widen).
+function outboundScopedFailOpenCustomer(knownCustomer, outbound) {
+  if (!knownCustomer || !outbound) return knownCustomer;
+  // Outbound recovery dispatches to the saved address, so it needs a
+  // COMPLETE one: street AND ZIP, the same evidence onFileAddressSatisfaction
+  // demands (hasAddress alone is derived from the street). A legacy row
+  // missing its ZIP keeps every address flag (codex #4933 r4 P1).
+  if (!String(knownCustomer.addressLine1 || '').trim() || !String(knownCustomer.addressZip || '').trim()) return null;
+  if (knownCustomer.addressOnly) return knownCustomer;
+  return { ...knownCustomer, addressOnly: true };
+}
+
 // Carrier caller-ID (CNAM) name for the extraction prompt, from the Twilio
 // AddOns envelope the voice webhook persisted. Only when the caller is NOT
 // withheld and the lookup succeeded; a business-line or "WIRELESS CALLER"
@@ -1398,15 +1420,27 @@ function callerIdNameForPrompt(call) {
  * call. Exported so the three offline routing audits MIRROR production rather
  * than approximating it (local pre-push audit P1; round-13 residual): a
  * hand-rolled "linked customer with an address" test also granted the lane to
- * OUTBOUND calls and to dormant/lost/duplicate accounts, whose stale on-file
- * data must never clear a blocker — both directions of error land on the
- * permissive side of a promotion gate.
+ * dormant/lost/duplicate accounts, whose stale on-file data must never clear
+ * a blocker — that direction of error lands on the permissive side of a
+ * promotion gate. (Outbound calls are no longer excluded here — owner ruling
+ * 2026-09-26 — but summarizeKnownCaller/failOpenKnownCustomer still refuse a
+ * dormant/lost/duplicate account regardless of direction, and outbound is
+ * scoped to address recovery only — see outboundScopedFailOpenCustomer.)
+ *
+ * Identity (Codex #4933 r1 P2): takes an optional `extractedPhone` (a
+ * caller-stated callback number, same second argument resolveCallContactPhone
+ * takes live) and resolves the actual contact phone through that SAME
+ * resolver — never a caller-supplied raw contactPhone. A naive
+ * to_phone/from_phone-by-direction guess gets a lead-webhook-auto-bridge
+ * outbound row wrong (to_phone is the STAFF cell that dialed out;
+ * metadata.leadPhone carries the real prospect destination), and every
+ * offline audit script was repeating exactly that mistake.
  *
  * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
  * exactly as the live path does — the two are one contract.
  */
 function buildFailOpenRoutingContext({
-  call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
+  call = {}, customer = null, extractedPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -1416,16 +1450,76 @@ function buildFailOpenRoutingContext({
     const verdict = onFileAddressVerdict !== undefined ? onFileAddressVerdict : persistedOnFileAddressVerdict(call);
     applyOnFileAddressVerdict(knownCaller, verdict);
   }
+  const outbound = isOutboundCall(call);
+  const contactPhone = resolveCallContactPhone(call, extractedPhone);
   return {
     knownCaller,
     options: {
-      // Fail-open is INBOUND-only: an outbound callback is our own dial, not
-      // a customer volunteering their identity by calling the office.
-      failOpen: !!failOpenEnabled && !isOutboundCall(call),
-      callerAni: contactPhone,
-      knownCustomer: failOpenKnownCustomer(knownCaller),
+      // Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends
+      // with a confirmed appointment time books itself like an inbound call
+      // does — but ONLY the on-file ADDRESS recovery, per the ruling's own
+      // scope (Codex #4933 r1 P1). Outbound does NOT get the ANI leg
+      // (caller_phone_missing stays held — callerAni withheld below) or the
+      // confidence exemptions (low_extraction_confidence / failOpenLowConfidence
+      // in call-triage-flags.js, both keyed on knownCustomer.addressOnly —
+      // outboundScopedFailOpenCustomer forces it true on outbound, reusing
+      // the same lever a new lead's validated on-file address already uses).
+      failOpen: !!failOpenEnabled,
+      callerAni: outbound ? null : contactPhone,
+      knownCustomer: outboundScopedFailOpenCustomer(failOpenKnownCustomer(knownCaller), outbound),
     },
   };
+}
+
+// Codex #4933 r3 P2: the SAME known-caller selection contract production's
+// Step 2 pre-lookup uses (call-recording-processor.js's own knownCustomer
+// assignment, ~L8589) — an operator relink (call.metadata.customer_link_override)
+// outranks the phone lookup entirely; an EXPLICIT unlink (an override present
+// with customer_id: null) means NO known caller at all, regardless of what the
+// phone would otherwise resolve to. The offline audit scripts used to pass
+// the persisted call.customer_id straight into buildFailOpenRoutingContext —
+// wrong whenever that column disagrees with the live selection (an operator
+// relink since the row was fetched, or a lead-webhook-auto-bridge row whose
+// resolveCallContactPhone comes back null because of broken metadata: with
+// no override, findCustomerForCallContact(null, {}) correctly returns null,
+// where reading call.customer_id would have kept using the persisted link
+// and reported an auto-route production would have held instead).
+//
+// Deliberately NOT wired into the live pass itself: production derives its
+// customerLinkOverride once, early (~L7907), from a call.metadata that a
+// later step (the claim/seal check, ~L8056) can reassign for the rest of
+// that pass — re-deriving it here from the (by-then-possibly-mutated)
+// call.metadata at the live call site risks reading a DIFFERENT override
+// than the one production actually decided on for that pass. The offline
+// scripts instead read one frozen row straight from the DB with no such
+// in-pass mutation, so recomputing the override from it here is safe and
+// matches exactly what production computed at ITS pre-lookup time for that
+// same row. Read-only (whereNull('deleted_at') selects, no writes). Takes
+// an optional opts.db (Codex #4933 r3 P1) so a caller with its OWN
+// connection — the two offline scripts that read DATABASE_PUBLIC_URL rather
+// than this module's own `db` — queries the SAME database it read the call
+// from, and never leaves a second, undestroyed connection pool open.
+async function resolveKnownCallerCustomer(call = {}, contactPhone = null, opts = {}) {
+  // opts.db (Codex #4933 r3 P1): the offline audit scripts read a DIFFERENT
+  // database than this module's own internal `db` when run outside
+  // Railway's private network (their own dbConn() prefers
+  // DATABASE_PUBLIC_URL) — querying the wrong one would silently null out
+  // or diverge every customer lookup, and a successful lookup on this
+  // module's internal `db` would also leave a second, never-destroyed
+  // connection pool open past the script's own cleanup. Every production
+  // call site omits opts.db and gets the module's own `db`, byte-identical
+  // to before.
+  const conn = opts.db || db;
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const override = metadata?.customer_link_override;
+  const customerLinkOverride = (override && typeof override === 'object' && 'customer_id' in override) ? override : null;
+  if (customerLinkOverride) {
+    return customerLinkOverride.customer_id
+      ? conn('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
+      : null;
+  }
+  return findCustomerForCallContact(contactPhone, {}, { db: opts.db });
 }
 
 function persistedOnFileAddressVerdict(call) {
@@ -2847,7 +2941,10 @@ async function avAddressUniqueOwner(matches, opts) {
     const callKey = addressKey(opts.callAddress);
     if (!callKey) return null;
     const candidateIds = matches.map((m) => m.id);
-    const props = await db('customer_properties')
+    // opts.db (Codex #4933 r3 P1): same caller-supplied connection override
+    // findCustomerForCallContact reads — this function only ever runs as
+    // its helper, sharing the same opts object.
+    const props = await (opts.db || db)('customer_properties')
       .whereIn('customer_id', candidateIds)
       .where({ active: true })
       .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
@@ -2871,11 +2968,19 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
 
+  // Codex #4933 r3 P1: an optional caller-supplied connection (opts.db) —
+  // the offline audit scripts read a DIFFERENT database than this module's
+  // own internal `db` when run outside Railway's private network
+  // (DATABASE_PUBLIC_URL vs DATABASE_URL); querying the wrong one there
+  // would silently null out or diverge every customer lookup. Every
+  // production call site omits opts.db and gets the module's own `db`,
+  // byte-identical to before.
+  const conn = opts.db || db;
   const predicateFor = (col) => (contactKey.length === 10
     ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
     : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
   const base = () => {
-    const query = db('customers').whereNull('deleted_at');
+    const query = conn('customers').whereNull('deleted_at');
     return query.where(function orPhones() {
       for (const col of CONTACT_MATCH_PHONE_COLS) {
         this.orWhereRaw(predicateFor(col), [contactKey]);
@@ -2885,7 +2990,7 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const matchedViaPrimary = (c) => samePhone(phone, c.phone);
 
   if (opts.preferredCustomerId) {
-    const preferred = await db('customers')
+    const preferred = await conn('customers')
       .where({ id: opts.preferredCustomerId })
       .whereNull('deleted_at')
       .first();
@@ -9543,18 +9648,37 @@ const CallRecordingProcessor = {
           // isn't held over recoverable contact-field flags — the ANI satisfies
           // caller_phone_missing, an existing customer's on-file address clears
           // address flags, a garbled email (name_email_mismatch) is advisory.
-          const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
+          // Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends
+          // with a confirmed appointment time books itself like an inbound
+          // call does, so this is no longer gated on !isOutboundCall — but the
+          // ruling's own scope is the on-file ADDRESS recovery only (Codex
+          // #4933 r1 P1). Outbound does NOT get the ANI leg (caller_phone_missing
+          // stays held — callerAni is withheld below) or the confidence
+          // exemptions (low_extraction_confidence / failOpenLowConfidence in
+          // call-triage-flags.js, both keyed on knownCustomer.addressOnly —
+          // outboundScopedFailOpenCustomer forces it true on outbound, reusing
+          // the same lever a new lead's validated on-file address already
+          // uses). agentCommitFailOpen stays inbound-only too (below) — a
+          // distinct contract.
+          const failOpenBooking = isEnabled('callFailOpenBooking');
+          const outboundCall = isOutboundCall(call);
           // A new lead's on-file address is validated HERE, once, and only
           // when this call does not state its own (codex #4685 r2 P2).
           knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction, failOpen: failOpenBooking });
-          const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
+          const knownCustomerForFailOpen = outboundScopedFailOpenCustomer(failOpenKnownCustomer(knownCaller), outboundCall);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
             // The merged canonical record: on-file address satisfaction must
             // see a V1-only address the same way the fail-open conflict check
             // does, and the unit ask the same way the merge point does.
             canonicalRecord: extracted,
-            failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
+            failOpen: failOpenBooking,
+            // caller_phone_missing fail-open stays inbound-only (Codex #4933
+            // r1 P1) — withheld here rather than adding a new canAutoRoute
+            // option; contactPhone itself is unaffected for every other use
+            // in this pass (SMS/email resolution, extraction, etc).
+            callerAni: outboundCall ? null : contactPhone,
+            knownCustomer: knownCustomerForFailOpen,
             agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
             // Grounds the agent-commitment evidence quote against the labeled
             // source transcript — evidence objects are untrusted model output.
@@ -18717,15 +18841,21 @@ const CallRecordingProcessor = {
           canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call) });
+        // Owner ruling (2026-09-26): fail-open applies on both directions —
+        // mirror the live path exactly (no !isOutboundCall gate on failOpen
+        // itself), but scoped to the on-file ADDRESS recovery only (Codex
+        // #4933 r1 P1) — see outboundScopedFailOpenCustomer and the withheld
+        // callerAni below, both mirroring the live path exactly.
+        const auditOutboundCall = isOutboundCall(call);
+        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') });
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
           canonicalRecord: extracted,
           // Keep the audit/shadow decision consistent with the enforce path.
-          failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
-          callerAni: contactPhone,
-          knownCustomer: failOpenKnownCustomer(knownCaller),
+          failOpen: isEnabled('callFailOpenBooking'),
+          callerAni: auditOutboundCall ? null : contactPhone,
+          knownCustomer: outboundScopedFailOpenCustomer(failOpenKnownCustomer(knownCaller), auditOutboundCall),
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
@@ -20191,6 +20321,7 @@ CallRecordingProcessor._test = {
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
+  resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
   isUsableContactPhone,
@@ -20222,6 +20353,12 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+// Codex #4933 r3 P2: the customer the audits pass INTO buildFailOpenRoutingContext
+// must be selected the same way production's Step 2 pre-lookup selects it
+// (operator override outranks the phone lookup; an explicit unlink is no
+// known caller at all) — not read straight off the persisted call.customer_id
+// column, which can disagree with the live selection.
+CallRecordingProcessor.resolveKnownCallerCustomer = resolveKnownCallerCustomer;
 
 // Production contract for the VOICE-RELAY booking path (NOT test-only): the
 // relay must decide WHICH PREMISE a voice booking lands on with the exact

@@ -9,6 +9,7 @@
 const {
   canAutoRoute, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS,
   hasAgentCommittedEvidence, quoteBindsConfirmedSlot, normalizeCommitmentText,
+  computeDeterministicTriageFlags,
 } = require('../services/call-triage-flags');
 const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
@@ -49,11 +50,15 @@ describe('canAutoRoute fail-open booking', () => {
   });
 
   // Owner ruling 2026-09-26 standing directive: every call-agent rule behaves
-  // the same on outbound and inbound calls. failOpen is inbound-only
-  // (call-recording-processor.js gates it on !isOutboundCall), so this test
-  // simulates the OUTBOUND shape directly: fail-open OFF, name_email_mismatch
-  // is the only flag on an otherwise-clean confirmed booking.
-  test('an OUTBOUND-shaped confirmed booking (fail-open off) is NOT blocked by name_email_mismatch alone', () => {
+  // the same on outbound and inbound calls. UPDATED same day: fail-open used
+  // to be inbound-only (call-recording-processor.js gated it on
+  // !isOutboundCall) — that exclusion is now removed (see the "outbound
+  // calls use the fail-open contract too" describe block below), so this is
+  // no longer a simulation of an outbound-specific shape. It still stands on
+  // its own merits: name_email_mismatch is advisory outright (never blocks)
+  // regardless of failOpen or direction, so leaving failOpen unset here still
+  // isolates that fact from the fail-open machinery.
+  test('a confirmed booking with fail-open off is NOT blocked by name_email_mismatch alone (advisory on any direction)', () => {
     const r = canAutoRoute(extraction(['name_email_mismatch']), { addressValidation: AV_CLEAN });
     expect(r.allowed).toBe(true);
     expect(r.flags).toContain('name_email_mismatch');
@@ -2863,5 +2868,281 @@ describe('V2 decision version bookkeeping', () => {
     const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
     expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
     expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
+  });
+});
+
+// Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends with a
+// confirmed appointment time books itself like an inbound call does. Prod
+// evidence (8 weeks): 7 outbound calls ended confirmed-with-start; 5 were
+// held, 2 of them ONLY by address_unverifiable+missing_service_address for a
+// customer whose address was already on file. call-recording-processor.js
+// used to hard-exclude outbound from the fail-open contract
+// (`&& !isOutboundCall(call)` at the live path, the routing-context builder,
+// and the offline audit replay) — that exclusion is removed so the on-file
+// ADDRESS recovery inbound gets also applies to outbound.
+//
+// UPDATED (Codex #4933 round-1, two valid P1s):
+// P1-1 — scoped outbound to the address recovery ONLY. Enabling the full
+// failOpen contract also lifted low_extraction_confidence and the overall
+// low-confidence rejection (knownCustomerConfidenceTrusted / failOpenLowConfidence
+// in call-triage-flags.js, both keyed on knownCustomer.addressOnly) and let
+// the ANI leg (caller_phone_missing) fail open too — none of that was the
+// ruling's ask. Fix: outboundScopedFailOpenCustomer forces knownCustomer.addressOnly
+// true on outbound (reusing the exact lever a new lead's validated on-file
+// address already uses), and callerAni is withheld (null) for outbound.
+// P1-2 — buildFailOpenRoutingContext now derives contact identity through
+// resolveCallContactPhone(call, extractedPhone) internally instead of
+// trusting a caller-supplied contactPhone — the offline audit scripts' own
+// naive to_phone/from_phone-by-direction guess got a lead-webhook-auto-bridge
+// outbound row wrong (to_phone is the STAFF cell that dialed out;
+// metadata.leadPhone carries the real prospect).
+//
+// Stays inbound-only (deliberately unchanged): agentCommitFailOpen,
+// impliedConsent, and the "Waves Assessment" generic-service fallback.
+describe('outbound calls use the fail-open contract too, scoped to address recovery (owner ruling 2026-09-26 + Codex #4933 r1)', () => {
+  const CallRecordingProcessor = require('../services/call-recording-processor');
+  const { buildFailOpenRoutingContext } = CallRecordingProcessor;
+
+  const knownCustomer = {
+    id: 'cust-onfile-1',
+    first_name: 'Barbara',
+    last_name: 'Onfile',
+    pipeline_stage: 'won',
+    address_line1: '123 Main St',
+    city: 'Venice',
+    state: 'FL',
+    zip: '34285',
+  };
+
+  test('buildFailOpenRoutingContext scopes outbound to address recovery: callerAni withheld, knownCustomer forced addressOnly; inbound is unaffected', () => {
+    const outboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound', to_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    expect(outboundCtx.options.failOpen).toBe(true);
+    // The ANI leg is withheld on outbound (P1-1) — caller_phone_missing must
+    // stay held, never fail open, on an outbound call.
+    expect(outboundCtx.options.callerAni).toBeNull();
+    // Address still clears (hasAddress true) but addressOnly is forced true,
+    // which is what keeps the confidence exemptions from also lifting.
+    expect(outboundCtx.options.knownCustomer).toMatchObject({ hasAddress: true, addressOnly: true });
+
+    const inboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'inbound', from_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    expect(inboundCtx.options.failOpen).toBe(true);
+    // Inbound is untouched by this scoping: the ANI rides through, and an
+    // established customer's on-file address is NOT addressOnly (full trust,
+    // confidence exemptions included — unchanged pre-existing behavior).
+    expect(inboundCtx.options.callerAni).toBe('+19415550100');
+    expect(inboundCtx.options.knownCustomer).toMatchObject({ hasAddress: true, addressOnly: false });
+
+    // The gate flag itself still governs both directions identically.
+    expect(buildFailOpenRoutingContext({
+      call: { direction: 'outbound' }, customer: knownCustomer, failOpenEnabled: false,
+    }).options.failOpen).toBe(false);
+  });
+
+  test('an OUTBOUND call whose saved address is incomplete (street but no ZIP) gets NO address recovery; inbound keeps its existing contract (codex #4933 r4 P1)', () => {
+    const noZip = { ...knownCustomer, zip: null };
+    const outboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound', to_phone: '+19415550100' }, customer: noZip, failOpenEnabled: true,
+    });
+    expect(outboundCtx.options.knownCustomer).toBeNull();
+    const r = canAutoRoute(extraction(['address_unverifiable', 'missing_service_address']), {
+      ...outboundCtx.options, contactPhone: '+19415550100',
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['missing_service_address']));
+
+    const inboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'inbound', from_phone: '+19415550100' }, customer: noZip, failOpenEnabled: true,
+    });
+    expect(inboundCtx.options.knownCustomer).toMatchObject({ hasAddress: true, addressOnly: false });
+  });
+
+  test('an OUTBOUND confirmed call for a known customer with an on-file address, no new address stated, fails open and the call routes (address flags only)', () => {
+    const ctx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound', to_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    // No addressValidation passed: the known-customer on-file address is what
+    // must satisfy both the address flags AND the common AV exit gate here —
+    // exactly the Barbara-case shape above, just on an outbound call.
+    const ex = extraction(['address_unverifiable', 'missing_service_address']);
+    ex.property = { service_address: {} }; // nothing stated on THIS call → on-file address governs
+    const r = canAutoRoute(ex, ctx.options);
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'missing_service_address']));
+  });
+
+  test('an OUTBOUND call with caller_phone_missing stays HELD even for a known customer with an on-file address (the ANI leg is inbound-only)', () => {
+    const ctx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound', to_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    const ex = extraction(['caller_phone_missing']);
+    const r = canAutoRoute(ex, ctx.options);
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_phone_missing');
+    // The SAME shape on inbound fails open (pre-existing behavior, unaffected).
+    const inboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'inbound', from_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    expect(canAutoRoute(ex, inboundCtx.options).allowed).toBe(true);
+  });
+
+  test('an OUTBOUND call with low_extraction_confidence (or low overall confidence) stays HELD for a known customer — the confidence exemptions are inbound-only', () => {
+    const ctx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound', to_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    const heldFlag = canAutoRoute(extraction(['low_extraction_confidence']), ctx.options);
+    expect(heldFlag.allowed).toBe(false);
+    expect(heldFlag.appointmentBlockingFlags).toContain('low_extraction_confidence');
+
+    const heldOverall = canAutoRoute(extraction([], 0), ctx.options); // overall confidence 0, no explicit flag
+    expect(heldOverall.allowed).toBe(false);
+    expect(heldOverall.reason).toBe('low_confidence');
+
+    // The SAME shapes on inbound fail open (pre-existing behavior, unaffected):
+    // an established customer's on-file address exempts the confidence checks.
+    const inboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'inbound', from_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    expect(canAutoRoute(extraction(['low_extraction_confidence']), inboundCtx.options).allowed).toBe(true);
+    expect(canAutoRoute(extraction([], 0), inboundCtx.options).allowed).toBe(true);
+  });
+
+  test('an OUTBOUND call that states a NEW address still holds despite fail-open being on', () => {
+    const ctx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound', to_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
+    });
+    expect(ctx.options.failOpen).toBe(true); // fail-open IS active for this outbound call...
+    const ex = extraction(['address_unverifiable', 'missing_service_address']);
+    ex.property = { service_address: { street_line_1: '9999 Nonexistent Rd', city: 'Sarasota', zip: '34231' } };
+    const r = canAutoRoute(ex, ctx.options);
+    // ...but a NEW stated address is never auto-approved — AV still governs it.
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'missing_service_address']));
+  });
+
+  test('resolveCallContactPhone resolves the DIALED (customer) number on an ordinary outbound call, not the staff/office leg', () => {
+    const { resolveCallContactPhone } = CallRecordingProcessor._test;
+    // Outbound: from_phone is Waves' own line, to_phone is the customer dialed.
+    expect(resolveCallContactPhone({ direction: 'outbound', from_phone: '+19412975749', to_phone: '+19145234413' }))
+      .toBe('+19145234413');
+  });
+
+  // Codex #4933 r1 P2: buildFailOpenRoutingContext now derives identity
+  // through resolveCallContactPhone rather than a caller-supplied
+  // contactPhone. A lead-webhook-auto-bridge row's to_phone is the STAFF
+  // cell that dialed out (ADAM_CELL in production — server/routes/lead-webhook.js),
+  // never the prospect; the real destination rides in metadata.leadPhone.
+  // (The observable effect on canAutoRoute's decision is nil today — P1-1
+  // withholds callerAni for every outbound call regardless of contactPhone's
+  // value — this is a correctness/consistency fix for the identity the audit
+  // context resolves, matching the exact resolver production uses.)
+  test('a lead-webhook-auto-bridge row resolves to the prospect (metadata.leadPhone), never the staff cell in to_phone; invalid metadata resolves to no usable identity', () => {
+    const { resolveCallContactPhone } = CallRecordingProcessor._test;
+    const staffCell = '+19415559999'; // to_phone: the ADAM_CELL-shaped staff leg
+    const prospectPhone = '+19415552222';
+    const bridgeCall = {
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      from_phone: '+19415551000',
+      to_phone: staffCell,
+      metadata: { type: 'lead_auto_bridge', leadPhone: prospectPhone },
+    };
+    expect(resolveCallContactPhone(bridgeCall)).toBe(prospectPhone);
+    expect(resolveCallContactPhone(bridgeCall)).not.toBe(staffCell);
+    // Invalid / malformed / missing metadata never falls back to the staff cell.
+    expect(resolveCallContactPhone({ ...bridgeCall, metadata: { type: 'something_else' } })).toBeNull();
+    expect(resolveCallContactPhone({ ...bridgeCall, metadata: 'not valid json' })).toBeNull();
+    expect(resolveCallContactPhone({ ...bridgeCall, metadata: null })).toBeNull();
+    expect(resolveCallContactPhone({ ...bridgeCall, metadata: { type: 'lead_auto_bridge' } })).toBeNull(); // no leadPhone
+
+    // buildFailOpenRoutingContext runs the SAME resolver internally (source-pinned
+    // below); its knownCustomer/failOpen output for this row is unaffected by
+    // identity either way (customer is passed in directly, not derived from phone).
+    const ctx = buildFailOpenRoutingContext({ call: bridgeCall, customer: knownCustomer, failOpenEnabled: true });
+    expect(ctx.options.callerAni).toBeNull(); // outbound — withheld regardless of identity (P1-1)
+    expect(ctx.options.knownCustomer).toMatchObject({ hasAddress: true, addressOnly: true });
+  });
+
+  // Codex #4933 r2 P1 (NEW round-2 finding): buildFailOpenRoutingContext
+  // resolves identity correctly (r1 P2), but the offline audit SCRIPTS were
+  // still computing their OWN naive contactPhone for the deterministic-flags
+  // pass and for canAutoRoute's `contactPhone` option — the exact naive
+  // to_phone/from_phone-by-direction guess this lane keeps fixing. For a
+  // lead-webhook-auto-bridge row with broken metadata, that guess resolves to
+  // the STAFF cell (always present, always dialable), so
+  // computeDeterministicTriageFlags never raises caller_phone_missing at all
+  // — the audit silently counts a call production would hold as
+  // auto-routable. Fixed in all three scripts (replay-call-extraction-variance.js,
+  // verify-v2-shadow-path.js, v2-promotion-readiness.js): their `contactPhone`
+  // is now `resolveCallContactPhone(call)` — ONE value feeding every
+  // routing/flag/extraction call in each script, exactly mirroring
+  // production's own single `contactPhone` const (call-recording-processor.js
+  // computes it once, with no extractedPhone, and never recomputes it).
+  test('a lead-webhook-auto-bridge row with invalid metadata: contactPhone resolves to null (not the staff cell), so computeDeterministicTriageFlags raises caller_phone_missing and canAutoRoute holds on it', () => {
+    const { resolveCallContactPhone } = CallRecordingProcessor._test;
+    const staffCell = '+19415559999'; // to_phone: the ADAM_CELL-shaped staff leg
+    const badMetadataCall = {
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      from_phone: '+19415551000',
+      to_phone: staffCell,
+      metadata: null, // broken/missing — no prospect number recoverable
+    };
+    // The bug this round fixes: a naive to_phone/from_phone-by-direction
+    // guess (what the 3 scripts used to compute) resolves to the staff cell
+    // — dialable, so it would never have raised the flag.
+    const naiveContactPhone = badMetadataCall.to_phone;
+    const resolvedContactPhone = resolveCallContactPhone(badMetadataCall);
+    expect(resolvedContactPhone).toBeNull();
+    expect(naiveContactPhone).toBe(staffCell);
+
+    const extractionShape = {
+      meta: {}, caller: {}, confidence: { overall: 0.9 },
+      scheduling: { status: 'confirmed', confirmed_start_at: '2026-07-11T09:00:00-04:00' },
+    };
+    const flagsWithNaivePhone = computeDeterministicTriageFlags(extractionShape, { contactPhone: naiveContactPhone });
+    const flagsWithResolvedPhone = computeDeterministicTriageFlags(extractionShape, { contactPhone: resolvedContactPhone });
+    expect(flagsWithNaivePhone).not.toContain('caller_phone_missing'); // the bug: silently never held
+    expect(flagsWithResolvedPhone).toContain('caller_phone_missing'); // the fix: correctly raised
+
+    // Feed the CORRECTLY-raised flag set into canAutoRoute exactly as the
+    // fixed scripts now do (buildFailOpenRoutingContext's options, same call).
+    const ctx = buildFailOpenRoutingContext({ call: badMetadataCall, customer: knownCustomer, failOpenEnabled: true });
+    const r = canAutoRoute(extraction(flagsWithResolvedPhone), ctx.options);
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_phone_missing');
+  });
+
+  // Deliberately UNCHANGED by this lane — pinned against the exact source so a
+  // future edit that widens these too gets caught. (Behavioral coverage for
+  // agentCommitFailOpen/impliedConsent already lives in
+  // call-recording-processor-guards.test.js and call-triage-flags tests;
+  // these lines are deep inside the single large processing function and are
+  // not independently callable, so the source pin is the practical guard —
+  // same pattern used elsewhere in this suite, e.g.
+  // call-onfile-house-number-conflict.test.js.)
+  test('agent-commit demotion, implied consent, and the Waves Assessment fallback stay inbound-only in source', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const outboundExcluded = (needle) => {
+      expect(src).toContain(needle);
+    };
+    outboundExcluded("agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),");
+    outboundExcluded("impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),");
+    outboundExcluded("&& isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {");
+    // ...while the three fail-open sites this lane changed no longer exclude
+    // outbound OUTRIGHT — they instead scope it via outboundScopedFailOpenCustomer
+    // + a withheld callerAni (Codex #4933 r1 P1).
+    expect(src).toContain("const failOpenBooking = isEnabled('callFailOpenBooking');");
+    expect(src).not.toContain("const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);");
+    expect(src).toContain('function outboundScopedFailOpenCustomer(knownCustomer, outbound) {');
+    expect(src).toContain('callerAni: outboundCall ? null : contactPhone,');
+    expect(src).toContain('callerAni: auditOutboundCall ? null : contactPhone,');
+    expect(src).toContain('callerAni: outbound ? null : contactPhone,');
+    // P1-2: identity is resolved through the production resolver, not a
+    // caller-supplied contactPhone.
+    expect(src).toContain('const contactPhone = resolveCallContactPhone(call, extractedPhone);');
   });
 });

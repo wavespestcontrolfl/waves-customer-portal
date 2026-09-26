@@ -30,19 +30,11 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'customer_id', 'ai_validation',
-        // The linked customer's fail-open inputs (codex round-21 P2 + the
-        // local pre-push audit P1). An established customer who confirms
-        // without restating their address normally has a `not_attempted`
-        // verdict — production dispatches to the address verified when it was
-        // saved, so a verifier without this context reports
-        // address_not_validated for a call production auto-created. The row
-        // goes through production's OWN summarizeKnownCaller, so the pipeline
-        // stage governs eligibility exactly as it does live; only the fields
-        // that helper reads are carried, no names.
-        db.raw("(select json_build_object('pipeline_stage', c.pipeline_stage, 'address_line1', c.address_line1,"
-          + " 'address_line2', c.address_line2, 'city', c.city, 'state', c.state, 'zip', c.zip)"
-          + ' from customers c where c.id = call_log.customer_id) as linked_customer'),
+      // metadata + source: resolveCallContactPhone needs both to resolve a
+      // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
+      // rather than the staff cell that dialed out — buildFailOpenRoutingContext
+      // now derives identity through that resolver (Codex #4933 r1 P2).
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'ai_validation',
         // Scoped to the CURRENT extraction pass (codex final-round P2) — a
         // card left from an earlier pass must not vouch for a reprocess where
         // recovery failed. NULL on either side yields NULL (not true), so an
@@ -50,6 +42,33 @@ async function main() {
         db.raw("exists(select 1 from triage_items ti where ti.call_log_id = call_log.id and ti.reason_code = 'address_recovered'"
           + " and ti.payload->>'extraction_model' = call_log.ai_extraction_model"
           + " and ti.payload->>'extraction_prompt_version' = call_log.ai_extraction_prompt_version) as has_address_recovered"));
+    // Codex #4933 r3 P2: resolve the linked customer the SAME way
+    // production's Step 2 pre-lookup does (an operator relink outranks the
+    // phone lookup; an explicit unlink is no known caller at all) — done
+    // HERE, in the Postgres-env phase, so Phase B (which is designed to run
+    // with NO DB access at all — see the file docstring) stays DB-free.
+    // Replaces the raw call_log.customer_id-keyed subquery this used to run:
+    // that column is not what production's own selection reads, and could
+    // disagree with it (an operator relink since the row was fetched, or —
+    // the concrete miss this round found — a lead-webhook-auto-bridge row
+    // whose contactPhone comes back null from broken metadata: production
+    // has NO knownCaller and holds; reading customer_id kept using the
+    // stale link and reported an auto-route). Only the fields the live
+    // summarizeKnownCaller reads are carried — no names, matching the prior
+    // subquery's PII minimization.
+    const KNOWN_CUSTOMER_FIELDS = ['pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
+    for (const row of rows) {
+      const contactPhone = CRP.resolveCallContactPhone(row);
+      // { db } (Codex #4933 r3 P1): this script's own Phase A connection
+      // (DATABASE_PUBLIC_URL-aware dbConn(), destroyed below) — never the
+      // processor's internal ../models/db, which can point at a different
+      // or unreachable host when this runs outside Railway's private
+      // network, and would otherwise leave a second pool undestroyed.
+      const resolved = await CRP.resolveKnownCallerCustomer(row, contactPhone, { db }).catch(() => null);
+      row.linked_customer = resolved
+        ? Object.fromEntries(KNOWN_CUSTOMER_FIELDS.map((k) => [k, resolved[k] ?? null]))
+        : null;
+    }
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -67,7 +86,15 @@ async function main() {
   let valid = 0;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
+    // Codex #4933 r2 P1: derive contactPhone through the SAME resolver
+    // production uses for the ENTIRE pass (no extractedPhone) — a naive
+    // to_phone/from_phone-by-direction guess gets a lead-webhook-auto-bridge
+    // row wrong (to_phone is the staff cell) and, on malformed/missing
+    // metadata, silently omits caller_phone_missing where production would
+    // raise it. This ONE value feeds every routing/flag/extraction call
+    // below — a single source of truth, matching production's own single
+    // `contactPhone` const.
+    const contactPhone = CRP.resolveCallContactPhone(r);
     const t0 = Date.now();
     const res = await CRP._test.extractCallDataV2(r.transcription, contactPhone, {
       callId: r.id,
@@ -105,10 +132,13 @@ async function main() {
       // V1-conflict demotion that always follows canAutoRoute on the live
       // path — a fail-open allow whose V1 address conflicts with the on-file
       // one is a NEW address and goes back to review.
+      // buildFailOpenRoutingContext resolves its OWN identity internally via
+      // resolveCallContactPhone(r) too (Codex #4933 r1 P2) — same value as
+      // `contactPhone` above (r2 P1 fix), computed independently since
+      // neither side has a genuine extractedPhone signal to pass.
       const { knownCaller, options: failOpenOptions } = CRP.buildFailOpenRoutingContext({
         call: r,
         customer: pj(r.linked_customer),
-        contactPhone,
         failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
       });
       const route = CRP.demoteFailOpenOnV1AddressConflict(
