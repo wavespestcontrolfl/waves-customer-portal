@@ -1272,7 +1272,11 @@ reply. Any reply — from either provider, on any intent — that carries
 safety wording, an EPA-approval claim, or a fixed re-entry/drying time
 (duration or clock time) is replaced wholesale with a reviewed "follow the
 product label" answer, in English or Spanish matching the reply's own language
-(a reply with emergency direction keeps the 911 / veterinary script instead).
+(a reply with emergency direction keeps the 911 / veterinary script instead;
+a non-emergency reply that carries both a claim and price talk gets the
+reviewed price redirect, which is also claim-free). The safety/emergency check
+reads the model's original reply before the price scrub, so a price mention
+never erases emergency direction.
 The check is the intake-local topic chokepoint in `ask-waves-intake.js`
 (`intakeSafetyClaimSupplement`), run on typography-folded text; the shared
 `reentrySafetyClaimFinding` is deliberately NOT called on this per-turn path

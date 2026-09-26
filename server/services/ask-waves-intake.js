@@ -127,7 +127,7 @@ const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|n
 
 // Swallowing/ingesting is an emergency only when a person or pet did it —
 // "Have the ants ingested the bait?" is pest behavior, not a poisoning.
-const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\b[^.?!]{0,40}?\b(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?)\b|\b(?:me\s+|se\s+)?trag(?:u[eé]|[oó])(?![a-zñáéíóú])|\bingir(?:i[oó]|i[eé]ron|[ií])(?![a-zñáéíóú])/i;
+const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\b[^.?!]{0,40}?\b(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?)\b|\b(?:swallow|ingest)(?:ed)?\b[^.?!]{0,30}?\bby\s+(?:(?:my|our|his|her|their|the|a|an)\s+)?(?:baby|kids?|child|children|toddler|infant|son|daughter|husband|wife|someone|somebody|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|me|us|him|her|them)\b|\b(?:me\s+|se\s+)?trag(?:u[eé]|[oó])(?![a-zñáéíóú])|\bingir(?:i[oó]|i[eé]ron|[ií])(?![a-zñáéíóú])/i;
 
 function looksLikeEmergency(text) {
   const t = String(text || '');
@@ -339,8 +339,6 @@ const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPRO
 
 
 
-// "Re-enter the portal / volver a entrar al portal" is a login, not a room.
-const DIGITAL_CONTEXT_RE = /\b(?:portal|account|login|log\s+in|password|website|site|app|página|pagina|cuenta|contraseña|sesi[oó]n|sistema)\b/i;
 
 // Timing claims (see fixedTimingClaim): any access wording in the reply or
 // the visitor's question makes every duration / clock time in the reply a
@@ -352,20 +350,25 @@ function durationWindow(sentence, index, length) {
   const after = sentence.slice(index + length).split(/\s+/).filter(Boolean).slice(0, 8).join(' ');
   return { tight: `${before.split(' ').slice(-6).join(' ')} ${sentence.substr(index, length)} ${after.split(' ').slice(0, 3).join(' ')}` };
 }
+// Once access is the topic, any number or time word in the reply is a fixed
+// window — units or not ("until four o'clock", "hasta las cuatro", "in 2").
+const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?:${NUM_WORD}|${NUM_WORD_ES}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
+// Digital re-entry ("re-enter the portal", "volver a entrar a su cuenta") is a
+// login, not a room. Only the digital phrase itself is removed before the
+// access check — a mixed turn ("I can't log in to the portal; when can I
+// re-enter the house?") still has a physical access question.
+const DIGITAL_ACCESS_RE = /\b(?:re-?enter(?:ing)?|log(?:ging)?\s*(?:in|back\s+in)|sign(?:ing)?\s+in|get(?:ting)?\s+(?:back\s+)?in(?:to)?|volver\s+a\s+entrar|entrar|ingresar|acceder)\s+(?:(?:to|into|in|on|al|a|la|el|en|the|your|my|our|su|mi|de)\s+){0,3}(?:portal|account|app|site|website|password|cuenta|p[aá]gina|sistema|sesi[oó]n|aplicaci[oó]n)\b/gi;
 function fixedTimingClaim(reply, contextText, treatmentContext) {
   const text = String(reply || '');
   // Topic, not proximity: when the reply or the visitor's question is about
-  // access at all (re-entry, drying, letting pets out, keeping off the lawn),
-  // EVERY duration or clock time in the reply is a timing claim — no
-  // scheduling or "takes about" exemption, no matter which sentence the
-  // access wording sits in ("It takes 30 minutes. Then you can re-enter.",
-  // "By noon." answering "When can I re-enter?"). Only a login/portal
-  // conversation with no treatment in it is exempt.
-  const accessTopic = ACCESS_SIGNAL_RE.test(text) || ACCESS_SIGNAL_RE.test(String(contextText || ''));
-  const digitalOnly = !treatmentContext && DIGITAL_CONTEXT_RE.test(`${text}\n${contextText || ''}`);
-  const hasClock = CLOCK_TIME_RE.test(text);
-  if (accessTopic && !digitalOnly && (hasClock || DURATION_RE.test(text))) return true;
-  if (digitalOnly) return false;
+  // physical access at all (re-entry, drying, letting pets out, keeping off
+  // the lawn), ANY duration, clock time or number in the reply is a timing
+  // claim — no scheduling or "takes about" exemption, no matter which
+  // sentence the access wording sits in ("It takes 30 minutes. Then you can
+  // re-enter.", "By noon." answering "When can I re-enter?").
+  const physical = (t) => String(t || '').replace(DIGITAL_ACCESS_RE, ' ');
+  const accessTopic = ACCESS_SIGNAL_RE.test(physical(text)) || ACCESS_SIGNAL_RE.test(physical(contextText));
+  if (accessTopic && (CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text))) return true;
   // No access topic: a clock time is booking ("we can treat tomorrow"); a
   // duration is judged by the words right around it.
   for (const sentence of text.split(/(?<=[.!?])\s+|[;\n]+/)) {

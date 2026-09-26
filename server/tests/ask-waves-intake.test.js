@@ -231,6 +231,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Your appointment is at 9 AM, and following completion of the treatment you can re-enter the house at 11 AM.', ''],
     ['By noon.', 'When can I re-enter?'],
     ['It takes 30 minutes. Then you can re-enter the house.', 'Tell me about your treatment.'],
+    ["Stay off the treated lawn until four o'clock.", ''],
+    ['Manténgase fuera del césped tratado hasta las cuatro.', ''],
+    ['You can re-enter at 4 PM.', "I cannot log in to the portal; when can I re-enter the house?"],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -1239,6 +1242,8 @@ describe('looksLikeEmergency', () => {
     'My child swallowed some bait',
     'our dog ingested the granules',
     'mi hijo se tragó un cebo',
+    'The bait was swallowed by my child',
+    'Some granules were ingested by my dog',
   ])('flags urgent/medical text: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(true);
   });
