@@ -115,7 +115,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         conn.raw(`(SELECT v.property_id FROM scheduled_services v WHERE v.id::text = COALESCE(
           sms_log.metadata->>'scheduled_service_id',
           (SELECT a.appointment_id FROM messaging_audit_log a
-            WHERE sms_log.twilio_sid IS NOT NULL AND a.provider_message_id = sms_log.twilio_sid LIMIT 1))) as linked_property_id`)),
+            WHERE sms_log.twilio_sid IS NOT NULL AND a.provider_message_id = sms_log.twilio_sid
+            ORDER BY a.created_at DESC, a.id DESC LIMIT 1))) as linked_property_id`)),
     call: conn('call_log').where({ customer_id: customerId, direction: 'outbound' })
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
       .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
