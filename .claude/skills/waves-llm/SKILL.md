@@ -149,17 +149,23 @@ a provider issue never causes a gap:
   The generated-image SCREEN is the ruled exception (owner 2026-09-25):
   `TEXT_POLICIES.imageScreen` is GPT-5.6 Sol first with Claude VISION as the
   backup; hero alt text stays on `visionAnalysis`.
-  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
-  `pest-identification.js#analyzePhoto`/`identifyPest`, and
-  `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
+  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day)
+  and `tree-shrub-assessment.js#analyzePhoto` call Gemini only; Claude runs
   ONLY when Gemini returns nothing (HTTP/parse/empty/schema-invalid miss). A
   single-model result still goes through each file's own single-model path
-  (pest-identification downgrades confidence a notch via `mergeModelResults`;
-  lawn/tree-shrub's `averageScores` passes the lone result through unchanged)
-  — a one-model read can never surface as the two-model "agreed" case.
-  `averageScores`/`mergeModelResults` still exist and still work with two
-  results handed to them directly (tests, or any future caller), but live
-  scoring never calls either with two live results anymore.
+  (lawn/tree-shrub's `averageScores` passes the lone result through
+  unchanged) — a one-model read can never surface as the two-model "agreed"
+  case.
+  **Photo ID ruling 2026-09-26:** `pest-identification.js#analyzePhoto` /
+  `identifyPest` (website funnel, SMS photo triage, admin assessments, the
+  customer app) use `TEXT_POLICIES.photoIdVision`: Gemini 3.8 Flash first;
+  the same photo goes to ChatGPT's best vision model (`OPENAI_FRONTIER`)
+  when Gemini misses, scores itself under `PHOTO_ID_ESCALATE_BELOW` (default
+  0.80), or lists a runner-up of different risk. Sequential per photo, no
+  Claude leg. The second look's answer decides (`resolvePhoto`): an agreement
+  on the same species keeps the lower confidence, otherwise it is the lone
+  answer (downgraded a notch); a risky runner-up whose second look never
+  came back makes the upload an inspection-first consultation.
   **Estimate-image ruling 2026-09-25:** `satellite-analyzer.js` and
   `property-lookup-v2.js` use `TEXT_POLICIES.estimateVision`: Gemini 3.8 Flash
   first, GPT-6 Sol only when Gemini fails or its output is invalid. No Claude,
