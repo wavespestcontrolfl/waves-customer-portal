@@ -379,6 +379,9 @@ describe('webhook + invoice credit', () => {
       entry_point: 'estimate_deposit_receipt_requeue',
       requires_registered_dispatch: true,
       billingDeliveryCategory: 'payment_receipt',
+      // No separate receipt email on this send, so the retry must not
+      // suppress the router's own Email leg.
+      hasEmailLeg: false,
     });
     const { replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
     expect(replaysWithoutPhone(meta.entry_point)).toBe(true);

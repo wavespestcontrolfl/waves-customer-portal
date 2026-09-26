@@ -561,7 +561,9 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
             ...(estimate.customer_id ? {
               billingDeliveryCategory: 'payment_receipt',
               notificationEventKey: `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
-              hasEmailLeg: true,
+              // The retry keeps the immediate send's own Email ownership: a
+              // separate receipt email exists only when wantEmail was set.
+              hasEmailLeg: hasEmailLeg === true,
             } : {}),
             // The customer can change their phone between the hold and
             // nextAllowedAt — the cron re-reads customers.phone at send time
@@ -2209,7 +2211,7 @@ async function replayDepositReceiptAppOnly(meta) {
       amountDollars: Number(ledgerRow.amount || 0),
       cardSurcharge: Number(ledgerRow.card_surcharge || 0),
       paymentIntentId: ledgerRow.stripe_payment_intent_id,
-      hasEmailLeg: true,
+      hasEmailLeg: meta.hasEmailLeg === true,
     });
     if (!built) return unavailable('DEPOSIT_RECEIPT_TEMPLATE_MISSING');
     return built.result;
