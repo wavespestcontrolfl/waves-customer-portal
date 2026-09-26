@@ -20,6 +20,7 @@ export default function SearchableCompletionChoices({
   const focusFirstOptionWhenOpen = useRef(false);
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
+  const menuOpen = open && !disabled;
   const selected = values.map(clean).filter(Boolean);
   const selectedKeys = new Set(selected.map(keyOf));
   const choices = useMemo(() => {
@@ -84,7 +85,7 @@ export default function SearchableCompletionChoices({
 
   return (
     <div style={{ position: 'relative', opacity: disabled ? 0.55 : 1 }}
-      data-modal-escape-owned={open && !disabled ? 'true' : undefined}
+      data-modal-escape-owned={menuOpen ? 'true' : undefined}
       onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}
       onKeyDown={(event) => {
         if (event.key === 'Escape' && open) {
@@ -98,7 +99,7 @@ export default function SearchableCompletionChoices({
         type="search"
         role="combobox"
         aria-label={`Search ${label.toLowerCase()}`}
-        aria-expanded={open && !disabled}
+        aria-expanded={menuOpen}
         aria-controls={listId}
         aria-autocomplete="list"
         autoComplete="off"
@@ -121,7 +122,7 @@ export default function SearchableCompletionChoices({
         style={{ width: '100%', boxSizing: 'border-box', minHeight: 46, padding: '11px 13px', border: '1px solid #d4d4d8', borderRadius: 10, background: '#fff', color: '#18181b', font: '400 14px Roboto, Arial, sans-serif' }}
       />
       {helper && <div style={{ marginTop: 6, fontSize: 14, color: '#71717a', lineHeight: 1.4 }}>{helper}</div>}
-      {open && !disabled && (
+      {menuOpen && (
         <div ref={listRef} id={listId} role="listbox" aria-label={`${label} choices`} aria-multiselectable="true"
           style={{ position: 'absolute', top: 48, left: 0, right: 0, zIndex: 45, maxHeight: 290, overflowY: 'auto', padding: 6, border: '1px solid #e4e4e7', borderRadius: 12, background: '#fff', boxShadow: '0 10px 28px rgba(0,0,0,.12)' }}>
           {matches.map((option) => {
