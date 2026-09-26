@@ -65,19 +65,23 @@ describeOrSkip('termPropertyLabelsForCustomer — per-term, ownership-scoped pro
 
   const insert = async (db, table, row) => (await db(table).insert(row).returning('*'))[0];
 
-  test('fallback chain: linked property -> estimate address -> customer address; two properties get two distinct labels', async () => {
+  test('fallback chain: quoted address snapshot -> linked property (legacy, no snapshot) -> customer address', async () => {
     const { db, termPropertyLabelsForCustomer } = await load();
     const customer = await insert(db, 'customers', {
       address_line1: '1 Home St', city: 'Bradenton', state: 'FL', zip: '34202',
     });
+    // The linked property row was REWRITTEN after the customer moved
+    // (syncPrimaryAddress) — the estimate's quoted snapshot still names the
+    // property this plan covers, and it wins.
     const propA = await insert(db, 'customer_properties', {
-      customer_id: customer.id, address_line1: '12 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34202',
+      customer_id: customer.id, address_line1: '99 New Home Rd', city: 'Palmetto', state: 'FL', zip: '34221',
     });
     const propB = await insert(db, 'customer_properties', {
       customer_id: customer.id, address_line1: '400 Gulf Dr', address_line2: 'Unit 3', city: 'Holmes Beach', state: 'FL', zip: '34217',
     });
-    const estA = await insert(db, 'estimates', { customer_id: customer.id, property_id: propA.id, address: 'ignored snapshot A' });
-    const estB = await insert(db, 'estimates', { customer_id: customer.id, property_id: propB.id });
+    const estA = await insert(db, 'estimates', { customer_id: customer.id, property_id: propA.id, address: '12 Palm Ave, Bradenton, FL 34202' });
+    // Legacy estimate with no snapshot (blank): the linked property is used.
+    const estB = await insert(db, 'estimates', { customer_id: customer.id, property_id: propB.id, address: '   ' });
     const estNoProperty = await insert(db, 'estimates', { customer_id: customer.id, address: '77 Quoted Ln, Sarasota, FL 34236' });
     const estBare = await insert(db, 'estimates', { customer_id: customer.id });
     const termA = await insert(db, 'annual_prepay_terms', { customer_id: customer.id, source_estimate_id: estA.id });
@@ -92,9 +96,10 @@ describeOrSkip('termPropertyLabelsForCustomer — per-term, ownership-scoped pro
       db,
     );
 
-    // termTied: only the estimate's linked property or its quoted address
-    // identifies WHICH plan this is; the profile fallback does not (r7).
+    // termTied: only the estimate's quoted address or (legacy) its linked
+    // property identifies WHICH plan this is; the profile fallback does not.
     expect(labels.get(termA.id)).toEqual({ label: '12 Palm Ave, Bradenton, FL 34202', termTied: true });
+    expect([...labels.values()].some(({ label }) => label.includes('New Home'))).toBe(false);
     expect(labels.get(termB.id)).toEqual({ label: '400 Gulf Dr, Unit 3, Holmes Beach, FL 34217', termTied: true });
     expect(labels.get(termQuoted.id)).toEqual({ label: '77 Quoted Ln, Sarasota, FL 34236', termTied: true });
     expect(labels.get(termBare.id)).toEqual({ label: '1 Home St, Bradenton, FL 34202', termTied: false });

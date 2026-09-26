@@ -688,7 +688,7 @@ function renewalDateText(ymd) {
 
 function distinctTermLabels(rows, labels) {
   // Codex #4940 r7 P1: on a multi-term account only a TERM-TIED label (the
-  // estimate's linked property or its quoted address) can tell cards apart
+  // estimate's quoted address, or its linked property) can tell cards apart
   // — the customer's own profile address is the same fallback for every
   // term, so it counts as unresolved there (never "disambiguated" by date).
   // A single term may keep the profile fallback.
@@ -764,8 +764,9 @@ router.get('/termite-annual-plan', async (req, res, next) => {
     }
     if (!applicableRows.length) return notAvailable();
     // Pre-push audit P1: a multi-property account's cards were otherwise
-    // indistinguishable — each term names its property (source estimate's
-    // property -> estimate address -> the customer's own address), scoped
+    // indistinguishable — each term names its property (the estimate's
+    // quoted address snapshot -> its linked property for a legacy estimate
+    // with no snapshot -> the customer's own address), scoped
     // to req.customerId at every join. A single term is fail-soft (a lookup
     // failure only drops its label). Codex r2 P1: with SEVERAL terms a
     // lookup failure fails closed — 503, which the portal renders as its

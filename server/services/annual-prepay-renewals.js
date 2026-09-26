@@ -2764,9 +2764,12 @@ async function hasSuccessorTerm(termId, conn = db) {
 // the term itself, its source estimate (e.customer_id), and the estimate's
 // linked property (cp.customer_id) must all belong to that customer, so a
 // mislinked estimate/property can never leak another account's address.
-// Fallback chain per term: the source estimate's linked customer_properties
-// row (estimates.property_id) -> the estimate's free-text address snapshot
-// (estimates.address — what was quoted) -> the customer's own address.
+// Fallback chain per term: the estimate's quoted address SNAPSHOT
+// (estimates.address — authoritative for what was quoted, per the estimates
+// property-linkage migration; a linked customer_properties row is NOT, since
+// syncPrimaryAddress rewrites a primary property when the customer moves)
+// -> the linked customer_properties row, only for a legacy estimate with no
+// snapshot -> the customer's own address.
 // termTied is true only for the first two: the customer's own address says
 // nothing about WHICH of several plans this is (Codex #4940 r7), so a
 // multi-term caller must treat a profile-address label as unresolved.
@@ -2800,8 +2803,8 @@ async function termPropertyLabelsForCustomer(customerId, termIds, conn = db) {
     );
   for (const row of rows) {
     const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
-    const termLabel = formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip)
-      || estimateAddress;
+    const termLabel = estimateAddress
+      || formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip);
     const label = termLabel || formatStructuredAddress(row.c_line1, row.c_line2, row.c_city, row.c_state, row.c_zip);
     if (label) labels.set(row.term_id, { label, termTied: !!termLabel });
   }
