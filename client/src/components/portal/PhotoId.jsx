@@ -961,8 +961,8 @@ function NextStepBlock({ nextStep, onOpenRequestCta, onDone }) {
           fixed template text — this is a routing note, never a request. */}
       {kind === 'referral' && (
         <button type="button" onClick={onDone} style={{
-          minHeight: 44, borderRadius: 8, border: `1px solid ${SHELL.borderStrong}`, background: SHELL.surface,
-          color: SHELL.text, cursor: 'pointer', fontSize: 15, fontWeight: 700, fontFamily: FONTS.body,
+          minHeight: 48, borderRadius: 8, border: `1px solid ${SHELL.borderStrong}`, background: SHELL.surface,
+          color: SHELL.text, cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
         }}>
           Done
         </button>
@@ -1133,7 +1133,7 @@ function NextPhotoCard({ nextPhoto, onRetakePhoto }) {
         {canConfirm ? 'A photo that would help confirm it' : "A photo can't confirm this one"}
       </div>
       {nextPhoto.ask && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{nextPhoto.ask}</div>}
-      {nextPhoto.why && <div style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.45 }}>{nextPhoto.why}</div>}
+      {nextPhoto.why && <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.45 }}>{nextPhoto.why}</div>}
       {canConfirm && (
         <button type="button" data-glass-accent="" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
           minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
@@ -1167,7 +1167,7 @@ function CandidatesSection({ candidates }) {
               {c.local === 'uncommon_here' && <Chip>Uncommon here</Chip>}
             </div>
             {c.difference_from_top && (
-              <div style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.4 }}>{c.difference_from_top}</div>
+              <div style={{ fontSize: 16, color: SHELL.muted, lineHeight: 1.4 }}>{c.difference_from_top}</div>
             )}
           </div>
         ))}
@@ -1190,7 +1190,7 @@ function AboutEntrySection({ entry }) {
   return (
     <div>
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} style={{
-        width: '100%', minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        width: '100%', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '6px 0', border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: FONTS.body,
       }}>
         <span style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>About {entry.common_name}</span>
