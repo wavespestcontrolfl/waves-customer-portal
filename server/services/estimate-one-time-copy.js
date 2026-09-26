@@ -188,6 +188,17 @@ function bedBugMethod(item = {}) {
 //   { key, outcome, includes: [...], assurance|null, terms }
 // `includes` carries the assurance as its last bullet when present, so the
 // renderers list it exactly like the recurring card's guarantee bullet.
+// Rodent trapping rows priced before the 2-visit rule (owner ruling
+// 2026-09-26) carry unlimitedCallbacks:true / includedFollowUps:'unlimited',
+// or predate those fields; those jobs are grandfathered, so their saved
+// estimate keeps the open-ended trap-check wording. Only a row that states
+// a numeric allowance gets the setup + 1 check copy.
+function isLegacyUnlimitedTrapping(item = {}) {
+  if (item.unlimitedCallbacks === true) return true;
+  const allowance = item.includedFollowUps ?? item.includedCallbacks;
+  return !(allowance !== '' && allowance != null && Number.isFinite(Number(allowance)));
+}
+
 function resolveOneTimeServiceCopy(item = {}) {
   const key = oneTimeCopyKeyFor(item);
   if (!key) return null;
@@ -296,6 +307,10 @@ function resolveOneTimeServiceCopy(item = {}) {
           : entry.woodBulletNeutral;
     lines = lines.map((line) => (line === entry.woodBullet ? bullet : line));
   }
+  if (key === 'rodent_trapping' && isLegacyUnlimitedTrapping(item)) {
+    outcome = entry.outcomeLegacy || outcome;
+    lines = lines.map((line) => (line === entry.checksBullet ? entry.checksBulletLegacy : line));
+  }
   // Rodent inspection: the fee credit carries the row's configured window
   // (creditableWithinDays); no window on the row ⇒ no credit promise.
   if (key === 'rodent_inspection') {
@@ -361,7 +376,10 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
           : 'treatment area';
     heroSub = heroSub.replace('{Areas}', areas);
   }
-  const aiBody = stingingV2 ? (entry.aiBodyV2 || entry.aiBody) : entry.aiBody;
+  const legacyTrapping = key === 'rodent_trapping' && rows.some(isLegacyUnlimitedTrapping);
+  if (legacyTrapping) heroSub = entry.hero.subLegacy || heroSub;
+  const aiBody = stingingV2 ? (entry.aiBodyV2 || entry.aiBody)
+    : legacyTrapping ? (entry.aiBodyLegacy || entry.aiBody) : entry.aiBody;
   return {
     key,
     hero: {

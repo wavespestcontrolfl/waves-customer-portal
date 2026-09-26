@@ -293,4 +293,15 @@ describe('rodent trap check allowance', () => {
     const status = await trappingJobStatus(fakeDb([]), 'c', { premiseMatcher: everyPremise, today: '2026-10-12' });
     expect(status).toMatchObject({ hasJob: false, visitCount: 0, nextVisitBillable: false });
   });
+
+  test('saved grandfathered estimates keep the open-ended trap-check copy', () => {
+    const copy = require('../services/estimate-one-time-copy');
+    const legacy = { service: 'rodent_trapping', price: 350, unlimitedCallbacks: true, includedFollowUps: 'unlimited' };
+    const current = { service: 'rodent_trapping', price: 350, unlimitedCallbacks: false, includedFollowUps: 1 };
+    expect(copy.resolveOneTimeServiceCopy(legacy).includes.join(' ')).not.toMatch(/1 trap-check|billed separately/);
+    expect(copy.resolveOneTimeServiceCopy(current).includes.join(' ')).toMatch(/1 trap-check visit/);
+    expect(copy.oneTimeOnlyIntelligenceCopy([legacy]).aiBody).not.toMatch(/one trap check/);
+    expect(copy.oneTimeOnlyIntelligenceCopy([current]).aiBody).toMatch(/one trap check/);
+    expect(copy.oneTimeOnlyIntelligenceCopy([legacy]).hero.sub).toMatch(/until the activity stops/);
+  });
 });
