@@ -597,20 +597,19 @@ describe('codex #4919 round-7 P1 — the early elapsed-slot check is generalized
     expect(section).not.toContain('wdoArrangerAuthorizedThisPass');
   });
 
-  test('shadow/legacy mode files its own card for this skip — same lock + merge + dispute-field-clearing shape as start_before_call\'s shadow card', () => {
+  // codex #4919 round-9 P2: this used to carry its own inline lock + merge +
+  // dispute-field-clearing writer (byte-for-byte identical to
+  // start_before_call's own copy); both now delegate to the shared
+  // module-level fileSkippedBookingCard helper (its own lock/merge/
+  // dispute-clearing/bridgeNeedsConfirmation-push shape is pinned once, in
+  // call-recording-processor-guards.test.js's fileSkippedBookingCard suite,
+  // not duplicated here).
+  test('shadow/legacy mode delegates to the shared fileSkippedBookingCard helper for this skip — same as start_before_call', () => {
     const gateAt = source.indexOf('if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {', checkAt);
     expect(gateAt).toBeGreaterThan(checkAt);
-    const catchAt = source.indexOf('slot-elapsed-at-booking-time triage insert failed', gateAt);
-    expect(catchAt).toBeGreaterThan(gateAt);
-    const section = source.slice(gateAt, catchAt);
-    expect(section).toContain('await lockTriageCall(ttrx, call.id);');
-    expect(section).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id')");
-    expect(section).toContain("flag: 'auto_booking_skipped_after_approval'");
-    expect(section).toContain("skipped_reason: 'slot_elapsed_at_booking_time'");
-    expect(section).toContain('dispute_customer_id: customerId ? String(customerId) : null');
-    expect(section).toContain('retained_service_id: null');
-    expect(section).toContain('retained_scheduled_date: null');
-    expect(section).toContain("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload");
+    const section = source.slice(gateAt, gateAt + 400);
+    expect(section).toContain('await fileSkippedBookingCard({');
+    expect(section).toContain("skippedReason: 'slot_elapsed_at_booking_time',");
     expect(section).not.toContain('.ignore()');
   });
 

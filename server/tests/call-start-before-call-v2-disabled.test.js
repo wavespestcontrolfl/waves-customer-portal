@@ -38,7 +38,11 @@ describe('start_before_call card files even when DRIVES_ROUTING is true but V2_E
     expect(nextStatementAt).toBeGreaterThan(branchGateAt);
     const branchSection = processorSource.slice(branchGateAt, nextStatementAt);
     expect(branchSection).not.toContain('if (!CALL_EXTRACTION_V2_DRIVES_ROUTING)');
-    expect(branchSection).toContain("skipped_reason: 'start_before_call'");
+    // codex #4919 round-9 P2: the inline writer was consolidated into the
+    // shared fileSkippedBookingCard helper — this branch now DELEGATES the
+    // skip reason rather than embedding the persisted field name directly.
+    expect(branchSection).toContain('await fileSkippedBookingCard({');
+    expect(branchSection).toContain("skippedReason: 'start_before_call',");
   });
 
   test('the writer that sets v2ApprovedExtraction is gated on the SAME effective-enforce expression — confirming the enforce-mode fallback really is unreachable in this combination', () => {
