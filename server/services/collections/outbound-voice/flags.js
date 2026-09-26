@@ -44,7 +44,7 @@ async function fileFlagCard({ customerId, flag, detail }) {
       'billing',
       `Billing follow-up call: ${flag.replace(/_/g, ' ')}`,
       detail,
-      { link: `/admin/customers/${customerId}`, metadata: { customerId, flag, source: 'collections_voice' } },
+      { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, flag, source: 'collections_voice' } },
     );
     // notifyAdmin resolves null on a failed insert (gh prb-r4) — a card
     // that never persisted is not filed.

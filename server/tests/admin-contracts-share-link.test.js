@@ -75,6 +75,17 @@ describe('createShareLink — the Contracts page mint (unchanged)', () => {
     expect(events()).toEqual([{ type: 'share_link_created', meta: { expiresAt: w.payload.share_token_expires_at.toISOString() } }]);
   });
 
+  test('locks the CUSTOMER row before the contract (the order /:id/cancel, /:token/sign and the termite close-out hold)', async () => {
+    mockRows = { customer_contracts: { ...base, status: 'sent' } };
+    const db = require('../models/db');
+    const before = db.mock.results.length;
+    await createShareLink('k1', req);
+    const locked = db.mock.results.slice(before)
+      .filter((x) => x.value.forUpdate && x.value.forUpdate.mock.calls.length > 0)
+      .map((x) => x.value.table);
+    expect(locked.slice(0, 2)).toEqual(['customers', 'customer_contracts']);
+  });
+
   test('terminal contracts refuse before any write', async () => {
     mockRows = { customer_contracts: { ...base, status: 'signed' } };
     expect((await createShareLink('k1', req)).error.status).toBe(400);
@@ -88,7 +99,9 @@ describe('activatePreparedShareLinks (the /sms send, before the provider call)',
     const r = await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }], req);
     expect(r.ok).toBe(true);
     const db = require('../models/db');
-    expect(db.mock.results.find((x) => x.value.table === 'customer_contracts').value.forUpdate).toHaveBeenCalled();
+    // Any customer_contracts builder took the row lock (the unlocked peek
+    // that precedes it — customer-first lock order — never does).
+    expect(db.mock.results.some((x) => x.value.table === 'customer_contracts' && x.value.forUpdate.mock.calls.length > 0)).toBe(true);
     const [w] = updates('customer_contracts');
     expect(w.filters).toContainEqual({ id: 'k1' });
     expect(w.payload).toEqual({ status: 'sent', share_token_hash: HASH, share_token_expires_at: expect.any(Date), shared_at: expect.any(Date), updated_at: expect.any(Date) });

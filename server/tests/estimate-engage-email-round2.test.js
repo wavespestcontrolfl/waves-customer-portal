@@ -102,12 +102,14 @@ describe('round-2 render QA', () => {
   beforeEach(() => jest.clearAllMocks());
 
   for (const key of ['estimate.engage_return_visit', 'estimate.engage_high_intent', 'estimate.engage_expiring']) {
-    test(`${key} renders the pest report tour (newly added)`, () => {
+    test(`${key} drops the retired pest report tour cleanly`, () => {
+      // Report tours retired from emails 2026-09-26 (they state the removed
+      // 90-day money-back claim on camera).
       const rendered = renderWith(byKey.get(key), 'pest');
       expect(rendered.validation.ok).toBe(true);
       expect(rendered.missingPayload).toEqual([]);
       expect(rendered.html).not.toMatch(/\{\{|\}\}/);
-      expect(rendered.html).toContain('/app-email/videos/waves-pest-tour-preview.gif');
+      expect(rendered.html).not.toContain('/app-email/videos/waves-pest-tour-preview.gif');
       expect(rendered.html).not.toContain('why-waves-van');
     });
   }

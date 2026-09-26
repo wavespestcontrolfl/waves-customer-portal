@@ -41,7 +41,7 @@ const routeTiers = require('../services/auto-dispatch/route-tiers');
 const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
 const {
   runRouteReorder, runRouteRepairAfterChange, runRouteReorderIfEnabled, recordSkippedTick,
-  runScheduleQualityAlertsOnly,
+  runScheduleQualityAlertsOnly, writeTechDayOrder, classifyWriteError,
 } = require('../services/route-reorder');
 
 // Fixed clock: 2026-08-13 04:10 ET (08:10Z). Band = 2026-08-14 .. 2026-08-19.
@@ -1015,4 +1015,32 @@ test('commit-time revalidation: a CUSTOMER address change mid-run rolls back', a
   expect(trxUpdates).toEqual([]);
   const ledger = JSON.parse(ledgerInserts[0].result);
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+// ── writeTechDayOrder / classifyWriteError, exported so a caller with no
+// route_order writer of its own (route-order-cleanup.js's --rollback) can
+// hand it an ordinary write instead of re-implementing any of its guards. ──
+describe('writeTechDayOrder (exported for reuse by route-order-cleanup.js --rollback)', () => {
+  test('refuses a tech-day with a staff-locked stop at the FRESH commit-time re-read — a no-op for runRouteReorder itself, which already filters these out before ever calling this writer', async () => {
+    const dateStr = '2026-08-18';
+    const techStops = [stop('a', { route_order: 1 })];
+    liveRowsOverride = [{ ...techStops[0], auto_dispatch_locked: true }];
+    const err = await writeTechDayOrder(db, {
+      dateStr, techId: 't1', techStops, finalOrdered: techStops, repair: null, opts: {}, now: NOW, repairGates: [],
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe('LOCKED_STOP');
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('classifyWriteError reports LOCKED_STOP as a quiet skip, never a run-degrading failure', () => {
+    const summary = { skipped: [], failed: [] };
+    const degrades = classifyWriteError(
+      Object.assign(new Error('a stop on this tech-day is staff-locked'), { code: 'LOCKED_STOP' }),
+      { summary, entryBase: { date: '2026-08-18', technician_id: 't1' } },
+    );
+    expect(degrades).toBe(false);
+    expect(summary.skipped).toEqual([{ date: '2026-08-18', technician_id: 't1', reason: 'LOCKED_STOP', detail: 'a stop on this tech-day is staff-locked' }]);
+    expect(summary.failed).toEqual([]);
+  });
 });

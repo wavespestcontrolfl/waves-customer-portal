@@ -565,3 +565,199 @@ test('pins confirmation in the deferred placement write and rechecks each locked
   }
   expect(trx).not.toHaveBeenCalled();
 });
+
+// GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
+// backlog item 3): a SLOT_TAKEN refusal falls back to the next-best
+// still-scored candidate, bounded, each re-checked the same way as the first.
+describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
+  const CONFIRMED_ROW = { scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false };
+  const slotTakenErr = () => Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN' });
+  const ORIGINAL_GATE = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+  afterEach(() => {
+    if (ORIGINAL_GATE === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = ORIGINAL_GATE;
+  });
+
+  test('gate on: SLOT_TAKEN on the first candidate falls back to the next-best still-valid one', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    const update = jest.fn().mockResolvedValue(1);
+    const queue = [readRow(CONFIRMED_ROW), readRow(CONFIRMED_ROW), { where() { return this; }, update }];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] });
+
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(2);
+    expect(SmartRebooker.reschedule.mock.calls[0].slice(1, 3)).toEqual([BEST.date, { start: BEST.start_time, end: BEST.end_time }]);
+    expect(SmartRebooker.reschedule.mock.calls[1].slice(1, 3)).toEqual([ALT.date, { start: ALT.start_time, end: ALT.end_time }]);
+    expect(res).toMatchObject({ ok: true });
+    // The caller (the orchestrator) needs to know WHICH candidate landed and
+    // how many attempts it took, so its audit can describe the actual move
+    // rather than the first one tried (Codex pre-push P1).
+    expect(res.applied).toBe(ALT);
+    expect(res.attempts).toBe(2);
+  });
+
+  test('gate on: the FIRST candidate succeeding reports applied=best and attempts=1', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockResolvedValueOnce({ success: true });
+    const update = jest.fn().mockResolvedValue(1);
+    const queue = [readRow(CONFIRMED_ROW), { where() { return this; }, update }];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] });
+
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(res.applied).toBe(BEST);
+    expect(res.attempts).toBe(1);
+  });
+
+  test('gate on: a non-SLOT_TAKEN failure never falls back, even with alternates available', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockRejectedValueOnce(Object.assign(new Error('capability'), { code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }));
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] }))
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off: a SLOT_TAKEN refusal is NOT retried even when alternateCandidates are supplied (byte-identical to before this lane)', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr());
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] }))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on: bounded at 3 total attempts — a 4th candidate is never tried', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT1 = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    const ALT2 = { date: '2026-08-13', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    const ALT3 = { date: '2026-08-14', start_time: '09:00', end_time: '11:00', technician_id: 't1' }; // beyond the cap
+    SmartRebooker.reschedule
+      .mockRejectedValueOnce(slotTakenErr())
+      .mockRejectedValueOnce(slotTakenErr())
+      .mockRejectedValueOnce(slotTakenErr());
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT1, ALT2, ALT3] }))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(3); // BEST + ALT1 + ALT2 only
+    expect(SmartRebooker.reschedule.mock.calls.map((c) => c[1])).toEqual([BEST.date, ALT1.date, ALT2.date]);
+  });
+
+  // Codex r1: after a SLOT_TAKEN the remaining alternates are re-evaluated
+  // against the now-current schedule before the next attempt.
+  test('gate on: after a SLOT_TAKEN the next attempt comes from the re-evaluation, not the stale alternates', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const STALE = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    const FRESH = { date: '2026-08-13', start_time: '10:00', end_time: '12:00', technician_id: 't1' };
+    const rescore = jest.fn().mockResolvedValue({ kind: 'move', rankedCandidates: [{ ...BEST }, FRESH] });
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    const update = jest.fn().mockResolvedValue(1);
+    const queue = [readRow(CONFIRMED_ROW), readRow(CONFIRMED_ROW), { where() { return this; }, update }];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [STALE], rescore });
+
+    expect(rescore).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.reschedule.mock.calls.map((c) => c[1])).toEqual([BEST.date, FRESH.date]); // BEST's twin is not retried
+    expect(res.applied).toBe(FRESH);
+    expect(res.attempts).toBe(2);
+  });
+
+  test('gate on: a retry reports the re-evaluation that authorized it — on success and on failure', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const FRESH = { date: '2026-08-13', start_time: '10:00', end_time: '12:00', technician_id: 't1' };
+    const refreshed = { kind: 'move', rankedCandidates: [FRESH], currentScore: { total_score: 40 } };
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockRejectedValueOnce(slotTakenErr());
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore: jest.fn().mockResolvedValue(refreshed) }))
+      .rejects.toMatchObject({ lastAttempted: FRESH, attemptsTried: 2, lastEvaluation: refreshed });
+
+    SmartRebooker.reschedule.mockReset();
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr());
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore: jest.fn().mockResolvedValue({ kind: 'no_change' }) }))
+      .rejects.toMatchObject({ lastAttempted: BEST, lastEvaluation: null }); // the caller's own evaluation authorized BEST
+
+    SmartRebooker.reschedule.mockReset();
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    const update = jest.fn().mockResolvedValue(1);
+    const queue = [readRow(CONFIRMED_ROW), readRow(CONFIRMED_ROW), { where() { return this; }, update }];
+    db.mockImplementation(() => queue.shift());
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore: jest.fn().mockResolvedValue(refreshed) });
+    expect(res.applied).toBe(FRESH);
+    expect(res.evaluation).toBe(refreshed);
+  });
+
+  test('gate on: a re-evaluation that no longer qualifies ends the retries; the error names the candidate tried last', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const STALE = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    const rescore = jest.fn().mockResolvedValue({ kind: 'no_change', reason_code: 'NO_SCORE_IMPROVEMENT' });
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr());
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [STALE], rescore }))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN', lastAttempted: BEST, attemptsTried: 1 });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on: when every attempt fails, the error carries the LAST attempted candidate and the attempt count', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockRejectedValueOnce(slotTakenErr());
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] }))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN', lastAttempted: ALT, attemptsTried: 2 });
+  });
+
+  test('gate off: the refusal propagates untouched (no lastAttempted / attemptsTried, no re-evaluation)', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    const rescore = jest.fn();
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr());
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+    const err = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore }).catch((e) => e);
+    expect(err.code).toBe('SLOT_TAKEN');
+    expect(err).not.toHaveProperty('lastAttempted');
+    expect(err).not.toHaveProperty('attemptsTried');
+    expect(rescore).not.toHaveBeenCalled();
+  });
+
+  // Codex pre-push P1 (staff control): the stale-recommendation guard runs
+  // before EVERY attempt, not once before the retry sequence.
+  test('gate on: the guard re-reads the row before every attempt', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    let reads = 0;
+    const update = jest.fn().mockResolvedValue(1);
+    const guardRead = () => ({ where() { reads += 1; return this; }, first: async () => CONFIRMED_ROW });
+    const queue = [guardRead(), guardRead(), { where() { return this; }, update }];
+    db.mockImplementation(() => queue.shift());
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] });
+    expect(reads).toBe(2); // one revalidatePlacement read per attempt
+  });
+
+  test('gate on: a visit LOCKED between attempt 1 (SLOT_TAKEN) and attempt 2 is not moved — the same STALE_PLACEMENT refusal as a first-attempt lock', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr());
+    const queue = [readRow(CONFIRMED_ROW), readRow({ ...CONFIRMED_ROW, auto_dispatch_locked: true })];
+    db.mockImplementation(() => queue.shift());
+
+    const err = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] }).catch((e) => e);
+
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1); // the fallback never ran
+    expect(err).toMatchObject({ code: 'STALE_PLACEMENT', message: 'Visit was locked/excluded from auto-dispatch after scoring' });
+    expect(err).not.toHaveProperty('lastAttempted'); // exactly the first-attempt guard's error
+    // The first-attempt guard produces the identical error.
+    db.mockImplementation(() => readRow({ ...CONFIRMED_ROW, auto_dispatch_locked: true }));
+    const first = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] }).catch((e) => e);
+    expect({ code: first.code, message: first.message }).toEqual({ code: err.code, message: err.message });
+  });
+
+});

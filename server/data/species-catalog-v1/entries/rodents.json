@@ -1,0 +1,320 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Rodents can carry disease and chew wiring. See a doctor if you have a bite or scratch, or contact with droppings and feel unwell.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: ENY-224 \"Rat and Mouse Control\" (Koehler & Kern, UF/IFAS) is back up at the FLVC/EDIS journal host (the ask.ifas.ufl.edu short URL still 404s, but the article record loads directly). It confirms: roof rats nest in attics/roof spaces/palm trees/shrubbery, are climbers, gnaw citrus fruit and are destructive to citrus groves, gnaw electrical wires/rafters in attics, and have a tail longer than the combined head and body, and that rats travel wires, pipes and rough walls using their sense of balance. Source URL added; ENY-224 re-verification note is resolved."
+    },
+    "slug": "roof-rat",
+    "common_name": "Roof Rat",
+    "aliases": [
+      "roof rat",
+      "roof rats",
+      "citrus rat",
+      "black rat"
+    ],
+    "scientific_name": "Rattus rattus",
+    "rank": "species",
+    "group": "rodents",
+    "subgroup": "rats",
+    "site_category": "Rodents",
+    "traits": [
+      "Nighttime scurrying in the attic or ceiling void",
+      "Sleek, dark gray-brown, tail longer than the body",
+      "Travels power lines, fences, and palm fronds like a tightrope",
+      "Hollowed-out citrus still on the tree"
+    ],
+    "look_alikes": [
+      {
+        "slug": "norway-rat",
+        "difference": "Roof rats are found up high (attic, roofline, trees) with a tail longer than the body; Norway rats burrow at ground level and have a shorter, thicker tail.",
+        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (attic vs. ground).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "attic-walls",
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "rodent",
+      "key": null,
+      "label": "Rodent Inspection & Exclusion",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Florida's aerialist — it runs fences and branches like a tightrope walker and enters at roofline, not floor level. Attic noise plus chewed wires is worth an inspection; sealing entry points (exclusion) is the standard approach once the entries are found.",
+      "fact": "It runs fences and branches like a tightrope walker and enters buildings at roofline, not floor level.",
+      "blurb": "Attic noise + chewed wires is worth an inspection. Exclusion (sealing entry points) is the standard approach, done after the entries are located."
+    },
+    "tech_notes": "Confirm tail-longer-than-body + roofline entry signs. Full exclusion walk (roof returns, AC chase, garage corners); quote trapping + exclusion after inspection.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1397",
+      "https://journals.flvc.org/edis/article/download/136514/141097/263288"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/roof-rat/",
+      "guides": []
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Rodents can carry disease and chew wiring. See a doctor if you have a bite or scratch, or contact with droppings and feel unwell.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms Norway rats are burrowers that dig under buildings/concrete slabs and along walls/rubbish (foundation-level activity). Its tail-length phrasing for Norway rats (\"about as long as the combined head and body\") is ambiguous next to the entry's \"tail shorter than the body,\" so also checked icwdm.org (Internet Center for Wildlife Damage Management, University of Nebraska-Lincoln Extension), which states the Norway rat's tail \"does not reach the tip of the nose\" -- i.e., shorter than head+body -- and confirms ground-level burrowing near walls/buildings. Entry traits left as written; both URLs added to sources."
+    },
+    "slug": "norway-rat",
+    "common_name": "Norway Rat",
+    "aliases": [
+      "norway rat",
+      "norway rats",
+      "sewer rat",
+      "brown rat"
+    ],
+    "scientific_name": "Rattus norvegicus",
+    "rank": "species",
+    "group": "rodents",
+    "subgroup": "rats",
+    "site_category": "Rodents",
+    "traits": [
+      "Burrows along foundations and under slabs",
+      "Heavier build than a roof rat, tail shorter than the body",
+      "Greasy rub marks along baseboards and pipes",
+      "Ground-floor and burrow specialist, rarely climbs high"
+    ],
+    "look_alikes": [
+      {
+        "slug": "roof-rat",
+        "difference": "Norway rats burrow at ground level with a tail shorter than the body; roof rats are found up high with a tail longer than the body.",
+        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (ground vs. attic).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "garage-storage",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "rodent",
+      "key": null,
+      "label": "Rodent Inspection & Exclusion",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Where roof rats take the high road, Norway rats dig in at the foundation. A burrow plus droppings suggests an established population; an inspection confirms the extent, then trapping paired with sealing entry points, in that order.",
+      "fact": "Ground-floor specialist — where roof rats take the high road, Norway rats dig in at the foundation.",
+      "blurb": "Burrow + droppings suggest an established population. An inspection confirms it, then trapping plus entry sealing, in that order."
+    },
+    "tech_notes": "Confirm burrow entrances + tail-shorter-than-body. Ground-level exclusion focus (foundation gaps, slab penetrations); quote trapping + exclusion after inspection.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1397",
+      "https://journals.flvc.org/edis/article/download/136514/141097/263288",
+      "https://icwdm.org/species/rodents/norway-rats/"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/norway-rat/",
+      "guides": []
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Rodents can carry disease. See a doctor if you have a bite or scratch, or contact with droppings and feel unwell.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms house mice nibble at a wide variety of food sources (consistent with the \"20-30 food sites a night\" copy) and states mice can squeeze through a 1/4-inch crack (\"any place a pencil can be poked, a mouse can go\"), and gives dropping length as 1/8 inch (rice-grain sized, matching the entry). A 1/4-inch gap is narrower than a dime's diameter (~0.7 in), so the entry's \"gap the width of a dime\" is a true but more conservative comparison than the source's precise figure; left as written since it is not contradicted. Source URL added."
+    },
+    "slug": "house-mouse",
+    "common_name": "House Mouse",
+    "aliases": [
+      "house mouse",
+      "house mice",
+      "mouse",
+      "mice"
+    ],
+    "scientific_name": "Mus musculus",
+    "rank": "species",
+    "group": "rodents",
+    "subgroup": "mice",
+    "site_category": "Rodents",
+    "traits": [
+      "Rice-grain-sized droppings in drawers and under sinks",
+      "Gnawed corners on food packaging",
+      "Fits through a gap the width of a dime",
+      "Grayish-brown, much smaller than either rat species"
+    ],
+    "look_alikes": [
+      {
+        "slug": "norway-rat",
+        "difference": "House mice are much smaller with rice-grain droppings; Norway rats are large with thick, capsule-shaped droppings and a burrow at ground level.",
+        "next_photo": "A close-up of the droppings next to a coin for size.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "kitchen",
+      "garage-storage",
+      "attic-walls"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "rodent",
+      "key": null,
+      "label": "Rodent Inspection & Exclusion",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A mouse nibbles at 20-30 food sites a night rather than eating one big meal, which is why droppings show up in many places at once. One mouse is rarely just one — sealing dime-sized gaps helps keep the next one from using the same door.",
+      "fact": "A mouse nibbles at 20-30 food sites a night rather than one big meal, which is why droppings show up everywhere at once.",
+      "blurb": "One mouse is rarely one mouse. Sealing dime-sized gaps helps keep the next one from using the same door."
+    },
+    "tech_notes": "Confirm rice-grain dropping size vs. rat. Full exclusion walk for dime-sized gaps; quote trapping + exclusion after inspection.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1397",
+      "https://journals.flvc.org/edis/article/download/136514/141097/263288"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/house-mouse/",
+      "guides": []
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]

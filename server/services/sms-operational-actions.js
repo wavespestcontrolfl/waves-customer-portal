@@ -15,11 +15,11 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
 const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
-const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
+const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode, statesClock } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -93,6 +93,113 @@ const TEMPORARY_INSTRUCTION = new RegExp([
   String.raw`\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b`,
   String.raw`\b\d{4}-\d{2}-\d{2}\b`,
 ].join('|'), 'i');
+
+// Codex #4816 r20: relative or calendar timing the customer stated ("call me
+// tomorrow", "this afternoon", "Friday", "mid Oct", "in 2 days") is still
+// stated timing when the extractor leaves due_text empty; it must not be
+// replaced by a per-kind default that could ring before that period.
+// One unit vocabulary for every relative-offset form, so no form carries a
+// shorter unit list than another (Codex #4816 r25/r33): OFFSET_UNIT after
+// "in / within / give me …", SPAN_UNIT after "next / coming / following /
+// over the next". "this year" stays out: "ants all this year" is usually
+// the past, and a false match would drop a real follow-up's bell.
+const OFFSET_UNIT = String.raw`(?:secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|wks?|months?|mos?|years?|yrs?)`;
+const SPAN_UNIT = String.raw`(?:days?|weeks?|months?|years?)`;
+// What the customer asks ABOUT is the topic, not the deadline: "call me
+// about my next visit", "about this month's invoice", "regarding Friday's
+// service" (Codex #4816 r37–r39 kept finding one topical form per round).
+// The clause after about/regarding/concerning, up to the next punctuation,
+// is dropped before the timing test; "in/within/after/give me about 2
+// hours" is an offset, not a topic, and stays. "from" names the source
+// of an artifact ("the report from this morning", Codex #4816 r41). Erring
+// toward the default deadline is the safe side: a missed bell is the worse
+// failure.
+// The clause always takes its first word ("about tomorrow's visit", "about
+// my next visit"), then stops before a word that starts a trailing deadline
+// ("about my invoice tomorrow", "... on Friday", "... by 5", "... next
+// week"), so that timing is still tested (Codex #4816 r40).
+const TRAILING_TIMING_START = String.raw`(?:today|tomorrow|tmrw|tonight|asap|eod|eow|by|before|after|on|until|till|at|in|within|later|end`
+  + String.raw`|(?:mon|tues|wednes|thurs|fri|satur|sun)day|this (?:morning|afternoon|evening|week(?:end)?)|next (?:week(?:end)?|month|year))\b`;
+
+// A possessive period names the topic, not the deadline: "about this
+// month's invoice", "tomorrow's appointment", "Friday's visit" (Codex #4816
+// r38). NOT_POSSESSIVE follows each bare period form.
+const NOT_POSSESSIVE = String.raw`(?!['’]s\b)`;
+const STATED_TIMING = new RegExp([
+  String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month|year)|later (?:today|this week)|end of (?:the )?(?:day|week|month|year)|eod|eow)\b${NOT_POSSESSIVE}`,
+  // Day parts after a timing preposition ("call me in the morning", "after
+  // work"), or plural as a standing preference ("evenings are best"). A bare
+  // "good morning" is a greeting, not timing (Codex #4816 r24).
+  String.raw`\b(?:in the|during the|by|before|after|around|until|till|early|late) (?:morning|afternoon|evening|night)\b`,
+  String.raw`\b(?:mornings|afternoons|evenings|nights)\b`,
+  // The period forms TEMPORARY_INSTRUCTION already knows (Codex #4816 r27).
+  String.raw`\bover the (?:weekend|summer|winter|holidays?|next (?:${COUNT} )?${SPAN_UNIT})\b`,
+  String.raw`\b(?:through|thru) the (?:weekend|week|month)\b`,
+  String.raw`\b(?:next|coming|following) (?:${COUNT} )?${SPAN_UNIT}\b${NOT_POSSESSIVE}|\bnext time\b`,
+  // A next visit is timing only when a timing preposition introduces it
+  // ("at the next visit", "before my next appointment"); "call to discuss
+  // the next appointment" names the topic (Codex #4816 r42).
+  String.raw`\b(?:at|on|during|before|after|by|until|till|for)(?: (?:the|my|our|your))? next (?:visit|appointment|service)\b`,
+  String.raw`\b(?:after|before) (?:work|school|lunch|dinner|noon)\b|\b(?:at )?lunch ?time\b`,
+  String.raw`\b${WEEKDAY}${NOT_POSSESSIVE}`,
+  // Undotted abbreviations ("call me Fri"). Wed/sat/sun double as ordinary
+  // words, so they count only after a day preposition (Codex #4816 r21).
+  String.raw`\b(?:mon|tue|tues|thu|thur|thurs|fri)\b`,
+  String.raw`\b(?:on|by|next|this|til|till|until|before|after) (?:wed|sat|sun)\b`,
+  // Any relative offset introduced as one, every unit and its abbreviations
+  // ("in 30 min", "within 2 hrs", "in half an hour", "give me 20 mins"), and
+  // "in a bit" / "in a few" — Codex #4816 r25 closes the family rather than
+  // one unit at a time. Bare "later", "shortly" or "2 hours" are left out:
+  // an undated row never bells, so a false match would drop a real
+  // follow-up, while a vague "later" only makes the default bell early.
+  // "about"/"like"/"around" only qualify an introducer ("in about 2 hours"):
+  // standing alone they describe a topic or history ("about 2 years of
+  // invoices", "here like 2 hours"), not callback timing (Codex #4816 r37).
+  String.raw`\b(?:in|within|after|give me)(?: (?:about|like|around|roughly|maybe))? (?:(?:${COUNT}|half an?|an?(?: half)?|\d+(?:\.\d+)?)\s*(?:-|to|or)?\s*(?:\d+\s*)?)${OFFSET_UNIT}\b`,
+  String.raw`\b(?:in|after) (?:a (?:bit|few|while|sec|second|minute|moment)|a little (?:bit|while)|a few)\b`,
+  String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month|year)\b)`,
+  String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
+  String.raw`\b(?:${ORDINAL_DAY}|\d{1,2}) (?:of )?${MONTH}\b`,
+  // The calendar-date forms match TEMPORARY_INSTRUCTION's, ISO included
+  // (Codex #4816 r23).
+  String.raw`\b(?:on|by|until|till|before|after|around|starting) the ${ORDINAL_DAY}\b`,
+  String.raw`\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b`,
+  String.raw`\b\d{4}-\d{2}-\d{2}\b`,
+].join('|'), 'i');
+
+// Stops before any word where STATED_TIMING itself matches, so every date
+// form it knows ("10/14", "Oct 14", "the 15th", weekdays) survives, plus the
+// preposition starts above (Codex #4816 r43).
+// "from" names a source ("the report from this morning", r41) unless an
+// open-ended marker makes it a start date ("call me from Friday onward",
+// "from tomorrow on", r44): then the clause is left for the timing test.
+// The other introducers always take their first word ("about tomorrow's
+// visit").
+const TOPIC_STOP = String.raw`(?!${TRAILING_TIMING_START}|${STATED_TIMING.source})`;
+// The marker must directly follow the start expression (at most three
+// words in): "the service that happened on Friday" is a source (r46).
+const RECORD_NOUN = String.raw`(?:reports?|photos?|pictures?|pics|videos?|images?|invoices?|statements?|bills?|receipts?|records?|notes|results|readings|logs?|data|charges|paperwork|documents?)`;
+const FROM_START_DATE = String.raw`(?!(?:[^\s,.;!?]+\s+){1,3}(?:on|onwards?|forward|until|till|through|thru)\b)`;
+const TOPIC_CLAUSE = new RegExp(
+  // After a record noun, "from" names what the record covers, a range's
+  // end date included ("the report from Friday through Sunday", Codex #4816
+  // r48); it still stops before a trailing deadline ("the report from last
+  // week tomorrow", r50).
+  String.raw`(?<=\b${RECORD_NOUN}\s)from\s+[^\s,.;!?]+`
+  + String.raw`(?:\s+(?:(?:that|which|who|where)\s[^,.;!?]*|(?:through|thru|until|till|to)\s+[^\s,.;!?]+|${TOPIC_STOP}[^\s,.;!?]+))*`
+  + String.raw`|(?<!\b(?:in|within|after|give me) )\b`
+  + String.raw`(?:(?:about|regarding|concerning|re:|in regards? to|with regards? to)\s+|from\s+${FROM_START_DATE})`
+  // A relative clause ("the service that happened on Friday") describes the
+  // topic, so it runs to the clause end, its dates included (r46).
+  + String.raw`[^\s,.;!?]+(?:\s+(?:(?:that|which|who|where)\s[^,.;!?]*|${TOPIC_STOP}[^\s,.;!?]+))*`, 'gi');
+function withoutTopics(quote) {
+  return String(quote || '').replace(TOPIC_CLAUSE, ' ');
+}
+
+// Outcomes a visit-only fact may reach without anyone needing to act: the
+// duration verdict itself and the scope/authority guards that can run before
+// it. Safety reviews (REVIEW_ON_NEGATION) are deliberately absent.
+const VISIT_ONLY_SILENCED_OUTCOMES = ['temporary_instruction', 'property_ambiguous', 'contact_authority', 'conflicting_facts', 'mixed_topics'];
 
 // A negated or uncertain report does not establish an active system or a
 // pet on site (next-stop alerts treat any pet_details as a pet). Keep these
@@ -174,7 +281,10 @@ async function applyFacts(trx, message, facts, context) {
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
     const negatedReview = REVIEW_ON_NEGATION[fact.field];
     const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
-    const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview
+    // The safety review outranks the duplicate-field conflict: a cat plus
+    // "not sure about the dog" is two pet_details facts, and the uncertain
+    // one must still ring (Codex #4816 r38).
+    const verdict = negated ? negatedReview : duplicateField ? 'conflicting_facts'
       : mixedTopics && !AUTO_APPLY_FIELDS.has(fact.field) ? 'mixed_topics' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
     // An explicit replay can offer new facts to staff but cannot refill a
@@ -269,6 +379,56 @@ async function appliedSmsProfileFields(conn, message) {
     ...proposals.filter((proposal) => ['approved', 'auto_applied', 'reverted'].includes(proposal.status)).map((proposal) => proposal.field)]);
 }
 
+// R5 — per-kind default deadlines (owner ruling 2026-09-24: "actions vs
+// follow-ups should have different timeframes"). Applied only when the
+// extractor could not resolve an explicit stated due_at (groundExtraction
+// keeps a bare "this morning"/"mid Oct" undated on purpose). Quick
+// request/response asks get a same-day window; deliverables that take real
+// work get a day or two; a technician follow-up gets the longest window.
+// send_reschedule_link sits with schedule_visit: both ask Waves to move a
+// booking, one by hand and one by texting the self-serve link.
+const DEFAULT_DEADLINE_HOURS = Object.freeze({
+  callback: 4, send_appointment_confirmation: 4,
+  schedule_visit: 24, send_reschedule_link: 24, send_estimate: 24, other: 24,
+  send_report: 48, send_paperwork: 48,
+  technician_follow_up: 72,
+});
+// Owner ruling 2026-09-24 (late): a promise Adam made himself is the ask
+// most likely to embarrass him if it slips, so it always gets the tighter
+// 48h window — overriding the per-kind table above, regardless of kind.
+const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
+
+// due_basis: 'stated' when the extractor grounded an explicit deadline in
+// the source text; 'default_kind' when this per-kind/basis table filled one
+// in instead; null when the kind has no default and nothing was stated
+// (legacy behavior — refreshSmsCommitments' null-due branch still applies).
+function resolveDueDeadline(item, messageCreatedAt) {
+  if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
+  // Defaults are Waves' own service windows. A customer-owned promise ("I'll
+  // send photos") keeps the legacy undated behavior; a 48h stamp would show
+  // the customer's own action as an overdue follow-up (Codex #4816 r2).
+  if (item.party !== 'waves') return { due_at: null, due_basis: null };
+  // The customer DID state a time ("tomorrow at 9 or 10", "mid Oct") that the
+  // extractor could not resolve to a clock instant: leave it undated rather
+  // than manufacture a per-kind deadline that contradicts what was said
+  // (Codex #4816 r1). The row still closes on evidence; it never bells.
+  // The grounded quote only, never the rest of the message (Codex #4816 r28
+  // reversing r22): an undated row never bells, so timing borrowed from an
+  // unrelated sentence ("The treatment on 2026-08-01 failed; please call
+  // me") would silently drop a real follow-up, while timing a shortened
+  // quote omits only makes the default bell early. A missed bell is the
+  // worse failure.
+  // timing_unverified is computed from every clock in the SMS; it speaks for
+  // this obligation only when its own quote states a clock ("Call me at 3
+  // and send the estimate" leaves the estimate its default — Codex #4816 r31).
+  const unresolvedClock = item.timing_unverified && statesClock(item.quote);
+  // Quotes are short excerpts; the cap keeps the timing regexes bounded.
+  if (item.due_text || unresolvedClock || STATED_TIMING.test(withoutTopics(String(item.quote || '').slice(0, 500)))) return { due_at: null, due_basis: null };
+  const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
+  if (hours == null) return { due_at: null, due_basis: null };
+  return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
+}
+
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   const replay = matchedContext.replay === true;
   if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
@@ -316,19 +476,41 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       : null;
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
+      const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at);
       return {
         sms_log_id: message.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
-        description: item.description, channel: 'sms', due_at: item.due_at,
-        due_basis: item.due_at ? 'stated' : null, source: 'ai', extractor_version: VERSION,
+        description: item.description, channel: 'sms', due_at: dueAt,
+        due_basis: dueBasis, source: 'ai', extractor_version: VERSION,
         evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
           speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
+        // The customer's only active property when the text arrived: an
+        // unscoped cancel ask is answered only by a cancellation there, never
+        // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
-          property_ambiguous: !propertyId, customer_id: customer.id, source_at: message.created_at },
+          property_ambiguous: !propertyId,
+          customer_id: customer.id, source_at: message.created_at },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
     // with the proposals, while execution hashes the same dedupe decision.
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
+    // Owner ruling 2026-09-24 (R4, the access-note text "my son should be
+    // there"): a temporary access note is not urgent, so a fact the
+    // extractor labels visit_only never rings the review bell on its own.
+    // It still rides in `analysis.facts` and counts toward
+    // `unverified_count` on a bell some OTHER real exception raises.
+    // - Keyed on the extractor's label (the schema's only temporary value),
+    //   whichever SCOPE guard caught the fact first: a visit-only fact is
+    //   never written, so property ambiguity, contact authority, a duplicate
+    //   or mixed topics add nothing for staff to decide (Codex #4816
+    //   r29/r32). An allowlist, so a safety review (a negated or uncertain
+    //   pet/irrigation report) or any future outcome still rings (r34).
+    // - 'uncertain' is the extractor asking for review, so it rings (r10).
+    // - A durable fact held back only by temporary wording rings: every fact
+    //   quotes the whole message, so the wording cannot be tied to it ("I'm
+    //   away tomorrow. My lockbox code is 1234") (r26/r27).
+    const settled = ['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'];
+    const temporaryFacts = facts.filter((f) => f.duration === 'visit_only' && VISIT_ONLY_SILENCED_OUTCOMES.includes(f.outcome));
+    const exceptions = facts.filter((f) => !settled.includes(f.outcome) && !temporaryFacts.includes(f));
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
     // grounding filter) are not, on their own, a real exception — only a
@@ -341,7 +523,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
           link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
           metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
+            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped + temporaryFacts.length,
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
       notification = notif.deduped
@@ -504,105 +686,249 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
   });
 }
 
+// Codex #4816 r15–r19: the newest visit activity for the row's customer,
+// after the source text, that the event page has not scanned yet — newer
+// than the sms_context.event_seen_at watermark. The same activity
+// loadSmsFulfillmentEvidence reads (creation, completion, a status
+// transition, a logged move); admissibility still decides whether it
+// answers the row. A watermark rather than a lookback window or cursor: the
+// page drains every pending event however many rows qualify, a scanned row
+// leaves it until new activity lands, and no event expires unseen. The
+// watermark advances only to the activity this read actually saw (as text,
+// keeping microseconds), never to the tick time, so a visit write that
+// commits after the read with an earlier timestamp stays unseen (r19).
+// Visit writers stamp their activity with the transaction-start time
+// (job_status_history.transitioned_at defaults to now()), so one that began
+// before a read can commit after it with an earlier timestamp than anything
+// the read saw (Codex #4816 r20). The watermark therefore never passes
+// now - EVENT_COMMIT_GRACE_MS, which outlasts any visit transaction: such a
+// write stays above it. A fresh event is re-scanned for a tick or two until
+// the cap passes it; the verdict cache makes that free of model calls.
+const EVENT_COMMIT_GRACE_MS = 10 * 60 * 1000;
+const RETRY_AFTER_SQL = "(cc.sms_context->'fulfillment_check'->>'retry_after')::timestamptz";
+// Anchored to the obligation's effective source time: a scheduled outbound
+// promise's queue row predates the delivery that actually made it (Codex
+// #4816 r27).
+const SOURCE_AT = "COALESCE((cc.sms_context->>'source_at')::timestamptz, s.created_at)";
+// The watermark was read against one customer's visits: after a merge or
+// merge undo moves the source SMS, it no longer applies (Codex #4816 r28).
+const EVENT_SEEN_AT = `CASE WHEN cc.sms_context->>'event_seen_customer_id' = s.customer_id::text
+  THEN (cc.sms_context->>'event_seen_at')::timestamptz END`;
+const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE(${EVENT_SEEN_AT}, ${SOURCE_AT}))`;
+// The floor and the tick bound sit in every branch, so each scan starts from
+// the row's watermark rather than the customer's whole visit history.
+const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
+const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
+    SELECT v.created_at AS at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.created_at')}
+    UNION ALL SELECT v.completed_at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.completed_at')}
+    UNION ALL SELECT h.transitioned_at FROM job_status_history h JOIN scheduled_services v ON v.id = h.job_id
+      WHERE v.customer_id = s.customer_id AND ${unseen('h.transitioned_at')}
+        AND h.to_status IN (${WITNESS_TRANSITION_STATUSES.map((v) => `'${v}'`).join(', ')})
+    UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
+      WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
+        AND ${LOGGED_MOVE_SQL('r')}
+  ) a)`;
+
+// Match merge and intake: customer, source, then commitment. A relink, an
+// edited or ineligible source, a gate turned off, or a row a person already
+// closed while verification ran all return null, so the verdict is retried
+// against the current state.
+async function lockLiveCommitment(trx, row, message) {
+  const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first('id');
+  const source = customer && await scheduledSourceMessage(trx, await trx('sms_log').where({ id: message.id }).forUpdate().first());
+  const sameSource = !!source && eligibleMessage(source, { captured: true })
+    && source.customer_id === message.customer_id && source.message_body === message.message_body;
+  const live = sameSource && await trx('call_commitments').where({ id: row.id }).forUpdate().first();
+  return live && smsCommitmentsEnabled() && live.status === 'open' && live.human_state == null ? { source, live } : null;
+}
+
+const OVERDUE_BELL_BODY = {
+  uncertain: (when) => `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
+  open: (when) => `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
+};
+
+// The deadline passed and the records do not establish completion.
+async function ringOverdueBell(trx, { row, message, verdict, dedupeKey }) {
+  const when = new Date(message.created_at).toLocaleString('en-US', {
+    timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+  const body = (OVERDUE_BELL_BODY[verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
+  const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
+    { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
+      link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
+      metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
+        sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
+  if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+}
+
+// One open row: skip, verify, and close or bell. Returns what happened so
+// the caller can count it.
+async function refreshSmsCommitment(conn, row, now, verify) {
+  const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
+  // A later delivery failure cannot erase already-recorded staff work.
+  // Intake still refuses failed sources; captured promises stay actionable.
+  if (!message || !eligibleMessage(message, { captured: true })) return { outcome: 'ineligible' };
+  // The SMS foreign key follows merges and merge undo. Embedded context
+  // is only a snapshot; never let its former owner strand the obligation.
+  const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
+  const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
+  // An outcome reached while a source query failed outright (truncation is
+  // persistent, so it does not count) is retried: the missing source may hold
+  // the event that selected the row (Codex #4816 r21/r26/r34).
+  const incomplete = evidence.failures.some((f) => !f.endsWith('_truncated'));
+  const settle = (outcome) => (incomplete ? 'deferred' : outcome);
+  const deadlinePassed = row.due_at != null && new Date(row.due_at) <= now;
+  // No deadline to enforce yet (none stated, or the window is still open)
+  // and nothing on file even looks like an answer: skip the model call
+  // entirely rather than spend it on an obligation with no chance of a
+  // grounded verdict, and leave the row open and silent.
+  if (!deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
+    return { outcome: settle('no_witness') };
+  }
+  // R1 (owner ruling 2026-09-24): inside an open window only an event may
+  // act. An admissible visit record (field progress, a move, a
+  // cancellation) reaches `verify` at once; a message witness (a staff
+  // text, a call) waits for the deadline before it costs a model call,
+  // exactly as a stated-deadline row always has. A NULL due_at is never an
+  // open window. Inside the window the event is what earned the early
+  // check, so only an event record may ground it (Codex #4816 r17): the
+  // model cannot close the row early by citing the call instead.
+  const inWindow = row.due_at != null && !deadlinePassed;
+  const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
+    && admissibleWitness(record, current, evidence.records));
+  if (!eventWitness && inWindow) return { outcome: settle('not_due') };
+  const verdict = await verify(current, evidence, { now, eventOnly: inWindow });
+  let closed = false;
+  // Only a verdict this transaction actually persisted counts as handled.
+  // Every early exit — a relinked or changed source, the gate turning off, a
+  // fulfilled verdict the revalidator could not commit (a locked or changed
+  // witness) — is retried, so its event stays unseen (Codex #4816 r18/r19).
+  let persisted = false;
+  await conn.transaction(async (trx) => {
+    const locked = await lockLiveCommitment(trx, row, message);
+    if (!locked) return;
+    const { source, live } = locked;
+    const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
+    if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
+    const dedupeKey = `sms-commitment:${row.id}`;
+    if (live.sms_context.customer_id !== source.customer_id) {
+      // Rolling dedupe only refreshes recent rows. Older bells must also
+      // follow a merge or undo instead of opening the retired account.
+      await trx('notifications').where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({
+          link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}&tab=comms`,
+          metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
+        });
+    }
+    await trx('call_commitments').where({ id: row.id }).update({
+      sms_context: { ...current.sms_context, fulfillment_check: verdict },
+    });
+    persisted = true;
+    if (verdict.verdict === 'fulfilled') {
+      await trx('call_commitments').where({ id: row.id }).update({
+        status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
+      });
+      await trx('notifications').where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({ read_at: now });
+      closed = true;
+      return;
+    }
+    // A NULL-due commitment only ever closes quietly on real evidence; it
+    // never rings a bell on its own (there is no stated deadline to have
+    // passed). The fulfillment_check above is still stored so a later
+    // pass with new evidence does not repeat the same model call for free.
+    if (deadlinePassed) await ringOverdueBell(trx, { row, message, verdict, dedupeKey });
+  });
+  // A provider or schema failure is persisted with retry_after, but no model
+  // judged the event: keep it pending (verify reuses the stored failure until
+  // retry_after, so this costs no extra provider calls).
+  return { outcome: persisted && !verdict.retry_after ? settle('verified') : 'deferred', verdict, closed };
+}
+
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {
   if (!smsCommitmentsEnabled()) return { skipped: 'gate_off' };
   if (!gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE')) return { skipped: 'activation_time_required' };
-  let afterId = null;
-  const cursorKey = 'sms_operations.fulfillment_cursor';
-  const cursor = await conn('system_settings').where({ key: cursorKey }).first('value');
-  if (/^[a-f0-9-]{36}$/i.test(cursor?.value || '')) afterId = cursor.value;
-  let scanned = 0;
-  let fulfilled = 0;
-  let unverified = 0;
-  let skippedNoWitness = 0;
-  // One bounded page per tick, with a durable cursor. An old open item
-  // cannot monopolize the first page and strand later customers forever.
-  // A NULL due_at (a "when will you be by" type ask with no stated time)
-  // is scanned too, so it can close on real evidence, but never bells on
-  // its own timer the way a due row does (see the hasDueDate guard below).
-  const rows = await conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
+  const counts = { scanned: 0, fulfilled: 0, unverified: 0, skipped_no_witness: 0, skipped_not_due: 0 };
+  const PAGE = 25;
+  // Two bounded pages per tick, each with its own durable cursor, so an old
+  // open item cannot monopolize the first page and strand later customers.
+  // Due work (deadline passed, or a legacy NULL due_at that closes on
+  // evidence but never bells) keeps its full page; rows whose window is
+  // still open are probed on a SEPARATE page for early system-event closure
+  // (R1) and never eat into due capacity (Codex #4816 r4: a backlog of
+  // future-dated rows must not delay a 4h callback bell). Inside the window
+  // only a system event or an admissible event witness may act; the model
+  // check and the bell still wait for the deadline.
+  const openRows = () => conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id').whereNull('c.deleted_at')
-    .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
-    .where((q) => q.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))
-    .modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
-    .orderBy('cc.id').limit(25).select('cc.*');
+    .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state');
+  const page = async (cursorKey, scope) => {
+    const cursor = await conn('system_settings').where({ key: cursorKey }).first('value');
+    const afterId = /^[a-f0-9-]{36}$/i.test(cursor?.value || '') ? cursor.value : null;
+    const rows = await scope(openRows()).modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
+      .orderBy('cc.id').limit(PAGE).select('cc.*');
+    return { cursorKey, rows };
+  };
+  // A third page, ahead of the cursors: any open row (due, undated or
+  // future) with unseen visit activity, so an event is checked on the next
+  // tick wherever the cursors stand (Codex #4816 r15–r17).
+  const tickBound = Array(4).fill(now);
+  // A row waiting out a provider/schema failure's retry_after cannot make
+  // progress on the same evidence (verify returns the stored failure until
+  // then), so it yields its slot rather than pinning the page through an
+  // outage; its event stays unseen and it returns once the retry is due.
+  // Activity newer than the failed attempt changes the evidence, so it brings
+  // the row back at once (Codex #4816 r21).
+  // Least recently stamped first, so a re-scan inside the commit grace never
+  // holds back a row whose event has not been seen at all.
+  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
+    // A stored failure reached for another owner (sms_context.customer_id is
+    // rewritten with every persisted verdict) says nothing about the current
+    // owner's evidence: a merge or undo lifts the backoff (Codex #4816 r32).
+    .where((q) => q.whereRaw(`${RETRY_AFTER_SQL} IS NULL OR ${RETRY_AFTER_SQL} <= ?`, [now])
+      .orWhereRaw("cc.sms_context->>'customer_id' IS DISTINCT FROM s.customer_id::text")
+      // Newer than what the failed attempt read: the same commit-grace cap
+      // as the watermark, so a visit write that began before that attempt
+      // but committed after it still counts (Codex #4816 r30).
+      .orWhereRaw(`${UNSEEN_VISIT_ACTIVITY} > COALESCE((cc.sms_context->>'event_attempted_through')::timestamptz,
+        ${RETRY_AFTER_SQL} - make_interval(secs => ?))`, [...tickBound, PROVIDER_RETRY_MS / 1000]))
+    // A deferred row keeps its event but moves behind rows not yet tried, so
+    // repeated deferrals cannot hold the page prefix (Codex #4816 r28).
+    .orderByRaw(`GREATEST(${EVENT_SEEN_AT}, (cc.sms_context->>'event_attempted_at')::timestamptz) ASC NULLS FIRST, cc.id`).limit(PAGE)
+    .select('cc.*', 's.customer_id as event_customer_id', conn.raw(`LEAST(${UNSEEN_VISIT_ACTIVITY}, ?::timestamptz)::text AS event_seen_through`,
+      [...tickBound, new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
+  const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at, event_customer_id: customerId }) => [id, { at, customerId }]));
+  const pages = [
+    await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
+    await page('sms_operations.future_cursor', (q) => q.where('cc.due_at', '>', now)),
+  ];
+  const rows = [...new Map([...eventRows.map(({ event_seen_through: _at, event_customer_id: _customer, ...row }) => row), ...pages.flatMap((p) => p.rows)]
+    .map((row) => [row.id, row])).values()];
   for (const row of rows) {
-    if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped: 'gate_off' };
-    scanned += 1;
-    const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
-    // A later delivery failure cannot erase already-recorded staff work.
-    // Intake still refuses failed sources; captured promises stay actionable.
-    if (!message || !eligibleMessage(message, { captured: true })) continue;
-    // The SMS foreign key follows merges and merge undo. Embedded context
-    // is only a snapshot; never let its former owner strand the obligation.
-    const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
-    const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
-    const hasDueDate = row.due_at != null;
-    // No stated deadline and nothing on file even looks like an answer: skip
-    // the model call entirely rather than spend it on an obligation with no
-    // chance of a grounded verdict, and leave the row open and silent.
-    if (!hasDueDate && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
-      skippedNoWitness += 1;
-      continue;
+    if (!smsCommitmentsEnabled()) return { ...counts, skipped: 'gate_off' };
+    counts.scanned += 1;
+    const result = await refreshSmsCommitment(conn, row, now, verify);
+    if (result.outcome === 'no_witness') counts.skipped_no_witness += 1;
+    if (result.outcome === 'not_due') counts.skipped_not_due += 1;
+    if (result.verdict?.verdict === 'uncertain') counts.unverified += 1;
+    if (result.closed) counts.fulfilled += 1;
+    // Stamped only after the row is handled: an error above, or a deferred
+    // close, leaves its event pending for the next tick.
+    // Only while the row is still open and untouched by staff: a human
+    // closure or correction in between wins.
+    if (seenThrough.has(row.id)) {
+      const { at, customerId } = seenThrough.get(row.id);
+      await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state').update({ sms_context: result.outcome === 'deferred'
+        ? conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('event_attempted_at', ?::text, 'event_attempted_through', ?::text)", [now.toISOString(), at])
+        : conn.raw("(COALESCE(sms_context, '{}'::jsonb) - 'event_attempted_at' - 'event_attempted_through') || jsonb_build_object('event_seen_at', ?::text, 'event_seen_customer_id', ?::text)", [at, customerId]) });
     }
-    const verdict = await verify(current, evidence, { now });
-    if (verdict.verdict === 'uncertain') unverified += 1;
-    await conn.transaction(async (trx) => {
-      // Match merge and intake: customer, source, then commitment. A relink
-      // while verification runs must retry against the current owner.
-      const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
-      if (!customer) return;
-      const source = await scheduledSourceMessage(trx, await trx('sms_log').where({ id: message.id }).forUpdate().first());
-      if (!source || !eligibleMessage(source, { captured: true }) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
-      const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
-      if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
-      const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
-      if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
-      const dedupeKey = `sms-commitment:${row.id}`;
-      if (live.sms_context.customer_id !== source.customer_id) {
-        // Rolling dedupe only refreshes recent rows. Older bells must also
-        // follow a merge or undo instead of opening the retired account.
-        await trx('notifications').where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({
-            link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}&tab=comms`,
-            metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
-          });
-      }
-      await trx('call_commitments').where({ id: row.id }).update({
-        sms_context: { ...current.sms_context, fulfillment_check: verdict },
-      });
-      if (verdict.verdict === 'fulfilled') {
-        await trx('call_commitments').where({ id: row.id }).update({
-          status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
-        });
-        await trx('notifications').where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({ read_at: now });
-        fulfilled += 1;
-        return;
-      }
-      // A NULL-due commitment only ever closes quietly on real evidence; it
-      // never rings a bell on its own (there is no stated deadline to have
-      // passed). The fulfillment_check above is still stored so a later
-      // pass with new evidence does not repeat the same model call for free.
-      if (!hasDueDate) return;
-      const when = new Date(message.created_at).toLocaleString('en-US', {
-        timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-      });
-      const body = verdict.verdict === 'uncertain'
-        ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`
-        : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`;
-      const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
-        { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
-          link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
-          metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
-            sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
-      if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
-    });
   }
-  const nextCursor = rows.length === 25 ? rows[rows.length - 1].id : null;
-  await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
-    .onConflict('key').merge({ value: nextCursor, updated_at: now });
-  return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness };
+  for (const { cursorKey, rows: pageRows } of pages) {
+    const nextCursor = pageRows.length === PAGE ? pageRows[pageRows.length - 1].id : null;
+    await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
+      .onConflict('key').merge({ value: nextCursor, updated_at: now });
+  }
+  return counts;
 }
 
 // Explicit operator action only. The scheduled intake never clears analysis
@@ -667,4 +993,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate };
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline };

@@ -125,9 +125,11 @@ async function sendViaTwilio(input, {
       // visit's saved property for the app's deep link.
       appointmentId: input.appointmentId || null,
       explicitPushOnly: input.channel === 'push',
-      skipPushRouting: Boolean(input.metadata?.appFallbackReason),
+      skipPushRouting: Boolean(input.metadata?.appFallbackReason || input.metadata?.billingDeliveryLeg),
       notificationEventKey: input.metadata?.notificationEventKey,
       invoiceId: input.invoiceId,
+      billingDeliveryCategory: input.metadata?.billingDeliveryLeg
+        ? require('../billing-channel-routing').billingDeliveryCategory(input) : undefined,
       requestNotification: input.metadata?.appOnly ? { id: input.metadata.service_request_id,
         status: input.metadata.request_status, version: input.metadata.request_status_version } : undefined,
       messageType,

@@ -52,7 +52,16 @@ function withoutOptionalFooter(body) {
   return body.split('\n').filter(line => !/^(?:Questions(?: or (?:requests|need to reschedule))?\? Reply (?:here|to this message)\.|If you have any questions or need assistance, simply reply to this message\.|Please reply to this message if you need any assistance\.|Reply STOP to opt out\.)$/i.test(line.trim())).join('\n').trim();
 }
 
-const PENDING_OUTBOUND_RE = /\b(?:will|we'll|i'll|we’ll|i’ll|going to|need to|have to|working on|momentarily|shortly|soon|tentativ\w*|pencil\w*)\b|\b(?:sorry|apologi\w*|cancel\w*|refund\w*|disput\w*|complaint|late|delay\w*|unpaid|overdue|outstanding|past due)\b/i;
+const PENDING_OUTBOUND_RE = /\b(?:will|we'll|i'll|we’ll|i’ll|going to|need to|have to|working on|momentarily|shortly|soon|tentativ\w*|pencil\w*)\b|\b(?:sorry|apologi\w*|cancel\w*|refund\w*|disput\w*|complaint|late|delay\w*|unpaid|overdue|outstanding|open balance|past[- ]due)\b/i;
+// Customer copy audit (2026-09-26, migration 20260926120000) reworded some
+// billing templates without changing what they mean — "outstanding balance"
+// to "open balance" in the balance reminders, and a routine "we'll see you at
+// your next service" sign-off dropped its "we'll" in the payment-received
+// receipt. Neither idiom itself signals pending work, but the bare "need to"
+// / "we'll" triggers above would otherwise flip the verdict on wording alone.
+// Neutralized before the promise scan so old and newly-sent copy classify
+// the same way.
+const PENDING_FALSE_POSITIVE_RE = /\bnothing (?:you )?(?:will )?need(?:s)? to do\b|\bwe['’]ll see you (?:at|for|on) your next (?:service|visit|appointment)\b/gi;
 // Owner decision 2026-09-24: thanks in reply to our own automated
 // appointment/estimate/review templates is a closure too. Keyed on the
 // persisted message type, never on body text. The needs-attention and
@@ -138,10 +147,15 @@ const manualClosure = (text, manualReply, row) => manualReply && row.mediaCount 
   && text.trim() !== '' && !asksForMoney(text) && !typedLinkOpen(text);
 // A hand-typed attachment (or unknown media count) stays open wherever it
 // sits in the thread, not only as the previous outbound.
-const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
+const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text.replace(PENDING_FALSE_POSITIVE_RE, ''))
   || (isHandTyped(row) && (row.mediaCount !== 0 || MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text) || asksForMoney(text) || typedLinkOpen(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
-const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.$/u;
+// Customer copy audit (2026-09-26, migration 20260926120000) reworded
+// ach_payment_processing's "3-5 business days" claim to match the webhook's
+// actual 5-day clearing window. Old messages stay in customer threads, so
+// this matches BOTH the pre-audit and rewritten bodies verbatim — never a
+// looser paraphrase match.
+const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! (?:We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.|Waves got your bank payment for invoice [\w-]+\. It usually clears within 5 business days, and we'll send a receipt then\.)$/u;
 
 /**
  * Conservative first release: explicit thanks following a delivered report,

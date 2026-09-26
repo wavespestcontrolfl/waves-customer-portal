@@ -77,6 +77,7 @@ async function loadCustomer(customerId) {
       'email',
       'phone',
       'address_line1',
+      'address_line2',
       'city',
       'state',
       'zip',
@@ -255,6 +256,11 @@ async function sendTemplate({
         deduped: true,
         blocked: !!result.blocked,
         messageId: result.message?.provider_message_id || null,
+        // The ORIGINAL acceptance time from the existing email_messages row
+        // (Codex #4921 r4 P1): a caller that records a dated witness for the
+        // send — the termite renewal notice's on-time/late classification —
+        // must use when the provider first accepted it, not this retry's time.
+        sentAt: result.message?.sent_at || null,
       };
     }
 
@@ -271,7 +277,7 @@ async function sendTemplate({
     });
 
     return result.sent
-      ? { ok: true, messageId: result.message?.provider_message_id || null }
+      ? { ok: true, messageId: result.message?.provider_message_id || null, sentAt: result.message?.sent_at || null }
       : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
   } catch (err) {
     await logLifecycleEmailAttempt({
@@ -880,6 +886,100 @@ async function sendMembershipRenewalReminder({
   });
 }
 
+// Termite annual plan (GATE_TERMITE_ANNUAL_PLAN) renewal-notice email —
+// the 45/30-day termite copy variant of sendMembershipRenewalReminder above
+// (build brief slice 5). 15/7 days out still use the generic
+// sendMembershipRenewalReminder for a termite term too; only the 45/30-day
+// rungs carry the auto-renew/cancel disclosure this sends.
+// The ONE idempotency key a termite renewal reminder is sent under — shared
+// by the sender below and findAcceptedTermiteRenewalReminder so the two can
+// never drift apart.
+function termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }) {
+  return `membership.termite_renewal_reminder:${termId || customerId}:${daysOut || 'notice'}:${stableEventKey(renewalDate)}`;
+}
+
+// Statuses that prove the provider ACCEPTED the email (mirrors
+// email-template-library's dedupedResultForExistingMessage "sent" set).
+const ACCEPTED_EMAIL_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
+
+// Codex #4921 pre-push P1: read-only lookup of an ALREADY-ACCEPTED termite
+// renewal reminder for this term+rung, so the renewal sweep can recover the
+// original acceptance time before deciding whether to send anything at all.
+// Returns { sentAt } or null. A query error is NOT swallowed — the caller
+// must treat "could not check" differently from "never sent".
+//
+// coversRungs: the rungs this ONE send discharged, read back from the
+// email's own persisted payload_snapshot (`covers_rungs`, stamped by the
+// sender for a combined 30+45 notice) — so a recovery after a failed witness
+// write knows the combined obligation from the evidence itself, never from
+// the retry's call-site options. [] when the payload carries no marker.
+async function findAcceptedTermiteRenewalReminder({ customerId, termId, daysOut, renewalDate } = {}) {
+  const row = await db('email_messages')
+    .where({ idempotency_key: termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }) })
+    .first('status', 'sent_at', 'payload_snapshot');
+  if (!row || !row.sent_at || !ACCEPTED_EMAIL_STATUSES.includes(String(row.status || '').toLowerCase())) return null;
+  let payload = row.payload_snapshot;
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch { payload = null; }
+  }
+  const coversRungs = Array.isArray(payload?.covers_rungs)
+    ? payload.covers_rungs.map(Number).filter(Number.isFinite)
+    : [];
+  return { sentAt: row.sent_at, coversRungs };
+}
+
+async function sendTermiteRenewalReminder({
+  customerId,
+  termId = null,
+  daysOut,
+  renewalDate,
+  renewalFee,
+  newStart,
+  newEnd,
+  cancelLink,
+  // No annual-inspection tracking exists yet anywhere in the schema (the
+  // signed annual report is a later slice) — always null today. When present
+  // the sentence renders; when null it is dropped entirely (never a blank
+  // "Your last annual inspection: ." — see the last_inspection_sentence
+  // paragraph block in the seeded template, which drops on empty content).
+  lastInspectionDate = null,
+  // The plan's own property (annual-prepay-renewals planPropertyForTerm);
+  // falls back to the customer's address.
+  address: planAddress = null,
+  // Combined 30+45 notice: the rungs this one send discharges, persisted in
+  // the email's payload_snapshot as evidence (see
+  // findAcceptedTermiteRenewalReminder). Unreferenced by the template.
+  coversRungs = null,
+  idempotencyKey,
+} = {}) {
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  const address = planAddress || [customer.address_line1, customer.address_line2, customer.city, customer.state, customer.zip]
+    .filter(Boolean)
+    .join(', ');
+  return sendTemplate({
+    customerId,
+    templateKey: 'membership.termite_renewal_reminder',
+    eventType: 'membership.termite_renewal_reminder',
+    payload: {
+      address,
+      new_start: displayDate(newStart),
+      new_end: displayDate(newEnd),
+      renewal_fee: money(renewalFee),
+      renewal_date: displayDate(renewalDate),
+      cancel_link: cancelLink,
+      last_inspection_sentence: lastInspectionDate
+        ? `Your last annual inspection: ${displayDate(lastInspectionDate)}.`
+        : '',
+      ...(Array.isArray(coversRungs) && coversRungs.length ? { covers_rungs: coversRungs } : {}),
+    },
+    idempotencyKey: idempotencyKey
+      || termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }),
+    categories: ['membership_renewal_reminder', 'termite_annual_plan'],
+    metadata: { annual_prepay_term_id: termId, days_out: daysOut },
+  });
+}
+
 async function sendMembershipCanceled({
   customerId,
   effectiveDate = new Date(),
@@ -967,6 +1067,8 @@ module.exports = {
   sendAppIntro,
   sendMembershipUpdated,
   sendMembershipRenewalReminder,
+  sendTermiteRenewalReminder,
+  findAcceptedTermiteRenewalReminder,
   sendMembershipCanceled,
   sendMembershipPaused,
   sendMembershipReactivated,

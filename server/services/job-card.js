@@ -35,7 +35,7 @@ const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('.
 const contextAggregator = require('./context-aggregator');
 
 const { redactAccessCodes } = contextAggregator;
-const { matchServiceProtocol } = require('./protocol-matcher');
+const { matchServiceProtocol, monthVisit } = require('./protocol-matcher');
 const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
@@ -1223,10 +1223,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
  * "Any" (pest, termite …) return null and keep the matcher's pick.
  */
 function seasonalVisit(program, scheduledDate) {
-  const visits = program?.visits || [];
-  const month = MONTHS[Number(String(scheduledDate || '').slice(5, 7)) - 1];
-  if (!month || !visits.some((v) => MONTHS.includes(String(v?.month || '')))) return null;
-  return visits.find((v) => v?.month === month) || null;
+  return monthVisit(program, MONTHS[Number(String(scheduledDate || '').slice(5, 7)) - 1]);
 }
 
 /**

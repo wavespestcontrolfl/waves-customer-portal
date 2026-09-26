@@ -16,7 +16,7 @@
  * same fallback rule as glassEstimateCopyFor).
  *
  * Truth scope (mirrors the glass packs — no new claims):
- * - Callbacks / 90-day / no-contract lines render ONLY for the recurring
+ * - Callbacks / money-back / no-contract lines render ONLY for the recurring
  *   residential lanes that already make those claims on the estimate page
  *   (pest, lawn, mosquito, tree & shrub, palm injection).
  * - rodent, termite (the service-lines lane folds bait AND the one-time
@@ -33,9 +33,16 @@ const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const logger = require('./logger');
 
 const RECURRING_TERMS_BENEFIT =
-  'No long-term contract, unlimited free callbacks, and a 90-day money-back guarantee.';
+  'No long-term contract, unlimited free callbacks, and a money-back guarantee.';
 const NEUTRAL_BENEFIT =
   'Licensed and insured, satisfaction guaranteed — and a real person answers when you reply.';
+// Termite carries no guarantee of any kind (owner ruling, waves-content
+// SKILL: re-treatment requires the paid bond), so any estimate with a
+// termite lane, and any estimate whose lanes are unknown, gets the neutral
+// line without "satisfaction guaranteed".
+const NO_GUARANTEE_BENEFIT =
+  'FDACS-licensed and insured, with the work documented when it’s done — and a real person answers when you reply.';
+const TERMITE_LANES = new Set(['termite', 'commercial_termite_bait']);
 
 // FAQ answers (owner-authored voice, 2026-07-21 "a few things folks
 // usually ask"). Truth scope mirrors `benefit`: the no-contract and
@@ -62,9 +69,10 @@ const FAQ_PRICE =
 // produces — pest/lawn/tree_shrub their own, palm injection folds into the
 // tree & shrub report (its visits are documented on that report). The
 // REPORT tours state the recurring-terms benefits on camera (callbacks /
-// no-contract / 90-day), so ONLY packs carrying RECURRING_TERMS_BENEFIT
-// may reference one — bundle/mosquito/rodent/termite/commercial/unknown
-// get empty slots and the renderer drops the blocks (v2 owner round
+// no-contract / the retired 90-day money-back wording), so ONLY packs
+// carrying RECURRING_TERMS_BENEFIT may reference one —
+// bundle/mosquito/rodent/termite/commercial/unknown get empty slots and
+// the renderer drops the blocks (v2 owner round
 // 2026-07-23: benefit-forward re-cut). The APP tour (static block in the
 // 20260723300000 migration, all categories) is deliberately TERMS-NEUTRAL
 // on camera — its claims are app facts (visits/reports/reschedule; Auto
@@ -72,6 +80,12 @@ const FAQ_PRICE =
 // — so it stays safe for termite/commercial/bundle recipients. Any future
 // re-cut that adds recurring-terms claims to the app tour must move it
 // behind per-pack gating like the report tours.
+//
+// RETIRED from emails 2026-09-26: the report tours say "90-day money-back
+// guarantee" on camera, and the owner removed that promise. The per-pack
+// `video` config stays so a re-cut without the 90-day claim can be switched
+// back on here; until then every pack emits empty slots and the module drops.
+const REPORT_TOUR_VIDEOS_LIVE = false;
 const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
 
 // smsHook completes the phrase "your Waves {smsHook}" so brand
@@ -92,7 +106,7 @@ const PACKS = {
     headline: 'Your pest-free home plan is ready',
     hook: 'Your price was built from your home — lot, roofline, and entry points — not somebody else’s.',
     benefit: RECURRING_TERMS_BENEFIT,
-    question: 'Wondering about pets and kids, interior treatment, or what happens if bugs come back? Reply and ask — real answers in minutes.',
+    question: 'Wondering about pets and kids, interior treatment, or what happens if bugs come back? Reply and ask — a real person answers.',
     included: 'Exterior and interior pest protection on a recurring schedule, built around how bugs actually get into your home. And if pests show up between visits, callbacks are free and unlimited — that’s part of the plan, not an upsell.',
     process: 'Approve online, pick a time for your first visit, and your tech protects the outside and inside of your home — with a full report of what was treated and found after every visit.',
     faq: {
@@ -109,7 +123,7 @@ const PACKS = {
     headline: 'Your greener-lawn game plan is ready',
     hook: 'Your price was built from your lawn — size, turf type, and current condition — nothing generic.',
     benefit: RECURRING_TERMS_BENEFIT,
-    question: 'Wondering when you’ll see results, or what happens with weeds? Reply and ask — real answers in minutes.',
+    question: 'Wondering when you’ll see results, or what happens with weeds? Reply and ask — a real person answers.',
     included: 'Feeding, weed control, and fungus watch on a program built for your turf type and its current condition — the applications your lawn needs, when it needs them.',
     process: 'Approve online and we schedule your first application. After every application you get a report of exactly what went down and why — and if something looks off between applications, you reply and we handle it.',
     faq: {
@@ -126,7 +140,7 @@ const PACKS = {
     headline: 'Your mosquito-free backyard plan is ready',
     hook: 'Targeted barrier protection where mosquitoes actually breed and rest on your lot — so evenings outside belong to you again.',
     benefit: RECURRING_TERMS_BENEFIT,
-    question: 'Wondering how fast it works, or about pets and the pool area? Reply and ask — real answers in minutes.',
+    question: 'Wondering how fast it works, or about pets and the pool area? Reply and ask — a real person answers.',
     included: 'Barrier treatment targeted at the spots where mosquitoes actually breed and rest on your lot — not a blanket fog and a hope.',
     process: 'Approve online, we schedule your first treatment, and your barrier stays maintained on schedule — with a report after every visit so you know exactly what was done.',
     faq: {
@@ -142,7 +156,7 @@ const PACKS = {
     headline: 'Your landscape protection plan is ready',
     hook: 'Priced bed by bed from what’s actually planted — insects, mites, disease, and nutrition handled before problems cost you a plant.',
     benefit: RECURRING_TERMS_BENEFIT,
-    question: 'Wondering which trees get treated or what gets applied? Reply and ask — real answers in minutes.',
+    question: 'Wondering which trees get treated or what gets applied? Reply and ask — a real person answers.',
     included: 'Insects, mites, disease, and nutrition for the palms, trees, and shrubs you’ve invested in — professional care that catches problems before they cost you a plant.',
     process: 'Approve online and we schedule your first visit. Your landscape gets looked at bed by bed, treated for what it actually needs, and documented in your report every time.',
     faq: {
@@ -159,7 +173,7 @@ const PACKS = {
     headline: 'Your palm treatment plan is ready',
     hook: 'Priced from your actual palms and their condition — treatment matched to what’s planted, not a generic average.',
     benefit: RECURRING_TERMS_BENEFIT,
-    question: 'Wondering how injections work or when to treat? Reply and ask — real answers in minutes.',
+    question: 'Wondering how injections work or when to treat? Reply and ask — a real person answers.',
     included: 'Treatment matched to your actual palms and their condition — targeted protection for the trees that anchor your landscape.',
     process: 'Approve online and we schedule your first visit — every treatment is documented in your report so you can see exactly what your palms received.',
     faq: {
@@ -176,7 +190,7 @@ const PACKS = {
     headline: 'Your rodent defense plan is ready',
     hook: 'Built from your property’s actual conditions and entry risks — the plan matches the problem, not a one-size-fits-all box of traps.',
     benefit: NEUTRAL_BENEFIT,
-    question: 'Wondering about trapping vs exclusion, or how long until they’re gone? Reply and ask — real answers in minutes.',
+    question: 'Wondering about trapping vs exclusion, or how long until they’re gone? Reply and ask — a real person answers.',
     included: 'A defense plan built around your property’s actual entry risks — matched to the problem you have, not a one-size-fits-all box of traps.',
     process: 'Approve online and we schedule your first visit — what we find and what we do is documented for you at every step.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
@@ -186,8 +200,8 @@ const PACKS = {
     smsHook: 'termite protection quote',
     headline: 'Your termite protection quote is ready',
     hook: 'Measured from your home — not a ballpark — and documented when the work is done.',
-    benefit: NEUTRAL_BENEFIT,
-    question: 'Wondering what’s covered or how long protection lasts? Reply and ask — real answers in minutes.',
+    benefit: NO_GUARANTEE_BENEFIT,
+    question: 'Wondering what’s covered or how long protection lasts? Reply and ask — a real person answers.',
     included: 'Protection measured from your home’s actual footprint — quoted from real measurements, not a ballpark, and documented when the work is done.',
     process: 'Approve online and we schedule the work — you get documentation of exactly what was done when it’s completed.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
@@ -209,7 +223,7 @@ const PACKS = {
     headline: 'Your complete home protection plan is ready',
     hook: 'Every service on this plan was priced from your actual property — one plan, one team accountable for all of it.',
     benefit: NEUTRAL_BENEFIT,
-    question: 'Wondering what’s included or how the services work together? Reply and ask — real answers in minutes.',
+    question: 'Wondering what’s included or how the services work together? Reply and ask — a real person answers.',
     included: 'Every service on your plan was priced from your actual property — one plan, one schedule, one team accountable for all of it.',
     process: 'Approve online once and we schedule everything — each service runs on its own right cadence, and every visit is documented in your report.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
@@ -217,8 +231,8 @@ const PACKS = {
   // One-time-only quotes (structural: no recurring dollars anywhere on the
   // estimate) carry NONE of the recurring-terms promises — #2969 built the
   // terms-neutral one-time hero for exactly this reason (30-day callback,
-  // not unlimited callbacks / 90-day MBG), and the report-tour videos state
-  // the recurring terms on camera, so the video slots stay empty. Claims
+  // not unlimited callbacks / the money-back guarantee), and the report-tour
+  // videos state the recurring terms on camera, so the video slots stay empty. Claims
   // echo the shipped one-time hero ("One visit, priced from your actual
   // property") and the unknown pack's documentation line only.
   one_time: {
@@ -227,20 +241,21 @@ const PACKS = {
     headline: 'Your service quote is ready',
     hook: 'One visit, priced from your actual property — not somebody else’s.',
     benefit: NEUTRAL_BENEFIT,
-    question: 'Wondering what’s included, or about pricing and scheduling? Reply and ask — real answers in minutes.',
+    question: 'Wondering what’s included, or about pricing and scheduling? Reply and ask — a real person answers.',
     included: 'One visit, priced from your actual property — with the work documented so you know exactly what was done.',
     process: 'Approve online, pick a time, and your tech completes the treatment — documented so you know exactly what was done.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
   },
   // Property-generic claims only, so nothing service-specific can be wrong
-  // (same rule as glassEstimateCopyFor's unknown fallback).
+  // (same rule as glassEstimateCopyFor's unknown fallback). An unknown
+  // estimate may be termite, so it makes no guarantee either.
   unknown: {
     label: 'service',
     smsHook: 'plan',
     headline: 'Your Waves plan is ready',
     hook: 'Your price was built from your actual property — not somebody else’s.',
-    benefit: NEUTRAL_BENEFIT,
-    question: 'Wondering what’s included, or about pricing and scheduling? Reply and ask — real answers in minutes.',
+    benefit: NO_GUARANTEE_BENEFIT,
+    question: 'Wondering what’s included, or about pricing and scheduling? Reply and ask — a real person answers.',
     included: 'A plan priced from your actual property — with every visit documented so you always know what was done.',
     process: 'Approve online, we schedule your first visit, and you get a report after every visit.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
@@ -272,20 +287,23 @@ function estimateIsOneTimeOnly(estimate) {
   return monthly <= 0 && annual <= 0 && onetime > 0;
 }
 
-function copyCategoryForEstimate(estimate) {
-  let lines = [];
+// Classifiable lane keys, or null when inference fails. Copy is decoration,
+// never a blocker — an unclassifiable estimate just gets the
+// property-generic pack.
+function laneKeysFor(estimate) {
   try {
-    lines = inferEstimateServiceLines(estimate || {});
+    const lines = inferEstimateServiceLines(estimate || {});
+    return [...new Set(
+      (lines || []).map((l) => l?.key).filter((k) => k && k !== 'unknown'),
+    )];
   } catch (e) {
-    // Copy is decoration, never a blocker — an unclassifiable estimate
-    // just gets the property-generic pack.
     logger.warn(`[estimate-followup-copy] service-line inference failed: ${e.message}`);
-    return 'unknown';
+    return null;
   }
-  const keys = [...new Set(
-    (lines || []).map((l) => l?.key).filter((k) => k && k !== 'unknown'),
-  )];
-  if (!keys.length) return 'unknown';
+}
+
+function copyCategoryForEstimate(estimate, keys = laneKeysFor(estimate)) {
+  if (!keys || !keys.length) return 'unknown';
   if (keys.some((k) => k.startsWith('commercial_'))) return 'commercial';
   // One-time-only wins over every service-keyed pack: a one-time pest or
   // lawn quote must never inherit the recurring-terms benefit, FAQ answers,
@@ -305,12 +323,19 @@ function packForEstimate(estimate) {
  * them never render with holes.
  */
 function followupEmailVars(estimate) {
-  const pack = packForEstimate(estimate);
+  const keys = laneKeysFor(estimate);
+  const pack = PACKS[copyCategoryForEstimate(estimate, keys)];
+  // A termite lane drops the guarantee under ANY pack: one-time trenching /
+  // pre-slab / Bora-Care quotes fold to `one_time`, termite + pest to
+  // `bundle`, bait monitoring to `commercial`, and all three carry
+  // "satisfaction guaranteed".
+  const hasTermite = (keys || []).some((k) => TERMITE_LANES.has(k));
+  const video = REPORT_TOUR_VIDEOS_LIVE ? pack.video : null;
   return {
     service_label: pack.label,
     category_headline: pack.headline,
     category_hook: pack.hook,
-    category_benefit: pack.benefit,
+    category_benefit: hasTermite ? NO_GUARANTEE_BENEFIT : pack.benefit,
     category_question: pack.question,
     category_included: pack.included,
     category_process: pack.process,
@@ -318,11 +343,12 @@ function followupEmailVars(estimate) {
     faq_terms: pack.faq.terms,
     faq_between_visits: pack.faq.betweenVisits,
     faq_price: pack.faq.price,
-    // Video slots are empty strings off-scope — the email image/small_note
-    // blocks drop on blank src/content, so the module vanishes cleanly.
-    report_video_preview: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour-preview.gif` : '',
-    report_video_url: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour.mp4` : '',
-    report_video_caption: pack.video ? pack.video.caption : '',
+    // Video slots are empty strings off-scope (or while the tours are
+    // retired) — the email image/small_note blocks drop on blank
+    // src/content, so the module vanishes cleanly.
+    report_video_preview: video ? `${VIDEO_BASE}/waves-${video.slug}-tour-preview.gif` : '',
+    report_video_url: video ? `${VIDEO_BASE}/waves-${video.slug}-tour.mp4` : '',
+    report_video_caption: video ? video.caption : '',
   };
 }
 
@@ -338,5 +364,5 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
 };

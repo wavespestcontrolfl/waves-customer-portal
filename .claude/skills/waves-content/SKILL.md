@@ -148,12 +148,12 @@ this skill.
 ## Publishing procedure (blog)
 1. Draft per the astro CLAUDE.md frontmatter/component rules; the binding
    schema gate is `packages/blog-schema/schema.json` (meta description
-   115–160 chars, 24 required fields, additionalProperties false).
+   115–160 chars, 23 required fields, additionalProperties false).
 2. `npm run publish:post <file>` before merge;
    `npm run validate:generated-blog -- --slug=<slug>` after build. The
    ASTRO repo is upstream for the blog schema: the portal's
    `packages/blog-schema` is a VENDORED copy pulled from astro via
-   `npm run sync:blog-schema` (`scripts/sync-from-astro.js`; a checksum
+   `npm run sync:blog-schema` (`packages/blog-schema/scripts/sync-from-astro.js`; a checksum
    drift check fails the build on mismatch) — edit the schema in the
    astro repo, then sync; never hand-edit the vendored copy here.
 3. Bump `modified:` frontmatter on ANY content edit (drives sitemap
