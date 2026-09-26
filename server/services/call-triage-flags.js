@@ -244,8 +244,13 @@ function suppressUnsupportedModelFlags(modelFlags, extraction) {
 // service that merely mentions "wdo" mid-word (there is none in the catalog,
 // but \b keeps this future-proof).
 function isWdoInspectionRequest(serviceRequest = {}) {
-  if (serviceRequest?.primary_service_category === 'wdo') return true;
-  return /\bWDO\b/i.test(String(serviceRequest?.specific_service_name || ''));
+  // A named specific service is the booking's final choice
+  // (resolveCallBookingCatalogService), so when one is present it must itself
+  // be the WDO row — the coarse category cannot override a contradictory pick
+  // like "Termite Inspection Service" (codex #4890 r6 P1).
+  const specific = String(serviceRequest?.specific_service_name || '').trim();
+  if (specific) return /\bWDO\b/i.test(specific);
+  return serviceRequest?.primary_service_category === 'wdo';
 }
 
 // Owner ruling 2026-09-26 (call 17ed9362): a lender or realtor ARRANGING a
@@ -267,18 +272,16 @@ function isWdoInspectionRequest(serviceRequest = {}) {
 // an outbound call with the identical extraction shape is authorized the
 // same way an inbound one is.
 const WDO_ARRANGER_RELATIONSHIPS = new Set(['real_estate_agent', 'lender']);
-function isAuthorizedWdoArrangerBooking(extraction, { now = Date.now() } = {}) {
+// Pure (no clock): the route decision must stay a function of the call so a
+// force-reprocess under the same decision version reproduces it (codex #4890
+// r6 P1). An elapsed agreed day is refused where the visit is WRITTEN — see
+// arrangerSlotElapsed in call-recording-processor.js (codex #4890 r5 P1).
+function isAuthorizedWdoArrangerBooking(extraction) {
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
   if (!WDO_ARRANGER_RELATIONSHIPS.has(relationship)) return false;
   if (!isWdoInspectionRequest(extraction?.service_request || {})) return false;
   const scheduling = extraction?.scheduling || {};
-  if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return false;
-  // The agreed slot must still be ahead (codex #4890 r5 P1): a call
-  // force-reprocessed after its appointment elapsed must not newly authorize
-  // a backdated visit — the downstream past-date guard compares against the
-  // CALL date, not today. Unparseable → not authorized (fail closed).
-  const slotMs = Date.parse(String(scheduling.confirmed_start_at));
-  return Number.isFinite(slotMs) && slotMs > now;
+  return scheduling.status === 'confirmed' && !!scheduling.confirmed_start_at;
 }
 
 function computeDeterministicTriageFlags(extraction, opts = {}) {

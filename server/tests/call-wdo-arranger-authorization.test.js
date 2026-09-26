@@ -17,11 +17,6 @@ const {
   canAutoRoute,
 } = require('../services/call-triage-flags');
 
-// The predicate requires the agreed slot to still be ahead (codex #4890 r5
-// P1), so pin "now" to the day after the live miss — before the fixture slot.
-beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-25T12:00:00Z') }); });
-afterAll(() => { jest.useRealTimers(); });
-
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
 const ANI = '+19415550100';
 
@@ -287,21 +282,37 @@ describe('codex #4890 r1 — audit trail and shadow bridge', () => {
   });
 });
 
-describe('codex #4890 r5 — an elapsed slot never newly authorizes a reprocessed call', () => {
-  test('a slot already in the past is not authorized, and caller_not_authorized stays', () => {
-    const past = wdoExtraction({ scheduling: { status: 'confirmed', confirmed_start_at: '2026-09-21T10:00:00-04:00' } });
-    expect(isAuthorizedWdoArrangerBooking(past)).toBe(false);
-    expect(computeDeterministicTriageFlags(past, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
+describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
+  const { arrangerSlotElapsed } = require('../services/call-recording-processor')._test;
+
+  test('a named non-WDO service is not a WDO request even when the category says wdo', () => {
+    const contradictory = wdoExtraction({
+      service_request: { primary_service_category: 'wdo', specific_service_name: 'Termite Inspection Service' },
+    });
+    expect(isAuthorizedWdoArrangerBooking(contradictory)).toBe(false);
+    expect(computeDeterministicTriageFlags(contradictory, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
   });
 
-  test('an explicit clock is honored (reprocess after the appointment date)', () => {
-    const e = wdoExtraction();
-    expect(isAuthorizedWdoArrangerBooking(e, { now: Date.parse('2026-09-25T12:00:00Z') })).toBe(true);
-    expect(isAuthorizedWdoArrangerBooking(e, { now: Date.parse('2026-09-29T12:00:00Z') })).toBe(false);
+  test('the category alone identifies a WDO when no specific service was named', () => {
+    const categoryOnly = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: null } });
+    expect(isAuthorizedWdoArrangerBooking(categoryOnly)).toBe(true);
   });
 
-  test('an unparseable slot fails closed', () => {
-    const bad = wdoExtraction({ scheduling: { status: 'confirmed', confirmed_start_at: 'Monday at ten' } });
-    expect(isAuthorizedWdoArrangerBooking(bad)).toBe(false);
+  test('the routing predicate is clock-free — a past slot still reads as authorized (the booking write refuses it)', () => {
+    const past = wdoExtraction({ scheduling: { status: 'confirmed', confirmed_start_at: '2020-01-06T10:00:00-05:00' } });
+    expect(isAuthorizedWdoArrangerBooking(past)).toBe(true);
+  });
+
+  test('the booking write refuses an arranger booking whose agreed ET day has passed', () => {
+    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', todayET: '2026-09-29' })).toBe(true);
+  });
+
+  test('a same-day or future agreed day still books', () => {
+    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', todayET: '2026-09-28' })).toBe(false);
+    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', todayET: '2026-09-25' })).toBe(false);
+  });
+
+  test('bookings that did not need the arranger rule are untouched by this guard', () => {
+    expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-28', todayET: '2026-09-29' })).toBe(false);
   });
 });

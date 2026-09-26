@@ -1032,6 +1032,13 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
+// True when an arranger-authorized WDO booking's agreed ET date (YYYY-MM-DD,
+// the wall date the visit row gets) is before today's ET date. Same-day slots
+// still book; only a whole elapsed day refuses (codex #4890 r5/r6).
+function arrangerSlotElapsed({ authorized, scheduledDate, todayET }) {
+  return !!authorized && !!scheduledDate && !!todayET && String(scheduledDate) < String(todayET);
+}
+
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
   return !!leadId && finalStatus === 'processed' && !nonLeadCall && !voicemailLeadPath
     && call?.status === 'completed' && call.call_outcome !== 'voicemail'
@@ -15241,6 +15248,25 @@ const CallRecordingProcessor = {
             }
 
             const callDateET = etDateString(call.created_at || new Date());
+            // An arranger-authorized WDO booking (owner ruling 2026-09-26) is
+            // refused once its agreed ET calendar day has passed — checked
+            // HERE, when the visit is written, on the same ET wall date the
+            // row gets (codex #4890 r5 P1 + r6: time-of-use, wall clock). A
+            // force-reprocess after the day must not create a backdated visit;
+            // routing itself stays clock-free. Same skip shape as below.
+            if (scheduledDate && arrangerSlotElapsed({
+              authorized: wdoArrangerAuthorizedThisPass, scheduledDate, todayET: etDateString(new Date()),
+            })) {
+              logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} has already passed; skipping schedule + SMS for ${maskSid(callSid)}`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'past_extracted_date',
+              };
+              scheduledDate = null;
+            }
             if (scheduledDate && scheduledDate < callDateET) {
               logger.warn(
                 `[call-proc] Extracted appointment date ${scheduledDate} is before call date ${callDateET}; skipping schedule + SMS`
@@ -20053,6 +20079,7 @@ CallRecordingProcessor._test = {
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
   resolveCallContactPhone,
+  arrangerSlotElapsed,
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
