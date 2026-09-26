@@ -1545,6 +1545,18 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
 
 describe('citability checks read rendered Markdown only (Codex r8 P2)', () => {
   const { checkCitabilityComparison, checkCitabilityHowToChoose, checkCitabilityNamedSources } = require('../services/content/content-quality-gate')._internals;
+  test.each([
+    'Ants trail. <!-- Per UF/IFAS, ants trail. -->',
+    'Ants trail. {/* Per UF/IFAS, ants trail. */}',
+    'Ants trail. `Per UF/IFAS, ants trail.`',
+  ])('hidden attribution beside visible prose cannot close a source gap: %s', body => {
+    const { checkCitabilityBackfillGapsCleared } = require('../services/content/content-quality-gate')._internals;
+    expect(checkCitabilityNamedSources({ body }).ok).toBe(false);
+    expect(checkCitabilityBackfillGapsCleared({ body }, {
+      gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sources'] },
+    }, { previousVersion: { body: 'Ants trail.' } }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: `${body} Per UF/IFAS, ants trail after rain.` }).ok).toBe(true);
+  });
   test('a ComparisonTable in a code fence or comment does not count', () => {
     const title = 'Bait vs. Spray';
     expect(checkCitabilityComparison({ title, body: '```mdx\n<ComparisonTable columns={[]} rows={[]} />\n```' }).ok).toBe(false);

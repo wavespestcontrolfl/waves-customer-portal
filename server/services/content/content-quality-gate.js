@@ -1156,8 +1156,8 @@ function nonBlogTarget(brief) {
 // Rendered lines only: fenced code, HTML/MDX comments and other non-rendered
 // Markdown must not satisfy (or trip) a citability check (Codex r8 P2).
 // The shared guardrails blanker preserves line structure but flattens list
-// indentation, so it is used as a per-line MASK over the original text —
-// nested-bullet indentation survives for the how-to criteria count.
+// indentation, so restore only leading whitespace onto the masked text —
+// never restore inline comments or code beside otherwise visible prose.
 function renderedCitabilityBody(body) {
   const raw = String(body || '');
   const { blankNonRenderedMarkdown } = require('./content-guardrails');
@@ -1165,7 +1165,9 @@ function renderedCitabilityBody(body) {
   const orig = raw.split(/\r?\n/);
   const mask = blanked.split(/\r?\n/);
   if (orig.length !== mask.length) return blanked;
-  return orig.map((line, i) => (mask[i].trim() ? line : '')).join('\n');
+  return orig.map((line, i) => (
+    mask[i].trim() ? line.match(/^[\t ]*/)[0] + mask[i].trimStart() : ''
+  )).join('\n');
 }
 
 // Attribution to ANY proper-noun source ("according to the Florida Forest

@@ -66,6 +66,10 @@ function corpus() {
 }
 
 describe('scanPost — same four heuristics as the quality gate', () => {
+  test('visible prose cannot make hidden inline attribution clear the source gap', () => {
+    const result = seeder.scanPost({ url: '/pest-control/ants/', body: 'Ants trail. <!-- Per UF/IFAS, ants trail. -->' });
+    expect(result.gaps).toContain('named_sources');
+  });
   test('a poor post reports every applicable gap; a good one reports none', () => {
     const poor = seeder.scanPost({ url: '/termite/bait-vs-liquid/', body: POOR });
     // how_to_choose is n/a to the gate before a table exists, but is planned
