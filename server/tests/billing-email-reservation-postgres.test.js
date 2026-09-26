@@ -257,7 +257,15 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     const first = await require('../services/billing-reminder-delivery')
       .reminderProgress(customerId, 'late_payment_checker', ['email']);
     expect(first.find((event) => event.metadata.notificationEventKey === acceptedEvent).complete).toBe(true);
-    expect(first.find((event) => event.metadata.notificationEventKey === terminalEvent).complete).toBe(false);
+    const terminalProgress = first.find((event) => event.metadata.notificationEventKey === terminalEvent);
+    expect(terminalProgress.complete).toBe(true);
+    expect(terminalProgress.resolved).toEqual(new Set(['email']));
+    expect(terminalProgress.delivered.size).toBe(0);
+    const ContactLedger = require('../services/collections/contact-ledger');
+    // Even a caller holding the pre-repair failure snapshot cannot reclaim
+    // the terminally resolved reservation after the repair commits.
+    await expect(ContactLedger.claimAttempt({ id: terminal.id, reused: true,
+      metadata: { send_failed: true } })).resolves.toMatchObject({ allowed: false });
     const second = await require('../services/billing-reminder-delivery')
       .reminderProgress(customerId, 'late_payment_checker', ['email']);
     expect(second.find((event) => event.metadata.notificationEventKey === terminalEvent).complete).toBe(true);
