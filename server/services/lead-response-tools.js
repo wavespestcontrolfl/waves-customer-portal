@@ -271,6 +271,20 @@ async function executeLeadTool(toolName, input, context) {
       const customer = subject.customer;
       if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
 
+      // Owner ruling 2026-09-26: exactly one automated text ever reaches a
+      // new website lead. This agent reply and the standard
+      // lead_auto_reply_biz reply (services/lead-auto-reply.js) share ONE
+      // first-touch claim on the phone — claim it here, before send, so a
+      // concurrent/racing standard reply can't also go out. Winning the
+      // claim means this is provably the customer's first automated text,
+      // so it gets the same first-touch opt-out line the standard reply
+      // carries; losing it (a standard reply, or another agent run, already
+      // claimed this phone) means the STOP line already reached this
+      // customer, so it isn't repeated here.
+      const { claimLeadFirstTouch, resolveLeadAutoReplyClaim } = require('./lead-auto-reply');
+      const firstTouch = await claimLeadFirstTouch(customer.phone, customer.id);
+      const messageBody = firstTouch.claimed ? `${input.message}\n\nReply STOP to opt out.` : input.message;
+
       // Routed through the customer-message middleware so consent /
       // suppression / identity / voice / segment checks all apply, and
       // every attempt lands in messaging_audit_log. Behavior change to
@@ -286,7 +300,7 @@ async function executeLeadTool(toolName, input, context) {
       // releases its locks before global-database audit and bookkeeping.
       const result = await sendCustomerMessage({
         to: customer.phone,
-        body: input.message,
+        body: messageBody,
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',
@@ -301,11 +315,19 @@ async function executeLeadTool(toolName, input, context) {
           }
           return dispatch(trx);
         }),
-      }).catch(err => {
-        if (!err.providerOutcome?.sent) throw err;
+      }).catch(async (err) => {
+        if (!err.providerOutcome?.sent) {
+          // Settle (keep/release) the first-touch claim on the SAME
+          // fail-closed rules resolveLeadAutoReplyClaim always applies —
+          // an unknown/thrown outcome is ambiguous and keeps the claim.
+          if (firstTouch.claimed) await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, err.providerOutcome || null);
+          throw err;
+        }
         logger.warn('[lead-agent] Response audit failed after provider acceptance', { leadId: context.leadId });
         return err.providerOutcome;
       });
+
+      if (firstTouch.claimed) await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, result);
 
       // No quiet-hours requeue: lead_response_auto_reply is a
       // customer-action entry point (owner ruling 2026-08-29) — the agent

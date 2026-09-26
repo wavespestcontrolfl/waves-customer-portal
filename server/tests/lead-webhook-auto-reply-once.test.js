@@ -49,8 +49,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { _test } = require('../routes/lead-webhook');
-const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim } = _test;
+const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim } = require('../services/lead-auto-reply');
 
 const PHONE = '+19415551234';
 const PHONE_HASH = crypto.createHash('sha256').update(PHONE, 'utf8').digest('hex');
