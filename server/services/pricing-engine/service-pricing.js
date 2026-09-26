@@ -3197,7 +3197,11 @@ function priceCommercialPest(property = {}, options = {}) {
   // perimeter, so that override stays absolute). The one auto-priceable
   // exception: an EXTERIOR-ONLY program with an explicit measured perimeter —
   // its buildup never reads the footprint.
-  if (options.buildingSizeMeasured === false || (defaulted && (interiorSelected || !perimeterExplicit))) {
+  // allowEstimatedFootprint: a commercial suite sized off the business-type
+  // default (estimator engine) — not measured, but a real footprint the
+  // owner wants priced; generateEstimate grades the line LOW.
+  const unmeasured = options.buildingSizeMeasured === false && options.allowEstimatedFootprint !== true;
+  if (unmeasured || (defaulted && (interiorSelected || !perimeterExplicit))) {
     return {
       service: 'commercial_pest',
       name: 'Commercial Pest Control',
@@ -3306,6 +3310,11 @@ function priceCommercialPest(property = {}, options = {}) {
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
   // A defaulted footprint (exterior-only priced off an explicit perimeter)
   // is always LOW confidence — the building size itself is unverified.
+  // A commercial suite sized off the business-type default is caught too,
+  // but centrally — generateEstimate's single post-pricing pass grades
+  // EVERY commercial line LOW when input.footprintSizeEstimated is true
+  // (primary review of PR #4840 r5 P1: threading it into each pricer
+  // individually left commercial termite-bait/rodent-bait ungraded).
   const pricingConfidence = (defaulted || footprint > cfg.lowConfidenceFootprintSf) ? 'LOW' : 'MEDIUM';
 
   return {

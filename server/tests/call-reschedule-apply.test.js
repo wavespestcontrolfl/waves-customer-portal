@@ -36,6 +36,9 @@ const QUOTE = 'We will see you on Thursday September 24 at 12 PM.';
 const FRIDAY_QUOTE = 'We will see you on Friday September 25 at 10 AM.';
 const MORNING_QUOTE = 'We will see you on Thursday September 24 at 9 AM.';
 
+const quoteFor = (startAt) => (startAt === '2026-09-25T10:00:00-04:00' ? FRIDAY_QUOTE
+  : startAt === '2026-09-24T09:00:00-04:00' ? MORNING_QUOTE : QUOTE);
+
 function v2(overrides = {}) {
   const base = {
     meta: { is_spam: false, is_voicemail: false },
@@ -52,8 +55,7 @@ function v2(overrides = {}) {
   };
   const merged = deepMerge(base, overrides);
   if (!Object.hasOwn(overrides, 'evidence')) merged.evidence = [{ field_path: '/scheduling/agent_committed_booking', speaker: 'agent',
-    quote: merged.scheduling.confirmed_start_at === '2026-09-25T10:00:00-04:00' ? FRIDAY_QUOTE
-      : merged.scheduling.confirmed_start_at === '2026-09-24T09:00:00-04:00' ? MORNING_QUOTE : QUOTE }];
+    quote: quoteFor(merged.scheduling.confirmed_start_at) }];
   return merged;
 }
 
@@ -67,8 +69,12 @@ function deepMerge(a, b) {
 
 const call = (overrides = {}) => ({
   id: CALL_ID, customer_id: CUSTOMER_ID, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
-  created_at: new Date('2026-09-22T19:07:24Z'), transcription: `Agent: ${QUOTE}\nAgent: ${FRIDAY_QUOTE}\nAgent: ${MORNING_QUOTE}\nCaller: Thank you.`, ...overrides,
+  created_at: new Date('2026-09-22T19:07:24Z'), transcription: `Agent: ${QUOTE}\nCaller: Thank you.`, ...overrides,
 });
+// Each call carries only ITS OWN commitment (#4806 single-sentence rule: any
+// later non-acknowledgement sentence — such as a second, different
+// commitment bundled into one fixture transcript — ungrounds the first).
+const callFor = (startAt, overrides = {}) => call({ transcription: `Agent: ${quoteFor(startAt)}\nCaller: Thank you.`, ...overrides });
 const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
 const visit = (overrides = {}) => {
   const row = {
@@ -211,7 +217,7 @@ describe('planRescheduleFromCall', () => {
   test('a date move within the span is a dateMove on that visit', () => {
     const plan = planRescheduleFromCall({
       v2: v2({ scheduling: { confirmed_start_at: '2026-09-25T10:00:00-04:00' } }),
-      call: call(), customer: customer(), candidates: [visit()], now: NOW,
+      call: callFor('2026-09-25T10:00:00-04:00'), customer: customer(), candidates: [visit()], now: NOW,
     });
     expect(plan).toMatchObject({ action: 'apply', dateMove: true, newDate: '2026-09-25', newWindow: { start: '10:00', end: '11:00' } });
   });
@@ -219,7 +225,7 @@ describe('planRescheduleFromCall', () => {
   test('reports already_at_requested_time when the visit is where the caller asked', () => {
     const plan = planRescheduleFromCall({
       v2: v2({ scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00' } }),
-      call: call(), customer: customer(), candidates: [visit()], now: NOW,
+      call: callFor('2026-09-24T09:00:00-04:00'), customer: customer(), candidates: [visit()], now: NOW,
     });
     expect(plan.action).toBe('already_at_requested_time');
   });
@@ -310,7 +316,7 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
       returning() { return Promise.resolve(Array.from({ length: table === 'triage_items' ? openCards : 1 }, (_, i) => ({ id: `card-${i}` }))); },
       insert(row) { writes.inserts.push({ table, row }); return Promise.resolve([{ id: 'act-1' }]); },
       first() {
-        if (table === 'call_log') return Promise.resolve(owned ? { ...call(), processing_generation: 3, processing_token: null, v2_extraction_status: 'valid', ai_extraction_enriched: extraction, ...settledCall } : undefined);
+        if (table === 'call_log') return Promise.resolve(owned ? { ...callFor(extraction?.scheduling?.confirmed_start_at), processing_generation: 3, processing_token: null, v2_extraction_status: 'valid', ai_extraction_enriched: extraction, ...settledCall } : undefined);
         if (table === 'activity_log') return Promise.resolve(prior);
         if (table === 'customers') return Promise.resolve(cust);
         if (table === 'triage_items') return Promise.resolve(state.counted ? { n: remaining } : (handled ? { id: 'handled-card' } : undefined));
@@ -364,7 +370,7 @@ describe('applyCallReschedule', () => {
     const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
       await opts.moveGuard({ trx: conn, service: conn.visits[0] }); return result;
     }) };
-    expect(await applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'applied' });
+    expect(await applyCallReschedule({ conn, call: callFor('2026-09-25T10:00:00-04:00'), now: NOW, rebooker })).toMatchObject({ outcome: 'applied' });
     expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ sourceSurface: 'call_reschedule', notifyRequested: false });
     expect(require('../routes/admin-dispatch').applySeriesMoveEffects).toHaveBeenCalledWith({ result, serviceId: VISIT_ID,
       newDate: '2026-09-25', newWindow: { start: '10:00', end: '11:00' }, notify: false, actorId: null, reasonText: null });
@@ -435,7 +441,7 @@ describe('applyCallReschedule', () => {
       await opts.moveGuard({ trx: conn, service: conn.visits[0] });
       return { success: true };
     }) };
-    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    await applyCallReschedule({ conn, call: callFor('2026-09-25T10:00:00-04:00'), now: NOW, rebooker });
     expect(rebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('seriesPolicy');
   });
 
@@ -518,7 +524,7 @@ describe('applyCallReschedule', () => {
   test('already at the requested time: no move, cards resolved as moot', async () => {
     const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00' } }) });
     const rebooker = { reschedule: jest.fn() };
-    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    const result = await applyCallReschedule({ conn, call: callFor('2026-09-24T09:00:00-04:00'), now: NOW, rebooker });
     expect(result).toMatchObject({ outcome: 'noop', reason: 'already_at_requested_time', cardsResolved: 1 });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
   });
@@ -596,7 +602,7 @@ describe('applyCallReschedule', () => {
       await opts.moveGuard({ trx: conn, service: conn.visits[0] });
       return { success: true, seriesMoveId: 'series-1' };
     }) };
-    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    await applyCallReschedule({ conn, call: callFor('2026-09-25T10:00:00-04:00'), now: NOW, rebooker });
     expect(require('../routes/admin-dispatch').applySeriesMoveEffects).toHaveBeenCalled();
     expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
     expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
@@ -613,7 +619,7 @@ describe('applyCallReschedule', () => {
       await opts.moveGuard({ trx: conn, service: conn.visits[0] });
       return result;
     }) };
-    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    await applyCallReschedule({ conn, call: callFor(startAt), now: NOW, rebooker });
     const snap = conn.writes.updates.find((u) => u.table === 'self_booked_appointments');
     expect(snap.arg).toMatchObject({ date, start_time: start, end_time: end });
     expect(snap.where).toContainEqual([{ id: 'sb-1' }]);

@@ -43,6 +43,8 @@ Usage: the confirmed Waves Pest Control PostHog organization/project `489072` ex
 
 ## Current navigation
 
+**Update 2026-09-26:** this is the navigation at audit time. Today's groups come from `client/src/config/adminNavigation.js`: `NAV_SECTION_DEFINITIONS` with the per-user `admin-navigation` flag off (see "Implemented navigation" below), and `WORKSPACE_GROUPS` with it on (`AdminWorkspaceNavigation` and the mobile Settings page).
+
 Desktop has 8 headings and 34 destinations with `agent_estimate` enabled (33 when disabled), all direct links. Permissions filter individual leaves. Mobile has Dashboard, Schedule, Customers, Messages, Settings; the owner-only Dashboard is omitted for technicians, and Settings (`/admin/more`) lists secondary workspaces and settings leaves. Its label is an existing owner decision, not a new “More” bucket introduced here.
 
 ```text
@@ -100,15 +102,15 @@ Larger recommendations are **DEFER PENDING EVIDENCE** for implementation. Their 
 ## Implemented navigation and behavior
 
 The review branch implements this tree, using the existing registry and individual
-role/flag filters. Every leaf is still a direct link. Service operations stays
+role/flag filters. Every leaf is still a direct link. Operations stays
 second so Schedule remains the second desktop destination.
 
 ```text
 Overview: Dashboard
-Service operations: Schedule, Reports, Assessments, Services, Pricing, Equipment, Inventory, Compliance, Knowledge
-Customers & Sales: Customers, Pipeline, Agent Estimate [flag], Price Match, Contracts
-Communications: Communications, Email
-Billing & Finance: Invoices, Recovery, Payers, Banking, Taxes
+Operations: Schedule, Reports, Assessments, Services, Pricing, Equipment, Inventory, Compliance, Knowledge
+Sales: Customers, Pipeline, Agent Estimate [flag], Price Match, Contracts
+Communications: Communications (Email is its embedded owner-only tab; /admin/email redirects there)
+Finance: Invoices, Recovery, Payers, Banking, Taxes
 People: Staff, Recruiting
 Marketing: PPC, SEO, Social Media, Blog, Newsletter, Reviews, Referrals
 System: Agent Ops, Tool Health, Settings

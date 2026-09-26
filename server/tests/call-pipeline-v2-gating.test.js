@@ -1012,26 +1012,64 @@ describe('hasNameEmailMismatch', () => {
     expect(hasNameEmailMismatch({ first_name: null, last_name: null, email: 'gennettryan@yahoo.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Al', last_name: null, email: 'xy@x.com' })).toBe(false);
   });
+
+  // Owner ruling 2026-09-26: the flag is advisory now (it never holds a
+  // booking or the first-touch email). The matcher itself is unchanged, so
+  // handles with no name signal and the original incident shape still flag.
+  // (Synthetic values.)
+  describe('still flags as an advisory (owner ruling 2026-09-26)', () => {
+    test('a pure handle with no name signal still flags (advisory, never a hold)', () => {
+      expect(hasNameEmailMismatch({ first_name: 'Karen', last_name: 'Boyd', email: 'sunnydays1987@example.com' })).toBe(true);
+    });
+    test('the incident shape (uncorroborated spoken first name, null surname) still flags', () => {
+      // Same shape as the real incident this flag was introduced for
+      // (spoken first name, surname null, email encoding a different name) —
+      // synthetic values here, distinct from the repo's existing pinned
+      // regression test for the real incident above.
+      expect(hasNameEmailMismatch({ first_name: 'Marisol', last_name: null, email: 'tpageharlan@example.com' })).toBe(true);
+    });
+  });
 });
 
+// Owner ruling 2026-09-26: name_email_mismatch is advisory — it still files
+// the name_review card, but never holds the appointment, for any call
+// direction, with or without fail-open.
 describe('name_email_mismatch in routing', () => {
-  test('flags name_email_mismatch and blocks auto-route', () => {
+  test('flags name_email_mismatch but does NOT block auto-route (advisory)', () => {
     const e = validV2Extraction();
     e.caller.first_name = 'Jeanette';
     e.caller.last_name = null;
     e.caller.email = 'gennettryan@yahoo.com';
     const flags = computeDeterministicTriageFlags(e, { contactPhone: '+19415551234' });
     expect(flags).toContain('name_email_mismatch');
-    expect(canAutoRoute(e, { contactPhone: '+19415551234' }).allowed).toBe(false);
+    // With everything else clean (AV accepted, confirmed booking) the call
+    // auto-routes despite the uncorroborated email.
+    const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(true);
+    expect(r.flags).toContain('name_email_mismatch');
   });
 
-  test('name_email_mismatch is appointment-blocking, not SMS-only', () => {
+  test('name_email_mismatch is advisory, not appointment-blocking', () => {
     const e = validV2Extraction();
-    e.caller.first_name = 'Jeanette';
+    e.caller.first_name = 'Marisol';
     e.caller.last_name = null;
-    e.caller.email = 'gennettryan@yahoo.com';
-    const r = canAutoRoute(e, { contactPhone: '+19415551234' });
-    expect(r.appointmentBlockingFlags).toContain('name_email_mismatch');
+    e.caller.email = 'tpageharlan@example.com';
+    const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN });
+    expect(r.appointmentBlockingFlags || []).not.toContain('name_email_mismatch');
+    expect(ADVISORY_TRIAGE_FLAGS.has('name_email_mismatch')).toBe(true);
+    expect(BLOCKING_TRIAGE_FLAGS.has('name_email_mismatch')).toBe(false);
+  });
+
+  test('an OUTBOUND confirmed booking (fail-open off) is not blocked by name_email_mismatch alone', () => {
+    // The evidence: inbound confirmed bookings used to demote this flag only
+    // through the inbound-only fail-open path, so an outbound confirmed
+    // booking still held on it. Now it never blocks either direction.
+    const e = validV2Extraction();
+    e.caller.first_name = 'Marisol';
+    e.caller.last_name = null;
+    e.caller.email = 'tpageharlan@example.com';
+    const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN, failOpen: false });
+    expect(r.allowed).toBe(true);
   });
 
   test('maps to name_review triage category', () => {
@@ -1086,3 +1124,4 @@ describe('advisory identity flags (missing_last_name / rental_or_tenant_occupied
     expect(r.flags).toEqual(expect.arrayContaining(['missing_last_name', 'rental_or_tenant_occupied']));
   });
 });
+

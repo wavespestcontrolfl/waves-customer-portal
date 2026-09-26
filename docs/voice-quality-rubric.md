@@ -1,6 +1,10 @@
 # Voice quality — manual conversation replay
 
-`npm run eval:voice-relay` runs 31 synthetic-caller scenarios through the live
+See `docs/sandy-voice-agent.md` for Sandy's capabilities/permissions summary
+and `docs/sandy-benchmark.md` for a reproducible model/renderer comparison
+built on this harness.
+
+`npm run eval:voice-relay` runs 36 synthetic-caller scenarios through the live
 `RelayConversation` loop: Sandy's prompt, model, registered tools and turn handling.
 It evaluates deterministic checks and prints the recorded conversation for review.
 By default only deterministic checks run. Select `--judge` for the optional transcript

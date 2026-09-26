@@ -102,3 +102,16 @@ describe('publicEnrichedProfile — plat median stays out of the public payload'
     expect(publicEnrichedProfile(undefined)).toBeNull();
   });
 });
+
+describe('public payload never carries suite-sizing fields (Codex #4840 r6 P0)', () => {
+  test('publicEnrichedProfile strips unitScopedLookup, suiteSize and suiteBuildingTotalSqFt', () => {
+    const { publicEnrichedProfile } = require('../routes/public-property-lookup')._test;
+    const out = publicEnrichedProfile({
+      homeSqFt: 1400, unitScopedLookup: true, suiteSize: { value: 1400 }, suiteBuildingTotalSqFt: 46031,
+    });
+    expect(out).not.toHaveProperty('unitScopedLookup');
+    expect(out).not.toHaveProperty('suiteSize');
+    expect(out).not.toHaveProperty('suiteBuildingTotalSqFt');
+    expect(out.homeSqFt).toBe(1400);
+  });
+});

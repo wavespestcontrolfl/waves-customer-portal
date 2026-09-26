@@ -416,7 +416,7 @@ jest.setTimeout(60000);
         body: 'retired',
         estimateId: null,
         quotePromised: true,
-        link: '/admin/customers/cust-1',
+        link: '/admin/customers?customerId=cust-1',
         forceUpdate: true,
         updateOnly: true,
         retiredByReason: 'price_agreed_on_call',
@@ -424,7 +424,7 @@ jest.setTimeout(60000);
 
       const engineBell = await mockDatabase('notifications').where({ id: 'n-engine-r9' }).first();
       expect(engineBell.title).toBe('Price agreed on call — send the promised quote');
-      expect(engineBell.link).toBe('/admin/customers/cust-1');
+      expect(engineBell.link).toBe('/admin/customers?customerId=cust-1');
       expect(engineBell.read_at).toBeNull();
       expect(engineBell.metadata.estimateId).toBeNull();
       const generic = await mockDatabase('notifications').where({ id: 'n-generic-r9' }).first();

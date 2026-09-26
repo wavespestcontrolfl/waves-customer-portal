@@ -30,6 +30,17 @@ const SQFT_SOURCES = {
   PROFILE: 'customer_profile',
   SUBDIVISION_MEDIAN: 'subdivision_median',
   LOOKUP_ESTIMATE: 'property_lookup_estimate',
+  // Commercial-suite sizing (owner ruling 2026-09-25,
+  // server/services/commercial-suite-size/): resolved by index.js AFTER
+  // arbitration + the unit-scope apply, when a commercial_suite tenant has
+  // no stated unit size — never produced by resolveHomeSqft itself. Suite-
+  // scoped by construction, so applyUnitScopeToPropertyFacts's
+  // BUILDING_SCOPE_HOME_SOURCES set must never include them. A web-search
+  // rung was removed (AGENTS.md: an LLM proposes intent, never a price
+  // field) — the ladder is caller/tech-stated -> DBPR license seats ->
+  // type default.
+  LICENSE_SEATS: 'license_seats',
+  SUITE_TYPE_DEFAULT: 'suite_type_default',
   NONE: 'unresolved',
 };
 

@@ -3,8 +3,9 @@
 **Status:** Planning (approved 2026-05-28). v0.2 report contract scaffold, diagnostic
 tables migration, and analyze-only tech route added 2026-06-15. v0.3 added the LLM
 diagnosis + narrative layer and replaced the human-review gate with a no-block
-auto-release ladder (2026-06-15 — see "v0.3" section below). Persist/send/public report
-routes and UI still not built.
+auto-release ladder (2026-06-15 — see "v0.3" section below). **Update 2026-09-26:** the
+persist/send/public-report routes, the tech UI and the public `/lawn-report/:token` page
+have shipped; tech-side photo persistence and SMS/email link delivery remain open.
 **Owner:** Adam.
 
 ## What this is
@@ -41,8 +42,7 @@ audit of the current repo:
   and `assessment_completion_tracking` all aggregate every row assuming it's a real
   customer assessment. Injecting prospect/spot-check rows silently corrupts those metrics
   unless a filter is patched into every consumer.
-- Baseline is **auto-assigned on insert** (`server/routes/admin-lawn-assessment.js:613`:
-  first row for a customer → `is_baseline = true`). Incompatible with standalone records.
+- Baseline assignment has three paths: (1) with `GATE_LAWN_PROPERTY_HISTORY` and `GATE_LAWN_VISIT_ASSESSMENT` both off, the insert in `server/routes/admin-lawn-assessment.js` marks a customer's first assessment as baseline; (2) with only `GATE_LAWN_VISIT_ASSESSMENT` on, the insert writes `is_baseline: false` and confirmation in `server/services/lawn-visit-runs.js` sets `is_baseline = true` directly when the customer has no baseline yet; (3) with `GATE_LAWN_PROPERTY_HISTORY` on, confirmation promotes the baseline through `installConfirmedBaseline` (the /confirm route and `lawn-visit-runs.js`). All three are incompatible with standalone records.
 
 Reuse doesn't require sharing the table: the AI engine, S3 upload, PDF renderer, and
 report-token rails are all service-layer functions that don't care which table the row
@@ -87,9 +87,12 @@ per-photo AI score columns.
 - Tokenized public-page pattern from estimates (`EstimateViewPage` + `estimate-public.js`) — web page, NOT PDF (no render-to-PDF exists in the repo).
 - Public report token + `express-rate-limit` + expiry pattern from `server/routes/reports-public.js` / `estimate-public.js`.
 
-**Not reused (existing-customer machinery, stays untouched):** `lawn-snapshot.js`,
-`lawn-recommendation-engine.js`, baseline logic, `lawn_baseline_resets`, the
-`server/routes/lawn-health.js` customer endpoints.
+**Not reused (existing-customer machinery, stays untouched):** baseline logic,
+`lawn_baseline_resets`, the `server/routes/lawn-health.js` customer endpoints.
+(`lawn-snapshot.js` and `lawn-recommendation-engine.js` were deleted in
+commit `29264bdfd6`; the cautious finding phrasing now lives in `safeFindingNote` in
+`server/routes/public-lawn-diagnostic.js`, while `server/services/lawn-diagnostic-report.js`
+normalizes findings, confidence and input sufficiency.)
 
 ## Lifecycle
 1. Tech starts a diagnostic → photos → AI diagnosis (their eyes only). Done, if internal.
@@ -331,10 +334,10 @@ report is a tokenized web page modeled on `client/src/pages/EstimateViewPage.jsx
   (`#FAF8F3` bg, Source Serif 4 headings, navy `#1B2C5B`), `<Page>` / `<Header>` /
   `<BrandFooter>` / `<GuaranteeStrip>` / `<QuestionsEscapeHatch>`. NOT admin monochrome.
 - **Satellite map embed already exists** — reuse the Static Maps URL pattern from
-  `PortalPage.jsx:4260`:
+  `PortalPage.jsx:8579`:
   `https://maps.googleapis.com/maps/api/staticmap?center=${address}&zoom=19&size=640x280&scale=2&maptype=satellite&key=${VITE_GOOGLE_MAPS_API_KEY}`
   built from the diagnostic's `address_snapshot`. The estimate's `WaveGuardIntelligenceCard`
-  (`EstimateViewPage.jsx:310-325`) already embeds `intelligence.satelliteUrl` — same mechanism.
+  (`EstimateViewPage.jsx:896-903`) already embeds `intelligence.satelliteUrl` — same mechanism.
 - Fork `WaveGuardIntelligenceCard` → `LawnReportCard` (it already renders headline + body +
   metrics grid + signals grid in the warm theme; feed it lawn data).
 
@@ -368,8 +371,10 @@ pre-written customer-safe snippets for what it sees in the photos; it does NOT i
 - Micronutrient yellowing blog (`.../blog/sarasota-lawn-yellowing-micronutrient-deficiency.md`) —
   best customer-facing copy for color/yellowing: Fe (new growth) vs Mn (green veins) vs Mg
   (margins) vs N (uniform/older); sandy-soil + high-pH iron lockout.
-- `server/services/lawn-snapshot.js` — reuse the cautious finding phrasing
-  ("We saw signs consistent with …") verbatim for unconfirmed disease.
+- `safeFindingNote` in `server/routes/public-lawn-diagnostic.js` (the former `lawn-snapshot.js`
+  phrasing now lives here) — reuse the cautious finding phrasing
+  ("We saw signs consistent with …") verbatim for unconfirmed disease. The service module
+  `server/services/lawn-diagnostic-report.js` owns finding/confidence normalization, not this copy.
 
 **Internal-only (powers the TECH view, never the customer report):**
 - `server/models/migrations/20260401000026_service_protocols.js` — diagnostic differentials
@@ -500,9 +505,10 @@ rename deferred.
 
 ## v1 backend API (built 2026-06-15)
 
-The analyze route was step 1; the persist → send → public chain is now built (backend
-only — photo S3 persistence and the React tech UI + public `/lawn-report/:token` page are
-deferred; the public page's satellite hero is address-based so it does not need stored photos).
+The analyze route was step 1; the persist → send → public chain is now built. (As of
+2026-06-15 the React tech UI and public `/lawn-report/:token` page were deferred; both have
+since shipped. Tech-side photo S3 persistence is still open; the public page's satellite hero
+is address-based so it does not need stored photos.)
 
 Routes (all never-block, all on the existing `tech-lawn-diagnostic.js` router unless noted):
 - `POST /api/tech/lawn-diagnostic` — persist an analyzed diagnostic as a draft
@@ -534,8 +540,10 @@ Both public routes added to the **docs/public-route-contracts.md** public-by-tok
 Tests: `lawn-diagnostic-public.test.js` (whitelisting no-leak, strict validation, token-gate
 404s, one-shot 409) + send-gate helper units in the route test. 54 lawn-diagnostic tests green.
 
-### v1 still to build
-Photo S3 persistence into `lawn_diagnostic_photos` (best-effort, for findings thumbnails);
-the `/tech/*` Lawn Diagnostic UI (D palette: capture → diagnosis → save/send/lead/archive);
-the public `/lawn-report/:token` React page (clone `EstimateViewPage`, satellite hero, plain
-findings, grass-type context, fix-it plan, quote CTA). v1.5: SMS/email link delivery.
+### v1 status (updated 2026-09-26)
+**Shipped:** the `/tech/*` Lawn Diagnostic UI (`TechLawnDiagnosticPage`, `client/src/App.jsx:711`)
+and the public `/lawn-report/:token` React page (`LawnReportViewPage`, `client/src/App.jsx:686`).
+**Still open:** photo S3 persistence into `lawn_diagnostic_photos` exists for the public
+funnel (`server/routes/public-lawn-assessment.js`) and the authenticated portal photo-ID
+handler (`server/routes/photo-id.js`); it is not yet wired for the tech-side flow.
+v1.5: SMS/email link delivery.

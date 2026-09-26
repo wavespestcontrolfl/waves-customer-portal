@@ -33,7 +33,7 @@ jest.mock('../services/invoice-followups', () => ({
 }));
 
 const db = require('../models/db');
-const { openBalanceInvoices } = require('../services/open-balance');
+const { openBalanceInvoices, rowIsSelfPayDue } = require('../services/open-balance');
 const ConsentProvenance = require('../services/collections/consent-provenance');
 const { readCachedLineType } = require('../services/messaging/validators/line-type');
 const ContactPolicy = require('../services/collections/contact-policy');
@@ -152,6 +152,44 @@ describe('baseline', () => {
     expect(readCachedLineType).not.toHaveBeenCalled();
     expect(ConsentProvenance.resolve).not.toHaveBeenCalled();
     expect(ConsentProvenance.freshness).not.toHaveBeenCalled();
+  });
+
+  test('an injected database carries every policy read through invoice and voice dependencies', async () => {
+    armAllowedBaseline();
+    const legacy = invoiceRow({ id: 'inv-legacy', status: 'unpaid' });
+    const tableQueues = new Map(Object.entries({
+      customers: [chain({ first: customerRow() })],
+      invoices: [chain({ result: [legacy] })],
+      collections_flags: [chain({ result: [] })],
+      messaging_suppression: [chain({ first: undefined })],
+      collections_contact_ledger: [chain({ result: [] }), chain({ result: [{ count: '0' }] })],
+      call_log: [chain({ first: undefined })],
+      invoice_followup_sequences: [chain({ first: { touches_sent: 2 } })],
+      activity_log: [chain({ result: [{ count: '0' }] })],
+    }));
+    const heldDatabase = jest.fn((table) => {
+      const queue = tableQueues.get(table);
+      if (!queue?.length) throw new Error(`Unexpected table ${table}`);
+      return queue.shift();
+    });
+    heldDatabase.raw = jest.fn((expr) => expr);
+
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'voice', purpose: 'late_payment', now: WED_11AM_EDT, database: heldDatabase,
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(db).not.toHaveBeenCalled();
+    expect(openBalanceInvoices).toHaveBeenCalledWith('cust-1', expect.objectContaining({ database: heldDatabase }));
+    expect(rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', legacy, expect.objectContaining({ database: heldDatabase }));
+    const { isDunningStopped } = require('../services/invoice-followups');
+    expect(isDunningStopped).toHaveBeenCalledWith('inv-1', heldDatabase);
+    expect(isDunningStopped).toHaveBeenCalledWith('inv-legacy', heldDatabase);
+    expect(heldDatabase.mock.calls.map(([table]) => table)).toEqual([
+      'customers', 'invoices', 'collections_flags', 'messaging_suppression',
+      'collections_contact_ledger', 'call_log', 'invoice_followup_sequences',
+      'activity_log', 'collections_contact_ledger',
+    ]);
   });
 });
 
@@ -1006,7 +1044,6 @@ test('a newer call_log conversation sets nextEligibleAt from ITS 7-day boundary,
 // by the open-balance loader — the supplemental arm admits them with the
 // same self-pay authority, so gate-on doesn't strand those customers.
 test('a customer whose only debt is a legacy-unpaid invoice still has an eligible balance', async () => {
-  const { rowIsSelfPayDue } = require('../services/open-balance');
   armAllowedBaseline({ invoices: [] }); // open-balance loader returns nothing
   setDbTables({
     customers: chain({ first: customerRow() }),

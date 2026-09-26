@@ -119,7 +119,12 @@ async function scheduledDepositReceiptAllowed(msg) {
   try {
     const prefs = await db('notification_prefs')
       .where({ customer_id: msg.customer_id })
-      .first('payment_receipt_channel');
+      .first('payment_receipt_channel', 'payment_receipt_channels');
+    if (require('./billing-delivery-channels').explicitBillingChannels(prefs, 'payment_receipt') !== null) {
+      // The central router will fan out the current explicit combination.
+      // The legacy scalar must not intercept a queued App/Email selection.
+      return true;
+    }
     const channel = prefs?.payment_receipt_channel || 'sms';
     return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
@@ -1648,6 +1653,50 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // While the follow-up pager is live, the overdue watchdog takes each
+  // promise over once it ages off the pager's 24-hour list. With callback
+  // cards on it already runs every 5 minutes; with cards off its cadence is
+  // daily, so it also runs — unmodified — once an hour, keeping that handoff
+  // gap under an hour (its bells dedupe per promise per ET day).
+  cron.schedule('0 25 * * * *', async () => {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('followupSlaAlerts') || require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Hourly overdue-promise tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] hourly watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // One-hour follow-up pager: every 15 minutes through the 8 AM–8 PM ET
+  // window (the 8:00–8:45 PM ticks catch deadlines that land at the close).
+  cron.schedule('0 */15 8-20 * * *', async () => {
+    try {
+      const { runFollowUpSlaWatcher } = require('./followup-sla-watcher');
+      const result = await runFollowUpSlaWatcher();
+      // A skip before runExclusive's own bookkeeping (no_connection: pool
+      // exhausted) is a MISSED tick and job_health must say so, as the
+      // adjacent commitment watchers record it.
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('followup-sla-watcher').catch(() => {});
+        await recordJobEnd('followup-sla-watcher', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Follow-up pager tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -2133,11 +2182,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY MONDAY 5:00AM — BI Briefing Agent (Monday morning SMS to Adam)
+  // runExclusive: a Railway deploy overlap fires this tick on both
+  // instances; the second skips (lease_held) instead of starting a second
+  // paid session and saving a second report. The owner text is also claimed
+  // once per ET week inside the tool (bi-briefing-sms.js).
   cron.schedule('0 5 * * 1', async () => {
     logger.info('Running: Weekly BI Briefing Agent');
     try {
-      const BIAgent = require('./bi-agent');
-      await BIAgent.run();
+      await runExclusive('bi-weekly-briefing', async () => {
+        const BIAgent = require('./bi-agent');
+        await BIAgent.run();
+      });
     } catch (err) {
       logger.error(`BI Briefing Agent failed: ${err.message}`);
     }
@@ -2411,6 +2466,35 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Lookup pending sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — purchase receipts → stock (Amazon Delivered emails and
+  // SiteOne invoices). For Amazon the
+  // post-email-sync hook (email-sync.js) handles the common case right when
+  // the email lands; this sweep scans `emails` directly (from_address +
+  // subject, never LLM classification) for anything it missed — a process
+  // restart mid-sync, a swallowed hook error, a backfill. Gate
+  // GATE_PURCHASE_RECEIPT_RESTOCK is read INSIDE the sweep at call time
+  // (also requires PURCHASE_RECEIPT_SINCE); kill = unset either one.
+  // runExclusive: an overlapping tick must not double-claim the same line
+  // (purchase_receipt_lines' own UNIQUE constraint is the hard backstop).
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    if (!gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK')) return;
+    try {
+      await runExclusive('purchase-receipt-restock', async () => {
+        const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
+        const result = await runPurchaseReceiptRestockSweep();
+        if (result.skipped) return;
+        const { logged, held, errors } = summarize(result);
+        if (logged || held || errors) {
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Purchase receipt restock sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4044,6 +4128,7 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
@@ -4069,7 +4154,9 @@ function initScheduledJobs() {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
-              ...(claimMeta.billingDeliveryCategory ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory } : {}),
+              ...(claimMeta.billingDeliveryCategory
+                ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory }
+                : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,
@@ -4594,7 +4681,7 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED'].includes(e.code));
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED', 'LEGACY_AUTOFILL_PRICE'].includes(e.code));
           // A reviewed attempt cannot be retimed: its receipt and pinned
           // offer belong to the original schedule. Even a bookkeeping throw
           // can follow provider acceptance, so stop for explicit staff review.

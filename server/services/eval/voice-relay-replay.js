@@ -84,9 +84,10 @@ const SEVERITIES = Object.freeze(['critical', 'major', 'quality']);
 const SEVERITY_WEIGHT = Object.freeze({ critical: 3, major: 2, quality: 1 });
 const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
-  'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
+  'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes', 'tool_input_includes',
   'end_session_called', 'no_model_text_before_tool',
   'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of', 'tools_called_at_most',
+  'tool_not_called_before_turn',
   // The named spoken-content checks (voice-relay-spoken-checks): one
   // implementation per prohibition, shared by every scenario that carries it.
   ...Object.keys(SPOKEN_CHECK_RUNNERS),
@@ -199,6 +200,16 @@ const RESUME_SCHEMA = Joi.object({
   segmentsText: Joi.string().allow('').required(),
   reconnects: Joi.number().integer().min(1),
   priorCallerTurns: Joi.number().integer().min(0),
+  // A write tool the segmentsText's own prose says already succeeded BEFORE
+  // the drop (e.g. "I've got that request in for … pending office review").
+  // There is no other supported way to back a resumed session's promise:
+  // applyResumeFixture seeds transcript TEXT only, never a toolCalls entry,
+  // so commitment_requires_receipt's mandatory, always-on check would
+  // otherwise false-fail the correct "it's already in, pending" recovery
+  // reply for want of a receipt the harness never recorded. Kept to the
+  // registered write tools only — the same set commitment_requires_receipt
+  // itself reads receipts from.
+  priorReceipts: Joi.array().min(1).items(Joi.string().valid(...WRITE_TOOLS)),
 }).allow(null);
 const MATCHER_SCALAR = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean());
 const INPUT_MATCHER_SCHEMA = Joi.object().min(1).pattern(/\S/, Joi.alternatives().try(
@@ -322,15 +333,19 @@ const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
-// A regex list, or the same list graded from a caller turn onward —
+// A regex list, or the same list graded over a caller-turn window —
 // { patterns: [...], fromTurn: 2 } skips what Sandy said before the caller's
-// second turn: a barge-in correction supersedes the read-back it cut.
+// second turn (a barge-in correction supersedes the read-back it cut);
+// { patterns: [...], onTurn: 2 } scopes to EXACTLY that one caller turn (e.g.
+// grading only the reply to a backchannel that must not derail the intake).
 const regexList = (v) => {
   if (Array.isArray(v)) return regexPatterns(v);
-  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn: <caller turn> }';
-  const unknown = Object.keys(v).find((k) => k !== 'patterns' && k !== 'fromTurn');
-  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn)`;
-  if (!Number.isInteger(v.fromTurn) || v.fromTurn < 1) return 'fromTurn must be a caller turn number (1 is the first)';
+  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn | onTurn: <caller turn> }';
+  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn'].includes(k));
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn)`;
+  if ((v.fromTurn == null) === (v.onTurn == null)) return 'value must set exactly one of fromTurn or onTurn';
+  const turn = v.onTurn != null ? v.onTurn : v.fromTurn;
+  if (!Number.isInteger(turn) || turn < 1) return `${v.onTurn != null ? 'onTurn' : 'fromTurn'} must be a caller turn number (1 is the first)`;
   return regexPatterns(v.patterns);
 };
 const CHECK_VALUE_RULES = Object.freeze({
@@ -342,6 +357,18 @@ const CHECK_VALUE_RULES = Object.freeze({
   spoken_never_matches: () => regexList,
   spoken_matches_any: () => regexList,
   capture_lead_input_includes: () => (v) => (!v || typeof v !== 'object' || Array.isArray(v) || !Object.keys(v).length ? 'value must be an object of capture_lead fields' : null),
+  // capture_lead_input_includes' generic sibling: any allowed tool, not just
+  // capture_lead. { tool: "<name>", input: { <field>: <expected> }, fromTurn?: <caller turn> }.
+  tool_input_includes: (knownTools) => (v) => {
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn> }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn)`;
+    if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
+    if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
+    if (!isPlainObject(v.input) || !Object.keys(v.input).length) return 'input must be a non-empty object of expected fields';
+    if (v.fromTurn !== undefined && (!Number.isInteger(v.fromTurn) || v.fromTurn < 1)) return 'fromTurn must be a caller turn number (1 is the first)';
+    return null;
+  },
   end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
   no_model_text_before_tool: (knownTools) => (v) => (v === true || (Array.isArray(v) && v.length && v.every((n) => WRITE_TOOLS.includes(n) || knownTools.has(n))) ? null : 'value must be true or a tool list'),
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
@@ -351,6 +378,20 @@ const CHECK_VALUE_RULES = Object.freeze({
     if (unknown) return `unknown tool "${unknown}"`;
     const bad = Object.entries(v).find(([, n]) => !Number.isInteger(n) || n < 0);
     return bad ? `${bad[0]}: max calls must be a non-negative integer` : null;
+  },
+  // A turn-scoped prohibition: `tool` must never be CALLED (any attempt,
+  // rejected or not — an early guess is the violation even if the fixture
+  // refused it) before caller turn `turn`. The sibling of
+  // `tools_called_at_most`'s per-scenario ceiling: a cap alone cannot say
+  // WHICH call was premature, only that too many happened.
+  tool_not_called_before_turn: (knownTools) => (v) => {
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn> }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'turn'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, turn)`;
+    if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
+    if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
+    if (!Number.isInteger(v.turn) || v.turn < 1) return 'turn must be a caller turn number (1 is the first)';
+    return null;
   },
   ...SPOKEN_CHECK_VALUE_RULES,
 });
@@ -474,6 +515,8 @@ function fixtureRules(s, knownTools) {
     [!Array.isArray(s.allowedTools) || !s.allowedTools.length, 'allowedTools must be a non-empty list of the tools this scenario may call'],
     ...(Array.isArray(s.allowedTools) ? s.allowedTools : []).map((name) => [!knownTools.has(name), `allowedTools names unknown tool "${name}"`]),
     [!!resumeError, `fixtures.resume: ${resumeError ? resumeError.message : ''}`],
+    ...(fx.resume && Array.isArray(fx.resume.priorReceipts) ? fx.resume.priorReceipts : [])
+      .map((name) => [!(Array.isArray(s.allowedTools) && s.allowedTools.includes(name)), `fixtures.resume.priorReceipts names "${name}", which is not in allowedTools`]),
   ];
 }
 
@@ -491,6 +534,9 @@ function lintScenario(s, knownTools) {
   for (const e of expects) {
     if (e && ['tools_called_include', 'tools_performed_include', 'tools_performed_any_of'].includes(e.check) && Array.isArray(e.value)) {
       for (const name of e.value) if (!allowed.has(name)) problems.push(`expect ${e.check} names "${name}", which allowedTools does not allow`);
+    }
+    if (e && e.check === 'tool_input_includes' && isPlainObject(e.value) && typeof e.value.tool === 'string' && !allowed.has(e.value.tool)) {
+      problems.push(`expect ${e.check} names "${e.value.tool}", which allowedTools does not allow`);
     }
   }
   return problems;
@@ -1121,6 +1167,14 @@ function applyResumeFixture(convo, scenario, record) {
   if (!resume) return;
   const segmentsText = String(resume.segmentsText || '');
   if (segmentsText) record.events.push({ kind: 'resume', text: segmentsText, turn: 0, index: record.events.length });
+  // Evidence, never a call: a synthetic receipt for a write the segmentsText
+  // says already happened before the drop, so commitment_requires_receipt
+  // (the mandatory, always-on check) can back a resumed promise that follows
+  // it. Kept OUT of record.toolCalls on purpose — every other check
+  // (tools_never_called chief among them, since a resumed session very often
+  // asserts the write must NOT happen again) reads calledNames/validNames
+  // from record.toolCalls, and this never actually ran through the live loop.
+  for (const name of resume.priorReceipts || []) record.seededReceipts.push({ name, index: -1, receipt: true, seeded: true });
   convo._resumedHint = true;
   convo._resume = { predecessorsComplete: true, segmentsText, reconnects: Number(resume.reconnects) || 1, relayLeadId: null };
   convo._resumeReady = Promise.resolve();
@@ -1260,6 +1314,15 @@ const CHECK_RUNNERS = Object.freeze({
     const over = Object.entries(value).map(([n, max]) => [n, calledNames.filter((c) => c === n).length, max]).filter(([, count, max]) => count > max);
     return over.length ? ['fail', over.map(([n, count, max]) => `${n} called ${count}× (max ${max})`).join(', ')] : ['pass', Object.entries(value).map(([n, max]) => `${n} ≤ ${max}`).join(', ')];
   },
+  // Every CALL counts, not just a validly-answered one: an early guess at
+  // `tool` is the violation this check exists to catch even when the
+  // fixture rejected it for missing/invalid arguments.
+  tool_not_called_before_turn(value, record) {
+    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn);
+    return early.length
+      ? ['fail', `${value.tool} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
+      : ['pass', `${value.tool} never called before caller turn ${value.turn}`];
+  },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
   tools_performed_include(value, record, { performedNames }) {
@@ -1293,6 +1356,22 @@ const CHECK_RUNNERS = Object.freeze({
     const best = captures.map((c) => inputIncludes(c.accumulated || c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
     return best.length ? ['fail', `no capture_lead input satisfied: ${best.join('; ')}`] : ['pass', 'capture_lead input includes every expected field'];
   },
+  // Any tool, not just capture_lead: only a call the fixture actually ran
+  // (ok === true — a refused/invalid call did nothing) can satisfy this, and
+  // an optional fromTurn scopes it to a call at or after a given caller turn
+  // (e.g. "the corrected lookup, not the pre-correction one").
+  tool_input_includes(value, record) {
+    const { tool, input, fromTurn } = value;
+    const calls = record.toolCalls.filter((t) => t.name === tool && t.ok === true && (fromTurn == null || t.turn >= fromTurn));
+    if (!calls.length) {
+      const anyCall = record.toolCalls.some((t) => t.name === tool);
+      return ['fail', anyCall
+        ? `${tool} was never called successfully${fromTurn != null ? ` from caller turn ${fromTurn} on` : ''} (every call was rejected, failed, or came before that turn)`
+        : `${tool} was never called`];
+    }
+    const best = calls.map((c) => inputIncludes(c.input, input)).reduce((a, b) => (b.length < a.length ? b : a));
+    return best.length ? ['fail', `no ${tool} call satisfied: ${best.join('; ')}`] : ['pass', `${tool} input includes every expected field`];
+  },
   end_session_called(value, record) {
     const want = typeof value === 'boolean' ? value : true;
     const called = record.endSession != null;
@@ -1319,19 +1398,29 @@ const CHECK_RUNNERS = Object.freeze({
     // member will follow up"): the call is on the record for the office,
     // nothing is claimed done and nothing was performed. Any other
     // commitment — an emailed estimate, a text — still needs a performed write.
-    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true || t.existing === true));
+    const receipts = [
+      ...record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true || t.existing === true)),
+      // A pre-drop receipt applyResumeFixture seeded from the resumed
+      // segmentsText's own prose (fixtures.resume.priorReceipts) — never a
+      // call this replay actually made, but evidence the office already has.
+      ...(record.seededReceipts || []),
+    ];
     const backs = (r, p) => r.index < p.index && (r.receipt === true || DIRECTED_FOLLOW_UP_RE.test(p.text));
     const unbacked = promises.find((p) => !receipts.some((r) => backs(r, p)));
     if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
-    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : r.existing ? ' (already on file)' : ''}`))].join(', ')})`];
+    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : r.existing ? ' (already on file)' : ''}${r.seeded ? ' (seeded from resumed segment)' : ''}`))].join(', ')})`];
   },
   ...SPOKEN_CHECK_RUNNERS,
 });
 
 // The patterns and the speech they grade: every utterance, or — for
-// { patterns, fromTurn } — only what Sandy said from that caller turn on.
+// { patterns, fromTurn } / { patterns, onTurn } — only what Sandy said from
+// that caller turn on, or on exactly that caller turn.
 function spokenScope(value, { spoken, utterances }) {
   if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
+  if (value.onTurn != null) {
+    return { sources: value.patterns, spoken: utterances.filter((u) => u.turn === value.onTurn).map((u) => u.text), scope: ` on caller turn ${value.onTurn}` };
+  }
   return { sources: value.patterns, spoken: utterances.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}` };
 }
 
@@ -1460,7 +1549,7 @@ function qualityScore(checks) {
 
 function newRecord(scenario, h) {
   return {
-    id: scenario.id, language: scenario.language || 'en', from: (scenario.caller && scenario.caller.from) || null, turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
+    id: scenario.id, language: scenario.language || 'en', from: (scenario.caller && scenario.caller.from) || null, turn: 0, events: [], spoken: [], toolCalls: [], seededReceipts: [], toolUse: {},
     // Placeholder until the conversation exists (below h.MODEL is the module
     // default — the best guess available before construction). runScenario
     // overwrites both with the constructed conversation's actual resolved

@@ -72,7 +72,7 @@ describe('receiptSmsFacts', () => {
     const facts = await InvoiceService.receiptSmsFacts(BASE_INVOICE);
     expect(facts.amount).toBe('164.00');
     expect(facts.cardLine).toBe(' (Visa ending 4242)');
-    expect(facts.receiptUrl).toBe('https://portal.example.com/pay/tok123');
+    expect(facts.receiptUrl).toBe('https://portal.example.com/receipt/tok123');
   });
 
   test('falls back to amount due (total − credit_applied) without a payment row', async () => {

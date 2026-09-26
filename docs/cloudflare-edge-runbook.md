@@ -80,10 +80,10 @@ the marketing site:
 | `/api/health` | GET | Railway healthcheck probe | none (public) |
 
 > **⚠️ Why explicit prefixes, not the whole `/api/webhooks/` tree:** `/api/webhooks/lead`
-> (website lead-form intake — `server/index.js:355`) lives under that path but is
+> (website lead-form intake — its `app.use('/api/webhooks/lead', …)` mount in `server/index.js`) lives under that path but is
 > **browser-originated** and must **keep** bot protection — it's a spam target and accepts
 > PII. A blanket `starts_with(…, "/api/webhooks/")` skip would silently expose it.
-> (`/api/leads` — `server/index.js:356` — is the **same handler mounted at a separate
+> (`/api/leads` — the `app.use('/api/leads', …)` mount right after it — is the **same handler mounted at a separate
 > path**, *not* under `/api/webhooks/`, so a webhooks-tree skip would not reach it; it is
 > likewise browser-origin and must stay protected.) When a new server-to-server webhook
 > provider is onboarded, add its prefix to the expression **deliberately**.

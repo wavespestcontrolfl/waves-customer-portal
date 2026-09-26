@@ -1649,3 +1649,88 @@ describe('write-tool turn ownership recheck (block parity)', () => {
     expect(captured[1]).toBeUndefined();
   });
 });
+
+// Sandy slice 1, PR D — targeted race test for handlePrompt's serialized
+// `_chain` (relay-conversation.js ~1938-1957). This is a MECHANIC test, not
+// a model-behavior test: it scripts the FIRST turn's pending write tool to
+// go on and complete normally (the model "books" the abandoned slot) — an
+// "already-dispatched write" case, standing in for any write that was
+// already in flight before a second caller turn (a change of mind, a
+// correction) arrives. It proves two things about the serialization
+// mechanic ONLY:
+//   1. the second turn queues behind the WHOLE first turn — including its
+//      pending write tool and its post-tool continuation round — never
+//      interleaving rounds or messages with it;
+//   2. a write already dispatched before the change lands completes exactly
+//      once and is never duplicated or re-triggered by the second turn.
+// It does NOT exercise, and must never be read as covering, whether the
+// MODEL recognizes changed instructions and avoids booking the abandoned
+// slot in the first place — that is the eval fixture's own contract
+// (server/fixtures/voice-relay-eval/scenarios.json:
+// delayed-tool-response-changed-instructions, graded by its deterministic
+// `expect` checks against a real or scripted model) and is covered by
+// voice-relay-eval-new-scenario-checks.test.js's own describe block for that
+// scenario, not by this file.
+describe('queued next-turn race: an already-dispatched write completes once, never duplicated', () => {
+  afterEach(() => { delete process.env.VOICE_RELAY_RENDERER; });
+
+  test('a second prompt arriving while the first turn\'s write tool is still pending queues behind the WHOLE turn — no round overlap, and the already-dispatched write is never duplicated', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-queue-race', from: '+19415551234', send });
+    let resolveTool;
+    const executeToolBoundedSpy = jest.spyOn(convo, '_executeToolBounded')
+      .mockImplementation(() => new Promise((resolve) => { resolveTool = resolve; }));
+
+    const firstPrompt = convo.handlePrompt('book me for tuesday at 1pm');
+    await flush();
+    const round1 = captured[0];
+    round1.resolve({
+      content: [
+        { type: 'text', text: 'Let me get that request in for you.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: { slot_ref: 'S2' } },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await flush(); // finalize settles; the tool loop is now awaiting the (still-pending) write tool
+    expect(executeToolBoundedSpy).toHaveBeenCalledTimes(1);
+
+    // The caller changes their mind before the pending write settles. This
+    // second prompt must queue onto _chain, never interleave with the still-
+    // open first turn.
+    const secondPrompt = convo.handlePrompt("actually cancel that — I'm seeing ants right now, can someone come take care of that instead");
+    await flush();
+    await flush();
+    expect(captured[1]).toBeUndefined(); // no round for EITHER turn starts while the write tool is pending
+
+    resolveTool('Booking request placed for Tuesday at 1 PM — PENDING office review.');
+    await flush();
+    const round1Continuation = captured[1];
+    expect(round1Continuation).toBeTruthy(); // turn 1's OWN continuation round (sees the tool result) — not turn 2's
+    round1Continuation.resolve({ content: [{ type: 'text', text: 'All set — a team member will confirm.' }], stop_reason: 'end_turn' });
+    await firstPrompt;
+    await flush();
+    await flush();
+
+    // Turn 1 fully closed (tool_result + its continuation) before turn 2's
+    // caller message was ever recorded — never interleaved.
+    const msgs = convo.messages;
+    const toolResultIdx = msgs.findIndex((m) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result');
+    const secondCallerIdx = msgs.findIndex((m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('ants'));
+    expect(toolResultIdx).toBeGreaterThanOrEqual(0);
+    expect(secondCallerIdx).toBeGreaterThan(toolResultIdx);
+
+    await flush();
+    const round2 = captured[2];
+    expect(round2).toBeTruthy(); // turn 2's round only starts once turn 1 is fully settled
+    round2.resolve({ content: [{ type: 'text', text: 'Sure, I can get that filed for you.' }], stop_reason: 'end_turn' });
+    await secondPrompt;
+
+    // The already-dispatched booking write completed exactly once — the
+    // second turn's changed instruction never re-triggers or duplicates it.
+    // (Whether the MODEL should have placed this booking at all given the
+    // changed instruction is the eval fixture's own question, not this
+    // mechanic test's — see the file-header note above.)
+    expect(executeToolBoundedSpy).toHaveBeenCalledTimes(1);
+  });
+});
