@@ -297,12 +297,14 @@ async function lockedContext(trx, customerId, proposedAddress = null) {
   const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
   if (!customer || customer.deleted_at) throw actionError('Customer not found', 404, 'customer_not_found');
   let primaryReference = customer;
+  let visitReference = customer;
   let primaries = await trx('customer_properties')
     .where({ customer_id: customerId, active: true, is_primary: true })
     .forUpdate()
     .select('*');
   if (!primaries.length) {
     primaryReference = proposedAddress ? { ...customer, ...proposedAddress } : customer;
+    if (!String(customer.address_line1 || '').trim()) visitReference = primaryReference;
     await ensurePrimaryProperty(primaryReference, { conn: trx });
     primaries = await trx('customer_properties')
       .where({ customer_id: customerId, active: true, is_primary: true })
@@ -317,7 +319,7 @@ async function lockedContext(trx, customerId, proposedAddress = null) {
     throw actionError('The customer and primary service location do not match. Resolve that conflict first.', 409, 'primary_location_mismatch');
   }
   const storedReview = await trx('customer_geocode_reviews').where({ customer_id: customerId }).forUpdate().first();
-  return { customer, primary, primaryReference, storedReview };
+  return { customer, primary, visitReference, storedReview };
 }
 
 function assertRevision(customer, storedReview, expected) {
@@ -340,7 +342,7 @@ async function auditResolution(trx, customerId, actorId, action, metadata) {
 }
 
 async function verifyPin({
-  trx, customerId, input, actorId, customer, primary, primaryReference, storedReview, visitContext,
+  trx, customerId, input, actorId, customer, primary, visitReference, storedReview, visitContext,
 }) {
   if (input.confirmed !== true) {
     throw actionError('Confirm the primary service location before verifying it.', 400, 'confirmation_required');
@@ -378,7 +380,7 @@ async function verifyPin({
     await require('./customer-address-fanout').propagateCustomerAddressChange({ before: customer, after }, trx);
   }
   const visitsUpdated = await updatePrimaryVisits(
-    trx, primaryReference, primary, after, latitude, longitude, visitContext,
+    trx, visitReference, primary, after, latitude, longitude, visitContext,
   );
   await reviewStore.saveReview(trx, after, {
     status: 'verified', reason: 'staff_verified', source: input.source, evidence: input.evidence,
@@ -451,7 +453,7 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
       ? await prelockVisitContext(trx, customerId, { includeProtected })
       : { visits: [], rootIds: [], seriesIds: [] };
     const proposedAddress = input.action === 'verify_pin' ? reviewAddressPatch(input.address) : null;
-    const { customer, primary, primaryReference, storedReview } = await lockedContext(
+    const { customer, primary, visitReference, storedReview } = await lockedContext(
       trx, customerId, proposedAddress,
     );
     if (!reviewStore.reviewEnabled()) throw actionError('Geocode review is disabled.', 404, 'review_disabled');
@@ -460,7 +462,7 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
       ? await lockVisitContext(trx, customerId, prelocked, { includeProtected })
       : { visits: [], parents: [] };
     retryAddress = await ACTION_HANDLERS[input.action]({
-      trx, customerId, input, actorId, customer, primary, primaryReference, storedReview, visitContext,
+      trx, customerId, input, actorId, customer, primary, visitReference, storedReview, visitContext,
     }) || null;
     if (!reviewStore.reviewEnabled()) throw actionError('Geocode review is disabled.', 404, 'review_disabled');
   }).catch(err => {

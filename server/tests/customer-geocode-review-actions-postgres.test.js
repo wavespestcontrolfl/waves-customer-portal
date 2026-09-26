@@ -320,6 +320,47 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect(await visit(visitIds.matching)).toMatchObject({ property_id: rows[0].id });
   });
 
+  test('a corrected address matches old customer stamps while creating a missing primary', async () => {
+    await mockConnection('customer_properties').where({ id: PRIMARY }).del();
+    await mockConnection('scheduled_services')
+      .whereIn('id', [visitIds.matching, visitIds.frozen, visitIds.individual])
+      .update({ property_id: null });
+    for (const name of ['completed', 'independentRoot']) {
+      const parent = await visit(visitIds[name]);
+      await mockConnection('scheduled_services').where({ id: visitIds[name] }).update({
+        property_id: null,
+        recurring_template_overrides: {
+          ...parent.recurring_template_overrides,
+          appointment_address: {
+            ...parent.recurring_template_overrides.appointment_address, property_id: null,
+          },
+        },
+      });
+    }
+    const corrected = { ...ADDRESS, address_line1: '104 Fixture Way' };
+
+    await verify({ address: corrected });
+
+    const [savedPrimary] = await mockConnection('customer_properties')
+      .where({ customer_id: CUSTOMER, active: true, is_primary: true });
+    expect(savedPrimary).toMatchObject(corrected);
+    expect(await visit(visitIds.matching)).toMatchObject({
+      property_id: savedPrimary.id, service_address_line1: corrected.address_line1,
+    });
+    expect(recurringServiceAddress(await visit(visitIds.completed))).toMatchObject({
+      property_id: savedPrimary.id, service_address_line1: corrected.address_line1,
+    });
+    expect(await visit(visitIds.frozen)).toMatchObject({
+      property_id: null, service_address_line1: ADDRESS.address_line1,
+    });
+    expect(await visit(visitIds.individual)).toMatchObject({
+      property_id: null, service_address_line1: ADDRESS.address_line1,
+    });
+    expect(await visit(visitIds.divergent)).toMatchObject({
+      property_id: SECONDARY, service_address_line1: SECONDARY_ADDRESS.address_line1,
+    });
+  });
+
   test('verify corrects an ongoing completed root even when it has no eligible future child', async () => {
     await mockConnection('scheduled_services').where({ id: visitIds.matching }).del();
     const corrected = { ...ADDRESS, address_line1: '103 Fixture Way' };
