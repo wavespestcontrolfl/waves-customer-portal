@@ -5,16 +5,21 @@
  * Amazon skips the Delivered email for about 1 in 6 shipments (5 of 29
  * since April; the Sep 13 Gentrol was one), and the Delivered lane can't
  * see those deliveries. Each sweep (sweep.js, after its Delivered pass)
- * looks at authenticated "Shipped:" emails between SHIPPED_GRACE_MS and
- * SHIPPED_LOOKBACK_MS old (never before PURCHASE_RECEIPT_SINCE). The
- * longest real shipped-to-delivered gap is 56 hours, so a shipment still
- * unconfirmed after 3 days is treated as one whose email was skipped.
+ * looks at authenticated "Shipped:" emails up to SHIPPED_LOOKBACK_MS old
+ * (never before PURCHASE_RECEIPT_SINCE). A shipment still unconfirmed once
+ * its promised arrival day ("Arriving today" / "tomorrow" / "Wednesday" /
+ * "June 16 - June 18" -> the last day, read on the ET calendar) and the day
+ * after have both passed is treated as one whose email was skipped: every
+ * real Delivered email came on or before its promised day. A Shipped email
+ * that promises no day waits SHIPPED_GRACE_MS (3 days; the longest real
+ * shipped-to-delivered gap is 56 hours).
  *
  * A shipment is settled once purchase_receipt_lines has any row for its
  * shipmentId: its Delivered email was processed (every authenticated one
- * leaves at least one row), or it was already alerted. The lookback keeps
- * every such Delivered email inside the Delivered pass's own 7-day window,
- * so a delivery that did get its email is always settled first. Otherwise,
+ * leaves at least one row; sweep.js runs its Delivered pass first), or it
+ * was already alerted. A Delivered email the lane never processed (it fell
+ * outside that pass's window) added no stock, so asking for a hand log is
+ * still right. Otherwise,
  * when the shipment carries at least one stocked product, its stocked items
  * are recorded as 'no_delivery_email' and ONE bell asks for a hand log, in
  * one transaction (the bell via notifyAdmin's trx option): a re-run never
@@ -31,14 +36,49 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
-const { formatETDate } = require('../../utils/datetime-et');
+const { formatETDate, etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { parseAmazonShippedEmail, AMAZON_SHIPPED_FROM } = require('./amazon-delivery-parser');
 const { matchAmazonTitleToProduct } = require('./product-matcher');
 const { VENDOR, UNKNOWN_ORDER, lockShipment } = require('./receipt-processor');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHIPPED_GRACE_MS = 3 * DAY_MS;
-const SHIPPED_LOOKBACK_MS = 7 * DAY_MS;
+const SHIPPED_LOOKBACK_MS = 14 * DAY_MS;
+// No alert can come sooner: "Arriving today" still waits out the next day.
+const MIN_ALERT_AGE_MS = DAY_MS;
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const MONTH_DAY_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
+
+// The ET day a Shipped email promises, as an addETDays-style carrier (noon
+// UTC of that calendar date), or null when it names none.
+function promisedArrivalDay(text, shippedAt) {
+  const phrase = (String(text || '').match(/^\s*arriving\s+(.+)$/im) || [])[1]?.toLowerCase();
+  if (!phrase) return null;
+  if (phrase.startsWith('today')) return addETDays(shippedAt, 0);
+  if (phrase.startsWith('tomorrow')) return addETDays(shippedAt, 1);
+  const weekday = WEEKDAYS.findIndex((name) => phrase.startsWith(name));
+  // "Arriving Wednesday" sent on a Wednesday means next week ("today" otherwise).
+  if (weekday >= 0) return addETDays(shippedAt, ((weekday - etParts(shippedAt).dayOfWeek + 7) % 7) || 7);
+  const last = [...phrase.matchAll(MONTH_DAY_RE)].pop();
+  if (!last) return null;
+  const { year } = etParts(shippedAt);
+  const onYear = (y) => new Date(Date.UTC(y, MONTHS.indexOf(last[1]), Number(last[2]), 12));
+  // Shipped late December, promised early January.
+  return onYear(year) < addETDays(shippedAt, -1) ? onYear(year + 1) : onYear(year);
+}
+
+// When an unconfirmed shipment counts as one whose Delivered email was
+// skipped: ET midnight once its promised day and the day after have
+// passed, else SHIPPED_GRACE_MS after the Shipped email.
+function alertAfter(email) {
+  const shippedAt = new Date(email.received_at);
+  const promised = promisedArrivalDay(email.body_text, shippedAt);
+  const at = promised
+    ? parseETDateTime(`${etDateString(addETDays(promised, 2))}T00:00`)
+    : new Date(shippedAt.getTime() + SHIPPED_GRACE_MS);
+  return { at, promised };
+}
 
 function shipmentSettled(conn, shipmentId) {
   return conn('purchase_receipt_lines').where({ vendor: VENDOR, shipment_key: shipmentId }).first('id');
@@ -53,9 +93,10 @@ async function stockedItems(items, conn) {
   return stocked;
 }
 
-async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, trx }) {
+async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promised, trx }) {
   const what = stocked.map(({ item, product }) => `${product.name} ×${item.quantity}`).join(', ');
-  const body = `Amazon shipped ${what} on ${formatETDate(new Date(email.received_at))} but never sent a delivery confirmation, `
+  const due = promised ? ` (due ${formatETDate(promised)})` : '';
+  const body = `Amazon shipped ${what} on ${formatETDate(new Date(email.received_at))}${due} but never sent a delivery confirmation, `
     + "so it wasn't added. If it arrived, log it by hand.";
   await notifyAdmin('inventory', 'Amazon delivery not confirmed', body, {
     link: '/admin/inventory?tab=products',
@@ -67,8 +108,11 @@ async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, trx })
 }
 
 // One Shipped email -> the alerted shipment, or null when there is nothing
-// to alert (not one we can check, already settled, or no stocked item).
-async function alertIfUndelivered(email, notifyAdmin, conn) {
+// to alert (not due yet, not one we can check, already settled, or no
+// stocked item).
+async function alertIfUndelivered(email, { notifyAdmin, now }, conn) {
+  const { at, promised } = alertAfter(email);
+  if (now < at.getTime()) return null;
   const parsed = parseAmazonShippedEmail(email);
   if (!parsed?.shipmentId || !parsed.items.length) return null;
   if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) return null;
@@ -83,7 +127,7 @@ async function alertIfUndelivered(email, notifyAdmin, conn) {
       vendor: VENDOR, order_number: parsed.orderNumber || UNKNOWN_ORDER, shipment_key: parsed.shipmentId, line_no: lineNo,
       email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: product.id, status: 'no_delivery_email',
     })));
-    await ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, trx });
+    await ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promised, trx });
     return { shipmentId: parsed.shipmentId, orderNumber: parsed.orderNumber, titles: stocked.map(({ item }) => item.title) };
   });
 }
@@ -98,12 +142,12 @@ async function alertUndeliveredShipments({ since, now = Date.now(), notifyAdmin 
     .whereRaw('LOWER(from_address) = ?', [AMAZON_SHIPPED_FROM])
     .whereRaw('subject ILIKE ?', ['Shipped:%'])
     .where('received_at', '>=', new Date(Math.max(since.getTime(), now - SHIPPED_LOOKBACK_MS)))
-    .where('received_at', '<=', new Date(now - SHIPPED_GRACE_MS))
+    .where('received_at', '<=', new Date(now - MIN_ALERT_AGE_MS))
     .orderBy('received_at', 'asc');
   const result = { undelivered: [], errors: [] };
   for (const email of emails) {
     try {
-      const alerted = await alertIfUndelivered(email, notifyAdmin, conn);
+      const alerted = await alertIfUndelivered(email, { notifyAdmin, now }, conn);
       if (alerted) result.undelivered.push({ ...alerted, emailId: email.id });
     } catch (err) {
       logger.error(`[purchase-receipts] undelivered check for email ${email.id} failed: ${err.message}`);
@@ -113,4 +157,4 @@ async function alertUndeliveredShipments({ since, now = Date.now(), notifyAdmin 
   return result;
 }
 
-module.exports = { alertUndeliveredShipments, SHIPPED_GRACE_MS };
+module.exports = { alertUndeliveredShipments, alertAfter };

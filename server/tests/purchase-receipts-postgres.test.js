@@ -173,8 +173,8 @@ jest.setTimeout(30000);
         + `* ${TITLE}\n  Quantity: 2\n\n* Lenovo Chromebook\n  Quantity: 1\n`,
       received_at: new Date(NOW - 4 * DAY), ...overrides,
     });
-    const run = () => alertUndeliveredShipments({
-      since: new Date(NOW - 30 * DAY), now: NOW, notifyAdmin: (...args) => notifications.notifyAdmin(...args),
+    const run = (now = NOW) => alertUndeliveredShipments({
+      since: new Date(NOW - 30 * DAY), now, notifyAdmin: (...args) => notifications.notifyAdmin(...args),
     });
     const alertBells = (shipmentId) => mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt-undelivered:${shipmentId}`]);
 
@@ -212,11 +212,20 @@ jest.setTimeout(30000);
       expect(await alertBells('ship-1')).toHaveLength(0);
     });
 
+    test('a promised arrival day is waited out, plus the day after: "Arriving Wednesday" from Sun Sep 13 rings Fri Sep 18', async () => {
+      const shippedSunday = new Date('2026-09-13T17:12:00Z'); // 1:12 PM ET
+      await shipped('ship-6', { received_at: shippedSunday, body_text: `Arriving Wednesday\nOrder #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=ship-6\n\n* ${TITLE}\n  Quantity: 1\n` });
+      expect((await run(new Date('2026-09-17T16:00:00Z').getTime())).undelivered).toEqual([]); // Thursday noon ET
+      expect((await run(new Date('2026-09-18T05:00:00Z').getTime())).undelivered).toHaveLength(1); // Friday 1 AM ET
+      const [bell] = await alertBells('ship-6');
+      expect(bell.body).toBe("Amazon shipped Taurus SC ×1 on September 13 (due September 16) but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
+    });
+
     test('too recent, unauthenticated, personal items only, or outside the lookback: no bell', async () => {
       await shipped('ship-2', { received_at: new Date(NOW - 2 * DAY) });
       await shipped('ship-3', { authentication_results: 'dkim=pass header.i=@evil.example; spf=fail' });
       await shipped('ship-4', { body_text: 'Order #\n900-1\nhttps://www.amazon.com/x?shipmentId=ship-4\n\n* Lenovo Chromebook\n  Quantity: 1\n' });
-      await shipped('ship-5', { received_at: new Date(NOW - 8 * DAY) });
+      await shipped('ship-5', { received_at: new Date(NOW - 15 * DAY) });
       expect((await run()).undelivered).toEqual([]);
       expect(await mockConn('purchase_receipt_lines')).toEqual([]);
       expect(await mockConn('notifications')).toEqual([]);
