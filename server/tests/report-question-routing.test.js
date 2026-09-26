@@ -463,7 +463,7 @@ describe('service report — every shipped chip answers its own category (AW-06)
   ])('customer re-entry with a time is re-entry, not a scheduled return: %s', (question) => {
     const answer = answerServiceReportQuestion({ question, data: pestData, nextAppointment });
     expect(answer).not.toMatch(/Your next appointment is/);
-    expect(answer).toMatch(/re-entry|dry|back (?:in|out)/i);
+    expect(answer).toMatch(/ready for normal use|re-entry/i);
   });
 
   test('"How did the treatment affect the pressure score?" gets the trend answer', () => {
