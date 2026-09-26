@@ -10067,7 +10067,13 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'tree_shrub', name: 'Tree & Shrub', icon: 'palm',
-    frequencies: ['4x per year', '6x per year'],
+    // My Plan renders frequencies[0] as the cadence line and SERVICE_CATALOG
+    // has no link to the customer's enrolled program — same as lawn/mosquito
+    // above. Customers enrolled before a cadence retired (4x/quarterly,
+    // owner directive 2026-09-24) keep their plan, so naming any one
+    // cadence misstates someone's; variant-neutral until the panel reads
+    // the matched service's real cadence.
+    frequencies: ['Recurring tree & shrub program'],
     basePrice: 50, description: 'Deep root feeding, insect & disease treatment, palm injections (Arborjet)',
     products: ['Merit 75 WP', 'Keel Fungicide', 'Arborjet TREE-age'],
   },
@@ -10135,12 +10141,23 @@ const SERVICE_COVERAGE = {
   rodent_bait: { summary: 'Exterior bait stations inspected and replenished on every visit.', details: ['Exterior rodent bait station inspection', 'Bait replenishment and rotation', 'Exclusion check around entry points'] },
 };
 
-// Service schedule months for calendar view
+// Service schedule months for calendar view. getScheduledMonthsForService
+// UNIONS this static cadence guess with the customer's real (completed +
+// upcoming) events, so it renders even before a series is fully seeded.
+//
+// tree_shrub has NO entry (codex P1 pre-push, 2026-09-24): SERVICE_CATALOG
+// has no link to which cadence a given customer is actually on (same gap
+// the neutral "Recurring tree & shrub program" cadence label above already
+// documents), and the four-month Feb/May/Aug/Nov pattern this used to fall
+// back to was the RETIRED 4x/quarterly Light cadence — every newly sold 6x
+// Standard or 9x Enhanced customer would see four fabricated planned visits
+// that never happen. Omitting the key (getScheduledMonthsForService's own
+// `|| []` fallback) shows only the customer's real scheduled/completed
+// months instead of a wrong guess.
 const SERVICE_SCHEDULE_MONTHS = {
   pest_control: [0, 3, 6, 9],        // Jan, Apr, Jul, Oct (quarterly)
   lawn_care: [0, 2, 5, 8],            // Jan, Mar, Jun, Sep (4x/year)
   mosquito: [1, 2, 3, 4, 5, 6, 7, 8, 9], // Feb-Oct (seasonal 9-visit program)
-  tree_shrub: [1, 4, 7, 10],          // Feb, May, Aug, Nov
   termite: [0, 3, 6, 9],              // Quarterly
 };
 

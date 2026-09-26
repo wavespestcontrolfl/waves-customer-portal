@@ -149,7 +149,10 @@ function waveGuardBundleValues() {
       // sets: defaults, and the cheapest selectable lawn/tree-shrub combo.
       for (const optionSet of [
         { lawnSqFt: 6000, lawn: {}, treeShrub: {} },
-        { lawnSqFt: 1500, lawn: { track: 'bahia', tier: 'premium' }, treeShrub: { tier: 'light' } },
+        // Cheapest selectable T&S tier is now Standard (6x) — Light/4x is
+        // retired for new sales (owner directive 2026-09-24) and must not
+        // shape the published minimum via this "cheapest combo" sweep.
+        { lawnSqFt: 1500, lawn: { track: 'bahia', tier: 'premium' }, treeShrub: { tier: 'standard' } },
       ]) {
       const est = generateEstimate({
         propertyType,
@@ -880,13 +883,17 @@ function buildRows() {
     key: 'tree_shrub_care',
     name: 'Tree & Shrub Care Program',
     unit: 'per month',
+    // 'light' (4x/quarterly) is hidden:true — retired for new sales (owner
+    // directive 2026-09-24: stop offering quarterly tree & shrub care) — so
+    // it no longer shapes the published range, mirroring how the lawn range
+    // above dropped its retired 6x column.
     values: sweepValues(
       LOTS_SQFT.flatMap((lot) =>
-        ['light', 'standard', 'enhanced'].flatMap((tier) =>
+        ['standard', 'enhanced'].flatMap((tier) =>
           TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
       ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
       (r) => r.monthly).concat(bundle('treeShrub')),
-    notes: `Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count (larger counts extend beyond this range); WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+    notes: `Monthly-billed program; 6 or 9 applications per year by tier; priced by planting beds and tree count (larger counts extend beyond this range); WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
   // rodent_plugging (calculatePluggingPrice) is deliberately NOT published:

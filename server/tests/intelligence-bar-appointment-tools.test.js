@@ -92,6 +92,11 @@ function chain(overrides = {}) {
 
 function wireDb(queues) {
   db.mockImplementation((table) => {
+    // The retired-for-sale catalog lookup (quarterly T&S gate, #4786):
+    // no retired rows unless a test queues its own.
+    if (table === 'services' && !queues.services) {
+      return { whereIn() { return this; }, select: () => Promise.resolve([]) };
+    }
     const q = queues[table];
     if (!q || q.length === 0) throw new Error(`Unexpected db('${table}') call`);
     return q.shift();

@@ -22,6 +22,15 @@ const MONTH_RECURRENCE_INTERVALS = {
   yearly: 12,
 };
 
+// Day-gap patterns (month patterns above walk calendar months instead).
+const DAY_RECURRENCE_INTERVALS = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
+// The gap nextRecurringDate falls back to for a pattern it cannot place —
+// an unknown value, or 'custom' with no interval. Roughly quarterly, so a
+// retired-plan gate must read that fallback as quarterly evidence (codex r30
+// on #4786) rather than let an unrecognized pattern schedule the retired
+// four-visit cadence unnoticed.
+const FALLBACK_RECURRENCE_GAP_DAYS = 91;
+
 const DEFAULT_WEEKEND_SHIFT = 'forward';
 
 // Seasonal mosquito: 9 visits at monthly gaps that NEVER land Nov-Jan (owner
@@ -282,6 +291,16 @@ function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
   };
 }
 
+// The next Feb–Oct seasonal occurrence after a visit, on the series' own
+// ordinal-weekday anchors (stored nth/weekday, else the visit's) — the date
+// the scheduler would place, for readers that ask "when is this plan due"
+// (the Intelligence Bar overdue scan — codex r34 on #4786).
+function nextSeasonalFebOctDue(lastDateStr, { nth = null, weekday = null } = {}) {
+  const last = dateOnly(lastDateStr);
+  if (!last) return null;
+  return seasonalFebOctDate(last, 1, recurrenceOrdinalOptions(last, { nth, weekday }));
+}
+
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const safe = dateOnly(baseDateStr) || etDateString();
   const base = parseETDateTime(`${safe}T12:00`);
@@ -302,9 +321,38 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
 
-  const intervals = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
-  const gap = pattern === 'custom' && intNum ? Math.max(1, intNum) : (intervals[pattern] || 91);
+  const gap = pattern === 'custom' && intNum ? Math.max(1, intNum) : (DAY_RECURRENCE_INTERVALS[pattern] || FALLBACK_RECURRENCE_GAP_DAYS);
   return etDateString(addETDays(base, gap * i));
+}
+
+// Does nextRecurringDate place this stored pattern on its own terms (a month
+// walk, a day gap, the nth-weekday walk, the season, or a custom interval)?
+// Anything else schedules at FALLBACK_RECURRENCE_GAP_DAYS.
+function schedulerPlacesPattern(pattern) {
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || pattern === 'custom'
+    || !!MONTH_RECURRENCE_INTERVALS[pattern] || Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern);
+}
+
+// The nominal day gap of a stored series' recurrence, for cadence math that
+// reads a series (the overdue scan) — never for scheduling, which walks
+// calendar months above. A 'custom' interval is its own gap (a bare interval
+// under a null pattern is NOT: lineDueOnRecurringDate rides every parent
+// occurrence when no pattern is stored, whatever the interval column says —
+// codex r30 on #4786); a month pattern is months × 30 (bimonthly 60,
+// quarterly 90, semiannual 180), monthly_nth_weekday included; a day-gap
+// pattern reads the table. Every other pattern mirrors nextRecurringDate
+// (codex r32): 'custom' with no interval, or a value it cannot place, runs at
+// FALLBACK_RECURRENCE_GAP_DAYS. Null only for what has no single nominal gap
+// — no pattern, one_time, the Feb–Oct season — so the caller falls back to
+// its own default.
+function intervalDaysForPattern(pattern, intervalDays = null) {
+  const interval = Number.parseInt(intervalDays, 10);
+  if (pattern === 'custom') return Number.isInteger(interval) && interval > 0 ? interval : FALLBACK_RECURRENCE_GAP_DAYS;
+  if (pattern === 'monthly_nth_weekday') return MONTH_RECURRENCE_INTERVALS.monthly * 30;
+  if (MONTH_RECURRENCE_INTERVALS[pattern]) return MONTH_RECURRENCE_INTERVALS[pattern] * 30;
+  if (Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern)) return DAY_RECURRENCE_INTERVALS[pattern];
+  if (!pattern || pattern === 'one_time' || pattern === SEASONAL_FEB_OCT) return null;
+  return FALLBACK_RECURRENCE_GAP_DAYS;
 }
 
 function shiftPastWeekend(dateStr, skip, direction = DEFAULT_WEEKEND_SHIFT) {
@@ -1455,8 +1503,12 @@ module.exports = {
   scheduledServiceColumns,
   seriesCreateLockKeys,
   inferRecurringPattern,
+  intervalDaysForPattern,
+  schedulerPlacesPattern,
+  FALLBACK_RECURRENCE_GAP_DAYS,
   SEASONAL_FEB_OCT,
   seasonalFebOctDate,
+  nextSeasonalFebOctDue,
   clampDateToSeason,
   firstInSeasonDate,
   markParentRecurring,

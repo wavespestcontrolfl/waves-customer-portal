@@ -5567,6 +5567,7 @@ describe('public estimate one-time breakdown', () => {
         return this;
       },
       whereNull() { return this; },
+      whereNotIn() { return this; },
       orWhere() { return this; },
       orWhereNull() { return this; },
       orWhereRaw() { return this; },

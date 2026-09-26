@@ -303,11 +303,13 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(treeShrub.recommendedTier).toBe('standard');
   });
 
-  test('light tier is selectable as an explicit downsell', () => {
+  test('light tier still prices correctly when explicitly requested (grandfathered plans only — retired for new sales 2026-09-24), but is hidden from availableTiers by default', () => {
     const quote = priceTreeShrub({ bedArea: 1000 }, { tier: 'light' });
     expect(quote.tier).toBe('light');
     expect(quote.frequency).toBe(4);
-    expect(quote.availableTiers).toEqual(['light', 'standard', 'enhanced']);
+    expect(quote.availableTiers).toEqual(['standard', 'enhanced']);
+    const withHidden = priceTreeShrub({ bedArea: 1000 }, { tier: 'light', includeHiddenTiers: true });
+    expect(withHidden.availableTiers).toEqual(['light', 'standard', 'enhanced']);
   });
 
   test('estimatedBedArea alias is normalized before turf fallback math', () => {

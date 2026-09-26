@@ -1495,13 +1495,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const q = serviceSearch.trim();
     if (!q) { setServiceResults([]); setServiceLoading(false); return; }
     setServiceLoading(true);
+    // A response belongs to the customer + query that asked for it (codex
+    // r27): once either changes, the superseded request's response is
+    // dropped instead of overwriting the current customer's results.
+    let superseded = false;
     const handle = setTimeout(async () => {
       try {
         const params = new URLSearchParams();
         params.set('search', q);
         params.set('is_active', 'true');
+        // Hide retired-for-sale rows (quarterly T&S, retired 2026-09-24);
+        // a customer who already has visits on one (the grandfathered plan) still
+        // sees it for a catch-up visit.
+        params.set('sellable', 'true');
+        if (selectedCustomer?.id) params.set('sellable_customer_id', selectedCustomer.id);
         params.set('limit', '50');
         const r = await adminFetch(`/admin/services?${params}`);
+        if (superseded) return;
         setServiceResults((r.services || []).map((s) => ({
           id: s.id,
           service_key: s.service_key,
@@ -1515,15 +1525,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           priceMax: s.price_range_max ?? s.base_price,
           base_price: s.base_price,
           default_duration_minutes: s.default_duration_minutes,
+          retiredForSale: s.retired_for_sale === true,
         })));
       } catch {
-        setServiceResults([]);
+        if (!superseded) setServiceResults([]);
       } finally {
-        setServiceLoading(false);
+        if (!superseded) setServiceLoading(false);
       }
     }, 200);
-    return () => clearTimeout(handle);
-  }, [serviceSearch]);
+    return () => { superseded = true; clearTimeout(handle); };
+  }, [serviceSearch, selectedCustomer?.id]);
+
+  // A retired-for-sale line (quarterly T&S) is only offered because the
+  // selected customer is already on that plan — it must not carry over to a
+  // different customer. The server refuses it too (RETIRED_SERVICE_NOT_SELLABLE).
+  const retiredLinesCustomerRef = useRef(selectedCustomer?.id || null);
+  useEffect(() => {
+    const customerId = selectedCustomer?.id || null;
+    if (retiredLinesCustomerRef.current === customerId) return;
+    retiredLinesCustomerRef.current = customerId;
+    setServices((arr) => (arr.some((line) => line.retiredForSale) ? arr.filter((line) => !line.retiredForSale) : arr));
+    // The previous customer's search results (a retired row among them) are
+    // not offered to the next one while their own search is in flight.
+    setServiceResults([]);
+  }, [selectedCustomer?.id]);
 
   useEffect(() => {
     const customerId = selectedCustomer?.id;

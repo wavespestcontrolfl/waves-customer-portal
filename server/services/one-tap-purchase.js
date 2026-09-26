@@ -111,6 +111,33 @@ function assertNoDrift(offer, clicked = {}) {
   if (mismatch) throw httpError(409, OFFER_CHANGED);
 }
 
+// initPurchase already refuses to OPEN a purchase whose option_id is no
+// longer in variantsForService's live ladder (e.g. tree-light, retired
+// 2026-09-24 with the 4x/quarterly T&S tier) — but reserve()/confirm()
+// never re-ran that same check. A purchase opened in the window BEFORE a
+// tier's retirement can sit `initiated`/`reserved` for up to the hold/
+// estimate lifetime and, without this, still reserve a slot and convert a
+// NEW plan at the retired tier after deployment (codex P1 pre-push).
+// Generic over any one-tap service/option — not a tree_shrub special case
+// — since it's the exact same live-ladder membership test initPurchase
+// already applies for every service this flow supports.
+function oneTapVariantStillOffered(purchase) {
+  // initPurchase's insert always sets option_id (line ~366) — a row with
+  // none is a shape this check has no opinion about; the other
+  // authoritative re-checks (assertTargetStillPurchasable, snapshotIntact)
+  // already cover a malformed/legacy row.
+  if (!purchase.option_id) return true;
+  const pricingAi = require('./customer-pricing-ai');
+  return pricingAi.variantsForService(purchase.service_key, '', false)
+    .some((v) => v.id === purchase.option_id);
+}
+
+async function rejectRetiredOneTapVariant(purchase) {
+  if (oneTapVariantStillOffered(purchase)) return;
+  await voidPurchase(purchase);
+  throw httpError(409, OFFER_CHANGED);
+}
+
 // Customer-facing slot serialization: nearbyJob.detourMinutes is a routing
 // internal and is deliberately dropped (never rendered — SlotPicker rule).
 function serializeSlot(slot) {
@@ -438,6 +465,7 @@ async function initPurchase({ customerId, clicked }) {
 async function reserve({ customerId, purchaseId, slotId }) {
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   if (!['initiated', 'reserved'].includes(purchase.status)) throw httpError(409, OFFER_CHANGED);
+  await rejectRetiredOneTapVariant(purchase);
   const estimate = await db('estimates')
     .where({ id: purchase.estimate_id })
     .first('id', 'status', 'expires_at');
@@ -827,6 +855,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   if (purchase.status !== 'reserved' || !purchase.scheduled_service_id) {
     throw httpError(409, 'Pick a time before confirming.');
   }
+  await rejectRetiredOneTapVariant(purchase);
   const preEstimate = await db('estimates').where({ id: purchase.estimate_id }).first('id', 'status', 'expires_at', 'price_locked_at');
   if (!preEstimate || preEstimate.status !== 'draft' || preEstimate.price_locked_at || estimateExpired(preEstimate)) {
     throw httpError(409, OFFER_CHANGED);
@@ -1370,5 +1399,5 @@ module.exports = {
   TERMS_VERSION,
   TERMS_TEXT,
   HOLD_MINUTES,
-  _private: { assertNoDrift, serializeSlot, formatVisitWhen, to12h },
+  _private: { assertNoDrift, serializeSlot, formatVisitWhen, to12h, oneTapVariantStillOffered, rejectRetiredOneTapVariant, voidPurchase },
 };
