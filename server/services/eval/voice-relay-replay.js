@@ -200,6 +200,16 @@ const RESUME_SCHEMA = Joi.object({
   segmentsText: Joi.string().allow('').required(),
   reconnects: Joi.number().integer().min(1),
   priorCallerTurns: Joi.number().integer().min(0),
+  // A write tool the segmentsText's own prose says already succeeded BEFORE
+  // the drop (e.g. "I've got that request in for … pending office review").
+  // There is no other supported way to back a resumed session's promise:
+  // applyResumeFixture seeds transcript TEXT only, never a toolCalls entry,
+  // so commitment_requires_receipt's mandatory, always-on check would
+  // otherwise false-fail the correct "it's already in, pending" recovery
+  // reply for want of a receipt the harness never recorded. Kept to the
+  // registered write tools only — the same set commitment_requires_receipt
+  // itself reads receipts from.
+  priorReceipts: Joi.array().min(1).items(Joi.string().valid(...WRITE_TOOLS)),
 }).allow(null);
 const MATCHER_SCALAR = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean());
 const INPUT_MATCHER_SCHEMA = Joi.object().min(1).pattern(/\S/, Joi.alternatives().try(
@@ -505,6 +515,8 @@ function fixtureRules(s, knownTools) {
     [!Array.isArray(s.allowedTools) || !s.allowedTools.length, 'allowedTools must be a non-empty list of the tools this scenario may call'],
     ...(Array.isArray(s.allowedTools) ? s.allowedTools : []).map((name) => [!knownTools.has(name), `allowedTools names unknown tool "${name}"`]),
     [!!resumeError, `fixtures.resume: ${resumeError ? resumeError.message : ''}`],
+    ...(fx.resume && Array.isArray(fx.resume.priorReceipts) ? fx.resume.priorReceipts : [])
+      .map((name) => [!(Array.isArray(s.allowedTools) && s.allowedTools.includes(name)), `fixtures.resume.priorReceipts names "${name}", which is not in allowedTools`]),
   ];
 }
 
@@ -1155,6 +1167,14 @@ function applyResumeFixture(convo, scenario, record) {
   if (!resume) return;
   const segmentsText = String(resume.segmentsText || '');
   if (segmentsText) record.events.push({ kind: 'resume', text: segmentsText, turn: 0, index: record.events.length });
+  // Evidence, never a call: a synthetic receipt for a write the segmentsText
+  // says already happened before the drop, so commitment_requires_receipt
+  // (the mandatory, always-on check) can back a resumed promise that follows
+  // it. Kept OUT of record.toolCalls on purpose — every other check
+  // (tools_never_called chief among them, since a resumed session very often
+  // asserts the write must NOT happen again) reads calledNames/validNames
+  // from record.toolCalls, and this never actually ran through the live loop.
+  for (const name of resume.priorReceipts || []) record.seededReceipts.push({ name, index: -1, receipt: true, seeded: true });
   convo._resumedHint = true;
   convo._resume = { predecessorsComplete: true, segmentsText, reconnects: Number(resume.reconnects) || 1, relayLeadId: null };
   convo._resumeReady = Promise.resolve();
@@ -1378,11 +1398,17 @@ const CHECK_RUNNERS = Object.freeze({
     // member will follow up"): the call is on the record for the office,
     // nothing is claimed done and nothing was performed. Any other
     // commitment — an emailed estimate, a text — still needs a performed write.
-    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true || t.existing === true));
+    const receipts = [
+      ...record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true || t.existing === true)),
+      // A pre-drop receipt applyResumeFixture seeded from the resumed
+      // segmentsText's own prose (fixtures.resume.priorReceipts) — never a
+      // call this replay actually made, but evidence the office already has.
+      ...(record.seededReceipts || []),
+    ];
     const backs = (r, p) => r.index < p.index && (r.receipt === true || DIRECTED_FOLLOW_UP_RE.test(p.text));
     const unbacked = promises.find((p) => !receipts.some((r) => backs(r, p)));
     if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
-    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : r.existing ? ' (already on file)' : ''}`))].join(', ')})`];
+    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : r.existing ? ' (already on file)' : ''}${r.seeded ? ' (seeded from resumed segment)' : ''}`))].join(', ')})`];
   },
   ...SPOKEN_CHECK_RUNNERS,
 });
@@ -1523,7 +1549,7 @@ function qualityScore(checks) {
 
 function newRecord(scenario, h) {
   return {
-    id: scenario.id, language: scenario.language || 'en', from: (scenario.caller && scenario.caller.from) || null, turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
+    id: scenario.id, language: scenario.language || 'en', from: (scenario.caller && scenario.caller.from) || null, turn: 0, events: [], spoken: [], toolCalls: [], seededReceipts: [], toolUse: {},
     // Placeholder until the conversation exists (below h.MODEL is the module
     // default — the best guess available before construction). runScenario
     // overwrites both with the constructed conversation's actual resolved

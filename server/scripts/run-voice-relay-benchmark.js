@@ -43,7 +43,21 @@ const fs = require('fs');
 
 const SCRIPT_PATH = path.join(__dirname, 'run-voice-relay-eval.js');
 const DEFAULT_TRIALS = 3;
-const CHILD_TIMEOUT_MS = 60 * 60 * 1000; // one hour per trial — generous; the eval's own child ceiling is 8h for the whole fixture
+// Each child here IS a full run of run-voice-relay-eval.js — the shipped
+// 36-scenario fixture (up to 90 caller turns, six 20s model streams per turn)
+// plus the eval's own retry-once wrapper, plus --judge's chains. That is
+// exactly the run the eval harness's own operational ceiling is sized for
+// (server/services/eval/voice-relay-replay.js CHILD_TIMEOUT_MS derivation,
+// exported as _internals.CHILD_TIMEOUT_MS: up to 3h/attempt, doubled for the
+// retry = 7h12m, +48m overhead = 8h) — so this runner must use a ceiling AT
+// LEAST that generous, or it would kill a legitimately still-running child
+// well before the eval's own wrapper would. Mirrored as a literal rather
+// than required directly: voice-relay-eval.js's module graph is heavier
+// (call-extraction-replay, the relay conversation loader, etc.) than this
+// file's own runOnce/summarizeCondition unit tests need — see runBenchmark's
+// existing lazy require of relay-conversation below for the same reason.
+// Re-derive together if that file's ceiling ever changes.
+const CHILD_TIMEOUT_MS = 8 * 60 * 60 * 1000;
 // The full set of flags this runner understands (see the file header's
 // usage examples). An unrecognized flag — a typo like --onyl or --trail — is
 // a usage error caught here, before any child process runs, rather than
@@ -159,6 +173,21 @@ function checkModelStamp(completed, expectedModel, parsed) {
   if (!completed || !expectedModel) return { modelMismatch: false, resolvedModels: [] };
   const resolvedModels = [...new Set((parsed.results || []).map((s) => s && s.model).filter(Boolean))];
   return { modelMismatch: resolvedModels.some((m) => m !== expectedModel), resolvedModels };
+}
+
+// --out and --only take a value; parseArgs hands back `true` for a bare
+// `--out` or `--only` with no `=value` (indistinguishable from a real string
+// value once destructured elsewhere), which would otherwise write the report
+// to the literal path "true" or filter scenarios down to none — silently,
+// after every child has already run for up to CHILD_TIMEOUT_MS. Checked
+// before any child runs, same as --candidate-model and --trials below.
+const VALUE_OPTIONS_NEEDING_A_VALUE = Object.freeze(['out', 'only']);
+function assertValueOptions(ARGS) {
+  for (const key of VALUE_OPTIONS_NEEDING_A_VALUE) {
+    if (ARGS[key] === true) {
+      throw new Error(`--${key} requires a value (got --${key} with no value)`);
+    }
+  }
 }
 
 /**
@@ -352,6 +381,7 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
       + `(supported: ${[...SUPPORTED_OPTIONS].map((k) => `--${k}`).join(', ')})`,
     );
   }
+  assertValueOptions(ARGS);
   if (!ARGS['candidate-model'] || ARGS['candidate-model'] === true) {
     throw new Error(
       "--candidate-model is required (e.g. --candidate-model=claude-haiku-4-5-20251001). "

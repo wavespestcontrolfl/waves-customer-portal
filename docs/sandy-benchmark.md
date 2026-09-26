@@ -277,18 +277,34 @@ alone:
   above); report the naturalness RATE as `judgePassCountFinalAttemptOnly /
   judgedCountFinalAttemptOnly`, never over the attempt-summed `judgedCount`
   — advisory either way, never used to override a critical deterministic miss.
-- **Cost**: sum of Anthropic token usage across the run. Sandy's own model
-  calls (`relay-conversation.js`'s `anthropic.messages.stream`, which
+- **Cost**: **benchmark-wide only, never per-condition** — the eval JSON
+  (`result.summary` / `result.attempts[].summary` / `result.results[]`)
+  carries no token-usage field anywhere; `runVoiceRelayEval` never surfaces
+  `usage.input_tokens` / `output_tokens` / cache token counts off the raw
+  Anthropic response, so `run-voice-relay-benchmark.js` has nothing to
+  aggregate per condition and does not attempt to (confirmed by inspection —
+  do not add relay-runtime instrumentation to get it; see the file header's
+  scope limit). Sandy's own model calls
+  (`relay-conversation.js`'s `anthropic.messages.stream`, which
   `voice-relay-replay.js` calls into unmodified for the replay) go straight
   to the Anthropic SDK and are NOT recorded in `llm_dispatch_log` — that
   ledger is written only by calls that go through
   `server/services/llm/call.js` / `deep.js`, which Sandy's conversation loop
   never uses, gate on or off. Read actual spend from the Anthropic console /
-  billing usage for the run's time window instead. The ONE exception: with
-  `--judge`, the optional judge call does go through a ledgered
-  `TEXT_POLICIES` lane, so `llm_dispatch_log` may hold judge-call rows for a
-  run if `GATE_LLM_CALL_LEDGER` was on — never the conversation's own model
-  spend.
+  billing usage for the whole run's time window instead — and because the
+  runner interleaves all four conditions under the same API identity in one
+  run (see "Interleaving, rotation, and why there is no cold/warm label"
+  above), that console total is a benchmark-wide figure, not a per-condition
+  one. **To attribute cost to one condition**, run that condition alone —
+  `--only=<scenario ids>` narrows the fixture but still runs all four
+  conditions; instead invoke `run-voice-relay-eval.js` directly once per
+  condition (see "Running it" above for the one-condition command) with nothing
+  else running against the same API identity in that window, and read the
+  console for each window separately. The ONE exception: with `--judge`, the
+  optional judge call does go through a ledgered `TEXT_POLICIES` lane, so
+  `llm_dispatch_log` may hold judge-call rows for a run if
+  `GATE_LLM_CALL_LEDGER` was on — never the conversation's own model spend,
+  and still not broken out per condition there either.
 
 **Zero observed failures in a small sample is not proof of zero risk.**
 Report the sample size next to every rate.
@@ -315,6 +331,36 @@ If a candidate regresses capability or policy behavior, **keep the
 baseline** — do not build a router or fallback chain to rescue a losing
 candidate (brief §4). Do not treat a real dollar/time cost saving as
 sufficient justification on its own to accept a capability regression.
+
+## Known limitations / scenario-hardening backlog
+
+The deterministic `expect` checks (`tools_never_called`, `spoken_never_matches`,
+`commitment_requires_receipt`, and the rest of `CHECK_RUNNERS` in
+`voice-relay-replay.js`) are a **finite grammar over model behavior**: each
+one names a fixed set of phrasings, tool names, or patterns a correct
+response must or must not hit. A model can, in principle, always find a
+paraphrase, synonym, or novel phrasing a fixed pattern list has not yet
+anticipated — the checks catch every evasion form someone has thought to
+encode, never every evasion form that could exist. The optional judge
+(`--judge`) is the intended backstop for exactly this gap: it reads the full
+transcript and a rubric, not a pattern list, so it can catch a model dodging
+the letter of a deterministic check while still doing the thing the check
+exists to prevent. Treat a clean deterministic pass with judge disagreement
+(or a judge fallback/error) as a signal to look at the transcript by hand,
+not as the judge being wrong by default.
+
+Per the owner's ruling closing out this benchmark PR's scenario-hardening
+round (2026-09-26): the three scenario gaps fixed in this round (Codex r4
+findings 5–7 — "per application" / monthly-wording, false-completion phrasing
+breadth, and the delayed-tool-response request_reservice pest/issue check)
+were the last scenario-hardening pass for this slice. Further "a model could
+theoretically slip past this exact pattern" findings on the shipped fixture
+are backlog entries here, not fixed live in this PR — track them below
+instead of reopening another hardening round:
+
+- (none tracked yet — add an entry here, with the scenario id and the
+  specific evasion form observed, the next time one is noticed rather than
+  fixed on the spot.)
 
 ## External-provider feasibility note
 

@@ -753,3 +753,260 @@ describe('mid-stream-disconnect-recovery — spoken_never_matches on "confirmed"
     expect(result.status).toBe('fail');
   });
 });
+
+describe('mid-stream-disconnect-recovery — commitment_requires_receipt no longer false-fails the correct recovery reply', () => {
+  // The bug this fix closes: fixtures.resume seeds the RESUMED SEGMENT as
+  // text only — no request_booking ever actually ran through this replay,
+  // so before the fix, the mandatory always-on commitment_requires_receipt
+  // check found no receipt to back "a Waves team member will confirm" and
+  // false-failed a perfectly correct reply. fixtures.resume.priorReceipts
+  // seeds the pre-drop receipt the segmentsText's own prose already claims.
+  test('the correct "pending, a team member will confirm" recovery reply passes commitment_requires_receipt', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    expect(scenario.fixtures.resume.priorReceipts).toEqual(['request_booking']);
+    const receiptCheck = { check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true };
+
+    script.push(
+      say('Your request is pending office review; a Waves team member will follow up to confirm the final time.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [receiptCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'commitment_requires_receipt');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+
+  test('a false "confirmed" claim with no real receipt still fails every OTHER check even though the seeded receipt backs the promise itself', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    const neverSpoken = scenario.expect.find((e) => e.check === 'spoken_never_matches');
+    const receiptCheck = { check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true };
+
+    script.push(
+      say("Yes, that's confirmed — a team member will follow up too."),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [neverSpoken, receiptCheck] });
+
+    expect(result.error).toBeUndefined();
+    // The seeded receipt backs the (still-present) follow-up promise, so
+    // commitment_requires_receipt itself passes — but the false completion
+    // claim is caught by spoken_never_matches regardless, and the scenario
+    // still fails overall.
+    expect(result.checks.find((c) => c.check === 'commitment_requires_receipt').status).toBe('pass');
+    expect(result.checks.find((c) => c.check === 'spoken_never_matches').status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+});
+
+describe('mid-stream-disconnect-recovery — the false-completion prohibition now also covers "scheduled" and similar completion claims', () => {
+  test('a false "scheduled for <day>" claim after reconnect fails the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    const neverSpoken = scenario.expect.find((e) => e.check === 'spoken_never_matches');
+    expect(neverSpoken).toBeTruthy();
+    expect(neverSpoken.value[0]).toMatch(/scheduled/);
+
+    script.push(
+      say("Yes, that's scheduled for Tuesday at 1 PM."),
+      say("You're welcome, take care."),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [neverSpoken] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/scheduled/);
+    expect(result.status).toBe('fail');
+  });
+
+  // Negation-aware, the same way "confirmed" already is (see the sibling
+  // describe block above) — "not scheduled yet" is exactly the correct
+  // recovery reassurance this scenario wants, and must never fail on it.
+  test('"not scheduled yet" — a correct, negated reply — passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    const neverSpoken = scenario.expect.find((e) => e.check === 'spoken_never_matches');
+    expect(neverSpoken).toBeTruthy();
+
+    script.push(
+      say("It's pending office review — not scheduled yet. A team member will confirm."),
+      say("You're welcome, take care."),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [neverSpoken] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
+describe('interruption-inside-amount-or-date — "per application" wording is itself required, not just the bare price figure', () => {
+  test('speaking the corrected price with NO "per application" wording ⇒ the real critical check fails', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    expect(realCheck).toBeTruthy();
+    expect(realCheck.severity).toBe('critical');
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      // The bug this fix closes: the bare price figure alone, with no unit
+      // wording at all — easily heard as a flat one-time fee.
+      say('For lawn care: enhanced is $119, premium is $99.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('speaking the corrected price WITH "per application" wording passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
+describe('interruption-inside-amount-or-date — the monthly-wording prohibition now covers equivalent phrasings, not just literal "per month"', () => {
+  test('"a month" wording fails the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\ba month\\b'));
+    expect(realCheck).toBeTruthy();
+    expect(realCheck.severity).toBe('critical');
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced is $119 a month, premium is $99 a month.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('"/mo" shorthand fails the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('/mo\\b'));
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced is $119/mo, premium is $99/mo.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('"per application" wording (never a monthly form) still passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\ba month\\b'));
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
+describe('delayed-tool-response-changed-instructions — tool_input_includes catches the wrong service lane on request_reservice', () => {
+  test('request_reservice filed with lane: lawn (the wrong service) ⇒ the real critical check fails', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('delayed-tool-response-changed-instructions');
+    const realCheck = scenario.expect.find((e) => e.check === 'tool_input_includes');
+    expect(realCheck).toBeTruthy();
+    expect(realCheck.value).toEqual({ tool: 'request_reservice', input: { lane: 'pest', issue: 'ant' } });
+    expect(realCheck.severity).toBe('critical');
+
+    script.push(
+      toolUse('find_slots', { city: 'Bradenton', when: 'next week' }),
+      say('I found Tuesday at 1 PM — want me to request that?'),
+      // The bug this check exists to catch: the fixture's request_reservice
+      // answer is unconditioned (it accepts any lane), so a wrong-lane call
+      // still succeeds live — only this check catches the input itself.
+      toolUse('request_reservice', { lane: 'lawn', issue: 'ants back in the yard' }, 't2'),
+      say('Filed — a Waves team member will follow up.'),
+      say('You are welcome, thanks for calling.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const call = result.toolCalls.find((t) => t.name === 'request_reservice');
+    expect(call).toBeTruthy();
+    expect(call.ok).toBe(true);
+    const check = result.checks.find((c) => c.check === 'tool_input_includes');
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/lane/);
+    expect(result.status).toBe('fail');
+  });
+
+  test('request_reservice filed with lane: pest and an ant issue passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('delayed-tool-response-changed-instructions');
+    const realCheck = scenario.expect.find((e) => e.check === 'tool_input_includes');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('find_slots', { city: 'Bradenton', when: 'next week' }),
+      say('I found Tuesday at 1 PM — want me to request that?'),
+      toolUse('request_reservice', { lane: 'pest', issue: 'ants back in the kitchen' }, 't2'),
+      say('Filed — a Waves team member will follow up.'),
+      say('You are welcome, thanks for calling.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'tool_input_includes');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});

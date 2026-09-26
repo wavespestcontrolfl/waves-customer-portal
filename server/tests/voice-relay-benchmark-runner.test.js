@@ -25,6 +25,7 @@ const {
   runBenchmark,
   rotateConditions,
   buildConditions,
+  CHILD_TIMEOUT_MS,
 } = require('../scripts/run-voice-relay-benchmark');
 
 // A stub child process: each call consumes the next queued response (the
@@ -595,5 +596,51 @@ describe('runBenchmark — unknown CLI options are refused before any child proc
       argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--only=booking-happy-path', '--judge', '--out=/tmp/x.json'],
       execFileImpl,
     })).resolves.toBeDefined();
+  });
+});
+
+describe('runBenchmark — --out and --only must carry a value, before any child process runs', () => {
+  // parseArgs hands back `true` for a bare `--out`/`--only` (no `=value`),
+  // which would otherwise silently write the report to a literal path
+  // "true", or filter every scenario out, only after every child had already
+  // run for up to CHILD_TIMEOUT_MS each.
+  test('a bare --out with no value is rejected, exit-2-style, before any child process runs', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--out'], execFileImpl }))
+      .rejects.toThrow(/--out requires a value/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('a bare --only with no value is rejected before any child process runs', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--only'], execFileImpl }))
+      .rejects.toThrow(/--only requires a value/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('--out and --only WITH values are accepted (no false positive)', async () => {
+    const execFileImpl = stubChild([{
+      code: 0,
+      stdout: JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }),
+    }]);
+    await expect(runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--out=/tmp/x.json', '--only=booking-happy-path'],
+      execFileImpl,
+    })).resolves.toBeDefined();
+  });
+});
+
+describe('CHILD_TIMEOUT_MS — a ceiling compatible with the eval harness\'s own operational bound', () => {
+  // Each child this runner spawns IS a full run-voice-relay-eval.js
+  // invocation (the shipped fixture, its own retry-once wrapper, and
+  // --judge's chains) — exactly the run server/services/eval/
+  // voice-relay-replay.js's own CHILD_TIMEOUT_MS (8h) is derived to bound.
+  // Mirrored as a literal, not required directly (see this file's own
+  // comment on the constant), so this test is what actually pins the two
+  // numbers together — a future change to one without the other fails here.
+  test('mirrors voice-relay-replay.js\'s own CHILD_TIMEOUT_MS exactly', () => {
+    const { _internals } = require('../services/eval/voice-relay-replay');
+    expect(CHILD_TIMEOUT_MS).toBe(_internals.CHILD_TIMEOUT_MS);
+    expect(CHILD_TIMEOUT_MS).toBe(8 * 60 * 60 * 1000);
   });
 });

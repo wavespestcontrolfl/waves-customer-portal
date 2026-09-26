@@ -4549,7 +4549,12 @@
      "check": "spoken_never_matches",
      "value": {
       "patterns": [
-       "\\bper month\\b"
+       "\\bmonthly\\b",
+       "\\ba month\\b",
+       "/mo\\b",
+       "\\bper month\\b",
+       "\\beach month\\b",
+       "\\bevery month\\b"
       ],
       "fromTurn": 2
      },
@@ -4559,7 +4564,8 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "\\$(119|99)\\b"
+       "\\$(119|99)\\b[^.!?]{0,40}\\bper application\\b",
+       "\\bper application\\b[^.!?]{0,40}\\$(119|99)\\b"
       ],
       "fromTurn": 2
      },
@@ -4717,6 +4723,17 @@
      "severity": "critical"
     },
     {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "request_reservice",
+      "input": {
+       "lane": "pest",
+       "issue": "ant"
+      }
+     },
+     "severity": "critical"
+    },
+    {
      "check": "tools_called_at_most",
      "value": {
       "find_slots": 2,
@@ -4781,7 +4798,8 @@
     "officeHours": "open",
     "resume": {
      "reconnects": 1,
-     "segmentsText": "Caller: Hi, it's Dana. I'd like to book my quarterly visit for {{dow+8}} at 1 PM in Bradenton.\nAgent: Sure — I've got that request in for {{day+8}} at 1 PM, pending office review. A Waves team member will [connection dropped mid-reply]"
+     "segmentsText": "Caller: Hi, it's Dana. I'd like to book my quarterly visit for {{dow+8}} at 1 PM in Bradenton.\nAgent: Sure — I've got that request in for {{day+8}} at 1 PM, pending office review. A Waves team member will [connection dropped mid-reply]",
+     "priorReceipts": ["request_booking"]
     },
     "toolResponses": {
      "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
@@ -4860,7 +4878,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(confirmed|booked|locked in|all set|reserved|guaranteed)\\b"
+      "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(confirmed|booked|locked in|all set|reserved|guaranteed|scheduled|on the calendar|on the schedule|set for)\\b"
      ],
      "severity": "critical"
     }
