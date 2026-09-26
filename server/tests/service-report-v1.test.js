@@ -993,7 +993,7 @@ describe('service report v1', () => {
         rain_24h_in: 0.02,
         source: 'FAWN - Myakka River',
       },
-      // AW-03: active ingredient / EPA reg / rainfast ride on app.product
+      // AW-03: active ingredient / EPA reg ride on app.product
       // directly — the same approved/frozen facts report-data.js's
       // attachApprovedReportProductFacts attaches for the report display —
       // not a separate live productContext lookup (removed).
@@ -1016,7 +1016,6 @@ describe('service report v1', () => {
           product: {
             name: 'Bifen XTS',
             active_ingredient: 'Bifenthrin 25.1%',
-            rainfast_minutes: 60,
           },
           method: 'perimeter_spray',
           methodLabel: 'Perimeter spray',
