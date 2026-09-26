@@ -118,8 +118,8 @@ heads-up per runbook §3.
 ### Phase 2 — Restore #2668: recurring card-on-file at accept
 
 **Status update:** the restore shipped as PR #2680 (`e8f0cd6118`) — `recurring-card-on-file.js`
-exists and is wired into billing-cron, scheduler, estimate-follow-up, appointment-card-request,
-stripe-webhook and estimate-public, gated by `RECURRING_CARD_ON_FILE`.
+exists and is required by estimate-public, estimate-slots-public, stripe-webhook, billing-cron,
+estimate-follow-up, scheduler and termite-annual-signature-charge, gated by `RECURRING_CARD_ON_FILE`.
 The steps below are retained as the spec-deltas record; check the restored module before
 re-applying any of them.
 

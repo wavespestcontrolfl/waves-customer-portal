@@ -69,12 +69,12 @@ One-time lawn additionally needs `treatmentType` (fert/weed/pest/fungicide multi
 | Field | Required | Collected by | Validation today | Missing-data behaviour | Required behaviour |
 |---|---|---|---|---|---|
 | Ornamental bed sq ft | yes (material $0.055/sf; labor bed/500 min) | UI-A (`bedArea` → sent as `estimatedBedAreaSf`, stamped `bedAreaSource: estimated` even when hand-measured), UI-P/AI (lot × density %), lookup vision | no clamp (owner ruling 2026-08-10); ≥ 8,000 → review | lot-based estimate (`medium` confidence, not parked); no lot → 2,000 fallback + review | a typed bed area must be `explicit`; lot-based must carry a review reason |
-| **Non-palm tree count** | yes (1.5 min/tree; $4/tree/yr) | UI-A (`treeCount`), UI-P, AI (`treeCount` 1–200), lookup vision | **Fixed in v4.8** (INP-002, `property-lookup-v2.js:4148-4162`): a blank UI-A field now stays absent instead of a fabricated explicit 0; negative rejected | density fallback {light 3, moderate 6, heavy 10} only when truly absent | blank must be absent, not 0; require ≥0 integer |
-| **Palm count** | yes when armed; today folds into per-tree terms **only when supplied on the service line** (`service-pricing.js:2745-2770`) | UI-P and AI send `services.treeShrub.palmCount` (priced); **Fixed in v4.8** (INP-001, `property-lookup-v2.js:4167-4210`): UI-A now forwards palm count on the service line too, falling back to the property-level count only when the operator supplies none | UI-A guards 1–200 when a T&S line is selected | resolved — see Fixed in v4.8 note | translator passes `palmCount` on the service line; engine treats property palms as a source when no line value |
+| **Non-palm tree count** | yes (1.5 min/tree; $4/tree/yr) | UI-A (`treeCount`), UI-P, AI (`treeCount` 1–200), lookup vision | **Fixed in v4.8** (INP-002, `property-lookup-v2.js` `firstNonNegativeIntegerOrThrow`): a blank UI-A field now stays absent instead of a fabricated explicit 0; negative rejected | density fallback {light 3, moderate 6, heavy 10} only when truly absent | blank must be absent, not 0; require ≥0 integer |
+| **Palm count** | yes when armed; today folds into per-tree terms **only when supplied on the service line** (`service-pricing.js:2745-2770`) | UI-P and AI send `services.treeShrub.palmCount` (priced); **Fixed in v4.8** (INP-001, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now forwards palm count on the service line too, falling back to the property-level count only when the operator supplies none | UI-A guards 1–200 when a T&S line is selected | resolved — see Fixed in v4.8 note | translator passes `palmCount` on the service line; engine treats property palms as a source when no line value |
 | Palm size / height / method | not modeled in T&S (only in `palm_injection`) | — | — | — | owner decision: add palm size to the routine reserve when armed |
 | Shrub count / shrub size | **not modeled** (density enum only) | — | — | — | owner decision |
-| Access difficulty | yes (0/8/15 min) | UI-P/AI (`access`); **Fixed in v4.8** (INP-004, `property-lookup-v2.js:4167-4210`): UI-A now collects and forwards it | enum | easy | done (v4.8) |
-| Tier (4/6/9) | yes | UI-P/AI; **Fixed in v4.8** (INP-004, `property-lookup-v2.js:4167-4210`): UI-A now forwards the selected tier instead of hardcoding `standard` | enum | standard | done (v4.8) |
+| Access difficulty | yes (0/8/15 min) | UI-P/AI (`access`); **Fixed in v4.8** (INP-004, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now collects and forwards it | enum | easy | done (v4.8) |
+| Tier (4/6/9) | yes | UI-P/AI; **Fixed in v4.8** (INP-004, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now forwards the selected tier instead of hardcoding `standard` | enum | standard | done (v4.8) |
 | Initial vs maintenance | not modeled (no corrective/initial visit) | — | — | — | owner decision |
 | Inventory | none read (June-2026 catalog prices baked into `materialModel`) | — | — | — | re-derive from catalog |
 | Protocol | `protocols.json` T&S (6 visits); pricing sells 4/6/9 | — | — | — | align protocol cadence with sold cadence |
@@ -147,7 +147,7 @@ Required: offer key (single vs 2-visit package), `fleaComplexity` (light/moderat
 
 ## 14. Stinging insects (`stinging`)
 
-Required: species, tier (1–4), removal option; optional aggressiveness/height/confined. **Fixed:** UI-A now collects species, scope tier and removal (`EstimateToolViewV2.jsx:3574-3576, 6669, 6678`; `property-lookup-v2.js:4478-4487`); the paper-wasp/tier-2/no-removal defaults apply only when a field is left blank.
+Required: species, tier (1–4), removal option; optional aggressiveness/height/confined. **Fixed:** UI-A now collects species, scope tier and removal (`EstimateToolViewV2.jsx:3574-3576, 6669, 6678`; `property-lookup-v2.js` `translateV2CallToV1Input`); the paper-wasp/tier-2/no-removal defaults apply only when a field is left blank.
 
 ## 15. Lawn specialty (`plugging`, `top_dressing`, `dethatching`)
 
