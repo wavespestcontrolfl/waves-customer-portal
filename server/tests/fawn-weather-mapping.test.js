@@ -94,6 +94,45 @@ describe('FawnWeather — real API shape', () => {
       expect(snap.soil_temp_f).toBeCloseTo(81.428, 2);
       expect(snap.wind_mph).toBeCloseTo(5.902, 2);
     });
+    test('the 24h total comes from the SAME station as the hourly snapshot — never a different gauge', async () => {
+      global.fetch = jest.fn((url) => Promise.resolve({
+        ok: true,
+        json: async () => (String(url).includes('lastDay')
+          ? [realShapedRow({ StationID: '490', rain_sum: '2.54' })]
+          : [realShapedRow({ StationID: '480', rain_sum: '0' })]),
+      }));
+      const snap = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
+      expect(snap.rain_24h_in).toBeNull();
+      expect(snap.rainfall_in).toBeNull();
+    });
+
+    test('an out-of-range location gets an unavailable snapshot, not another location\'s cached conditions', async () => {
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({ StationID: '480', t2m_avg: '25' })],
+      }));
+      const ok = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
+      expect(ok.temp_f).toBeCloseTo(77, 5);
+      const far = await FawnWeather.getCurrent({ latitude: 26.6406, longitude: -81.8723 });
+      expect(far.station).toBe('unavailable');
+      expect(far.temp_f).toBeNull();
+    });
+
+    test('a later fetch failure at the SAME coordinate reuses that coordinate\'s last-good snapshot', async () => {
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({ StationID: '480', t2m_avg: '25' })],
+      }));
+      await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
+      nowSpy.mockReturnValue(1_700_000_000_000 + 20 * 60 * 1000);
+      global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 503 }));
+      const again = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
+      expect(again.temp_f).toBeCloseTo(77, 5);
+      const other = await FawnWeather.getCurrent({ latitude: 27.0, longitude: -82.2 });
+      expect(other.station).toBe('unavailable');
+      nowSpy.mockRestore();
+    });
   });
 
   describe('getRecentRainfall (lastDay — meaningful rainfall total)', () => {

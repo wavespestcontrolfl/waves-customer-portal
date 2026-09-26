@@ -38,7 +38,6 @@ const STATION_HINTS = [
 // another's cache.
 const _stationCache = { lastHour: null, lastDay: null };
 const _stationCacheTime = { lastHour: 0, lastDay: 0 };
-let _lastSnapshot = null;
 const CACHE_TTL = 15 * 60 * 1000;
 
 // getRecentRainfall()'s last-good fallback, keyed per requested coordinate
@@ -48,6 +47,21 @@ const CACHE_TTL = 15 * 60 * 1000;
 // review, 2026-09-26).
 const _recentRainfallCache = new Map(); // key -> { at, snapshot }
 const RAIN_FALLBACK_MAX_AGE = 6 * 60 * 60 * 1000; // 6h
+
+// getCurrent()'s last-good fallback — same per-coordinate, age-bounded shape
+// as above. A single global slot let a Fort Myers request (no station in
+// range) receive North Port's conditions after any earlier success (Codex
+// review, 2026-09-26).
+const _currentCache = new Map(); // key -> { at, snapshot }
+const CURRENT_FALLBACK_MAX_AGE = 2 * 60 * 60 * 1000; // 2h
+
+function unavailableCurrent(message) {
+  return {
+    temp_f: null, humidity_pct: null, rainfall_in: null, rainfall_1h_in: null, rain_24h_in: null,
+    soil_temp_f: null, wind_mph: null, station: 'unavailable', timestamp: new Date().toISOString(),
+    error: message,
+  };
+}
 
 function coordKey({ latitude, longitude } = {}) {
   const lat = Number(latitude);
@@ -275,37 +289,41 @@ const FawnWeather = {
    * Returns: { temp_f, humidity_pct, rainfall_in, rainfall_1h_in, rain_24h_in, soil_temp_f, wind_mph, station, timestamp }
    */
   async getCurrent(options = {}) {
+    const key = coordKey(options);
     try {
       const data = await fetchStationRows('lastHour');
       const station = selectStation(data, options);
 
-      if (!station) throw new Error('No FAWN station found');
+      // No recognized station within range is a geographic answer, not an
+      // outage — never paper over it with a cached reading.
+      if (!station) return unavailableCurrent('No FAWN station found');
 
       const snapshot = normalizeStationSnapshot(station);
       snapshot.rainfall_1h_in = snapshot.rainfall_in;
 
       let rain24h = null;
       try {
+        // Match the day row by the hourly station's ID so the 24h total is
+        // always the same gauge the snapshot is labeled with; absent → null.
+        const id = stationId(station);
         const dayRows = await fetchStationRows('lastDay');
-        const dayStation = selectStation(dayRows, options);
+        const dayStation = id ? dayRows.find((row) => stationId(row) === id) : null;
         if (dayStation) rain24h = rainfallInches(dayStation);
-      } catch (_e) {
+      } catch {
         // Best-effort only — the hourly "current conditions" snapshot
         // (temp/humidity/wind) still stands even if the 24h lookup fails.
       }
       snapshot.rain_24h_in = rain24h;
       snapshot.rainfall_in = rain24h;
 
-      _lastSnapshot = snapshot;
+      _currentCache.set(key, { at: Date.now(), snapshot });
 
       return snapshot;
     } catch (err) {
       logger.error(`[fawn-weather] Fetch failed: ${err.message}`);
-      return _lastSnapshot || {
-        temp_f: null, humidity_pct: null, rainfall_in: null, rainfall_1h_in: null, rain_24h_in: null,
-        soil_temp_f: null, wind_mph: null, station: 'unavailable', timestamp: new Date().toISOString(),
-        error: err.message,
-      };
+      const cached = _currentCache.get(key);
+      if (cached && Date.now() - cached.at < CURRENT_FALLBACK_MAX_AGE) return cached.snapshot;
+      return unavailableCurrent(err.message);
     }
   },
 
