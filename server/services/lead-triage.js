@@ -36,6 +36,18 @@ const strOrNull = (v) => v === null || typeof v === 'string';
 // one into null, leaving the lead with no classification or reply while the
 // row read success (Codex r16 on #4884) — so they must be non-blank.
 const nonBlank = (v) => typeof v === 'string' && v.trim() !== '';
+// A sign-off by ANY name, left after the shared stripper (which knows only
+// the Waves signers): a dash-led capitalized name — "— Sarah", "— Sarah,
+// Waves Team" — or a last line that is only a capitalized name. Such a reply
+// is rejected, not guessed at: the other provider gets a turn, and a signed
+// fallback leaves no suggestion (Codex r2 on #4975). A dash inside a sentence
+// ("Totally — Tuesday works.") is untouched.
+const NAME = "[A-Z][\\p{L}'.-]*(?:\\s+[A-Z][\\p{L}'.-]*){0,2}";
+const SIGN_OFF_TAIL_RES = [
+  new RegExp(`(?:^|\\s)[—–-]{1,2}\\s*${NAME}(?:\\s*,\\s*[^\\n]{1,40})?[\\s!.🌊]*$`, 'u'),
+  new RegExp(`\\n\\s*${NAME}(?:\\s*,\\s*[^\\n]{1,40})?[\\s!.🌊]*$`, 'u'),
+];
+const hasSignOffTail = (text) => SIGN_OFF_TAIL_RES.some((re) => re.test(text.trim()));
 function triageMatchesSchema(t) {
   if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
   const x = t.extractedData;
@@ -43,7 +55,7 @@ function triageMatchesSchema(t) {
   // longer one failed the async lead update after acceptance (Codex r20).
   return nonBlank(t.serviceInterest) && t.serviceInterest.trim().length <= 255
     && TRIAGE_SCHEMA.properties.urgency.enum.includes(t.urgency)
-    && nonBlank(t.suggestedReply)
+    && nonBlank(t.suggestedReply) && !hasSignOffTail(t.suggestedReply)
     && !!x && typeof x === 'object' && !Array.isArray(x)
     && strOrNull(x.pestType) && strOrNull(x.location) && strOrNull(x.propertyType);
 }
