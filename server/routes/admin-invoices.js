@@ -2313,47 +2313,64 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /:id/annual-prepay — remove the annual-prepay flag from an invoice.
-// Clears the invoice link and cancels the linked term through the SAME
-// canonical cancel pipeline the void/refund sync uses (ADMIN-BUG-R16) — a
-// raw status write here used to leave the customer stranded in
-// billing_mode='annual_prepay' forever (never billed again) and coverage-
-// settled visit invoices closed. A DECIDED term (renewal_decision set —
-// renewed / switch_plan / a decided lapse) is refused with 409 instead of
-// being destroyed; re-marking later re-activates a term this route did
-// cancel.
+// DELETE /:id/annual-prepay — remove the annual-prepay flag from an invoice
+// that was marked by mistake. The invoice itself survives as an ordinary
+// invoice, so the term is cancelled through the canonical pipeline the
+// void/refund sync uses (ADMIN-BUG-R16 — a raw status write here left the
+// customer on billing_mode 'annual_prepay', never billed again, and covered
+// visit invoices closed) only when that cannot double-bill:
+// - a decided term (renewed / switch_plan / decided lapse) is refused;
+// - a PAID prepay is refused (owner ruling 2026-09-26): its payment stays on
+//   the surviving invoice, so undoing coverage would bill the covered work
+//   again — a refund is the way to end it and returns the money;
+// - a prepay minted by the on-site switch or carrying a rodent setup fee is
+//   refused: the cancel restores the charges it replaced while the surviving
+//   invoice still carries them — voiding it is the way to end it.
+// Re-marking later re-activates a term this route cancelled.
 router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
+  const refuse = (message) => {
+    const err = new Error(message);
+    err.statusCode = 409;
+    err.isOperational = true;
+    return err;
+  };
   try {
     const invoice = await db('invoices')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'annual_prepay_term_id');
+      .first('id', 'customer_id');
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
-    if (invoice.annual_prepay_term_id) {
-      const term = await db('annual_prepay_terms').where({ id: invoice.annual_prepay_term_id }).first('renewal_decision');
-      if (term?.renewal_decision) {
-        return res.status(409).json({
-          error: `This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`,
-        });
-      }
-    }
     // Visit invoices this term settled as coverage, which the cancel reopens.
     // Settlement stopped their reminders and the reopen skips the re-arm
     // inside a transaction, so it runs after commit (below).
     let coveredInvoiceIds = [];
     await db.transaction(async (trx) => {
       // Customer before invoice — the order reverse-prepaid and apply-credit
-      // take, and the cancel below locks the customer too — then re-read the
-      // invoice under its own lock: the pre-read above can go stale.
+      // take, and the cancel below locks the customer too — then read the
+      // invoice under its own lock: a payment landing on it waits for us.
       await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('customer_id', 'annual_prepay_term_id');
       if (!locked || locked.customer_id !== invoice.customer_id) {
-        const err = new Error('This invoice changed while the annual prepay flag was being removed — retry.');
-        err.statusCode = 409;
-        err.isOperational = true;
-        throw err;
+        throw refuse('This invoice changed while the annual prepay flag was being removed — retry.');
       }
       const termId = locked.annual_prepay_term_id;
+      if (termId) {
+        const term = await trx('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision');
+        if (term?.renewal_decision) {
+          throw refuse(`This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`);
+        }
+        if (AnnualPrepayRenewals.ACTIVE_STATUSES.includes(term?.status)) {
+          throw refuse('This annual prepay is paid, so removing the flag would leave its payment on the invoice while the covered visits are billed again. To end the coverage, refund the invoice — a refund cancels the coverage and returns the money.');
+        }
+        const replacedCharges = await trx('invoices')
+          .where({ status: 'void' })
+          .where('notes', 'like', `%${InvoiceService.prepaySwitchSupersededByMarker(invoice.id)}%`)
+          .first('id')
+          || await trx('setup_fee_claims').where({ invoice_id: invoice.id }).where('amount', '>', 0).first('id');
+        if (replacedCharges) {
+          throw refuse('This annual prepay replaced other charges when it was created (an on-site switch or a rodent setup fee). Void the invoice instead — voiding cancels the coverage and restores those charges.');
+        }
+      }
       await trx('invoices')
         .where({ id: invoice.id })
         .update({ annual_prepay_term_id: null, updated_at: new Date() });
@@ -2361,27 +2378,16 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         coveredInvoiceIds = await trx('invoices')
           .where({ annual_prepay_covered_term_id: termId, status: 'prepaid' })
           .pluck('id');
-        // Canonical cancel: renewal_decision guard, stamp clear
-        // (throwOnError — a swallowed failure here used to leave a future
-        // visit silently prepaid-free of charge), covered-invoice reopen,
-        // pending-window/WaveGuard credit reversal, customers.billing_mode
-        // reset to the recorded prior mode, and switch/setup-fee restores —
-        // all inside this same transaction. throwOnError: true because this
-        // is an explicit operator action, not a best-effort background
-        // sync: a half-finished cancel here must roll back, not strand the
-        // customer between states.
+        // Canonical cancel in this transaction: stamp clear, covered-invoice
+        // reopen, pending-window/WaveGuard credit reversal and the billing-mode
+        // reset to the recorded prior mode. throwOnError: an explicit operator
+        // action rolls back whole rather than stranding the customer between
+        // states.
         const cancelled = await AnnualPrepayRenewals.cancelTermWithRestorations(termId, trx, { throwOnError: true });
-        // The pre-transaction check above can miss a decision that lands
-        // (recordDecision) between that read and this transaction opening —
-        // the guarded update then matches nothing and returns null. Abort
-        // rather than silently unlinking the invoice and detaching the
-        // decided term's visits (they would lose valid coverage linkage and
-        // could be billed again for already-paid work).
+        // A decision recorded after the check above leaves the guarded update
+        // matching nothing — refuse rather than unlinking a decided term.
         if (!cancelled) {
-          const err = new Error('This term already has a renewal decision and cannot be removed this way — use the renewal workflow instead.');
-          err.statusCode = 409;
-          err.isOperational = true;
-          throw err;
+          throw refuse('This term already has a renewal decision and cannot be removed this way — use the renewal workflow instead.');
         }
         // Detach any scheduled visits attachScheduledServices() stamped while
         // the term was active — pricing-reality-check treats a non-null

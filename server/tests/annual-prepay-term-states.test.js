@@ -742,7 +742,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       10: { from: st(['active', 'renewal_pending']), to: st(['payment_pending']), where: 'suspendActiveTermsForDisputedInvoice' },
       11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
-      13: { from: [], fromText: '*any*', to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+      13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
