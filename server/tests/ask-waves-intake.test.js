@@ -1314,6 +1314,9 @@ describe('looksLikeEmergency', () => {
     'The bait was swallowed by my child',
     'Some granules were ingested by my dog',
     'Some bait got into her mouth',
+    'My child was stung and is not breathing',
+    "he got stung and isn't breathing",
+    'mi hijo no está respirando',
     'El cebo fue ingerido por mi hijo',
     'mi perro se comió el cebo',
   ])('flags urgent/medical text: %s', (text) => {

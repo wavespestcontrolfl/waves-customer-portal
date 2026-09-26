@@ -121,7 +121,7 @@ const FALLBACK_RESULT = Object.freeze({
 // paired with a reaction word (plain "ants bite" stays a normal fallback).
 // English + Spanish — the surface explicitly supports Spanish visitors, so
 // every deterministic guard reads both languages.
-const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
+const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|(?:not|isn'?t|aren'?t|stopped|stops|quit)\s+breathing|no\s+(?:est[aá]\s+)?respira(?:ndo)?|dej[oó]\s+de\s+respirar|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
 const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?|picad(?:o|a|ura|uras)|pic[oó]|mordedura?s?|mordi[dó]\w*|mordi[oó])\b/i;
 const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|respir\w*|beb[eé])\b/i;
 
@@ -131,7 +131,9 @@ const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|th
 
 // A denied symptom ("stung but has no swelling", "sin ronchas") is not a
 // reaction; it is removed before the sting/bite pairing is checked.
-const NEGATED_REACTION_RE = new RegExp(`\\b(?:no|not|without|never|sin|isn'?t|aren'?t|doesn'?t\\s+have|don'?t\\s+see|has\\s+no|have\\s+no|no\\s+tiene|no\\s+hay)\\s+(?:(?:any|signs?\\s+of|real|much|a|ninguna?|nada\\s+de)\\s+)*(?:${REACTION_RE.source.slice(5, -3)})`, 'gi');
+// Only symptoms a visitor can safely deny are listed — never breathing
+// ("is not breathing" is the emergency itself, matched by EMERGENCY_RE).
+const NEGATED_REACTION_RE = /\b(?:no|not|without|never|sin|isn'?t|aren'?t|doesn'?t\s+have|don'?t\s+see|has\s+no|have\s+no|no\s+tiene|no\s+hay)\s+(?:(?:any|signs?\s+of|real|much|a|ninguna?|nada\s+de)\s+)*(?:swell\w*|swoll\w*|hives|rash|dizz\w*|fever|vomit\w*|nause\w*|hincha\w*|ronchas|urticaria|fiebre|sarpullido|v[oó]mit\w*|n[aá]usea\w*)\b/gi;
 
 function looksLikeEmergency(text) {
   const t = String(text || '');
