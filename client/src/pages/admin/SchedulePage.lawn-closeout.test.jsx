@@ -89,6 +89,29 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const mount = () => render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={submit} />);
 
+it.each([false, true])('requires visit facts beyond a typed treatment target: companion=%s', async (companion) => {
+  const targetKey = companion ? 'treatment_target' : 'target_pest';
+  const schema = { type: 'one_time_pest_treatment', fields: [
+    { key: targetKey, label: 'Target pest', type: 'text', placeholder: 'Synthetic target' },
+    { key: 'work_completed', label: 'Work completed', type: 'text', placeholder: 'Synthetic work' },
+  ], nextStepChips: [] };
+  render(<CompletionPanel service={{ ...service, serviceType: 'One-Time Pest Treatment', waveguardTier: null,
+    completionProfile: { serviceKey: 'one_time_pest_treatment', requiresProducts: false, ...(!companion && { findingsType: schema.type }) },
+    ...(companion ? { companionSchemas: [schema] } : { findingsSchema: schema }),
+  }} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.change((await screen.findAllByPlaceholderText('Synthetic target'))[0], { target: { value: 'Ants' } });
+  const generate = () => screen.getAllByRole('button', { name: /generate ai/i });
+  fireEvent.click(generate()[0]);
+  expect(alert).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(false);
+  fireEvent.change(screen.getAllByPlaceholderText('Synthetic work')[0], { target: { value: 'Inspected the kitchen.' } });
+  fireEvent.click(generate()[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  const request = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(companion ? request.companionFindings[0].values : request.structuredFindings.values)
+    .toEqual({ [targetKey]: 'Ants', work_completed: 'Inspected the kitchen.' });
+});
+
 it('prefills the engine mix and submits findings and inspection actions once, with edited quantities', async () => {
   mount();
   await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe('15'));
