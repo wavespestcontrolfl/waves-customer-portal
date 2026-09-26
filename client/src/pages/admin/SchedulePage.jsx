@@ -13024,6 +13024,11 @@ export function CompletionPanel({
   // completion submit an action the tech deleted from the restored notes
   // (codex r77).
   const preGenerationChipDetachedRef = useRef(false);
+  // A pre-change completion draft (no protocolVisitMonth) restored while the
+  // completion list was still loading — bound once the list says whether the
+  // program is month-keyed (see restoreDraft and the effect after the
+  // completion-actions load).
+  const pendingLegacyProtocolRef = useRef(null);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -14385,6 +14390,29 @@ export function CompletionPanel({
     treatmentPlanMixItems,
     lawnCompletionDefaults,
   ]);
+  // Finishes restoreDraft's January binding for a pre-change draft restored
+  // before the list arrived: a month-keyed program drops that draft's
+  // protocol selections and their markers and invalidates a report written
+  // from them, exactly as restoreDraft does when the list is already loaded.
+  // An "Any" program, a January visit, or a failed list keeps them.
+  useEffect(() => {
+    const pending = pendingLegacyProtocolRef.current;
+    if (!pending || protocolActionsLoading) return;
+    pendingLegacyProtocolRef.current = null;
+    const loadedMonth = protocolActionsLoaded ? protocolActionMeta?.visit?.month : null;
+    if (!loadedMonth || loadedMonth === "Any" || protocolMonthForService(service) === "Jan") return;
+    if (typeof preGenerationNotesRef.current === "string") {
+      preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, pending.labels);
+    }
+    invalidateGeneratedReportOnTypedEdit();
+    setNotes((current) => withoutProtocolMarkerLines(current, pending.labels));
+    setSelectedProtocolActionLabels((current) => current.filter((label) => !pending.labels.includes(label)));
+    setActionScopeByLabel((current) => {
+      const next = { ...current };
+      pending.labels.forEach((label) => { delete next[label]; });
+      return next;
+    });
+  }, [protocolActionsLoading, protocolActionsLoaded, protocolActionMeta]);
 
   useEffect(() => {
     // The flag decides whether this request carries completion defaults; a
@@ -14953,16 +14981,20 @@ export function CompletionPanel({
       ? savedDraft.selectedProtocolActionLabels
       : [];
     // A draft saved before the month was recorded carries the list every
-    // tree & shrub completion showed until then: visit 1 (January). The
-    // loaded list says whether this visit's program is month-keyed (palm care
-    // is tree & shrub, palm injection is "Any"); until it loads, the tree &
-    // shrub service line stands in.
-    const monthKeyedVisitList = protocolActionMeta?.visit?.month
-      ? protocolActionMeta.visit.month !== "Any"
-      : serviceLineForCloseout === "tree_shrub";
-    const draftProtocolVisitMonth = Object.hasOwn(savedDraft, "protocolVisitMonth")
+    // tree & shrub completion showed until then: visit 1 (January). Only the
+    // loaded completion list says whether this visit's program is month-keyed
+    // (palm care is tree & shrub, palm injection is "Any"), so such a draft
+    // restored before that list arrives is bound when it does
+    // (pendingLegacyProtocolRef), never on a guess.
+    const legacyProtocolDraft = !Object.hasOwn(savedDraft, "protocolVisitMonth") && !isTypedFindings;
+    const loadedVisitMonth = protocolActionsLoaded ? protocolActionMeta?.visit?.month || null : null;
+    const draftProtocolVisitMonth = !legacyProtocolDraft
       ? savedDraft.protocolVisitMonth
-      : !isTypedFindings && monthKeyedVisitList ? "Jan" : null;
+      : loadedVisitMonth && loadedVisitMonth !== "Any" ? "Jan" : null;
+    pendingLegacyProtocolRef.current = legacyProtocolDraft && !isLawn && protocolActionsLoading
+      && draftProtocolLabels.length > 0
+      ? { labels: draftProtocolLabels }
+      : null;
     const protocolVisitMoved = !isLawn
       && typeof draftProtocolVisitMonth === "string"
       && draftProtocolVisitMonth !== "Any"

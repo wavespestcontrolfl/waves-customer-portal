@@ -22,10 +22,14 @@ let optionalOptions;
 let delayFlags;
 let flagResolvers;
 let completionActions;
+let actionsGate;
+let failActions;
 beforeEach(async () => {
   delayFlags = false;
   flagResolvers = [];
   completionActions = { actions: [] };
+  actionsGate = null;
+  failActions = false;
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
   improvementsEnabled = true;
   defaultsEnabled = false;
@@ -72,7 +76,11 @@ beforeEach(async () => {
     }
     if (url.includes('tech-tips')) data = { available: true, groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }] };
     if (url.includes('generate-report')) data = { report: 'WHAT WE DID:\nApplied the old products.\nWHAT WE FOUND:\nLawn looked fine.' };
-    if (url.includes('completion-actions')) data = completionActions;
+    if (url.includes('completion-actions')) {
+      if (actionsGate) await actionsGate;
+      if (failActions) throw new Error('Synthetic protocol list outage');
+      data = completionActions;
+    }
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
     return { ok: true, json: async () => data };
   }));
@@ -248,6 +256,61 @@ it('a palm injection draft with no recorded month keeps its protocol action: its
   const body = await submittedBody();
   expect(body.protocolActionsCompleted).toEqual(['Injected palm trunk']);
   expect(body.technicianNotes).toBe('[Protocol] Injected palm trunk');
+});
+
+// Restore clicked while the completion list is still loading: only the list
+// can say whether the program is month-keyed, so binding waits for it.
+function holdCompletionList() {
+  let release;
+  actionsGate = new Promise((resolve) => { release = resolve; });
+  return () => release();
+}
+const detachedReportDraft = (report, preGenerationNotes, label) => ({
+  notes: report, generatedReportText: report, aiReportUsed: true, chipLinesDetached: true,
+  preGenerationNotes, selectedProtocolActionLabels: [label],
+});
+
+it('a pre-change tree & shrub draft restored before its list arrives is cleared once the month list lands', async () => {
+  const releaseList = holdCompletionList();
+  completionActions = monthList(5, 'May', 'May palm fertilizer');
+  const visit = shrubsOn('2026-05-12');
+  const report = 'WHAT WE DID:\nApplied palm fertilizer.\nWHAT WE FOUND:\nPalms looked healthy.';
+  saveDraft(visit, detachedReportDraft(report, '[Protocol] Earlier palm fertilizer\nChecked the side-yard palms.', 'Earlier palm fertilizer'));
+  render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  releaseList();
+  await screen.findByText(/the draft\s+was cleared/);
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual([]);
+  expect(body.technicianNotes).toBe('Checked the side-yard palms.');
+});
+
+it('a pre-change palm injection draft restored before its list arrives keeps its action and report', async () => {
+  const releaseList = holdCompletionList();
+  completionActions = monthList(1, 'Any', 'Injected palm trunk', 'palm_injection');
+  const visit = shrubsOn('2026-05-12', 'Palm Injection');
+  const report = 'WHAT WE DID:\nInjected the palm trunk.\nWHAT WE FOUND:\nCrown looked healthy.';
+  saveDraft(visit, detachedReportDraft(report, '[Protocol] Injected palm trunk', 'Injected palm trunk'));
+  render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  releaseList();
+  await screen.findByRole('option', { name: /Injected palm trunk/ });
+  const body = await submittedBody();
+  expect(screen.queryByText(/the draft\s+was cleared/)).toBeNull();
+  expect(body.protocolActionsCompleted).toEqual(['Injected palm trunk']);
+  expect(body.technicianNotes).toBe(report);
+});
+
+it('a pre-change draft restored after its completion list failed keeps its protocol action', async () => {
+  failActions = true;
+  const visit = shrubsOn('2026-05-12');
+  saveDraft(visit, { notes: '[Protocol] Earlier palm fertilizer', selectedProtocolActionLabels: ['Earlier palm fertilizer'] });
+  render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByText('Protocol actions unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual(['Earlier palm fertilizer']);
+  expect(body.technicianNotes).toBe('[Protocol] Earlier palm fertilizer');
 });
 
 
