@@ -610,11 +610,17 @@ const NEGATION_HEDGE_TOKENS = [
   ' unfortunately ', ' call you back ', ' have to check ', ' let me check ',
   ' see if ', ' ask someone ', ' no ', ' nope ', ' nah ',
 ];
+// Codex round 22, P1 (:611): the bare noncommittal "We'll see." / "Let's
+// see." — whitelisted words only, and "see if" was the only see-hedge.
+// Anchored to the END of the sentence (a courtesy tail aside), so the
+// commitment heads "we'll see you/him/her/them" never match.
+const SEE_HEDGE_RE = /(?:^| )(?:(?:we|i) (?:ll|will|shall)(?: (?:just|have to|just have to))? see|let s see|let us see)(?: (?:then|thanks|thank you|okay|ok|so))*$/;
 function turnHasNegationOrHedge(normalizedTurn) {
   // "No problem." is an affirmation, not the bare-"no" rejection (codex
   // round 10, P2) — drop the phrase before the token screen.
   const padded = ` ${normalizedTurn} `.replace(/ no problem(?= )/g, '');
-  return NEGATION_HEDGE_TOKENS.some((t) => padded.includes(t));
+  return NEGATION_HEDGE_TOKENS.some((t) => padded.includes(t))
+    || SEE_HEDGE_RE.test(normalizedTurn);
 }
 
 // Conditional-language screen (codex P0): "If the homeowner approves, we
@@ -1118,7 +1124,11 @@ const APPROVAL_REQUEST_RE = new RegExp(`\\b(?:get|getting|obtain|secure|have|wai
 // Codex round 16, P1 (:1109): DEMONSTRATIVE determiners — "We need that
 // okay." / "need this approval" — are the same outstanding-authorization
 // shape, so that/this/any join the determiner set.
-const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some|that|this|any) ${AUTHORIZATION_NOUN_ALT}\\b`);
+// Codex round 22, P1 (:1121): ASR/elliptical "We need yes." drops the
+// determiner. For the unambiguous NEED verbs (need/require/wait for) the
+// determiner is now optional; get/have keep requiring one, since "have
+// okay"/"get yes" are not natural and "okay"/"yes" double as openers.
+const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some|that|this|any)|need|needs|needed|require|requires|wait for|waiting for) ${AUTHORIZATION_NOUN_ALT}\\b`);
 // Codex round 9, P1 (:713): neither AUTHORIZATION_NEED_RE nor
 // APPROVAL_REQUEST_RE covers a DIRECTIVE the agent gives to have a third
 // party grant approval — "I will tell him to okay it." names no "need"/
@@ -1391,7 +1401,20 @@ function isBarePronounClause(clauseNs) {
 // ("if it does", "if it goes to you") names no topic of its own, so ONLY
 // then does the referent resolve against the PREVIOUS sentence's benign
 // nouns; a clause with any actual content word never falls back.
+// Codex round 22, P1 (:1406): "If we are all set and the email goes to
+// you" — one benign topic ("email") anywhere in the clause used to clear
+// the WHOLE compound antecedent, booking-status half included. A clause
+// coordinated with and/or/but is now judged per component: every
+// component must be benign on its own.
+const CLAUSE_COORDINATOR_RE = / (?:and|or|but) /;
 function clauseIsBenign(clauseNs, prevNs) {
+  if (!clauseNs) return false;
+  if (CLAUSE_COORDINATOR_RE.test(clauseNs)) {
+    return clauseNs.split(CLAUSE_COORDINATOR_RE).every((part) => clauseComponentIsBenign(part.trim(), prevNs));
+  }
+  return clauseComponentIsBenign(clauseNs, prevNs);
+}
+function clauseComponentIsBenign(clauseNs, prevNs) {
   if (!clauseNs) return false;
   const padded = ` ${clauseNs} `;
   if (AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))) return false;
@@ -1436,7 +1459,9 @@ const SCHEDULING_PREDICATE_TERMS = [
   // Codex round 21, P1 (:1426): booking idioms built from whitelisted words
   // ("Need to put you down.") — any "<party> down" and "get <party> in".
   ' you down ', ' him down ', ' her down ', ' them down ', ' us down ',
-  ' get you in ', ' get him in ', ' get her in ', ' get them in ',
+  // Codex round 22, P1 (:1439): "put you in" too — any "<party> in"
+  // (get/put/have/squeeze … you in), not one verb at a time.
+  ' you in ', ' him in ', ' her in ', ' them in ', ' us in ',
   ' coming out ',
   ' appointment ', ' appointments ',
   ' book ', ' booked ', ' booking ',

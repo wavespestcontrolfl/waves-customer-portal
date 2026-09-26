@@ -1590,6 +1590,36 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // Codex round 22 (review of e41594dfe4): four P1s.
+  // P1 (:1121) — determiner-less "need yes".
+  // P1 (:1439) — "put you in" (any "<party> in").
+  // P1 (:1406) — a compound antecedent with one booking-status component.
+  // P1 (:611)  — the bare "We'll see." hedge.
+  test.each([
+    "We need yes. We'll see you Sunday at noon.",
+    "We need approval. We'll see you Sunday at noon.",
+    "Need to put you in. We'll see you Sunday at noon.",
+    "If we are all set and the email goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
+    "We'll see. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. We'll see, thanks.",
+    "Let's see. We'll see you Sunday at noon.",
+  ])('Codex round-23 regression: need-yes, put-you-in, compound antecedents, and see-hedges poison — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "If the email goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. Thank you so much.",
+  ])('Codex round-23: single-topic antecedents and courtesy closers still ground — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",
