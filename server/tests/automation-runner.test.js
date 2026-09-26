@@ -260,9 +260,8 @@ describe('automation runner suppression guardrails', () => {
 
   test.each([
     { payment_issue_channels: ['sms', 'push'] },
-    { payment_issue_channels: ['email', 'sms'], email_enabled: false },
-    { payment_issue_channels: ['email'], email_enabled: false },
-  ])('a queued payment-failed step honors the current Email choice and opt-out: %j', async (prefs) => {
+    { payment_issue_channels: ['sms'], email_enabled: false },
+  ])('a queued payment-failed step honors the current Email choice: %j', async (prefs) => {
     const enrollment = {
       id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
       current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
@@ -294,7 +293,15 @@ describe('automation runner suppression guardrails', () => {
     }));
   });
 
-  test('a legacy NULL payment-issue choice still sends', async () => {
+  // The portal-wide email switch never cancels a payment-failed email (owner
+  // ruling 2026-09-26: payment emails cannot be turned off); only an
+  // explicit channel choice without Email does.
+  test.each([
+    { payment_issue_channels: null },
+    { payment_issue_channels: null, email_enabled: false },
+    { payment_issue_channels: ['email', 'sms'], email_enabled: false },
+    { payment_issue_channels: ['email'], email_enabled: false },
+  ])('a payment-failed step with Email selected or unset still sends: %j', async (prefs) => {
     const enrollment = {
       id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
       current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
@@ -307,7 +314,7 @@ describe('automation runner suppression guardrails', () => {
         from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
       automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), chain()],
       email_suppressions: [chain({ result: [] })],
-      notification_prefs: [chain({ first: { payment_issue_channels: null } })],
+      notification_prefs: [chain({ first: prefs })],
     });
     sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-legacy' });
 

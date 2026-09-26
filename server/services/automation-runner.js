@@ -149,8 +149,11 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
   // SELECT * keeps this consumer deployable before the additive foundation
   // migration; an absent column is the same legacy NULL behavior.
   const prefs = await db('notification_prefs').where({ customer_id: enrollment.customer_id }).first();
+  // Only an explicit channel choice without Email cancels — the portal-wide
+  // email switch never does (owner ruling 2026-09-26: payment emails cannot
+  // be turned off).
   const selected = billingChannelAllowed(prefs, 'payment_issue', 'email');
-  if (selected === null || (selected && prefs.email_enabled !== false)) return null;
+  if (selected !== false) return null;
   return blockSendAndCancelEnrollment({ enrollment, sendId,
     reason: 'Billing delivery preference excludes Email', cancelReason: 'billing_email_deselected' });
 }

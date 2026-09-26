@@ -126,3 +126,36 @@ describe('account-membership-email distinguishes a transient prefs failure from 
     expect(result.skipped).not.toBe(true);
   });
 });
+
+// Owner ruling 2026-09-26: payment emails cannot be turned off. A billing.*
+// notice sent through this family's sendTemplate ignores the portal-wide
+// email switch that still silences membership.* / account.* mail above.
+describe('billing notices ignore the portal-wide email switch', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('billing.previsit_balance is emailed to a customer with email_enabled=false', async () => {
+    const prefs = { customer_id: 'cust-1', email_enabled: false };
+    const queues = {
+      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
+      customer_interactions: [chain(), chain(), chain()],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
+    };
+    db.mockImplementation((table) => {
+      const q = queues[table];
+      if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
+      return q.shift();
+    });
+    const result = await AccountMembershipEmail.sendPrevisitBalanceReminder({
+      customerId: 'cust-1',
+      amount: '$129.00',
+      serviceType: 'Pest Control',
+      visitDate: 'Tuesday, October 6',
+      billingUrl: 'https://portal.example/pay',
+      idempotencyKey: 'previsit:cust-1:2026-10-06',
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'billing.previsit_balance' }));
+    expect(result).not.toMatchObject({ skipped: true });
+    expect(result.reason).not.toBe('email_opted_out');
+  });
+});
