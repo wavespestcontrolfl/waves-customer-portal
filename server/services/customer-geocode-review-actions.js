@@ -9,6 +9,7 @@ const { toDateStr } = require('./auto-dispatch/dates');
 const reviewStore = require('./customer-geocode-review');
 
 const REVIEW_SOURCES = new Set(['county_records', 'customer_confirmation', 'site_visit']);
+const ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 const VISIT_FIELDS = [
   'id', 'property_id', 'technician_id', 'scheduled_date', 'status', 'lat', 'lng',
   'auto_dispatch_locked', 'auto_dispatch_excluded',
@@ -28,7 +29,7 @@ function completeAddress(row) {
 }
 
 function sameAddress(a, b) {
-  return JSON.stringify(reviewStore.addressSnapshot(a)) === JSON.stringify(reviewStore.addressSnapshot(b));
+  return ADDRESS_FIELDS.every(field => String(a?.[field] || '') === String(b?.[field] || ''));
 }
 
 function hasUsablePin(row) {
@@ -225,7 +226,8 @@ async function verifyPin({ trx, customerId, input, actorId, customer, primary, s
   }
   const latitude = pinAtScale(input.latitude, 7);
   const longitude = pinAtScale(input.longitude, 7);
-  const after = input.address ? { ...customer, ...input.address } : { ...customer };
+  const address = input.address ? { ...input.address, address_line2: input.address.address_line2 || null } : null;
+  const after = address ? { ...customer, ...address } : { ...customer };
   if (!completeAddress(after)) {
     throw actionError('A complete confirmed service address is required.', 400, 'incomplete_service_address');
   }
@@ -238,11 +240,11 @@ async function verifyPin({ trx, customerId, input, actorId, customer, primary, s
   after.latitude = latitude;
   after.longitude = longitude;
   await trx('customers').where({ id: customerId }).update({
-    ...(input.address || {}), latitude, longitude, updated_at: new Date(),
+    ...(address || {}), latitude, longitude, updated_at: new Date(),
   });
-  await syncPrimaryAddress(after, trx, { explicitLine2: !!input.address });
+  await syncPrimaryAddress(after, trx, { explicitLine2: !!address });
   await syncPrimaryCoordsFromCustomer(customerId, trx);
-  if (input.address) {
+  if (address) {
     await require('./customer-address-fanout').propagateCustomerAddressChange({ before: customer, after }, trx);
   }
   const visitsUpdated = await updatePrimaryVisits(
@@ -253,7 +255,7 @@ async function verifyPin({ trx, customerId, input, actorId, customer, primary, s
     reviewed_by: actorId, latitude, longitude,
   });
   await auditResolution(trx, customerId, actorId, input.action, {
-    address_changed: !!input.address,
+    address_changed: !!address,
     visits_updated: visitsUpdated,
     source: input.source,
   });

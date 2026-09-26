@@ -54,9 +54,11 @@ function visit(overrides = {}) {
   };
 }
 
-function fakeConnection({ reviewStatus = 'verified', customerOverrides = {}, reviewOverrides = {} } = {}) {
+function fakeConnection({ reviewStatus = 'verified', customerOverrides = {}, primaryOverrides = {}, reviewOverrides = {} } = {}) {
   const customerRow = { ...customer, ...customerOverrides };
-  const primaryRow = { ...customerRow, id: 'property-1', customer_id: customer.id, active: true, is_primary: true };
+  const primaryRow = {
+    ...customerRow, id: 'property-1', customer_id: customer.id, active: true, is_primary: true, ...primaryOverrides,
+  };
   const reviewRow = {
     customer_id: customer.id, status: reviewStatus, reason: 'prior', source: 'site_visit', evidence: 'prior evidence',
     latitude: customer.latitude, longitude: customer.longitude, updated_at: new Date('2026-09-25T12:00:00Z'),
@@ -136,6 +138,7 @@ test('verify releases a protected review before atomically saving address, pin, 
   const corrected = {
     address_line1: '101 Main St', address_line2: '', city: 'Sarasota', state: 'FL', zip: '34236',
   };
+  const canonical = { ...corrected, address_line2: null };
 
   const detail = await resolveCustomerGeocodeReview(customer.id, {
     revision: 'rev-1', action: 'verify_pin', address: corrected,
@@ -146,21 +149,37 @@ test('verify releases a protected review before atomically saving address, pin, 
     expect.objectContaining({ status: 'pending', reason: 'manual_verification_in_progress' }));
   expect(updates).toContainEqual(expect.objectContaining({
     table: 'customers',
-    patch: expect.objectContaining({ ...corrected, latitude: 27.4, longitude: -82.4 }),
+    patch: expect.objectContaining({ ...canonical, latitude: 27.4, longitude: -82.4 }),
   }));
   expect(customerProperties.syncPrimaryAddress).toHaveBeenCalledWith(
-    expect.objectContaining({ ...corrected, latitude: 27.4, longitude: -82.4 }), conn, { explicitLine2: true },
+    expect.objectContaining({ ...canonical, latitude: 27.4, longitude: -82.4 }), conn, { explicitLine2: true },
   );
   expect(customerProperties.syncPrimaryCoordsFromCustomer).toHaveBeenCalledWith(customer.id, conn);
   expect(addressFanout.propagateCustomerAddressChange).toHaveBeenCalledWith(expect.objectContaining({
-    before: expect.objectContaining({ id: customer.id }), after: expect.objectContaining(corrected),
+    before: expect.objectContaining({ id: customer.id }), after: expect.objectContaining(canonical),
   }), conn);
-  expect(reviewStore.saveReview).toHaveBeenNthCalledWith(2, conn, expect.objectContaining(corrected),
+  expect(reviewStore.saveReview).toHaveBeenNthCalledWith(2, conn, expect.objectContaining(canonical),
     expect.objectContaining({ status: 'verified', reason: 'staff_verified', reviewed_by: 'actor-1' }));
   expect(auditLog.recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
     action: 'customer_geocode_review.verify_pin', critical: true, trx: conn,
   }));
   expect(detail.revision).toBe('rev-2');
+});
+
+test('pre-existing null and empty mirror fields are equivalent without hiding nonempty differences', async () => {
+  const equivalent = fakeConnection({
+    customerOverrides: { address_line2: null, city: null, state: null, zip: null, latitude: null, longitude: null },
+    primaryOverrides: { address_line2: '', city: '', state: '', zip: '' },
+    reviewStatus: 'provider_unavailable', reviewOverrides: { latitude: null, longitude: null },
+  });
+  await expect(resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'retry',
+  }, 'actor-1', equivalent.conn)).resolves.toEqual(expect.objectContaining({ revision: 'rev-2' }));
+
+  const divergent = fakeConnection({ primaryOverrides: { city: 'Bradenton' } });
+  await expect(resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'revoke',
+  }, 'actor-1', divergent.conn)).rejects.toMatchObject({ statusCode: 409, code: 'primary_location_mismatch' });
 });
 
 test('revoke preserves the review pin as evidence and only clears exact matching live mirrors', async () => {

@@ -142,15 +142,16 @@ postgres('customer geocode review actions in PostgreSQL', () => {
 
   test('verify atomically saves the protected pin, primary mirror, audit and only eligible visit snapshots', async () => {
     const corrected = { address_line1: '101 Fixture Way', address_line2: '', city: 'Bradenton', state: 'FL', zip: '34205' };
+    const canonical = { ...corrected, address_line2: null };
     await verify({ address: corrected });
 
     const savedCustomer = await customer();
     const savedPrimary = await primary();
     const savedReview = await review();
-    expect(savedCustomer).toMatchObject(corrected);
+    expect(savedCustomer).toMatchObject(canonical);
     expect(Number(savedCustomer.latitude)).toBe(PIN.latitude);
     expect(Number(savedPrimary.latitude)).toBe(PIN.latitude);
-    expect(savedPrimary).toMatchObject(corrected);
+    expect(savedPrimary).toMatchObject(canonical);
     expect(savedReview).toMatchObject({ status: 'verified', reason: 'staff_verified', reviewed_by: ACTOR });
     expect(Number(savedReview.longitude)).toBe(PIN.longitude);
 
@@ -181,6 +182,18 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     const saved = await review();
     expect(saved).toMatchObject({ status: 'needs_pin', reason: 'verification_revoked', reviewed_by: null });
     expect(Number(saved.latitude)).toBe(PIN.latitude);
+  });
+
+  test('an empty optional unit on unchanged-address verification permits the next review action', async () => {
+    await verify({ address: { ...ADDRESS, address_line2: '' } });
+
+    await expect(resolveCustomerGeocodeReview(CUSTOMER, {
+      revision: (await detail()).revision, action: 'revoke',
+    }, ACTOR, mockConnection)).resolves.toEqual(expect.objectContaining({
+      review: expect.objectContaining({ status: 'needs_pin' }),
+    }));
+    expect((await customer()).address_line2).toBeNull();
+    expect((await primary()).address_line2).toBeNull();
   });
 
   test('outside-area confirmation snapshots a revision-bound legacy pin before clearing every matching mirror', async () => {
