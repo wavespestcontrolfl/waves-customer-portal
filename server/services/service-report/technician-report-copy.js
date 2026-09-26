@@ -42,9 +42,9 @@
 const crypto = require('crypto');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-// Code-noun anchored credential detector (shared with the generate-report
-// output gate): a token counts as a credential only beside an actual
-// code/PIN noun — location keywords alone ("120 linear feet around the
+// Credential detector shared with the generate-report output gate: tokens
+// need an explicit code/PIN noun or a device credential shape. Location
+// keywords alone ("120 linear feet around the
 // garage") never trip it. Post-generation inline edits go through THIS
 // parser at completion, so the screen lives here (codex r36 #3420). The
 // shapes mirror the canonical scrubber: digit codes either side of the
@@ -67,6 +67,12 @@ const REPORT_ACCESS_CODE_RES = [
   // ≥3 digits so counts ("2 doors") never trip
   /\b\d{3,8}\b[^\n.!?]{0,20}\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|lock)\b/i,
   /\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?|enter(?:s|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}\b/i,
+  // Past actions also carry credentials; decimals and explicit dimension units
+  // remain work details. Bare "in" is a preposition, not evidence of inches.
+  /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}(?!\.\d)\b(?!\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|sq|square|percent|%|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|linear|gallons?|oz|ounces?|pounds?|lbs?)\b)/i,
+  // Shorthand device credentials ("rear gate 2468") need no linking verb.
+  // Direct adjacency and the unit exclusion preserve treatment measurements.
+  /\b(?:gate|door|garage|lock\s?box|alarm|entry|keypad)\s*[:=-]?\s*["'‘’“”]?\d{3,8}(?!\.\d)\b(?!\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|sq|square|percent|%|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|linear|gallons?|oz|ounces?|pounds?|lbs?)\b)/i,
   // digits directly before a positional prep + device noun are the same
   // credential without any action verb ("Use 4417 at the side gate",
   // codex r87) — mirrors the canonical redactor's digit-to-location form;

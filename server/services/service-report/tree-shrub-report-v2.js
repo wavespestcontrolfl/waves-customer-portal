@@ -20,6 +20,7 @@
 const { buildTreeShrubVisualCategories, scoreStatus } = require('./tree-shrub-visual-categories');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { buildTreeShrubInsightCards } = require('./tree-shrub-report-insights');
+const { customerCopyViolations } = require('./technician-report-copy');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
 // approved report summary; falls back to category/active-ingredient heuristics. `kind`
@@ -112,9 +113,19 @@ function buildTreatment({ applications = [], actions = [] } = {}) {
     };
   }).filter(Boolean);
 
+  // Protocol actions remain valid internal completion evidence, but this
+  // treatment object is copied verbatim into the customer report. Screen at
+  // read time so legacy records pre-dating completion validation are covered;
+  // a scrubbed credential is omitted rather than showing "[redacted]".
+  const customerActions = (actions || [])
+    .map((action) => String(action || '').trim())
+    .filter((action) => action
+      && !/\[redacted\]/i.test(action)
+      && customerCopyViolations(action).length === 0);
+
   const focus = uniq([
     ...products.map((p) => classifyProduct({ active_ingredient: p.activeIngredient, product_name: p.name }).tag),
-    ...(actions || []).map((a) => String(a || '').trim()),
+    ...customerActions,
   ]).map(cap).slice(0, 4);
 
   const kinds = new Set(products.map((p) => p.kind));

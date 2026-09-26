@@ -247,6 +247,23 @@ function collectStrings(value, acc = []) {
 }
 
 describe('Lawn Report V2 — consistency golden fixtures', () => {
+  test('customer treatment focus drops raw and pre-redacted access actions but keeps clean custom work', () => {
+    const reportV2 = buildLawnReportV2({
+      lawnAssessment: CASES.healthy,
+      actions: [
+        'Checked irrigation coverage',
+        'Used gate code 4417 for access',
+        'Used gate code [redacted] for access',
+        'Opened side gate with 2468',
+        'rear gate 2468',
+      ],
+    });
+
+    expect(reportV2.treatment.focus).toEqual(['Checked irrigation coverage']);
+    expect(reportV2.snapshot.todaysFocus).toEqual(['Checked irrigation coverage']);
+    expect(JSON.stringify(reportV2)).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
+  });
+
   for (const [name, lawnAssessment] of Object.entries(CASES)) {
     describe(name, () => {
       const reportV2 = buildLawnReportV2({ lawnAssessment, applications: APPLICATIONS, actions: ['Exterior perimeter band'] });

@@ -401,6 +401,10 @@ internal audit record. Partial assessments retain their scored categories withou
 whole-landscape reassurance. Public and queued PDFs share the tree-only `tsreview2`
 cache revision so older PDFs cannot retain the substituted scores. Token, access,
 privacy, and rate-limit guards are unchanged.
+Public protocol actions and lawn/tree treatment focus exclude action text rejected
+by the shared customer-copy validator, including access credentials and redaction
+placeholders. This read-time projection also covers legacy records; internal
+completion evidence and replay inputs remain stored unchanged.
 Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
 Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,

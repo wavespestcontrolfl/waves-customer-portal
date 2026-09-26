@@ -333,6 +333,23 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     expect(v2.snapshot.peaceOfMind).not.toMatch(/treatment is complete|protected/);
   });
 
+  it('customer treatment focus drops raw and pre-redacted access actions but keeps clean custom work', () => {
+    const v2 = buildTreeShrubReportV2({
+      treeShrubAssessment: assessment(),
+      actions: [
+        'Pruned dead fronds',
+        'Used gate code 4417 for access',
+        'Used gate code [redacted] for access',
+        'Opened side gate with 2468',
+        'rear gate 2468',
+      ],
+    });
+
+    expect(v2.treatment.focus).toEqual(['Pruned dead fronds']);
+    expect(v2.snapshot.todaysFocus).toEqual(['Pruned dead fronds']);
+    expect(JSON.stringify(v2)).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
+  });
+
   it('peace-of-mind keeps the treatment copy when products were actually applied', () => {
     const v2 = buildTreeShrubReportV2({
       treeShrubAssessment: assessment({
