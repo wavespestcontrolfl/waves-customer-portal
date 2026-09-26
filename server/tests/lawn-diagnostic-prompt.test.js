@@ -122,3 +122,38 @@ describe('normalizeDiagnosisJson keeps findings the report normalizers read corr
     expect(out.droppedFindings).toBe(1);
   });
 });
+
+// Codex r17 on #4884: every other field the report normalizer reads must be
+// absent or text — an object confirmation_step crashed the tech diagnostic
+// page (rendered as a React child) and object evidence items became
+// "[object Object]".
+describe('normalizeDiagnosisJson checks every field the report reads', () => {
+  const { normalizeDiagnosisJson } = require('../services/lawn-diagnostic-prompt');
+  const FULL = {
+    finding_id: 'F1', name: 'Chinch bugs', confidence: 'moderate', severity: 'moderate', spread_risk: 'high',
+    estimated_area_affected: '10-25%', urgency: 'follow_up', observed_evidence: ['yellowing patches'],
+    inferred_context: ['hot, dry week'], negative_evidence: ['no fungal lesions'],
+    confirmation_step: 'Flotation test at the patch edge', customer_wording: 'We may be seeing chinch bug activity.',
+  };
+
+  test('a full on-contract finding is kept', () => {
+    expect(normalizeDiagnosisJson({ findings: [FULL] })).toMatchObject({ findings: [FULL], droppedFindings: 0 });
+  });
+
+  test.each([
+    ['an object confirmation_step', { confirmation_step: {} }],
+    ['an object customer_wording', { customer_wording: { text: 'x' } }],
+    ['an object estimated_area_affected', { estimated_area_affected: { pct: 10 } }],
+    ['an object evidence item', { observed_evidence: ['patches', { where: 'front' }] }],
+    ['an object as the whole evidence list', { negative_evidence: { none: true } }],
+    ['an off-enum spread_risk', { spread_risk: 'viral' }],
+    ['an object camelCase alias', { confirmationStep: { step: 'x' } }],
+  ])('%s drops the finding', (_label, extra) => {
+    expect(normalizeDiagnosisJson({ findings: [{ ...FULL, ...extra }] })).toMatchObject({ findings: [], droppedFindings: 1 });
+  });
+
+  test('a single-string evidence value, null fields, and a numeric id are still read correctly', () => {
+    const out = normalizeDiagnosisJson({ findings: [{ ...FULL, finding_id: 1, observed_evidence: 'yellowing', confirmation_step: null, spread_risk: 'Medium' }] });
+    expect(out.droppedFindings).toBe(0);
+  });
+});

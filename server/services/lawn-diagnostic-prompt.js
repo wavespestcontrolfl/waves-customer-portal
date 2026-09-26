@@ -374,12 +374,30 @@ const findingKey = (value) => String(value).trim().toLowerCase().replace(/[^a-z0
 const onEnum = (value, keys) => value === undefined || value === null
   || (typeof value === 'string' && keys.includes(findingKey(value)));
 
+// Every other field lawn-diagnostic-report.js's normalizeFindings reads
+// (the contract's snake_case names and the camelCase aliases it also
+// accepts): the text fields pass straight through to the report and the tech
+// page, which renders them as React children — an object there crashed the
+// diagnostic view — and list items are String()-ed into "[object Object]",
+// so each must be absent or text (lists: text items); spread_risk is keyed
+// like the other enums (Codex r17 on #4884).
+const FINDING_TEXT_FIELDS = ['finding_id', 'findingId', 'id', 'primary_finding', 'primaryFinding', 'estimated_area_affected', 'estimatedAreaAffected', 'confirmation_step', 'confirmationStep', 'customer_wording', 'customerWording'];
+const FINDING_LIST_FIELDS = ['observed_evidence', 'observedEvidence', 'evidence', 'inferred_context', 'inferredContext', 'negative_evidence', 'negativeEvidence'];
+const FINDING_SPREAD_KEYS = ['low', 'moderate', 'medium', 'high', 'unknown'];
+const isFindingText = (value) => value === undefined || value === null || typeof value === 'string'
+  || (typeof value === 'number' && Number.isFinite(value));
+const isFindingTextList = (value) => isFindingText(value) || (Array.isArray(value) && value.every(isFindingText));
+
 function isOnContractFinding(finding) {
   if (!finding || typeof finding !== 'object' || Array.isArray(finding)) return false;
   if (typeof finding.name !== 'string' || !finding.name.trim()) return false;
   return onEnum(finding.confidence, FINDING_CONFIDENCE_KEYS)
     && onEnum(finding.severity, FINDING_SEVERITY_KEYS)
-    && onEnum(finding.urgency, FINDING_URGENCY_KEYS);
+    && onEnum(finding.urgency, FINDING_URGENCY_KEYS)
+    && onEnum(finding.spread_risk, FINDING_SPREAD_KEYS)
+    && onEnum(finding.spreadRisk, FINDING_SPREAD_KEYS)
+    && FINDING_TEXT_FIELDS.every((field) => isFindingText(finding[field]))
+    && FINDING_LIST_FIELDS.every((field) => isFindingTextList(finding[field]));
 }
 
 function normalizeDiagnosisJson(json = {}) {
@@ -391,9 +409,9 @@ function normalizeDiagnosisJson(json = {}) {
     findings,
     customer_summary: typeof json.customer_summary === 'string' ? json.customer_summary : '',
     // >0 whenever a candidate member was dropped as off-contract (not an
-    // object, no name, or a present-but-off-enum confidence/severity/
-    // urgency) — callers fail the ledger row on this even when enough
-    // on-contract findings remain to keep going.
+    // object, no name, a present-but-off-enum confidence/severity/urgency/
+    // spread_risk, or a non-text field) — callers fail the ledger row on this
+    // even when enough on-contract findings remain to keep going.
     droppedFindings: rawCount - findings.length,
   };
 }
