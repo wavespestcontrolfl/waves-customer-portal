@@ -63,7 +63,7 @@ const APPOINTMENT_TIME = '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)';
 const APPOINTMENT_WINDOW = `\\d{1,2}(?::\\d{2})?(?:\\s*(?:a\\.?m\\.?|p\\.?m\\.?))?\\s*(?:–|—|-|to)\\s*${APPOINTMENT_TIME}`;
 const APPOINTMENT_LEAD = '(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment)\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on)|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
 const RECAP_APPOINTMENT_RE = new RegExp(
-  `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME})?(?:,?\\s+(?:and|then)\\s+(\\S))?`,
+  `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME}|,?\\s+${APPOINTMENT_WINDOW})?(?:,?\\s+(?:and|then)\\s+(\\S))?`,
   'gi',
 );
 
