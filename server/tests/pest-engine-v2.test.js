@@ -1,0 +1,1166 @@
+/**
+ * Photo ID v2 pest engine tests (PR-2a).
+ *
+ * Model calls are mocked at `llm/call`'s `dispatch` — nothing here hits a
+ * real provider. The species catalog is mocked with the small, hand-built
+ * fixture in `helpers/pest-engine-fixtures.js` rather than the live
+ * `species-catalog-v1` data (per the 2026-09-26 contract delta note: the
+ * live entry files are being revised in parallel by content workers, so
+ * engine tests target fixtures, never the live files).
+ *
+ * `TEXT_POLICIES.photoIdVision` is mocked in too (PR #4865 adds the real
+ * one; this engine reads it at call time either way) so this suite runs
+ * independently of whether that PR has landed on main yet.
+ */
+
+jest.mock('../services/species-catalog', () => require('./helpers/pest-engine-fixtures').FIXTURE);
+jest.mock('../services/llm/call', () => ({
+  ...jest.requireActual('../services/llm/call'),
+  dispatch: jest.fn(),
+}));
+jest.mock('../config/models', () => {
+  const actual = jest.requireActual('../config/models');
+  return {
+    ...actual,
+    TEXT_POLICIES: {
+      ...actual.TEXT_POLICIES,
+      photoIdVision: {
+        name: 'photoIdVision',
+        primary: { provider: 'gemini', model: 'gemini-3.8-flash-test' },
+        fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
+      },
+    },
+  };
+});
+
+const { dispatch } = require('../services/llm/call');
+const catalog = require('../services/species-catalog');
+const engine = require('../services/photo-id-v2/pest-engine');
+
+const {
+  buildAnswer, mapToV1, resolveCandidate, dedupeCandidates, isConsequential, isApproved,
+  identifyPestV2, REFERRAL_TEMPLATES,
+} = engine;
+
+// ── ctx-builder helpers for buildAnswer unit tests ─────────────────────────
+
+// buildAnswer unit tests model post-verify candidates, so `verified`
+// defaults to true; pass `verified: false` for an unchecked guess.
+function cand(slug, confidence, { traitsVisible = [], traitsNotVisible = [], verified = true } = {}) {
+  const entry = catalog.getEntry(slug);
+  if (!entry) throw new Error(`fixture has no entry "${slug}"`);
+  return { slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, checked: verified, verified };
+}
+
+function candOff(offCatalogName, groupId, confidence) {
+  return { slug: null, offCatalogName, groupId, confidence, entry: null, traitsVisible: [], traitsNotVisible: [] };
+}
+
+function baseCtx(overrides = {}) {
+  return {
+    candidates: [],
+    disagreed: false,
+    disagreementNode: null,
+    escalationTriggered: false,
+    openaiAnswered: false,
+    openaiStoodInAlone: false,
+    qualityUsable: true,
+    qualityIssue: 'none',
+    currentMonth: 6,
+    ...overrides,
+  };
+}
+
+const CURRENT_MONTH = 6; // June — inside every fixture entry's active_months
+
+beforeEach(() => {
+  dispatch.mockReset();
+});
+
+// ── buildAnswer: naming thresholds ─────────────────────────────────────────
+
+describe('buildAnswer — entry-level naming', () => {
+  test('pretty_sure at >= 0.80 for an approved entry', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)] }));
+    expect(built.answer).toMatchObject({
+      level: 'entry', wording: 'pretty_sure', node_id: 'fire-ant', headline: "We're pretty sure: Fire Ant", subhead: 'Solenopsis invicta',
+    });
+    expect(built.entry.slug).toBe('fire-ant');
+    expect(built.tier).toBe('ai_suggestion');
+    expect(built.nextPhoto).toBeNull();
+  });
+
+  test('likely at 0.55–0.80 for an approved entry', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('ghost-ant', 0.65)] }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.answer.headline).toBe('Likely: Ghost Ant');
+    expect(built.tier).toBe('ai_suggestion');
+  });
+
+  test('harmless/ally entry reaches pretty_sure at 0.70 when no consequential alt is close (decision #2)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('gopher-tortoise', 0.72)] }));
+    expect(built.answer.wording).toBe('pretty_sure');
+    expect(built.entry.slug).toBe('gopher-tortoise');
+  });
+
+  test('decision #2 guard: the SAME 0.70 ally confidence does NOT reach pretty_sure when a consequential alt is close (>=0.20)', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('gopher-tortoise', 0.72), cand('fire-ant', 0.55)],
+    }));
+    expect(built.answer.wording).toBe('likely'); // 0.72 still clears the general LIKELY_MIN bar
+    expect(built.entry.slug).toBe('gopher-tortoise');
+  });
+
+  test('a consequential alt below 0.20 does NOT block the harmless-plainly bar', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('gopher-tortoise', 0.72), cand('fire-ant', 0.10)],
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+  });
+
+  test('an UNAPPROVED entry never gets named, however high its confidence — climbs to group instead', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
+    expect(built.answer.level).toBe('group');
+    expect(built.answer.node_id).toBe('ants');
+    expect(built.answer.headline).toBe('Looks like an ant');
+    expect(built.entry).toBeNull();
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('owner_approved but fact-check pending (non-empty verification) is ALSO unapproved', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('pending-verification-ant', 0.95)] }));
+    expect(built.entry).toBeNull();
+    expect(built.answer.level).toBe('group');
+  });
+
+  test('an escalation trigger with no OpenAI answer can never read pretty_sure, even at 0.90', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('fire-ant', 0.90)], escalationTriggered: true, openaiAnswered: false,
+    }));
+    expect(built.answer.wording).toBe('likely'); // capped down from pretty_sure, still clears LIKELY_MIN
+  });
+
+  test('an escalation trigger WITH an OpenAI answer is not capped', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('fire-ant', 0.90)], escalationTriggered: true, openaiAnswered: true,
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+  });
+});
+
+describe('buildAnswer — lineage climb', () => {
+  test('climbs to GROUP when the top entry alone is under 0.60 but the group sum clears it', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('fire-ant', 0.35), candOff('a stinging ant', 'ants', 0.30)],
+    }));
+    expect(built.answer.level).toBe('group');
+    expect(built.answer.node_id).toBe('ants');
+    expect(built.answer.headline).toBe('Looks like an ant');
+  });
+
+  test('climbs to CATEGORY when neither group clears 0.60 but the category sum does', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('ghost-ant', 0.35), cand('roof-rat', 0.30)],
+    }));
+    expect(built.answer.level).toBe('category');
+    expect(built.answer.node_id).toBe('insect');
+    expect(built.answer.subhead).toBeNull();
+  });
+
+  test('climbs across ALL candidates\' lineages, not just the top-by-confidence one (Codex round-0 P1, round 3)', () => {
+    // gopher-tortoise@0.40 is the TOP candidate by confidence, but its own
+    // group (turtles) alone is under 0.60; the two ants together clear it.
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('gopher-tortoise', 0.40), cand('fire-ant', 0.35), cand('ghost-ant', 0.30)],
+    }));
+    expect(built.answer.level).toBe('group');
+    expect(built.answer.node_id).toBe('ants');
+  });
+
+  test('evidence comes only from candidates under the climbed node, never the off-lineage top (Codex round-0 P1, round 14)', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [
+        cand('gopher-tortoise', 0.40, { traitsVisible: [1], traitsNotVisible: [2] }),
+        cand('fire-ant', 0.35, { traitsVisible: [1, 3], traitsNotVisible: [2] }),
+        cand('ghost-ant', 0.30),
+      ],
+    }));
+    expect(built.answer.node_id).toBe('ants');
+    expect(built.evidence).toEqual({ matches: ['Reddish-brown mound builders', 'Two-node waist'], still_need: ['Aggressive when disturbed'] });
+  });
+
+  test('an unknown answer cites no evidence at all', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('gopher-tortoise', 0.30, { traitsVisible: [1] })] }));
+    expect(built.answer.level).toBe('unknown');
+    expect(built.evidence).toEqual({ matches: [], still_need: [] });
+  });
+
+  test('unknown when nothing clears any lineage rung', () => {
+    const built = buildAnswer(baseCtx({ candidates: [candOff('something unrecognizable', null, 0.1)] }));
+    expect(built.answer).toMatchObject({ level: 'unknown', wording: 'unknown', node_id: null, headline: "We couldn't tell from these photos" });
+    expect(built.tier).toBe('needs_more_evidence');
+    // Still gets retake guidance (pre-push audit on Codex #4916 r4).
+    expect(built.nextPhoto).toEqual({ ask: 'Other retake photo', why: 'Other retake why', photo_can_confirm: true });
+  });
+});
+
+describe('buildAnswer — disagreement', () => {
+  test('a shared node from the two disagreeing lineages, tier needs_more_evidence, entry null', () => {
+    const node = { level: 'group', id: 'ants', label: 'Ants', generic: 'an ant' };
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('fire-ant', 0.6), cand('ghost-ant', 0.5)], disagreed: true, disagreementNode: node,
+    }));
+    expect(built.answer).toMatchObject({ level: 'group', node_id: 'ants', wording: 'group_only', headline: 'Looks like an ant' });
+    expect(built.entry).toBeNull();
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('no shared node at all reads unknown', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.6)], disagreed: true, disagreementNode: null }));
+    expect(built.answer.level).toBe('unknown');
+  });
+});
+
+describe('buildAnswer — tier', () => {
+  test('unusable photo quality forces needs_more_evidence and caps the wording at likely, with a next photo (Codex #4916 r4)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], qualityUsable: false }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.tier).toBe('needs_more_evidence');
+    expect(built.nextPhoto).not.toBeNull();
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(v1.report_contract.identification).toMatchObject({ confidence: 'moderate', contested: true });
+  });
+
+  test('an entry with no look-alike still gets retake guidance when the photo is unusable (pre-push audit, Codex #4916 r5)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('gopher-tortoise', 0.9, { traitsVisible: [1] })], qualityUsable: false }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.tier).toBe('needs_more_evidence');
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(true);
+  });
+
+  test('a subject conflict also caps the wording below pretty_sure (Codex #4916 r4)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], subjectConflict: true }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('a trait cited as both seen and not seen supports neither side (Codex #4916 r4)', () => {
+    const c = engine.resolveCandidate({ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2, 9], traits_not_visible: [1, 3] });
+    expect(c.traitsVisible).toEqual([2]);
+    expect(c.traitsNotVisible).toEqual([3]);
+  });
+
+  test('multiple_subjects forces needs_more_evidence', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9)], qualityIssue: 'multiple_subjects' }));
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('a chosen look-alike pair with photo_can_confirm:false forces needs_more_evidence even at entry level', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.60), cand('no-photo-pair-b', 0.55)], currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.level).toBe('entry'); // 'likely' — still entry level
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('a SINGLE candidate (no second candidate at all) whose own fallback pair is unconfirmable also blocks pretty_sure — Codex round-0 P1 (round 6)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-a', 0.95)], currentMonth: CURRENT_MONTH }));
+    expect(built.answer.wording).toBe('likely'); // never pretty_sure despite 0.95
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('a second candidate that is NOT the curated pair still falls back to the top entry\'s own unconfirmable pair — Codex round-0 P1 (round 7)', () => {
+    // ghost-ant is a real second candidate, but it is not no-photo-pair-a's
+    // curated pair (that's no-photo-pair-b) — the fallback must still apply.
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95), cand('ghost-ant', 0.10)], currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('an unconfirmable pair blocks pretty_sure even at 0.90 confidence — Codex round-0 P1 (round 5)', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.90), cand('no-photo-pair-b', 0.85)], currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('likely'); // never pretty_sure
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+});
+
+describe('buildAnswer — next_photo', () => {
+  test('null when pretty_sure', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)] }));
+    expect(built.nextPhoto).toBeNull();
+  });
+
+  test('a curated look-alike pair supplies ask/why with photo_can_confirm true by default', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('ghost-ant', 0.65), cand('white-footed-ant', 0.30)] }));
+    expect(built.nextPhoto).toEqual({
+      ask: 'A close-up from the side.', why: 'White-footed ants are black all over.', photo_can_confirm: true,
+    });
+  });
+
+  test('falls back to the node next_photo when there is no curated pair', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
+    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+  });
+
+  test('a single entry-level candidate (no second candidate) preserves its own first look-alike\'s photo_can_confirm:false — Codex round-0 P1', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-a', 0.60)] }));
+    expect(built.answer.level).toBe('entry');
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+});
+
+describe('buildAnswer — look-alike identities respect the review gate (Codex round-0 P1)', () => {
+  test('an approved entry\'s look_alikes list DROPS an UNAPPROVED look-alike entirely — name, slug, AND comparison prose', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)] }));
+    expect(built.entry.look_alikes).toHaveLength(0);
+    expect(JSON.stringify(built.entry)).not.toContain('Unreviewed Ant');
+    expect(JSON.stringify(built.entry)).not.toContain('two-node waist'); // the comparison prose itself
+  });
+
+  test('next_photo does not surface a curated pair\'s comparison prose when the OTHER side is unapproved', () => {
+    // no-photo-pair-a's ONLY look-alike (no-photo-pair-b) is approved in the
+    // base fixture; this test's point is the SINGLE-candidate fallback path
+    // when that one look-alike is swapped for an unapproved target.
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.55)] })); // fire-ant's only look-alike is unapproved
+    expect(built.answer.wording).toBe('likely');
+    // The group's generic prompt stands in; nothing names the unapproved ant.
+    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+  });
+
+  test('a one-way curated pair is found from the runner-up\'s side (Codex #4916 r3)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.6, { traitsVisible: [1] }), cand('one-way-ant', 0.3)] }));
+    expect(built.nextPhoto).toEqual({
+      ask: 'A close-up of the head from above.',
+      why: 'One-way ants have a squarish head; fire ants do not.',
+      photo_can_confirm: true,
+    });
+  });
+
+  test('a photo-unconfirmable pair blocks pretty_sure even while its other side is unapproved (Codex round-0 P1, round 19)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-c', 0.95, { traitsVisible: [1] })] }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.tier).toBe('needs_more_evidence');
+    expect(built.nextPhoto).toEqual({
+      ask: 'A technician can confirm this one on site or from a sample.',
+      why: 'It has a close look-alike that a photo alone can\'t rule out.',
+      photo_can_confirm: false,
+    });
+    expect(JSON.stringify(built)).not.toMatch(/unreviewed/i);
+  });
+});
+
+describe('buildAnswer — referral', () => {
+  test('bee relocation referral for an approved honey-bee-wall-colony entry', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('honey-bee-wall-colony', 0.85)] }));
+    expect(built.referral).toEqual({ kind: 'bee_relocation', text: REFERRAL_TEMPLATES.bee_relocation });
+  });
+
+  test('protected_leave_alone referral for the gopher tortoise', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('gopher-tortoise', 0.85)] }));
+    expect(built.referral).toEqual({ kind: 'protected_leave_alone', text: REFERRAL_TEMPLATES.protected_leave_alone });
+  });
+
+  test('null referral for an entry with no referral kind', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)] }));
+    expect(built.referral).toBeNull();
+  });
+});
+
+describe('buildAnswer — role/risk/action + verdict labels (contract delta #2)', () => {
+  test('roof rat (rodent, inspection-first hard rule) carries fixed labels', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('roof-rat', 0.85)] }));
+    expect(built.entry).toMatchObject({
+      role: 'health_pest', role_label: 'Health pest',
+      risk: 'medical', risk_label: 'Can cause a medically significant reaction',
+      action: 'inspection', action_label: 'Get an inspection',
+      verdict_label: 'Worth a pro look',
+    });
+  });
+});
+
+describe('buildAnswer — candidates block hides an unapproved candidate\'s identity', () => {
+  test('an unapproved second candidate shows the group generic, not its name', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('fire-ant', 0.85), cand('unreviewed-ant', 0.30)], currentMonth: CURRENT_MONTH,
+    }));
+    const unreviewed = built.candidatesBlock.find((c) => c.common_name === 'an ant');
+    expect(unreviewed).toBeTruthy();
+    expect(unreviewed.slug).toBeNull();
+    expect(unreviewed.scientific_name).toBeNull();
+    expect(JSON.stringify(built)).not.toContain('Unreviewed Ant');
+  });
+});
+
+describe('buildAnswer — evidence', () => {
+  test('matches/still_need are cited catalog traits, capped at 3, from the top candidate\'s trait numbers', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('fire-ant', 0.85, { traitsVisible: [1, 3], traitsNotVisible: [2] })],
+    }));
+    expect(built.evidence).toEqual({
+      matches: ['Reddish-brown mound builders', 'Two-node waist'],
+      still_need: ['Aggressive when disturbed'],
+    });
+  });
+
+  test('out-of-range/duplicate trait numbers are dropped, never invented', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('fire-ant', 0.85, { traitsVisible: [1, 1, 99, -1] })],
+    }));
+    expect(built.evidence.matches).toEqual(['Reddish-brown mound builders']);
+  });
+
+  test('an UNAPPROVED top candidate never has its traits cited as evidence — Codex round-0 P1 (round 8)', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('unreviewed-ant', 0.95, { traitsVisible: [1] })],
+    }));
+    expect(built.evidence).toEqual({ matches: [], still_need: [] });
+  });
+});
+
+describe('buildAnswer — local label', () => {
+  test('common_here_now when range is common and the month is active', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)], currentMonth: 6 }));
+    expect(built.candidatesBlock[0].local).toBe('common_here_now');
+  });
+
+  test('uncommon_here for a rare-range entry', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('gopher-tortoise', 0.85)], currentMonth: 6 }));
+    expect(built.candidatesBlock[0].local).toBe('uncommon_here');
+  });
+});
+
+// ── isConsequential / isApproved ───────────────────────────────────────────
+
+describe('isConsequential', () => {
+  test('venomous makes a candidate consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: { venomous: true } })).toBe(true);
+  });
+  test('irritant (contract delta #5) makes a candidate consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: { irritant: true } })).toBe(true);
+  });
+  test('disease_vector makes a candidate consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: { disease_vector: true } })).toBe(true);
+  });
+  test('inspection-first makes a candidate consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: {}, service: { inspection_first: true } })).toBe(true);
+  });
+  test('a plain nuisance entry is not consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: {}, service: {} })).toBe(false);
+  });
+  test('null entry is not consequential', () => {
+    expect(isConsequential(null)).toBe(false);
+  });
+});
+
+describe('isApproved', () => {
+  test('owner_approved + empty verification is approved', () => {
+    expect(isApproved(catalog.getEntry('fire-ant'))).toBe(true);
+  });
+  test('draft status is not approved', () => {
+    expect(isApproved(catalog.getEntry('unreviewed-ant'))).toBe(false);
+  });
+  test('owner_approved with a pending verification entry is not approved', () => {
+    expect(isApproved(catalog.getEntry('pending-verification-ant'))).toBe(false);
+  });
+});
+
+// ── resolveCandidate / dedupeCandidates ────────────────────────────────────
+
+describe('resolveCandidate', () => {
+  test('resolves a real catalog slug', () => {
+    const c = resolveCandidate({ slug: 'fire-ant', confidence: 0.7 });
+    expect(c.entry.slug).toBe('fire-ant');
+    expect(c.confidence).toBe(0.7);
+  });
+
+  test('a hallucinated/unknown slug degrades to off-catalog rather than being dropped', () => {
+    const c = resolveCandidate({ slug: 'not-a-real-slug', off_catalog_name: 'Some bug', group_id: 'ants', confidence: 0.4 });
+    expect(c.entry).toBeNull();
+    expect(c.offCatalogName).toBe('Some bug');
+    expect(c.groupId).toBe('ants');
+  });
+
+  test('confidence is clamped to [0,1]', () => {
+    expect(resolveCandidate({ slug: 'fire-ant', confidence: 5 }).confidence).toBe(1);
+    expect(resolveCandidate({ slug: 'fire-ant', confidence: -5 }).confidence).toBe(0);
+    expect(resolveCandidate({ slug: 'fire-ant', confidence: 'nonsense' }).confidence).toBe(0);
+  });
+});
+
+describe('dedupeCandidates', () => {
+  test('keeps the higher-confidence instance of a duplicate slug and caps at 3, ranked', () => {
+    const list = [
+      cand('fire-ant', 0.3), cand('fire-ant', 0.9), cand('ghost-ant', 0.5),
+      cand('white-footed-ant', 0.4), cand('roof-rat', 0.2),
+    ];
+    const out = dedupeCandidates(list);
+    expect(out).toHaveLength(3);
+    expect(out[0].slug).toBe('fire-ant');
+    expect(out[0].confidence).toBe(0.9);
+    expect(out.map((c) => c.slug)).toEqual(['fire-ant', 'ghost-ant', 'white-footed-ant']);
+  });
+});
+
+// ── mapToV1 ────────────────────────────────────────────────────────────────
+
+describe('mapToV1', () => {
+  test('a v2 entry with a v1 legacy slug maps through the REAL v1 PEST_LIBRARY entry', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)] }));
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(v1.species_slug).toBe('fire-ant');
+    expect(v1.report_contract.identification.slug).toBe('fire-ant');
+    expect(v1.report_contract.safety.stinging).toBe(true);
+    expect(v1.report_contract.safety.venomous).toBe(true);
+    expect(v1.report_contract.contract_version).toBe('pest_id_v1');
+  });
+
+  test('a v2-only entry (no v1 legacy slug) degrades to v1\'s own unmatched default — never a fabricated v1 identity', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('roof-rat', 0.85)] }));
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(v1.species_slug).toBeNull();
+    expect(v1.report_contract.identification.slug).toBeNull();
+    expect(v1.report_contract.service.inspection_required).toBe(true);
+    expect(v1.report_contract.urgency).toBe('high');
+  });
+
+  test('an unapproved/climbed answer (no named entry at all) maps to the fully generic v1 default', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(v1.species_slug).toBeNull();
+    expect(v1.category).toBe('other');
+    expect(v1.report_contract.service.inspection_required).toBe(true);
+  });
+
+  test('contested is true only on a disagreed needs_more_evidence result', () => {
+    const node = { level: 'group', id: 'ants', label: 'Ants', generic: 'an ant' };
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.6)], disagreed: true, disagreementNode: node }));
+    const v1 = mapToV1({ ...built, disagreed: true });
+    expect(v1.report_contract.identification.contested).toBe(true);
+  });
+});
+
+// ── orchestration (identifyPestV2) — escalation triggers + combining ──────
+
+const PHOTO = { data: 'AAAA', mimeType: 'image/jpeg' };
+
+function candidatesReply(candidates, quality = { usable: true, issue: 'none' }, shows = 'organism') {
+  return { ok: true, json: { quality, shows, candidates } };
+}
+
+describe('identifyPestV2 — escalation triggers', () => {
+  test('Gemini missed entirely + OpenAI stands in ALONE with EMPTY trait arrays never reads pretty_sure — Codex round-0 P1 (round 10)', async () => {
+    // Gemini's total failure means candidateContextFor had nothing to hand
+    // OpenAI — its own escalation prompt tells it to report empty trait
+    // arrays in exactly this case, so a high raw confidence here was never
+    // actually checked against a single numbered trait by anyone.
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'gemini_500' }) // candidates
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.95, traits_visible: [], traits_not_visible: [] }],
+        },
+      }); // escalation, standing in alone
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.answer.wording).toBe('likely'); // never pretty_sure — no trait was ever verified
+    expect(result.v2.evidence).toEqual({ matches: [], still_need: [] });
+  });
+
+  test('trait numbers OpenAI cites for a candidate it was never given a numbered list for are discarded, not published as evidence — Codex round-0 P1 (round 11)', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'gemini_500' }) // candidates fail — contextSlugs ends up empty
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          // fire-ant was never raised, so this candidate never got a
+          // numbered trait list — yet it cites trait numbers anyway.
+          candidates: [{ slug: 'fire-ant', confidence: 0.95, traits_visible: [1, 3], traits_not_visible: [2] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.evidence).toEqual({ matches: [], still_need: [] }); // discarded, not cited
+  });
+
+  test('Gemini missed entirely (candidates call fails) escalates, skips the verify call, and stands in as the ONLY candidate — capped at likely even citing traits', async () => {
+    // Non-empty trait numbers here don't rescue pretty_sure either: Gemini
+    // never raised anything, so OpenAI had no numbered list to check
+    // these against in the first place (see the round-10 test above).
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'gemini_500' }) // candidates
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      }); // escalation
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(dispatch).toHaveBeenCalledTimes(2); // candidates + escalation only (no verify — no catalog candidate from call 1)
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    expect(result.internal.models.verify).toBeNull();
+    expect(result.v2.answer.wording).toBe('likely');
+    expect(result.v2.entry.slug).toBe('fire-ant');
+  });
+
+  test('low confidence after verify escalates; OpenAI agreement bumps confidence to the higher of the two', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }])) // candidates
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [1], traits_not_visible: [] }] } }) // verify
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      }); // escalation
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(result.internal.disagreed).toBe(false);
+    expect(result.v2.answer.wording).toBe('pretty_sure'); // bumped to the higher (0.85) of the two
+  });
+
+  test('agreement carries the WINNING side\'s own trait evidence, not Gemini\'s stale/empty verify — Codex round-0 P1 (PR-2b wiring round 2)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      // Gemini's verify is INVALID (no trait arrays) — a miss, not a real
+      // check — so its own confidence/traits never actually move.
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.97 }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.90, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.answer.wording).toBe('pretty_sure');
+    // OpenAI is the winning (higher-confidence) side and its trait check
+    // must be what the customer sees — never empty, never Gemini's.
+    expect(result.v2.evidence.matches).toEqual(['Reddish-brown mound builders', 'Aggressive when disturbed']);
+  });
+
+  test('a stale unchecked secondary never outranks or out-merges a checked one — Codex round-0 P1 (round 15)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.97 }, { slug: 'ghost-ant', confidence: 0.90 }]))
+      // Gemini's verify is invalid (no trait arrays): neither number was checked.
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.97 }, { slug: 'ghost-ant', confidence: 0.90 }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [
+            { slug: 'fire-ant', confidence: 0.70, traits_visible: [1, 2], traits_not_visible: [] },
+            { slug: 'ghost-ant', confidence: 0.20, traits_visible: [], traits_not_visible: [1] },
+          ],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+    expect(result.v2.evidence.matches).toEqual(['Reddish-brown mound builders', 'Aggressive when disturbed']);
+  });
+
+  test('an unchecked Gemini top that OpenAI never re-scored can read likely at most, never pretty_sure — Codex round-0 P1 (round 15)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.70 }, { slug: 'ghost-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.70 }, { slug: 'ghost-ant', confidence: 0.95 }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'ghost-ant', confidence: 0.93, traits_visible: [], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+
+  test('an unchecked new OpenAI top is still OpenAI\'s top: disagreement is not erased by verification — Codex round-0 P1 (round 16)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'ghost-ant', confidence: 0.75 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'ghost-ant', confidence: 0.75, traits_visible: [1], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [
+            { slug: 'fire-ant', confidence: 0.95, traits_visible: [], traits_not_visible: [] },
+            { slug: 'ghost-ant', confidence: 0.20, traits_visible: [1], traits_not_visible: [] },
+          ],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.disagreed).toBe(true);
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+
+  test('self-contradiction (candidates-call top != verify-call top) triggers escalation', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: 'fire-ant', confidence: 0.9 }, { slug: 'ghost-ant', confidence: 0.4 },
+      ])) // candidates: fire-ant raw-top
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          candidates: [
+            { slug: 'fire-ant', confidence: 0.3, traits_visible: [], traits_not_visible: [1, 2, 3] },
+            { slug: 'ghost-ant', confidence: 0.85, traits_visible: [1, 2], traits_not_visible: [] },
+          ],
+        },
+      }) // verify: ghost-ant is now top — contradicts the candidates-call top
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' }); // escalation unavailable
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('self_contradiction');
+    // OpenAI never answered after a trigger fired — ghost-ant's 0.85 can never read pretty_sure.
+    expect(result.v2.answer.wording).toBe('likely');
+    expect(result.v2.entry.slug).toBe('ghost-ant');
+  });
+
+  test('a consequential look-alike close (top two within 0.25, one risky one not) triggers escalation', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: 'fire-ant', confidence: 0.55 }, { slug: 'ghost-ant', confidence: 0.45 },
+      ]))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          candidates: [
+            { slug: 'fire-ant', confidence: 0.55, traits_visible: [1], traits_not_visible: [] },
+            { slug: 'ghost-ant', confidence: 0.45, traits_visible: [1], traits_not_visible: [] },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('consequential_lookalike_close');
+  });
+
+  test('a verify call that answers ok but omits a requested candidate is treated as gemini_missed, not a silent unverified confidence — Codex round-0 P1', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [] } }) // verify answered ok, but verified nothing
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' }); // escalation unavailable
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    // The unverified 0.95 can never read pretty_sure once a trigger fired
+    // with no OpenAI answer.
+    expect(result.v2.answer.wording).toBe('likely');
+  });
+
+  test('a verify record naming the right slug but missing its trait arrays is not a real verification — Codex round-0 P1 (round 8)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.97 }] } }) // no trait arrays at all
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    // The invalid verify record's 0.97 was never applied — and even if it
+    // had been, the unanswered trigger caps it below pretty_sure either way.
+    expect(result.v2.answer.wording).toBe('likely');
+    expect(result.v2.evidence).toEqual({ matches: [], still_need: [] }); // zero cited evidence
+  });
+
+  test('an escalation call that answers ok but names NO candidate does not count as OpenAI confirmation — Codex round-0 P1 (round 2)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.4, traits_visible: [], traits_not_visible: [1, 2, 3] }] } }) // verify tanks the confidence
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [] } }); // escalation answers ok, names nothing
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.models.escalation.ok).toBe(true);
+    // Confidence is unchanged (still 0.4 from verify) AND the trigger has no
+    // real OpenAI answer to lift the pretty_sure cap either way.
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+
+  test('no trigger fires on a clean, confident, uncontested read — no escalation call at all', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.9 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(result.internal.escalation_triggered).toBe(false);
+    expect(result.internal.escalation_reasons).toEqual([]);
+    expect(result.v2.answer.wording).toBe('pretty_sure');
+  });
+});
+
+describe('identifyPestV2 — escalation records get the SAME field validation as verify records (Codex round-0 P1, round 9)', () => {
+  test('an escalation candidate naming only a slug (no confidence, no trait arrays) does not count as OpenAI confirmation', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.40, traits_visible: [], traits_not_visible: [1, 2, 3] }] } }) // verify tanks it
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [{ slug: 'fire-ant' }] } }); // no confidence/traits at all
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.models.escalation.ok).toBe(true); // the HTTP/parse call itself succeeded
+    // The invalid escalation record must not lift the cap or bump Gemini's
+    // own (tanked) confidence back up.
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+});
+
+describe('identifyPestV2 — malformed provider responses never throw (Codex round-0 P1, round 4)', () => {
+  test('a candidates response with a non-array `candidates` field is treated as gemini_missed, not a crash', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: {} } }) // malformed
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' }); // escalation unavailable
+
+    const result = await identifyPestV2([PHOTO]);
+    // Neither leg produced a valid envelope: a failed analysis (503 at the
+    // route), never an "unknown" read and never a throw (Codex #4916 r2 P1).
+    expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
+  });
+
+  test('an escalation response with a non-array `candidates` field never throws and is treated as unavailable', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({ ok: true, json: { candidates: 'not-an-array' } }); // malformed escalation response
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.internal.models.escalation.ok).toBe(true); // the HTTP/parse call succeeded
+    expect(result.v2.answer.wording).not.toBe('pretty_sure'); // but it is not treated as an OpenAI confirmation
+  });
+});
+
+describe('identifyPestV2 — a null element in an otherwise-valid candidates array never throws (Codex round-0 P1, round 5)', () => {
+  test('candidates: [null, {...}] is sanitized, not a crash', async () => {
+    dispatch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [null, { slug: 'fire-ant', confidence: 0.9 }] },
+      })
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1], traits_not_visible: [] }] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.answer.wording).toBe('pretty_sure');
+  });
+
+  test('an escalation response with a null element is also sanitized', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [null, { slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.v2.answer.wording).toBe('pretty_sure'); // agreement bumps to the higher (0.9)
+  });
+});
+
+describe('identifyPestV2 — bounded per-leg timeout budget (Codex round-0 P1, round 4)', () => {
+  test('every dispatched leg carries a positive numeric timeoutMs', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+
+    await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    for (const call of dispatch.mock.calls) {
+      expect(call[1].timeoutMs).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('identifyPestV2 — combined photo quality (Codex round-0 P1, round 3)', () => {
+  test('an unusable/multiple_subjects quality read from EITHER leg forces needs_more_evidence, even at high combined confidence', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.60 }], { usable: true, issue: 'none' }))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.60, traits_visible: [1], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: false, issue: 'multiple_subjects' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.90, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    // Agreement bumps confidence to 0.90, but OpenAI's quality finding forces
+    // needs_more_evidence, which also caps the wording (Codex #4916 r4).
+    expect(result.v2.answer.wording).toBe('likely');
+    expect(result.v2.tier).toBe('needs_more_evidence');
+  });
+});
+
+describe('identifyPestV2 — Gemini/OpenAI disagreement', () => {
+  test('a real disagreement (different top slugs) drops to the shared lineage node, tier needs_more_evidence', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'ghost-ant', confidence: 0.9, traits_visible: [1], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.disagreed).toBe(true);
+    expect(result.v2.answer.level).toBe('group');
+    expect(result.v2.answer.node_id).toBe('ants');
+    expect(result.v2.entry).toBeNull();
+    expect(result.v2.tier).toBe('needs_more_evidence');
+  });
+});
+
+describe('identifyPestV2 — off-catalog and no-photos', () => {
+  test('no usable photos returns ok:false without calling any model', async () => {
+    const result = await identifyPestV2([]);
+    expect(result).toEqual({ ok: false, reason: 'no_photos' });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('an off-catalog answer never leaks model prose into the customer object', async () => {
+    dispatch.mockResolvedValueOnce(candidatesReply([
+      { slug: '', off_catalog_name: 'XYZ_MODEL_PROSE_MARKER', rank: 'genus', group_id: 'ants', confidence: 0.9 },
+    ]));
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(1); // no catalog candidate ⇒ no verify call
+    expect(result.v2.answer.level).toBe('group');
+    expect(result.v2.answer.headline).toBe('Looks like an ant');
+    expect(JSON.stringify(result.v2)).not.toContain('XYZ_MODEL_PROSE_MARKER');
+  });
+
+  test('every attempted leg answering no_route (the model policy is unregistered) fails closed instead of degrading to a misleading analyzed answer — Codex round-0 P1 (PR-2b wiring round 1)', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'no_route' }) // candidates
+      .mockResolvedValueOnce({ ok: false, reason: 'no_route' }); // escalation (fallback also unregistered)
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result).toEqual({ ok: false, reason: 'no_route' });
+  });
+
+  test('no_route on the candidates leg alone does NOT fail closed when the escalation leg is configured and answers for real', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'no_route' }) // candidates: primary unregistered
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      }); // escalation: fallback IS registered and answers
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+  });
+});
+
+describe('identifyPestV2 — internal object never reaches v2', () => {
+  test('the returned v2 object has no `models`/`internal` keys', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.9 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1], traits_not_visible: [] }] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.models).toBeUndefined();
+    expect(result.v2.internal).toBeUndefined();
+    expect(result.internal).toBeDefined();
+  });
+});
+
+describe('combineEscalation — agreement only takes a CHECKED confidence (Codex round-0 P1, rounds 12–13)', () => {
+  const { combineEscalation } = engine._test;
+  const geminiTop = (confidence, verified) => ({ ...cand('fire-ant', confidence), checked: verified, verified });
+  const escalation = (confidence) => ({
+    ok: true,
+    json: {
+      quality: { usable: true, issue: 'none' }, shows: 'organism',
+      candidates: [{ slug: 'fire-ant', confidence, traits_visible: [1, 2], traits_not_visible: [] }],
+    },
+  });
+
+  test('two unverified guesses never bump each other: Gemini\'s reading stands', () => {
+    // fire-ant was never handed to OpenAI with numbered traits, so its 0.95 is a raw guess.
+    const out = combineEscalation([geminiTop(0.4, false)], escalation(0.95), new Set());
+    expect(out.disagreed).toBe(false);
+    expect(out.finalCandidates[0].confidence).toBe(0.4);
+    expect(out.finalCandidates[0].verified).toBe(false);
+  });
+
+  test('both verified: the higher of the two', () => {
+    const out = combineEscalation([geminiTop(0.6, true)], escalation(0.9), new Set(['fire-ant']));
+    expect(out.finalCandidates[0].confidence).toBe(0.9);
+    expect(out.finalCandidates[0].verified).toBe(true);
+  });
+
+  test('a verified Gemini reading is not overridden by a higher unverified OpenAI guess', () => {
+    const out = combineEscalation([geminiTop(0.8, true)], escalation(0.95), new Set());
+    expect(out.finalCandidates[0].confidence).toBe(0.8);
+  });
+
+  test('a completed OpenAI check that found NO supporting trait still replaces an unchecked guess (round 18)', () => {
+    const esc = {
+      ok: true,
+      json: {
+        quality: { usable: true, issue: 'none' }, shows: 'organism',
+        candidates: [{ slug: 'fire-ant', confidence: 0.10, traits_visible: [], traits_not_visible: [1, 2, 3] }],
+      },
+    };
+    const out = combineEscalation([geminiTop(0.95, false)], esc, new Set(['fire-ant']));
+    expect(out.finalCandidates[0].confidence).toBe(0.10);
+    expect(out.finalCandidates[0].traitsNotVisible).toEqual([1, 2, 3]);
+    expect(out.finalCandidates[0].verified).toBe(false);
+  });
+
+  test('an unverified Gemini reading takes the verified OpenAI one, even when lower', () => {
+    const out = combineEscalation([geminiTop(0.97, false)], escalation(0.7), new Set(['fire-ant']));
+    expect(out.finalCandidates[0].confidence).toBe(0.7);
+    expect(out.finalCandidates[0].traitsVisible).toEqual([1, 2]);
+  });
+});
+
+describe('Codex #4916 r1', () => {
+  test('P1: a leg without quality/shows is a failed leg, never a named result off combineQuality\'s default', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.95 }] } }) // no quality, no shows
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_error' }); // escalation unavailable
+    const result = await identifyPestV2([PHOTO]);
+    // Neither leg's envelope is valid, so nothing analyzed the photos.
+    expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
+  });
+
+  test('P1: an envelope-less leg plus a valid second look still answers from the second look', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.95 }] } }) // no quality, no shows
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [] } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+
+  test('Codex #4916 r2 P1: an identity-less candidate never suppresses the second look', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: '', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_error' });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  test('Codex #4916 r2 P2: a named descendant maps to its nearest mapped v1 ancestor, and a climbed answer keeps its leading differential', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.35), cand('ghost-ant', 0.30), cand('white-footed-ant', 0.10)] }));
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(built.topEntrySlug).toBeNull();
+    expect(v1.report_contract.alternate_slugs).toEqual(['fire-ant', 'ghost-ant']);
+
+    const named = mapToV1({ ...buildAnswer(baseCtx({ candidates: [cand('honey-bee-wall-colony', 0.85)] })), disagreed: false });
+    expect(named.species_slug).toBe('honey-bee');
+  });
+
+  test('P1: a candidate missing confidence is dropped; the leg\'s valid candidates survive', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'ghost-ant' }, { slug: 'fire-ant', confidence: 0.9 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }] } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.candidates.map((c) => c.slug)).toEqual(['fire-ant']);
+  });
+
+  test('P1: legs that agree on the name but not on what the photos show need more evidence', () => {
+    const agreed = [cand('fire-ant', 0.9, { traitsVisible: [1, 2] })];
+    expect(buildAnswer(baseCtx({ candidates: agreed })).tier).toBe('ai_suggestion');
+    expect(buildAnswer(baseCtx({ candidates: agreed, subjectConflict: true })).tier).toBe('needs_more_evidence');
+  });
+
+  test.each([
+    ['organism', 'sign', true], ['organism', 'nothing', true], ['sign', 'nothing', true],
+    ['organism', 'both', false], ['sign', 'both', false], ['nothing', 'nothing', false],
+    ['organism', undefined, false],
+  ])('P1: shows %s vs %s conflicts = %s', (a, b, expected) => {
+    expect(engine._test.showsConflict(a, b)).toBe(expected);
+    expect(engine._test.showsConflict(b, a)).toBe(expected);
+  });
+
+  test('P1: an escalation that agrees on the slug but reads only a sign forces needs_more_evidence end to end', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [1], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows: 'sign',
+        candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+      } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(true);
+    expect(result.v2.tier).toBe('needs_more_evidence');
+  });
+
+  test('P2: alternates are stored as v1 slugs; v2-only alternates are dropped, never passed through', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85), cand('ghost-ant', 0.5), cand('roof-rat', 0.4)] }));
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(v1.report_contract.alternate_slugs).toEqual(['ghost-ant']);
+  });
+});
+
+describe('pre-push audit on Codex #4916 r1: a "nothing" read never backs a named result', () => {
+  test.each([
+    ['a lone Gemini "nothing" read with a confident match', 'nothing', null],
+    ['two agreeing "nothing" reads', 'nothing', 'nothing'],
+  ])('%s', async (_label, geminiShows, openaiShows) => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: openaiShows ? 0.5 : 0.9 }], undefined, geminiShows))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: openaiShows ? 0.5 : 0.9, traits_visible: [1, 2], traits_not_visible: [] }] } });
+    if (openaiShows) {
+      dispatch.mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows: openaiShows,
+        candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+      } });
+    }
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.tier).toBe('needs_more_evidence');
+  });
+});
