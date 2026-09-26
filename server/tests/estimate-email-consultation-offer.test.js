@@ -168,7 +168,7 @@ describe('probeGoneQuietConsultation — the slow step, before the engine re-rea
   });
 });
 
-describe('finalizeGoneQuietConsultationUrl — the last await before the send', () => {
+describe('finalizeGoneQuietConsultationUrl — the last step before the send', () => {
   test('happy path: an email-channel, short-wrapped URL with the 14-day TTL; re-judged against the send\'s recipient', async () => {
     const url = await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com');
 
@@ -183,7 +183,7 @@ describe('finalizeGoneQuietConsultationUrl — the last await before the send', 
     expect(mockRecipientIsLead).toHaveBeenCalledWith('taylor@example.com', LEAD);
   });
 
-  test('minted FIRST, re-judged LAST — nothing awaits between the re-judge and the caller\'s send (Codex #4918 r9)', async () => {
+  test('minted FIRST, re-judged LAST — nothing of this step awaits after the re-judge (Codex #4918 r9)', async () => {
     const order = [];
     mockShortWrap.mockImplementation(async () => { order.push('mint'); return SHORT_URL; });
     mockReconfirmConsultationLead.mockImplementation(async () => { order.push('reconfirm'); return LEAD; });

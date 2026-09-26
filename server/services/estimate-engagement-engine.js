@@ -52,6 +52,11 @@ const { probeGoneQuietConsultation, finalizeGoneQuietConsultationUrl } = require
 const followupShared = require('./estimate-follow-up')._private;
 
 const GONE_QUIET_RULE_KEY = 'viewed_gone_quiet_72h';
+// Estimate columns that move without the snapshot going stale, on the last
+// read before an offer-carrying send: the job's own counter heal (overlaid
+// on the in-memory row) and updated_at (it moves with any write; a real
+// change also shows in its own column).
+const OWN_ESTIMATE_WRITES = new Set(['follow_up_count', 'last_follow_up_at', 'updated_at']);
 
 const ACTIVE_STATUSES = ['sent', 'viewed'];
 const TERMINAL_STATUSES = new Set(['declined', 'accepted', 'expired', 'void']);
@@ -776,12 +781,32 @@ async function processDueBatch(now = new Date()) {
       const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
-      // The LAST await before the send (Codex #4918 r9/r12): mint the link,
-      // then re-judge the probe-free shared eligibility and the lead's-own-
-      // inbox rule against THIS send's recipient. '' drops only the link.
+      // After the claim (Codex #4918 r9/r12): mint the link, then re-judge
+      // the probe-free shared eligibility and the lead's-own-inbox rule
+      // against THIS send's recipient. '' drops only the link.
       const consultationUrl = consultationContext
         ? await finalizeGoneQuietConsultationUrl(consultationContext, est.customer_email)
         : '';
+      if (consultationContext) {
+        // finalize's mint and re-judge are the only awaits this offer adds
+        // between the engine's estimate read and its send, and the send —
+        // recipient, name, address, price, services — is built from that
+        // read (Codex #4918 r12/r13). Re-read the row as the last step
+        // before sending: if anything changed besides this job's own counter
+        // heal, give the claim back and retry the whole job on fresh state
+        // (the checks at the top then skip it if it is no longer sendable) —
+        // never send from, or patch, a stale snapshot. Nothing awaits after
+        // this read but the provider call itself.
+        const current = await db('estimates').where({ id: est.id }).first();
+        const changed = !current || Object.keys(current).some((col) => !OWN_ESTIMATE_WRITES.has(col)
+          && JSON.stringify(current[col]) !== JSON.stringify(est[col]));
+        if (changed) {
+          await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+          claimed = false;
+          await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
+          continue;
+        }
+      }
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,

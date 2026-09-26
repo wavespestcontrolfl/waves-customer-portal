@@ -8,18 +8,21 @@
  * estimateConsultationLead eligibility every consultation surface uses).
  *
  * Two steps, split around the engine's own send checks (Codex #4918
- * r7–r12). The shared eligibility includes a slot probe that can take up to
+ * r7–r13). The shared eligibility includes a slot probe that can take up to
  * 3 s, and every read the engine judges or sends from must be taken AFTER
- * it — so the slow step runs before the engine's fresh re-read, and only a
- * fast, probe-free re-judge sits between the engine's claim and its send:
+ * it — so the slow step runs before the engine's fresh re-read, and only
+ * fast, probe-free work (this link's mint and re-judge, then the engine's
+ * own last re-read of the estimate) sits between the engine's claim and its
+ * send:
  *
  *   - probeGoneQuietConsultation(estimateId) — the slow step, called BEFORE
  *     the engine re-reads the estimate. Returns the context the second step
  *     needs (the eligible lead and the property its probe resolved), or null
  *     for no offer. Mints nothing.
- *   - finalizeGoneQuietConsultationUrl(context, recipientEmail) — the LAST
- *     await before the engine's send: mints the short link, then re-runs the
- *     probe-free shared eligibility (reconfirmConsultationLead) and the
+ *   - finalizeGoneQuietConsultationUrl(context, recipientEmail) — after the
+ *     engine's claim, right before its send (only the engine's own final
+ *     re-read of the estimate follows): mints the short link, then re-runs
+ *     the probe-free shared eligibility (reconfirmConsultationLead) and the
  *     lead's-own-inbox rule against the recipient this email is about to go
  *     to. Returns the short URL, or '' to drop the link.
  *
@@ -95,8 +98,9 @@ async function finalizeGoneQuietConsultationUrl(context, recipientEmail) {
     const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
     const shortUrl = await shortWrap(longUrl, context.leadId, expiresAt);
     if (!shortUrl) return '';
-    // Minted FIRST, re-judged LAST (Codex #4918 r9): nothing awaits between
-    // this check and the caller's send. A failed check leaves one unsent
+    // Minted FIRST, re-judged LAST (Codex #4918 r9): nothing of this step
+    // awaits after the re-judge — only the engine's own final re-read of the
+    // estimate follows before its send. A failed check leaves one unsent
     // short code behind (it expires with the token) — never a sent link.
     const lead = await reconfirmConsultationLead(context);
     if (!lead || !recipientIsLead(recipientEmail, lead)) return '';
