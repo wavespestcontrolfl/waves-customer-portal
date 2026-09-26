@@ -7061,7 +7061,10 @@ async function generateLeadSynopsis(transcription) {
     const response = await client.messages.create({
       model: MODELS.FLAGSHIP,
       ...MODELS.anthropicEffortConfig(MODELS.FLAGSHIP),
-      max_tokens: 1200,
+      // Ceiling, not a target: on an always-thinking model (Opus 5.5) thinking
+      // spends from this budget before the text block, so a tight cap can end
+      // the turn with no text at all (pre-push audit on 9fe5de4f59).
+      max_tokens: 2048,
       messages: [{
         role: 'user',
         content: `Role:

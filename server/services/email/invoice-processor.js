@@ -57,7 +57,9 @@ async function processVendorInvoice(email, classification) {
       const parseResponse = await anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...MODELS.anthropicEffortConfig(MODELS.FLAGSHIP),
-        max_tokens: 1024,
+        // Ceiling, not a target — see comms-tools.js: thinking spends from this
+        // budget on an always-thinking model, so 1024 could end with no text.
+        max_tokens: 2048,
         messages: [{
           role: 'user',
           content: [
