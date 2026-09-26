@@ -466,6 +466,33 @@ describe('service report — every shipped chip answers its own category (AW-06)
     expect(answer).toMatch(/ready for normal use|re-entry/i);
   });
 
+  test.each([
+    'Will the pests be back in summer?',
+    'Will ants be back in two weeks?',
+  ])('pests coming back is not a scheduled technician return: %s', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: pestData, nextAppointment });
+    expect(answer).not.toMatch(/Your next appointment is/);
+    expect(answer).not.toMatch(/ready for normal use|re-entry/i);
+    expect(answer).toMatch(/activity|found|pressure/i);
+  });
+
+  test.each([
+    'What do you recommend before my next appointment?',
+    'Do you have any recommendations for my next visit?',
+  ])('advice wording outranks appointment nouns: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/next step/i);
+  });
+
+  test('"Can I ask what chemical was applied near my pets?" gets the applied answer', () => {
+    expect(answerServiceReportQuestion({ question: 'Can I ask what chemical was applied near my pets?', data: pestData, nextAppointment }))
+      .toMatch(/Sources used: this service report/);
+  });
+
+  test('a pet reaction reported with an observation verb gets re-entry guidance', () => {
+    expect(answerServiceReportQuestion({ question: 'I noticed my dog got sick after the treatment. Is that dangerous?', data: pestData, nextAppointment }))
+      .toMatch(/ready for normal use|re-entry/i);
+  });
+
   test('"How did the treatment affect the pressure score?" gets the trend answer', () => {
     expect(answerServiceReportQuestion({ question: 'How did the treatment affect the pressure score?', data: pestData }))
       .not.toMatch(/Sources used: this service report/);
@@ -545,6 +572,11 @@ describe('service report — every shipped chip answers its own category (AW-06)
   });
 
   // --- Lawn V2 insight chips (category-specific, ReportViewPage.jsx QUESTION_BY_CATEGORY) ---
+  test('"Is it safe to water after today\'s treatment?" gets the watering answer, not re-entry', () => {
+    expect(answerServiceReportQuestion({ question: "Is it safe to water after today's treatment?", data: lawnData }))
+      .toMatch(/irrigation off|before you water/);
+  });
+
   test('chip "Am I watering the right amount?" answers with the weekly watering plan', () => {
     expect(answerServiceReportQuestion({ question: 'Am I watering the right amount?', data: lawnData }))
       .toBe('This week: check the rain before you water Leave the turf irrigation off for now.');

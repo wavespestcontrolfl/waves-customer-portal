@@ -11,12 +11,14 @@ const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../cons
 const SAFETY_SUBJECT_RE = /\b(pets?|dogs?|cats?|kids?|child(?:ren)?)\b/;
 // Bare "come back" / "go back" / "wait" are NOT cues: "When will you come
 // back?" is a scheduling question.
-const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bback\s*(?:out|outside|in|inside)\b/;
+const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b(?!\s+to\s+(?:water|irrigate|run\s+(?:the\s+)?sprinklers?|mow|fertiliz\w*))|\bback\s*(?:out|outside|in|inside)\b/;
 // A scheduled return ("When will you come back in October?", "Will you be
 // back in two weeks?") is a visit question, not re-entry. A customer, pet or
 // location coming back ("Can I be back inside in two hours?", "Can my dog be
-// back outside in an hour?") is re-entry, not the technician returning.
-const SCHEDULED_RETURN_RE = /(?<!\bcan\s+(?:i|we|they|he|she|(?:my|our|the)\s+\w+)\s+)\b(?:come|coming|be)\s+back\b(?!\s+(?:inside|outside|indoors|outdoors|out|in\s+(?:the\s+)?(?:house|home|yard|room)))[^?.!]*\b(?:in|on|next|by|around)\s+(?:\d+|a|an|one|two|three|four|five|six|few|couple|the\s+next|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weeks|month|months|spring|summer|fall|winter)\b/;
+// back outside in an hour?") is re-entry, and pests coming back ("Will ants
+// be back in two weeks?") are findings — only the technician returning is a
+// scheduled return.
+const SCHEDULED_RETURN_RE = /\b(?:you|y'?all|tech(?:nician)?s?|waves|someone|somebody|(?:your|the)\s+(?:team|crew|tech(?:nician)?s?))\s+(?:(?:will|are|is|going\s+to|gonna)\s+)*(?:come|coming|be)\s+back\b(?!\s+(?:inside|outside|indoors|outdoors|out|in\s+(?:the\s+)?(?:house|home|yard|room)))[^?.!]*\b(?:in|on|next|by|around)\s+(?:\d+|a|an|one|two|three|four|five|six|few|couple|the\s+next|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weeks|month|months|spring|summer|fall|winter)\b/;
 // A location word still means re-entry ("When can we go outside again?")
 // unless the question is about what was applied there.
 const LOCATION_RE = /\b(outside|inside|outdoors|indoors)\b/;
@@ -63,13 +65,20 @@ const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:
 // A past-tense treatment question ("Were chemicals applied around my cats?",
 // "Why did you spray near my dogs' beds?") asks about the application, not
 // re-entry — unless it also asks about safety or going back out.
-const REENTRY_ASK_RE = /\b(safe|okay|ok|fine|alright|harm\w*|hurt\w*|danger\w*|toxic|poison\w*|sick|when\s+can|can\s+(?:i|we|they|he|she|my)|go\s+(?:out|back|in)|let\s+(?:my|the|them))\b/;
+const REENTRY_ASK_RE = /\b(safe|okay|ok|fine|alright|harm\w*|hurt\w*|danger\w*|toxic|poison\w*|sick|when\s+can|can\s+(?:i|we|they|he|she|my\s+\w+)\s+(?:go|be|get|let|walk|play|return|come|stay|sit|use|touch)\b|go\s+(?:out|back|in)|let\s+(?:my|the|them))\b/;
+const HAZARD_RE = /\b(?:sick|ill|danger\w*|toxic|poison\w*|harm\w*|hurt\w*|vomit\w*|reaction)\b/;
+// Pests or weeds coming back ("Will ants be back in two weeks?") is a
+// recurrence question, not re-entry.
+const PEST_RETURN_RE = /\b(?:pests?|ants?|roaches?|cockroaches?|bugs?|mosquito(?:e?s)?|spiders?|rodents?|mice|rats?|termites?|fleas?|ticks?|wasps?|weeds?|chinch\w*|grubs?)\s+(?:(?:will|are|is|going\s+to|gonna)\s+)*(?:come|coming|be)\s+back\b/;
 function isReentryIntent(q) {
+  if (PEST_RETURN_RE.test(q)) return false;
   if (SCHEDULED_RETURN_RE.test(q)) return false;
   const askedAboutApplication = TREATMENT_QUESTION_RE.test(q) && PAST_TENSE_RE.test(q) && !REENTRY_ASK_RE.test(q);
   // Appointment wording keeps a pet/kid noun from meaning re-entry ("When is
   // my next appointment for the kids' room?").
-  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q) && !askedAboutApplication && !APPOINTMENT_RE.test(q))
+  // Hazard wording outranks an observation verb ("I noticed my dog got sick
+  // after the treatment. Is that dangerous?").
+  return (SAFETY_SUBJECT_RE.test(q) && (!FINDINGS_VERB_RE.test(q) || HAZARD_RE.test(q)) && !askedAboutApplication && !APPOINTMENT_RE.test(q))
     || REENTRY_PHRASE_RE.test(q)
     || REENTRY_TEMPORAL_RE.test(q)
     // A bare location word is re-entry only without treatment, findings or
@@ -88,6 +97,7 @@ const ADVICE_RE = /\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+action|ne
 // below (codex #4839 round-4 P2 4109926457: "What are you applying at my
 // next appointment?" must reach the appointment answer, not treatment) and
 // the appointment branch itself, so the two can never drift apart.
+const SCHEDULING_REQUEST_RE = /\b(?:schedul\w*|reschedul\w*|book\w*|when\s+is|what\s+time|what\s+day|move\s+my|cancel\w*)\b/;
 const APPOINTMENT_RE = /\b(appointment|appt|schedule|scheduled|next service|next visit)\b/;
 // Pressure/score words apply to any report (pest pressure or lawn score).
 const TREND_CORE_RE = /\b(pressure|trend|trending|better|worse|score|index|improving)\b/;
@@ -588,7 +598,10 @@ function questionRoutingRules({
     { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
     // Explicit advice outranks treatment inflections ("What do you recommend
     // after spraying?") — codex #4839 P2.
-    { test: (q) => ADVICE_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    // Only an actual scheduling request ("Should I schedule my next
+    // appointment?") outranks advice — "What do you recommend before my next
+    // appointment?" is still advice.
+    { test: (q) => ADVICE_RE.test(q) && !SCHEDULING_REQUEST_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
     // Scheduled returns go to the appointment.
     { test: (q) => SCHEDULED_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
     // Future treatment timing is scheduling, not today's application.
@@ -630,7 +643,7 @@ function questionRoutingRules({
       test: (q) => /\b(do|watch|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q),
       answer: () => answerNextSteps({ data, nextAppointment }),
     },
-    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q) && !PEST_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
     {
       test: (q) => /\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q) || FINDINGS_QUESTION_RE.test(q),
       answer: () => answerFindings({ data }),
