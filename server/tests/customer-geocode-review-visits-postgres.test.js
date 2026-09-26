@@ -174,6 +174,73 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     });
   });
 
+  test('replaces standalone and recurring visits carrying the primary pin when the customer mirror is missing', async () => {
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    const standaloneId = randomUUID();
+    const independentId = randomUUID();
+    const primaryPin = { latitude: 27.4987654, longitude: -82.5754321 };
+    await trx('customers').where({ id: CUSTOMER_ID }).update({ latitude: null, longitude: null });
+    await trx('customer_properties').where({ id: PRIMARY_ID }).update(primaryPin);
+    customer = { ...customer, latitude: null, longitude: null };
+    primary = { ...primary, ...primaryPin };
+    const appointmentAddress = {
+      property_id: PRIMARY_ID,
+      service_address_line1: ADDRESS.address_line1,
+      service_address_line2: ADDRESS.address_line2,
+      service_address_city: ADDRESS.city,
+      service_address_state: ADDRESS.state,
+      service_address_zip: ADDRESS.zip,
+      lat: primaryPin.latitude,
+      lng: primaryPin.longitude,
+      zone: 'legacy',
+    };
+    await trx('scheduled_services').insert([
+      visitRow(parentId, {
+        property_id: PRIMARY_ID, status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { appointment_address: appointmentAddress },
+      }),
+      visitRow(childId, { property_id: PRIMARY_ID, recurring_parent_id: parentId, lat: 27.498765, lng: -82.575432 }),
+      visitRow(standaloneId, { property_id: PRIMARY_ID, lat: 27.498765, lng: -82.575432 }),
+      visitRow(independentId, { property_id: PRIMARY_ID, lat: 27.4, lng: -82.4, route_order: 9 }),
+    ]);
+
+    const locked = await context();
+    expect((await updatePrimaryVisits(
+      trx, customer, primary, CORRECTED, NEW_PIN.latitude, NEW_PIN.longitude, locked, ACTOR_ID,
+    )).sort()).toEqual([childId, standaloneId].sort());
+
+    for (const id of [childId, standaloneId]) {
+      expect(await trx('scheduled_services').where({ id }).first()).toMatchObject({
+        property_id: PRIMARY_ID, lat: '27.500000', lng: '-82.500000',
+      });
+    }
+    expect(await trx('scheduled_services').where({ id: independentId }).first()).toMatchObject({
+      lat: '27.400000', lng: '-82.400000', route_order: 9,
+    });
+    expect(recurringServiceAddress(await trx('scheduled_services').where({ id: parentId }).first()))
+      .toMatchObject({ lat: NEW_PIN.latitude, lng: NEW_PIN.longitude, zone: null });
+  });
+
+  test('replaces the locked primary pin when the customer mirror is stale and preserves independent pins', async () => {
+    const primaryPinId = randomUUID();
+    const customerPinId = randomUUID();
+    const independentId = randomUUID();
+    await trx('scheduled_services').insert([
+      visitRow(primaryPinId, { property_id: PRIMARY_ID, lat: 27.5, lng: -82.5 }),
+      visitRow(customerPinId, { property_id: PRIMARY_ID, lat: 27.498124, lng: -82.574813 }),
+      visitRow(independentId, { property_id: PRIMARY_ID, lat: 27.4, lng: -82.4, route_order: 7 }),
+    ]);
+
+    const locked = await context();
+    expect((await updatePrimaryVisits(
+      trx, customer, primary, CORRECTED, 27.51, -82.51, locked, ACTOR_ID,
+    )).sort()).toEqual([customerPinId, primaryPinId].sort());
+    expect(await trx('scheduled_services').where({ id: independentId }).first()).toMatchObject({
+      lat: '27.400000', lng: '-82.400000', route_order: 7,
+    });
+  });
+
   test('skips an entirely unrelated group while still moving an eligible primary group', async () => {
     const eligibleVisitId = randomUUID();
     const unrelatedVisitId = randomUUID();
