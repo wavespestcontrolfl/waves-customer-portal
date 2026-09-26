@@ -144,17 +144,14 @@ function scheduledPriceMovedError(lockedSvc) {
 // invoice; adoption = a replay transaction waking under the mint lock to
 // find another writer (Charge Now / completion mint) already committed one.
 // Same predicate either way — the ONE terminal-status filter.
-// excludeInvoiceIds: a sibling the caller already accounted for (the
-// annual-prepay covered-base settlement beside an add-ons bill) is not the
-// replay it is looking for.
-async function findAdoptableScheduledInvoice(trx, scheduledServiceId, { excludeInvoiceIds = [] } = {}) {
+async function findAdoptableScheduledInvoice(trx, scheduledServiceId) {
   await assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId);
-  const query = trx('invoices')
+  return trx('invoices')
     .where({ scheduled_service_id: scheduledServiceId })
     .whereNot('status', 'void')
-    .whereNotIn('status', TERMINAL_INVOICE_STATUSES);
-  if (excludeInvoiceIds.length) query.whereNotIn('id', excludeInvoiceIds);
-  return query.orderBy('created_at', 'desc').first();
+    .whereNotIn('status', TERMINAL_INVOICE_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first();
 }
 
 // Take the mint lock, adopt whatever non-terminal invoice landed first.
@@ -176,10 +173,15 @@ async function adoptScheduledInvoiceUnderMintLock(trx, scheduledServiceId) {
 // caller's read and this lock — retrying re-reads and bills the current
 // price instead of silently minting the stale one.
 async function mintScheduledServiceInvoiceWithDeposit({
-  svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false, excludeFromAdoption = [],
+  svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false,
   // A quiet backfill closeout leaves the estimate deposit on its ledger for
   // the reviewer (the completion path's skipDepositCredit posture).
   skipDepositCredit = false,
+  // The caller's check, under the visit lock, that the lines it built are
+  // still what the visit bills (e.g. its add-on rows — an equal-total edit
+  // passes the price guard). An editor locking the visit row first waits
+  // for this mint, so a throw here is the only race left.
+  assertLinesCurrentInTrx = null,
 }) {
   const InvoiceService = require('../services/invoice');
   const {
@@ -215,7 +217,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
           e.code = 'SCHEDULED_BILLING_SOURCE_MOVED';
           throw e;
         }
-        const replayed = await findAdoptableScheduledInvoice(trx, svc.id, { excludeInvoiceIds: excludeFromAdoption });
+        const replayed = await findAdoptableScheduledInvoice(trx, svc.id);
         if (replayed) return { invoice: replayed, reused: true };
         // Stale-price refusal — CREATE only (an adopted replay invoice is
         // the extension probe/re-probe's problem, handled there). Both
@@ -227,6 +229,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
         }
+        if (assertLinesCurrentInTrx) await assertLinesCurrentInTrx(trx);
         if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
