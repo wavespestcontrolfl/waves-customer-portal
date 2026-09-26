@@ -222,15 +222,20 @@ it('offers the tree catalog for untyped palm closeouts while retaining closeout 
 });
 
 it.each([
-  ['Completed the documented crack-and-crevice treatment.', {}],
-  ['Applied gel bait in the recorded locations.', { dryDown: false }],
-  ['Applied dust to the recorded accessible voids.', { dryDown: false }],
-])('records treatment scope and drying evidence for a searchable pest application: %s', async (action, dryingEvidence) => {
+  ['Completed the documented crack-and-crevice treatment.', {}, null, 'interior'],
+  ['Applied gel bait in the recorded locations.', { dryDown: false }, null, 'interior'],
+  ['Applied dust to the recorded accessible voids.', { dryDown: false }, null, 'interior'],
+  ['Completed the documented trunk application.', { dryDown: false }, {
+    serviceType: 'Every 6 Weeks Tree & Shrub Care Service',
+    completionProfile: { serviceKey: 'tree_shrub', findingsType: 'tree_shrub', requiresProducts: false },
+    findingsSchema: { type: 'tree_shrub', schemaVersion: 2, fields: [], nextStepChips: [] },
+  }, 'exterior'],
+])('records treatment scope and drying evidence for a searchable application: %s', async (action, dryingEvidence, serviceOverrides, scope) => {
   reentryDefaultsFromEvidence = true;
   completionChoicesEnabled = true;
   techTipsAvailable = false;
   render(<CompletionPanel
-    service={{ ...service, id: 'pest-choice', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false }, waveguardTier: null }}
+    service={{ ...service, id: 'choice-visit', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false }, waveguardTier: null, ...serviceOverrides }}
     products={[]}
     onClose={() => {}}
     onSubmit={submit}
@@ -246,7 +251,7 @@ it.each([
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].protocolActionScopesCompleted).toContainEqual({
-    label: action, scope: 'interior', treatmentApplied: true, ...dryingEvidence,
+    label: action, scope, treatmentApplied: true, ...dryingEvidence,
   });
 });
 
@@ -357,12 +362,14 @@ it.each(['gate off', 'API error'])('keeps saved scope for a visible pre-generati
   });
 });
 
-it.each([false, true])('omits retired lawn actions without saved choice or scope provenance: generated=%s', async (generated) => {
+it.each(['marker', 'mixed-case marker', 'generated'])('omits retired lawn actions without saved choice or scope provenance: %s', async (mode) => {
   const retiredAction = 'Retired planned lawn application.';
+  const generated = mode === 'generated';
+  const markerAction = mode === 'mixed-case marker' ? retiredAction.toUpperCase() : retiredAction;
   completionChoicesEnabled = !generated;
   localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
     serviceId: service.id, savedAt: Date.now(),
-    notes: generated ? 'WHAT WE DID:\nDocumented this visit.' : `Handwritten visit note.\n[Protocol] ${retiredAction}`,
+    notes: generated ? 'WHAT WE DID:\nDocumented this visit.' : `Handwritten visit note.\n[Protocol] ${markerAction}`,
     selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
     areasServiced: ['Front yard'], selectedProtocolActionLabels: [retiredAction],
     chipLinesDetached: generated,
@@ -373,7 +380,7 @@ it.each([false, true])('omits retired lawn actions without saved choice or scope
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(retiredAction);
-  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(retiredAction);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(markerAction);
 });
 
 it('omits a visible generated-draft action that is outside the current specialty preset', async () => {

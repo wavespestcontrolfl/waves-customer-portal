@@ -89,6 +89,8 @@ describe("service completion choices", () => {
     ];
     const interiorApplications = serviceCompletionChoicesFor("pest", "actions")
       .filter(({ id }) => interiorApplicationIds.some((suffix) => id.endsWith(suffix)));
+    const trunkInjection = serviceCompletionChoicesFor("tree_shrub", "actions")
+      .find(({ id }) => id.endsWith("completed-trunk"));
     const inspection = serviceCompletionChoicesFor("lawn", "actions")
       .find(({ id }) => id.endsWith("inspected-turf"));
 
@@ -97,6 +99,7 @@ describe("service completion choices", () => {
     expect(interiorApplications).toHaveLength(interiorApplicationIds.length);
     expect(interiorApplications.every((choice) => choice.scope === "interior" && choice.treatmentApplied === true)).toBe(true);
     expect(interiorApplications.find(({ id }) => id.endsWith("dusted-voids"))).toMatchObject({ dryDown: false });
+    expect(trunkInjection).toMatchObject({ scope: "exterior", treatmentApplied: true, dryDown: false });
     expect(inspection).toMatchObject({ scope: "exterior", treatmentApplied: false });
     expect([...exterior.keywords, ...interiorApplication.keywords]).not.toContain("product");
   });

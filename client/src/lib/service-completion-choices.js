@@ -210,7 +210,7 @@ const treeShrub = Object.freeze({
     ["completed-root-zone", "Completed the documented root-zone application.", ["soil treatment", "drench"], { scope: "exterior", treatmentApplied: true }],
     ["completed-granular", "Completed the documented granular application.", ["soil", "broadcast"], { scope: "exterior", treatmentApplied: true }],
     ["completed-targeted", "Completed a targeted application on the recorded plants.", ["spot treatment", "localized"], { scope: "exterior", treatmentApplied: true }],
-    ["completed-trunk", "Completed the documented trunk application.", ["injection", "stem"], { scope: "exterior", treatmentApplied: true }],
+    ["completed-trunk", "Completed the documented trunk application.", ["injection", "stem"], { scope: "exterior", treatmentApplied: true, dryDown: false }],
     ["treated-visible-activity", "Treated the recorded area of visible plant-pest activity.", ["insects", "localized"], { scope: "exterior", treatmentApplied: true }],
     ["serviced-palms", "Completed the recorded palm-care work.", ["palms", "fronds"]],
     ["serviced-foundation-beds", "Completed tree and shrub service in the foundation beds.", ["landscape", "zone"]],

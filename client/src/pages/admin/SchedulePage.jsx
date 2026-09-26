@@ -17263,10 +17263,11 @@ export function CompletionPanel({
       // The server also reconstructs actions from marker notes. Remove the
       // rejected selections there so a stale draft cannot restore them again.
       const excludedProtocolLabels = new Set(selectedProtocolActionLabels
-        .filter((label) => !reportProtocolActions.includes(label)));
+        .filter((label) => !reportProtocolActions.includes(label))
+        .map((label) => String(label || "").trim().toLowerCase()));
       const reportTechnicianNotes = notes.split("\n").filter((line) => {
         const match = line.match(/^\s*\[(?:Protocol(?: optional)?|Action)\]\s+(.+)$/i);
-        return !match || !excludedProtocolLabels.has(match[1].trim());
+        return !match || !excludedProtocolLabels.has(match[1].trim().toLowerCase());
       }).join("\n");
       const reportObservations = [
         ...activeSelectedLabels(selectedObservationLabels),
