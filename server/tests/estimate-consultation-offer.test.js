@@ -317,12 +317,17 @@ describe('buildEstimateConsultationOffer — happy path', () => {
   test('a slot probe that outlives its budget (slow geocoder) → null at the budget, never a hung page or send (Codex #4918 r1 P2)', async () => {
     const { _test: { PROBE_BUDGET_MS } } = require('../services/estimate-consultation-offer');
     jest.useFakeTimers();
+    let settle;
     try {
-      mockComputeConsultationSlotsForLead.mockReturnValue(new Promise(() => {})); // never settles
+      // Outlives the budget; settled in finally so this abandoned probe does
+      // not hold one of the capped in-flight slots for later tests.
+      mockComputeConsultationSlotsForLead.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
       const pending = buildEstimateConsultationOffer(baseArgs());
       await jest.advanceTimersByTimeAsync(PROBE_BUDGET_MS);
       await expect(pending).resolves.toBeNull();
     } finally {
+      settle?.({ ok: false, slots: [] });
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
       jest.useRealTimers();
     }
   });
@@ -383,5 +388,37 @@ describe('buildEstimateConsultationOffer — post-probe estimate freshness', () 
   test('nothing changes during the probe → still eligible, same URL contract as before this recheck existed', async () => {
     const result = await buildEstimateConsultationOffer(baseArgs());
     expect(result?.url).toContain('/inspection/');
+  });
+});
+
+// Codex #4918 r8 P2: the 3 s budget abandons a slow probe but cannot cancel
+// it, so in-flight probes (abandoned ones included) are capped.
+describe('estimateConsultationLead — bounded in-flight slot probes', () => {
+  const { _test } = require('../services/estimate-consultation-offer');
+
+  test('past MAX_PROBES_IN_FLIGHT hung probes, no new probe starts and no offer is built; a settled probe frees its slot', async () => {
+    jest.useFakeTimers();
+    try {
+      const releases = [];
+      mockComputeConsultationSlotsForLead.mockImplementation(() => new Promise((resolve) => { releases.push(resolve); }));
+      const hung = [];
+      for (let i = 0; i < _test.MAX_PROBES_IN_FLIGHT; i += 1) {
+        const p = buildEstimateConsultationOffer(baseArgs());
+        await jest.advanceTimersByTimeAsync(_test.PROBE_BUDGET_MS + 1);
+        hung.push(await p);
+      }
+      expect(hung.every((r) => r === null)).toBe(true);
+      expect(_test.probesInFlight()).toBe(_test.MAX_PROBES_IN_FLIGHT);
+      const callsAtCap = mockComputeConsultationSlotsForLead.mock.calls.length;
+
+      expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+      expect(mockComputeConsultationSlotsForLead.mock.calls.length).toBe(callsAtCap); // nothing new started
+
+      releases.forEach((r) => r({ ok: true, slots: [], needsAddress: false }));
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      expect(_test.probesInFlight()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

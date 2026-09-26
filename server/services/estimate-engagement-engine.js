@@ -775,10 +775,12 @@ async function processDueBatch(now = new Date()) {
           continue;
         }
       }
-      if (consultationUrl) {
-        // The URL was authorized for the recipient read before the probe.
-        // If the estimate's email moved since, this send goes to the NEW
-        // address without the offer (never a bearer for another inbox).
+      if (isGoneQuiet) {
+        // The gone-quiet probe ran (up to 3 s) whether or not it produced an
+        // offer, so the recipient read before it is stale either way (Codex
+        // #4918 r8 P2). If the estimate's email moved since, this send goes
+        // to the NEW address, without the offer (never a bearer for another
+        // inbox).
         const freshRecipient = await db('estimates').where({ id: est.id }).first('customer_email');
         if (String(freshRecipient?.customer_email || '').trim().toLowerCase()
           !== String(est.customer_email || '').trim().toLowerCase()) {

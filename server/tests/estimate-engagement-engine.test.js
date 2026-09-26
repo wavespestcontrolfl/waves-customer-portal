@@ -517,6 +517,7 @@ describe('processDueJobs', () => {
     test('a blank builder result still sends the email with consultation_url === "" (gate off / ineligible / build error)', async () => {
       buildGoneQuietConsultationUrl.mockResolvedValue('');
       enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } }); // post-claim recipient re-read
 
       const result = await Engine.processDueJobs(NOW);
 
@@ -572,6 +573,27 @@ describe('processDueJobs', () => {
         expect.objectContaining({ consultation_url: '' }),
       );
       expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('new-owner@example.com');
+    });
+
+    test('no offer (probe timed out / no slots) but the recipient email changed during the probe → the send still goes to the NEW address (Codex #4918 r8 P2)', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'new-owner@example.com' } });
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(1);
+      expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('new-owner@example.com');
+    });
+
+    test('an unchanged recipient keeps the send exactly as before', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
+
+      await Engine.processDueJobs(NOW);
+
+      expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('taylor@example.com');
     });
 
     test('every other rule\'s payload never gets consultation_url — the builder is never even called for them', async () => {

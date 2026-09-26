@@ -64,6 +64,22 @@ function withinProbeBudget(promise) {
   return Promise.race([promise, budget]).finally(() => clearTimeout(timer));
 }
 
+// The budget abandons a slow probe but cannot cancel it (the geocoder,
+// county lookup and slot computation take no abort signal), so a provider
+// slowdown would otherwise stack one background probe per gone-quiet job
+// or page load (Codex #4918 r8 P2). Probes in flight — abandoned ones
+// included, released only when the underlying work settles — are capped;
+// past the cap the offer is simply omitted and no new probe starts.
+const MAX_PROBES_IN_FLIGHT = 3;
+let probesInFlight = 0;
+function startBoundedProbe(run) {
+  if (probesInFlight >= MAX_PROBES_IN_FLIGHT) return null;
+  probesInFlight += 1;
+  const probe = Promise.resolve().then(run);
+  probe.finally(() => { probesInFlight -= 1; }).catch(() => {});
+  return probe;
+}
+
 // The lead an estimate belongs to. The link the admin estimate tool writes
 // is the lead-side pointer leads.estimate_id (estimate-lead-linkage.js reads
 // it for attribution); only estimator-engine call drafts and commercial
@@ -121,7 +137,12 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
   if (!leadWantsRecurringPlan(lead)) return null;
 
   const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
-  const result = await withinProbeBudget(computeConsultationSlotsForLead(lead.id, { count: 1 }));
+  const probe = startBoundedProbe(() => computeConsultationSlotsForLead(lead.id, { count: 1 }));
+  if (!probe) {
+    logger.warn(`[estimate-consultation-offer] ${MAX_PROBES_IN_FLIGHT} slot probes already in flight — no offer for lead ${lead.id}`);
+    return null;
+  }
+  const result = await withinProbeBudget(probe);
   if (result === PROBE_TIMED_OUT) {
     logger.warn(`[estimate-consultation-offer] slot probe exceeded ${PROBE_BUDGET_MS}ms for lead ${lead.id} — no offer`);
     return null;
@@ -203,5 +224,5 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
 module.exports = {
   buildEstimateConsultationOffer,
   estimateConsultationLead,
-  _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS },
+  _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS, MAX_PROBES_IN_FLIGHT, probesInFlight: () => probesInFlight },
 };
