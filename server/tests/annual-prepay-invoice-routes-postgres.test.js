@@ -122,6 +122,23 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await trx('customers').where({ id: customerId }).first('billing_mode')).billing_mode).toBe('annual_prepay');
   });
 
+  test('removing the flag is refused when the invoice is paid but its term never activated', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    // The webhook committed the payment; the term activation after it failed.
+    const prepayInvoiceId = await invoice(customerId, { status: 'paid', paid_at: new Date(), annual_prepay_term_id: termId });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/refund/);
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
+  });
+
   test('removing the flag from an unpaid prepay runs the canonical cancel: prior billing mode back, covered invoice owed again, open visits released', async () => {
     const { customerId, prepayInvoiceId, term } = await markedPaidPrepay();
     const coveredVisits = await trx('scheduled_services').where({ annual_prepay_term_id: term.id }).orderBy('scheduled_date');
