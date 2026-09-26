@@ -6539,6 +6539,11 @@ async function checkAndSend({ today = etDateString() } = {}) {
       // term end (the effective end); a term matched solely by an early
       // last-service date still reminds on term_end instead.
       const onTermEnd = dateOnly(term.term_end) === target;
+      // A termite annual-plan term (only reachable here via the schema-
+      // readiness fallback) renews on term_end — its contractual notice is
+      // N days before THAT date, never a last-visit anchor (a visit up to
+      // 120 days early would stamp the rung and suppress the real notice).
+      if (isTermiteAnnualPlanTerm(term) && !onTermEnd) continue;
       if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
       try {
         const result = await sendCustomerTermNotice(term, daysOut);

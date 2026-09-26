@@ -4021,6 +4021,28 @@ describe('annual prepay renewal helpers', () => {
     expect(q30.whereNull).not.toHaveBeenCalledWith('annual_plan_version');
   });
 
+  // Codex #4921 r5 P1: in that fallback, a termite term matched only by an
+  // early last-service date (up to 120 days before term_end) must NOT send
+  // or stamp its 30-day notice — the contractual anchor is term_end.
+  test('checkAndSend fallback: a termite term matched only by its last-service date is skipped (anchor = term_end)', async () => {
+    const failingProbe = query();
+    failingProbe.columnInfo = jest.fn(async () => { throw new Error('connection reset'); });
+    const termiteByLastVisit = {
+      id: 'term-t', customer_id: 'c1', status: 'active', annual_plan_version: 'v3',
+      term_end: '2026-12-20', last_scheduled_service_date: '2026-10-26', renewal_decision: null,
+    };
+    const q30 = query({ rows: [termiteByLastVisit] });
+    const q15 = query({ rows: [] });
+    const q7 = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: [] })],
+      annual_prepay_terms: [failingProbe, q30, q15, q7],
+    });
+
+    await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({ sent: 0 });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   // Codex #4921 r4 P1: a transient columnInfo() failure used to be cached as
   // {} for the life of the process, silently disabling every column-gated
   // path until a restart.
