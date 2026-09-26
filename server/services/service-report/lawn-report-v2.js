@@ -447,6 +447,17 @@ function isActionableWateringInstruction(note) {
     || /\b(?:add|apply|give)\b[^.]{0,32}\b\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?)\b[^.]{0,24}\b(?:water|watering|irrigation)\b/i.test(text);
 }
 
+function isCompleteWaterInInstruction(note) {
+  const text = String(note || '').trim();
+  if (!isActionableWateringInstruction(text)) return false;
+  if (/\b(?:do not|don't|avoid|delay|hold|keep)\b[^.]{0,48}\b(?:water|watering|irrigat\w*)\b/i.test(text)) return false;
+  const positiveWaterAction = /\b(?:water|irrigat\w*)\b/i.test(text)
+    || /\b(?:add|apply|give)\b[^.]{0,48}\b(?:water|watering|irrigation)\b/i.test(text);
+  const amountOrTiming = /\b(?:within|after|before|for|until|immediately|today|tomorrow)\b/i.test(text)
+    || /\b\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?)\b/i.test(text);
+  return positiveWaterAction && amountOrTiming;
+}
+
 // Aftercare watering/re-entry from the manufacturer LABEL on the applied products.
 // Surfaces a real label watering-in note when present; otherwise a safe default that
 // invents no number. Re-entry text comes from the label when available.
@@ -469,7 +480,11 @@ function buildAftercare(applications) {
     const note = (p.irrigation_notes || facts.irrigationNotes || '').trim();
     if (note && !productNotes.includes(note)) productNotes.push(note);
     if (isActionableWateringInstruction(note) && !actionableProductNotes.includes(note)) actionableProductNotes.push(note);
-    applicationWaterEvidence.push({ required: req, hasInstruction: !!note });
+    applicationWaterEvidence.push({
+      required: req,
+      hasInstruction: !!note,
+      hasCompleteWaterInInstruction: isCompleteWaterInInstruction(note),
+    });
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
   // A requirement boolean proves water-in is required, but establishes no
@@ -481,11 +496,15 @@ function buildAftercare(applications) {
   const requiredWithoutInstruction = applicationWaterEvidence.some(
     (entry) => entry.required === true && !entry.hasInstruction,
   );
+  const requiredWithIncompleteInstruction = applicationWaterEvidence.some(
+    (entry) => entry.required === true && entry.hasInstruction && !entry.hasCompleteWaterInInstruction,
+  );
   if (productNotes.length > 1) {
     watering = 'The recorded product watering instructions differ. Confirm the directions with your technician before changing irrigation.';
     evidenceSource = 'conflicting_product_instructions';
     needsReview = true;
-  } else if (productNotes.length === 1 && actionableProductNotes.length === 0) {
+  } else if (productNotes.length === 1
+    && (actionableProductNotes.length === 0 || requiredWithIncompleteInstruction)) {
     watering = 'A product watering note was recorded, but it does not include a specific amount or timing. Confirm the directions with your technician before changing irrigation.';
     evidenceSource = 'incomplete_product_instruction';
     needsReview = true;

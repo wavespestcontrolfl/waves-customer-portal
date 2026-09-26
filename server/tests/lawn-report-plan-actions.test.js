@@ -109,6 +109,20 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
         });
     }
   });
+  test('required watering needs a positive amount or timing before it can be credited', () => {
+    for (const irrigationNotes of ['Water in.', 'Do not water for 24 hours.']) {
+      expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
+        .toMatchObject({
+          waterInRequired: true,
+          evidenceSource: 'incomplete_product_instruction',
+          needsReview: true,
+        });
+    }
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: 'Water after service.' } }]))
+      .toMatchObject({ evidenceSource: 'product_instruction', needsReview: false });
+    expect(buildAftercare([{ product: { irrigation_required: false, irrigation_notes: 'Do not water for 24 hours.' } }]))
+      .toMatchObject({ evidenceSource: 'product_instruction', needsReview: false });
+  });
   test('source pin: with a plan the neutral copy is rewritten, label copy untouched', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'lawn-report-v2.js'), 'utf8');
     expect(src).toMatch(/if \(aftercare\.neutral && water && water\.weekPlan && water\.weekPlan\.title\) \{\s*aftercare\.watering = NEUTRAL_AFTERCARE_WITH_PLAN;/);
