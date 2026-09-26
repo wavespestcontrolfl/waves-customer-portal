@@ -51,17 +51,20 @@ function combinedWaterCard(report) {
 describe('insight cards defer to the plan', () => {
   const waterCard = (water, extra = {}) => buildLawnInsightCards({ categories: [], water, grassLabel: 'St. Augustine', ...extra }).find((c) => c.category === 'water');
   test('deficit: no "add irrigation time" when a plan is present', () => {
-    expect(waterCard({ status: 'deficit' }).customerAction).toMatch(/Add a little irrigation time/);
+    expect(waterCard({ status: 'deficit' }).customerAction).toMatch(/No upcoming watering plan is recorded/);
     const withPlan = waterCard({ status: 'deficit', weekPlan: PLAN });
     expect(withPlan.customerAction).toMatch(/Follow this week’s watering plan below/);
     expect(withPlan.customerAction).not.toMatch(/irrigation time/);
     expect(withPlan.nextVisitPlan).not.toMatch(/added water/);
-    expect(withPlan.wavesAction).toMatch(/this week’s watering plan/);
+    expect(withPlan.wavesAction).toBe('');
   });
   test('surplus: no "ease back by one cycle" when a plan is present (watering-in variant included)', () => {
-    expect(waterCard({ status: 'surplus' }).customerAction).toMatch(/Ease back on irrigation by one cycle/);
+    expect(waterCard({ status: 'surplus' }).customerAction).toMatch(/No upcoming watering plan is recorded/);
     expect(waterCard({ status: 'surplus', weekPlan: PLAN }).customerAction).toMatch(/Follow this week’s watering plan below — it already accounts for the extra water/);
-    expect(waterCard({ status: 'surplus', weekPlan: PLAN }, { waterInRequired: true }).customerAction).toMatch(/^Water in today’s application as directed, then follow this week’s watering plan below/);
+    expect(waterCard({ status: 'surplus', weekPlan: PLAN }, {
+      waterInRequired: true,
+      waterInInstructionRecorded: true,
+    }).customerAction).toMatch(/^Today’s application requires water-in; use the recorded product directions, then follow this week’s watering plan below/);
   });
 });
 
@@ -110,14 +113,14 @@ describe('combined report gives product aftercare priority over water insights',
       creditableWaterIn: true,
     });
     expect(combinedWaterCard(report).customerAction).toBe(
-      'Water in today’s application as directed, then follow this week’s watering plan below — it already accounts for the extra water.',
+      'Today’s application requires water-in; use the recorded product directions, then follow this week’s watering plan below.',
     );
   });
 });
 
 describe('root cause defers to the plan', () => {
   test('surplus and deficit name the plan; other stories unchanged', () => {
-    expect(buildRootCause({ effectiveWaterStatus: 'deficit' })).toMatch(/a bit more even watering/);
+    expect(buildRootCause({ effectiveWaterStatus: 'deficit' })).toMatch(/No upcoming watering plan is recorded here/);
     // gh-r37: the sentence agrees with the card's ACTION — never "sets the runs" beside a hold, never "eases back" beside a run.
     expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: RUN_PLAN })).toMatch(/this week’s watering plan below sets the runs/);
     expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: HOLD_PLAN })).toMatch(/weighs that against the week’s rain, so follow it as written/);
@@ -327,10 +330,13 @@ describe('generic moisture card defers to the plan (codex gh-r29)', () => {
   const cats = [{ key: 'water_moisture_stress', status: 'watch', customerExplanation: 'Mixed read.' }];
   const card = (water, extra = {}) => buildLawnInsightCards({ categories: cats, water, grassLabel: 'lawn', ...extra }).find((c) => c.category === 'water');
   test('no "keep your current schedule" / "ease back a cycle" under a plan', () => {
-    expect(card({ status: 'balanced', scheduleOnFile: true }).customerAction).toMatch(/Keep your current watering schedule/);
+    expect(card({ status: 'balanced', scheduleOnFile: true }).customerAction).toBe('');
     expect(card({ status: 'balanced', scheduleOnFile: true, weekPlan: PLAN }).customerAction).toMatch(/Follow this week’s watering plan below/);
-    expect(card({ status: 'balanced', overwatering: true }).customerAction).toMatch(/ease back an irrigation cycle/);
+    expect(card({ status: 'balanced', overwatering: true }).customerAction).toMatch(/No upcoming watering plan is recorded/);
     expect(card({ status: 'balanced', overwatering: true, weekPlan: PLAN }).customerAction).toMatch(/follow this week’s watering plan below rather than adding cycles/);
-    expect(card({ status: 'balanced', overwatering: true, weekPlan: PLAN }, { waterInRequired: true }).customerAction).toMatch(/^Water in today’s application as directed first.*this week’s watering plan below already accounts for it/);
+    expect(card({ status: 'balanced', overwatering: true, weekPlan: PLAN }, {
+      waterInRequired: true,
+      waterInInstructionRecorded: true,
+    }).customerAction).toMatch(/^Today’s application requires water-in; use the recorded product directions first, then follow this week’s watering plan below/);
   });
 });
