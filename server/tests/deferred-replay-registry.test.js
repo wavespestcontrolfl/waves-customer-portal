@@ -372,6 +372,209 @@ describe('deferred-replay registry', () => {
     });
   });
 
+  // Codex #4963 round 4 pre-push audit (finding C continued): the REPLAY
+  // itself can only partially succeed — e.g. it accepts Text while Email is
+  // still retryable/held. Without a pending check on the replay's own
+  // outcome, the executor sees smsResult.sent:true, calls finalize, gets
+  // ok:true, and discharges the row — the still-outstanding channel is
+  // silently dropped with no further retry ever queued.
+  describe('invoice_send_deferred finalize: the replay itself only partially succeeds', () => {
+    function chainable() {
+      const q = {};
+      for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot', 'whereNull', 'forUpdate', 'clone']) q[m] = jest.fn(() => q);
+      q.update = jest.fn(async () => 1);
+      q.first = jest.fn(async () => undefined);
+      q.insert = jest.fn(async () => [1]);
+      return q;
+    }
+    function mockTables({ existingQueued, smsLogInserts } = {}) {
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return chainable();
+        if (table === 'sms_log') {
+          const q = chainable();
+          // Models the real WHERE id != excludedId: a .whereNot({id}) call
+          // narrows a same-id existingQueued match away to none, exactly
+          // like the actual SQL would exclude the row being finalized.
+          let excludedId = null;
+          q.whereNot = jest.fn((criteria) => { excludedId = criteria?.id ?? criteria; return q; });
+          q.first = jest.fn(async () => {
+            if (existingQueued && excludedId && existingQueued.id === excludedId) return undefined;
+            return existingQueued || undefined;
+          });
+          q.insert = jest.fn((row) => { if (smsLogInserts) smsLogInserts.push(row); return Promise.resolve([1]); });
+          return q;
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      });
+    }
+    const partialAcceptResults = {
+      email: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
+      sms: { sent: true, deliveryOutcome: 'accepted' },
+    };
+
+    test('replay accepts Text with Email still retryable: queues ONE new row with replaySkipChannels [previous skip, sms] and attempt 2', async () => {
+      const smsLogInserts = [];
+      mockTables({ smsLogInserts });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], replaySkipChannels: ['push'], partial_fanout_attempt: 1,
+      }, {
+        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(1);
+      const meta = JSON.parse(smsLogInserts[0].metadata);
+      expect(meta.partial_fanout_retry).toBe(true);
+      expect(meta.partial_fanout_attempt).toBe(2);
+      expect(meta.pending_channels).toEqual(['email']);
+      expect(meta.original_block_code).toBe('BILLING_CHANNEL_FAILED');
+      // Union of the PREVIOUS skip list and whatever THIS replay newly
+      // delivered — a channel accepted two attempts ago must never be
+      // re-sent by the next replay either.
+      expect(meta.replaySkipChannels.sort()).toEqual(['push', 'sms']);
+      expect(smsLogInserts[0].to_phone).toBe('+19415550101');
+      expect(smsLogInserts[0].message_body).toBe('Invoice ready');
+    });
+
+    test('an uncertain pending leg after a partial accept is surfaced but never requeued (no double-send)', async () => {
+      const smsLogInserts = [];
+      mockTables({ smsLogInserts });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 1,
+      }, {
+        channelResults: {
+          email: { sent: false, deliveryOutcome: 'uncertain' },
+          sms: { sent: true, deliveryOutcome: 'accepted' },
+        },
+        smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
+    test('attempt cap: a would-be 5th attempt is refused, logged for operator review, never queued', async () => {
+      const smsLogInserts = [];
+      mockTables({ smsLogInserts });
+      const logger = require('../services/logger');
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 4,
+      }, {
+        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(0);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('inv-1'));
+    });
+
+    test('the row currently being finalized is excluded from the dedupe check by id — it is not mistaken for an existing queued row', async () => {
+      const smsLogInserts = [];
+      // The row being finalized itself still reads as a live ('sending')
+      // sms_log row for this invoice at this exact moment — without
+      // excludeSmsLogId the dedupe check below would "find" it and skip
+      // queuing the genuine new retry row.
+      mockTables({ existingQueued: { id: 'row-1' }, smsLogInserts });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 1,
+      }, {
+        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(1);
+    });
+
+    test('a genuinely already-queued OTHER row is still adopted, never duplicated', async () => {
+      const smsLogInserts = [];
+      mockTables({ existingQueued: { id: 'row-other' }, smsLogInserts });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 1,
+      }, {
+        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
+    test('a fully-accepted replay requeues nothing', async () => {
+      const smsLogInserts = [];
+      mockTables({ smsLogInserts });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 1,
+      }, {
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: true, deliveryOutcome: 'accepted' },
+        },
+        smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
+    test('a permanently-blocked pending leg (no retryable/deferred flag) is surfaced but never requeued', async () => {
+      const smsLogInserts = [];
+      mockTables({ smsLogInserts });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 1,
+      }, {
+        channelResults: {
+          email: { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'MISSING_BILLING_RECIPIENT' },
+          sms: { sent: true, deliveryOutcome: 'accepted' },
+        },
+        smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
+    test('a queue-insert failure returns ok:false so the durable finalize retry rail redoes it', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return chainable();
+        if (table === 'sms_log') {
+          const q = chainable();
+          q.first = jest.fn(async () => undefined);
+          q.insert = jest.fn(() => { throw new Error('db down'); });
+          return q;
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 1,
+      }, {
+        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
+      });
+      expect(res).toEqual({ ok: false });
+    });
+
+    test('the finalize_only durable retry rail (bare ctx — no channelResults) recovers a previously-persisted copy and still requeues', async () => {
+      // Mirrors scheduler.js's claimMeta.finalize_only branch: ctx carries
+      // only retry/customerId/providerMessageId/smsLogId — channelResults/
+      // toPhone/body are NOT there. They must come back from the row's OWN
+      // metadata (persisted by the FIRST attempt below).
+      const smsLogInserts = [];
+      mockTables({ smsLogInserts });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
+        pending_channels: ['email'], partial_fanout_attempt: 1,
+        replay_channel_results: partialAcceptResults,
+        replay_to_phone: '+19415550101', replay_body: 'Invoice ready',
+      }, {
+        retry: true, customerId: 'cust-1', providerMessageId: null, smsLogId: 'row-1',
+      });
+      expect(res).toEqual({ ok: true });
+      expect(smsLogInserts).toHaveLength(1);
+      const meta = JSON.parse(smsLogInserts[0].metadata);
+      expect(meta.partial_fanout_attempt).toBe(2);
+      expect(smsLogInserts[0].to_phone).toBe('+19415550101');
+    });
+  });
+
   test('unregistered entry points are inert', async () => {
     expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
     expect(await finalizeDeferredReplay('some_future_unregistered_deferred', {}, {})).toBeNull();
