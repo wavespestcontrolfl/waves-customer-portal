@@ -215,6 +215,11 @@ function matchDbprRow(rows, { street, unit, zip, phone, businessNameHint } = {})
   const disambiguated = addressMatches.filter((row) => {
     const loc = rowLocation(row);
     const rowUnit = normalizeUnitValue(loc.unit);
+    // A license for a DIFFERENT suite at this address is never this suite,
+    // whatever the phone or name says (a shared owner's phone, a loose name
+    // hit) — only rows with no unit, or searches with no target unit, may be
+    // picked out by phone/name.
+    if (targetUnit && rowUnit && rowUnit !== targetUnit) return false;
     if (targetUnit && rowUnit && rowUnit === targetUnit) return true;
     if (targetPhone) {
       const rowPhone = normalizePhoneDigits(row['Secondary Phone Number'])

@@ -281,3 +281,29 @@ describe('isEligibleDineInLicense', () => {
     expect(isEligibleDineInLicense({ ...base, ...override })).toBe(false);
   });
 });
+
+describe('matchDbprRow never returns another suite', () => {
+  const { matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
+  const row104 = {
+    'Location Street Address': '4400 TEST COMMONS PKWY E #104',
+    'Location Zip Code': '00000',
+    'Business Name': 'TEST TACO SHOP',
+    'Secondary Phone Number': '555-010-0199',
+  };
+  test('a phone match on a different suite is rejected', () => {
+    expect(matchDbprRow([row104], {
+      street: '4400 Test Commons Pkwy E', unit: '#102', zip: '00000', phone: '+15550100199',
+    })).toBeNull();
+  });
+  test('a name match on a different suite is rejected', () => {
+    expect(matchDbprRow([row104], {
+      street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', businessNameHint: 'Test Taco Shop',
+    })).toBeNull();
+  });
+  test('a phone match still picks a row that carries no unit', () => {
+    const noUnit = { ...row104, 'Location Street Address': '4400 TEST COMMONS PKWY E' };
+    expect(matchDbprRow([noUnit], {
+      street: '4400 Test Commons Pkwy E', unit: '#102', zip: '00000', phone: '+15550100199',
+    })).toBe(noUnit);
+  });
+});
