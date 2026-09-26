@@ -23,6 +23,12 @@
  *   over the same booking_config advance-days window, around the CUSTOMER's
  *   coordinates. When both lanes are open the browse list is computed at the
  *   LONGER lane duration so every offered slot commits cleanly for either.
+ *   Passes rankProfile:'reservice' to buildBookingAvailability — with
+ *   GATE_RESERVICE_RANK_AFTER_NEW live (owner ruling 2026-09-24: new-customer
+ *   bookings get first pick of open time), the suggested strip and each
+ *   day's is_best_fit badge rank packed slots against existing stops ahead
+ *   of empty-day slots, with a 5-business-day latency guard; the offered
+ *   slot set itself (days[].slots) never changes. Gate off: byte-identical.
  *
  * POST /:token/find-slots — Waves AI date/time search. Same parser the
  *   reschedule page uses (parseWhen), clamped to the booking window on both
@@ -198,6 +204,14 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     today: new Date(),
     // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
     selfServeNotice: true,
+    // Re-service rank profile (GATE_RESERVICE_RANK_AFTER_NEW, owner ruling
+    // 2026-09-24): only takes effect when the gate is live — see
+    // buildBookingAvailability's own doc comment. Passed unconditionally so
+    // every browse/search/commit-revalidation call on this route (the only
+    // caller of buildAvailabilityForCustomer) opts in the same way; it never
+    // filters the offered slot set, so the commit-time re-validation below
+    // still accepts exactly what days[].slots offers.
+    rankProfile: 'reservice',
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }

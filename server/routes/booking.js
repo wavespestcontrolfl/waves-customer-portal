@@ -147,8 +147,8 @@ const {
   CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
-const { selfBookDayCapEnabled } = require('../config/feature-gates');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { selfBookDayCapEnabled, reserviceRankAfterNewLive } = require('../config/feature-gates');
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
@@ -244,7 +244,11 @@ function compareRankedSlots(a, b) {
   return String(a.start_time).localeCompare(String(b.start_time));
 }
 
-function curateSlots(candidates, today) {
+// `opts.latencyCutoffDate` (re-service rank profile only — see
+// reserviceAdjustedScore below): replaces the calendar "soon" swap with a
+// business-day horizon computed against the ALREADY-adjusted rank. Omitted
+// (every other caller), behavior is byte-identical to before.
+function curateSlots(candidates, today, opts = {}) {
   const sorted = [...candidates].sort(compareRankedSlots);
   const picks = [];
   const pickedDates = new Set();
@@ -279,16 +283,70 @@ function curateSlots(candidates, today) {
     }
   }
 
-  const soonStart = etDateString(today);
-  const soonEnd = etDateString(addETDays(today, 3));
-  const hasSoonCandidate = sorted.some(s => s.date >= soonStart && s.date <= soonEnd);
-  const hasSoonPick = picks.some(s => s.date >= soonStart && s.date <= soonEnd);
-  if (hasSoonCandidate && !hasSoonPick) {
-    const soonPick = sorted.find(s => s.date >= soonStart && s.date <= soonEnd);
-    replaceWorstWith(soonPick);
+  if (opts.latencyCutoffDate) {
+    const hasHorizonCandidate = sorted.some(s => s.date <= opts.latencyCutoffDate);
+    const hasHorizonPick = picks.some(s => s.date <= opts.latencyCutoffDate);
+    if (hasHorizonCandidate && !hasHorizonPick) {
+      replaceWorstWith(sorted.find(s => s.date <= opts.latencyCutoffDate));
+    }
+  } else {
+    const soonStart = etDateString(today);
+    const soonEnd = etDateString(addETDays(today, 3));
+    const hasSoonCandidate = sorted.some(s => s.date >= soonStart && s.date <= soonEnd);
+    const hasSoonPick = picks.some(s => s.date >= soonStart && s.date <= soonEnd);
+    if (hasSoonCandidate && !hasSoonPick) {
+      const soonPick = sorted.find(s => s.date >= soonStart && s.date <= soonEnd);
+      replaceWorstWith(soonPick);
+    }
   }
 
   return picks.sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.start_time).localeCompare(String(b.start_time)));
+}
+
+// Re-service ranking profile (GATE_RESERVICE_RANK_AFTER_NEW, owner ruling
+// 2026-09-24: "prefer new customers over existing — new-customer bookings
+// get first pick of open time; re-service/callback pickers rank after").
+// Values are minutes-equivalent, the same units as compareRankedSlots'
+// `score` (detour minutes + 0.5/day-out — scheduling/find-time.js), so they
+// combine with it directly.
+//
+// An empty tech-day (no stops yet) is exactly the room a brand-new customer
+// at an unproven address needs — nothing to anchor a route estimate
+// against. 240 minutes (4 hours) comfortably exceeds any single day's
+// realistic detour/days-out spread, so an empty day only wins when nothing
+// packed is feasible anywhere in range.
+const RESERVICE_EMPTY_DAY_PENALTY_MINUTES = 240;
+// idle_minutes (idleMinutesAgainst) already measures the hole a candidate
+// leaves against its neighbours. Weight it below 1:1 against detour so a
+// slot that saves a little drive time but opens a big hole still loses to a
+// tightly packed one, without letting idle alone override a much
+// better-routed candidate.
+const RESERVICE_IDLE_WEIGHT = 0.5;
+// No re-service SLA is enforced anywhere in code — the only reference is a
+// "5-business-day callback protocol" comment (routes/booking.js). Used only
+// as this ranking guard's horizon, never as a commitment the engine keeps.
+const RESERVICE_LATENCY_BUSINESS_DAYS = 5;
+
+function reserviceAdjustedScore(candidate) {
+  const base = candidate.score ?? candidate.rank ?? 999999;
+  const emptyDayPenalty = (candidate.stops_that_day || 0) === 0 ? RESERVICE_EMPTY_DAY_PENALTY_MINUTES : 0;
+  const idlePenalty = (candidate.idle_minutes || 0) * RESERVICE_IDLE_WEIGHT;
+  return base + emptyDayPenalty + idlePenalty;
+}
+
+// The ET calendar date that is `businessDays` business days (Mon-Fri) after
+// `today` — the re-service latency guard's horizon. Counts from the NEXT
+// calendar day, since the earliest offerable slot is already at least one
+// day out (booking_config advance_days_min).
+function businessDayHorizonEnd(today, businessDays) {
+  let cursor = today;
+  let counted = 0;
+  while (counted < businessDays) {
+    cursor = addETDays(cursor, 1);
+    const dow = etParts(cursor).dayOfWeek; // 0=Sun..6=Sat
+    if (dow !== 0 && dow !== 6) counted += 1;
+  }
+  return etDateString(cursor);
 }
 
 function fallbackZoneCenter(city) {
@@ -1087,7 +1145,12 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // server/services/scheduling/self-serve-notice.js) is never offered. The
 // voice-agent callers (relay-tools.js, relay-booking.js) deliberately leave
 // this false — the call agent is unaffected by the notice rule.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false }) {
+// `rankProfile`: opt-in, unset for every caller except reservice-public.js
+// (which always passes 'reservice'). Only takes effect when
+// GATE_RESERVICE_RANK_AFTER_NEW is also live (reserviceRankAfterNewLive) —
+// see reserviceAdjustedScore below. It only ever reorders `slots`/`days`'
+// is_best_fit; the offered slot SET (days[].slots) is never filtered.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile = null }) {
   config = applySchedulingPolicy(config);
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
   // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
@@ -1379,6 +1442,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       rank: slot.rank,
       score: slot.score,
       idle_minutes: idleMinutes,
+      // Carried for the re-service rank profile's empty-day penalty
+      // (reserviceAdjustedScore) — otherwise unused by any other caller.
+      // No `|| 0` fallback here (reserviceAdjustedScore's own read already
+      // treats a missing value as 0) — addCandidate is already at the
+      // complexity ceiling and this field adds no branching either way.
+      stops_that_day: slot.stops_that_day,
       startTime24: startTime,
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
@@ -1445,8 +1514,27 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       }
     }
   }
+  // Re-service rank profile (GATE_RESERVICE_RANK_AFTER_NEW): diagnostics run
+  // whenever a profile is passed (reservice-public.js only), gate on or off,
+  // so "before" and "after" are the byte-for-byte proof when it's dark.
+  const reserviceRankActive = rankProfile === 'reservice' && reserviceRankAfterNewLive();
+  let reserviceBeforeDates = null;
+  if (rankProfile) {
+    const baseline = [...candidateMap.values()].sort(compareRankedSlots);
+    reserviceBeforeDates = curateSlots(baseline, today).map((s) => s.date);
+  }
+  if (reserviceRankActive) {
+    for (const candidate of candidateMap.values()) candidate.score = reserviceAdjustedScore(candidate);
+  }
   const candidates = [...candidateMap.values()].sort(compareRankedSlots);
-  const curatedSlots = curateSlots(candidates, today);
+  if (reserviceRankActive) candidates.forEach((candidate, i) => { candidate.rank = i + 1; });
+  const curateOpts = reserviceRankActive
+    ? { latencyCutoffDate: businessDayHorizonEnd(today, RESERVICE_LATENCY_BUSINESS_DAYS) }
+    : {};
+  const curatedSlots = curateSlots(candidates, today, curateOpts);
+  if (rankProfile) {
+    logger.info(`[booking] availability rank_profile=${rankProfile} active=${reserviceRankActive} total_feasible=${result.total_feasible || 0} before=${JSON.stringify(reserviceBeforeDates)} after=${JSON.stringify(curatedSlots.map((s) => s.date))}`);
+  }
 
   // Group slots by date, anonymize tech, add reason + best_fit flag, dedupe (one slot per day+start)
   const byDate = new Map();
@@ -1509,7 +1597,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   }
 
   return {
-    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, ...slot }) => slot),
+    // stops_that_day is internal ranking state (reserviceAdjustedScore) —
+    // strip it here so every caller's payload shape stays byte-for-byte
+    // identical to before this field existed.
+    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, stops_that_day, ...slot }) => slot),
     days,
     nearby: days.some(d => d.nearby),
     total_feasible: result.total_feasible || 0,
@@ -5954,6 +6045,15 @@ module.exports._internals = {
   bookingOfferLocationKey,
   idleMinutesAgainst,
   BOOKING_FUNNEL_SERVICE_DURATIONS,
+  // Re-service rank profile (GATE_RESERVICE_RANK_AFTER_NEW) primitives,
+  // exported for direct unit coverage.
+  compareRankedSlots,
+  curateSlots,
+  reserviceAdjustedScore,
+  businessDayHorizonEnd,
+  RESERVICE_EMPTY_DAY_PENALTY_MINUTES,
+  RESERVICE_IDLE_WEIGHT,
+  RESERVICE_LATENCY_BUSINESS_DAYS,
   validateBookingSlotGeometry,
   validateBookingSlotDate,
   generateConfirmationCode,

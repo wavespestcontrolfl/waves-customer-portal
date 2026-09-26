@@ -1981,7 +1981,23 @@ reschedule search: model-backed parseWhen clamped on BOTH ends to the
 booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
 the lane-eligibility gates, and the $0/is_callback commit contract as
-security-critical).
+security-critical). Ranking (owner ruling 2026-09-24, GATE_RESERVICE_RANK_AFTER_NEW,
+nested inside GATE_RESERVICE_SELF_SERVE): this route's browse/search/commit-
+revalidation calls opt `buildBookingAvailability` into `rankProfile:'reservice'`.
+With the gate live, the suggested strip (top-level `slots`) and each day's
+`is_best_fit` badge rank a slot on a day with existing stops ahead of a slot
+on an otherwise-empty day, and favor a tightly packed placement (lower
+idle/detour) over one that opens a hole — an empty tech-day is exactly the
+room a new customer at an unproven address needs, so it is not the default
+re-service recommendation. A "soonest" swap still guarantees the strip
+includes the best-ranked slot starting within 5 business days when one is
+feasible (no re-service SLA is enforced anywhere in code; this is a ranking
+guard only, in place of the general funnel's calendar 3-day swap). The FULL
+per-day slot list (`days[].slots`) is never filtered or reordered by this —
+every feasible slot the engine found is still there, and the commit-time
+single-day revalidation still accepts exactly what that list offers. Gate
+off (default): buildBookingAvailability ignores the profile and this route's
+payload is byte-for-byte identical to before this gate existed.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner
