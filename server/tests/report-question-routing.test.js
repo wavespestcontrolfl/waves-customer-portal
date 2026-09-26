@@ -388,6 +388,25 @@ describe('service report — every shipped chip answers its own category (AW-06)
       .toBe(answerServiceReportQuestion({ question: 'What do you recommend?', data: pestData, nextAppointment }));
   });
 
+  test("\"Was there any activity near my dogs' bowls?\" gets findings, not re-entry", () => {
+    expect(answerServiceReportQuestion({ question: "Was there any activity near my dogs' bowls?", data: pestData }))
+      .toBe(answerServiceReportQuestion({ question: 'What did you find?', data: pestData }));
+  });
+
+  test.each([
+    'What is the pressure score used for?',
+    'How is Pest Pressure used?',
+  ])('a pressure/score question with generic "used" gets the trend answer: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData })).not.toMatch(/Sources used: this service report/);
+  });
+
+  test.each([
+    'I was wondering when my next treatment is',
+    'I was curious when you will spray again',
+  ])('an unrelated past verb does not cancel a future treatment cue: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Your next appointment is/);
+  });
+
   test('"When is my next treatment after today?" goes to the appointment', () => {
     expect(answerServiceReportQuestion({ question: 'When is my next treatment after today?', data: pestData, nextAppointment }))
       .toMatch(/Your next appointment is/);

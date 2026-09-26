@@ -25,7 +25,7 @@ const TREATMENT_QUESTION_RE = /\b(treat|treats|treating|treated|treatment|treatm
 const FINDINGS_QUESTION_RE = /\b(find|found|finding|see|saw|notice|noticed|activity|ants?|pests?|bugs?|roaches?|spiders?|rodents?|mice|rats?)\b/;
 // Observation verbs only — an intent verb outranks topic nouns. A pest noun
 // alone ("…after the ant treatment?") never suppresses a safety subject.
-const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|observe|observed|spot|spotted)\b/;
+const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|observe|observed|spot|spotted|activity|evidence)\b/;
 // Observation as the question's main act ("what did you find/see…", "did
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
@@ -36,7 +36,9 @@ const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:
 const PAST_TENSE_RE = /\b(?:was|were|did|today|applied|sprayed|treated|used)\b/;
 // Past-tense verbs only — "today" anchors time but doesn't cancel an explicit
 // future cue ("When is my next treatment after today?").
-const PAST_VERB_RE = /\b(?:was|were|did|applied|sprayed|treated|used)\b/;
+// Past tense that governs the treatment itself ("was it treated", "did you
+// spray", "applied") — not an unrelated "I was wondering when…".
+const PAST_VERB_RE = /\b(?:was|were|did)\s+(?:you\s+|it\s+|they\s+|the\s+\w+\s+)?(?:treat|spray|appl|use)\w*|\b(?:applied|sprayed|treated)\b/;
 // "What did you spray near my dogs' beds?" asks what was applied, even with
 // a pet noun in it.
 const WHAT_APPLIED_RE = /\b(?:what|which)\b[^?.!]{0,40}\b(?:spray\w*|appl\w*|use[sd]?|treat\w*|products?)\b/;
@@ -589,7 +591,10 @@ function questionRoutingRules({
       answer: () => answerNextAppointment({ nextAppointment }),
     },
     {
-      test: (q) => TREATMENT_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q),
+      // A pressure/score question with only the generic "used" ("What is the
+      // pressure score used for?") belongs to the trend answer.
+      test: (q) => TREATMENT_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q)
+        && !(TREND_CORE_RE.test(q) && !/\b(?:products?|spray\w*|appl\w*|treat\w*|chemicals?|baits?)\b/.test(q)),
       // "Is the treatment working?" asks about results, not what was applied.
       answer: (q) => (EFFECTIVENESS_RE.test(q) ? answerTrend({ data }) : answerAppliedToday({ data })),
     },
