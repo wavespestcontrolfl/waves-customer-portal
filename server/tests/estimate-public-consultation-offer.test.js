@@ -133,7 +133,9 @@ function estimateRow(overrides = {}) {
     archived_at: null,
     customer_id: null,
     customer_name: 'Pat Consult',
-    customer_phone: null,
+    // The linked lead's own phone — the offer requires the lead to still be
+    // the estimate's contact (leadMatchesEstimateContact).
+    customer_phone: '9415551234',
     customer_email: null,
     address: '123 Consult Ln, Bradenton, FL 34203',
     satellite_url: null,

@@ -6,19 +6,10 @@
  *   - linkedLeadIdFor's OWN pointer-lookup call throwing, in isolation from
  *     the later `leads` row fetch (proving the failure is caught at the
  *     builder regardless of which DB call inside the chain blows up first);
- *   - estimateConsultationLead (the shared eligibility a future email caller
- *     will also call) is documented to THROW rather than swallow errors —
- *     unlike buildEstimateConsultationOffer, which wraps it in try/catch.
- *     A future caller that forgets its own try/catch would crash;
- *   - estimateConsultationLead does NOT read GATE_ESTIMATE_CONSULTATION_OFFER
- *     at all — that gate belongs to the page builder only;
  *   - the cheap short-circuits (acceptActive false / scheduled_service_id /
- *     estimate_group_id / a missing estimate) never touch the DB, whichever
- *     entry point is called directly;
- *   - a pointer and a stamp that name the SAME lead id but in different
- *     letter case are two distinct Set members today (String() only changes
- *     type, never case) — documents current fail-safe (ambiguous → no
- *     offer) behavior rather than asserting it's the intended outcome.
+ *     estimate_group_id / a missing estimate) never touch the DB;
+ *   - a pointer and a stamp that name the SAME lead id in different letter
+ *     case are one candidate (uuids compare case-insensitively).
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -60,7 +51,6 @@ function splitBuilder({ pluckThrows = false, pluckResult = [], firstRow = null, 
 
 const {
   buildEstimateConsultationOffer,
-  estimateConsultationLead,
   _test: { linkedLeadIdFor },
 } = require('../services/estimate-consultation-offer');
 
@@ -128,60 +118,9 @@ describe('linkedLeadIdFor — pointer lookup failure isolated from the lead-row 
   });
 });
 
-describe('estimateConsultationLead — throws rather than swallowing (callers must fail soft themselves)', () => {
-  test('a DB blow-up during eligibility propagates as a rejection, not a null', async () => {
-    mockBuilders.leads = splitBuilder({ pluckThrows: true, firstRow: OPEN_RECURRING_LEAD });
-    await expect(estimateConsultationLead({
-      estimate: baseEstimate(), estimateData: baseEstimateData(), acceptActive: true,
-    })).rejects.toThrow('pointer lookup exploded');
-  });
-
-  test('computeConsultationSlotsForLead rejecting also propagates out of estimateConsultationLead', async () => {
-    mockComputeConsultationSlotsForLead.mockRejectedValue(new Error('inspection-public blew up'));
-    await expect(estimateConsultationLead({
-      estimate: baseEstimate(), estimateData: baseEstimateData(), acceptActive: true,
-    })).rejects.toThrow('inspection-public blew up');
-  });
-
-  test('the SAME failure is fully absorbed one layer up by buildEstimateConsultationOffer', async () => {
-    mockComputeConsultationSlotsForLead.mockRejectedValue(new Error('inspection-public blew up'));
-    const result = await buildEstimateConsultationOffer({
-      estimate: baseEstimate(), estimateData: baseEstimateData(), acceptActive: true,
-    });
-    expect(result).toBeNull();
-  });
-});
-
-describe('estimateConsultationLead — GATE_ESTIMATE_CONSULTATION_OFFER is not this function\'s gate', () => {
-  test('offer gate off, inspection gate on → estimateConsultationLead still resolves the lead (the page builder is what stops the OFFER, not eligibility itself)', async () => {
-    process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'false';
-    const lead = await estimateConsultationLead({
-      estimate: baseEstimate(), estimateData: baseEstimateData(), acceptActive: true,
-    });
-    expect(lead).toEqual(OPEN_RECURRING_LEAD);
-  });
-
-  test('...but buildEstimateConsultationOffer with the same inputs returns null while its own gate is off', async () => {
-    process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'false';
-    const result = await buildEstimateConsultationOffer({
-      estimate: baseEstimate(), estimateData: baseEstimateData(), acceptActive: true,
-    });
-    expect(result).toBeNull();
-  });
-
-  test('inspection gate off → estimateConsultationLead returns null with no DB call regardless of the offer gate', async () => {
-    process.env.GATE_LEAD_INSPECTION_LINK = 'false';
-    const lead = await estimateConsultationLead({
-      estimate: baseEstimate(), estimateData: baseEstimateData(), acceptActive: true,
-    });
-    expect(lead).toBeNull();
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-});
-
-describe('estimateConsultationLead — cheap short-circuits never touch the DB', () => {
+describe('buildEstimateConsultationOffer — cheap short-circuits never touch the DB', () => {
   test('acceptActive false → null, no DB call', async () => {
-    const lead = await estimateConsultationLead({
+    const lead = await buildEstimateConsultationOffer({
       estimate: baseEstimate(), estimateData: baseEstimateData(), acceptActive: false,
     });
     expect(lead).toBeNull();
@@ -189,7 +128,7 @@ describe('estimateConsultationLead — cheap short-circuits never touch the DB',
   });
 
   test('estimateData.scheduled_service_id set (drafted from a visit) → null, no DB call', async () => {
-    const lead = await estimateConsultationLead({
+    const lead = await buildEstimateConsultationOffer({
       estimate: baseEstimate(),
       estimateData: baseEstimateData({ scheduled_service_id: 'svc-1' }),
       acceptActive: true,
@@ -199,7 +138,7 @@ describe('estimateConsultationLead — cheap short-circuits never touch the DB',
   });
 
   test('estimate.estimate_group_id set (grouped, multi-property) → null, no DB call', async () => {
-    const lead = await estimateConsultationLead({
+    const lead = await buildEstimateConsultationOffer({
       estimate: baseEstimate({ estimate_group_id: 'grp-1' }),
       estimateData: baseEstimateData(),
       acceptActive: true,
@@ -209,7 +148,7 @@ describe('estimateConsultationLead — cheap short-circuits never touch the DB',
   });
 
   test('estimate missing entirely → null, no DB call, no throw', async () => {
-    const lead = await estimateConsultationLead({
+    const lead = await buildEstimateConsultationOffer({
       estimate: undefined, estimateData: baseEstimateData(), acceptActive: true,
     });
     expect(lead).toBeNull();
@@ -217,7 +156,7 @@ describe('estimateConsultationLead — cheap short-circuits never touch the DB',
   });
 
   test('called with no arguments at all → null, no throw', async () => {
-    await expect(estimateConsultationLead()).resolves.toBeNull();
+    await expect(buildEstimateConsultationOffer()).resolves.toBeNull();
     expect(mockDb).not.toHaveBeenCalled();
   });
 

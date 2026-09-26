@@ -74,7 +74,10 @@ function baseArgs(overrides = {}) {
   };
   return {
     acceptActive: o.acceptActive,
-    estimate: { id: ESTIMATE_ID, address: o.estimateAddress, estimate_group_id: o.grouped ? 'grp-1' : null },
+    estimate: {
+      id: ESTIMATE_ID, address: o.estimateAddress, estimate_group_id: o.grouped ? 'grp-1' : null,
+      customer_id: null, customer_phone: o.customerPhone === undefined ? '(941) 555-1234' : o.customerPhone, customer_email: null,
+    },
     estimateData: {
       ...(o.leadId ? { lead_id: o.leadId } : {}),
       ...(o.leadLinkage ? { lead_linkage: o.leadLinkage } : {}),
@@ -144,6 +147,12 @@ describe('buildEstimateConsultationOffer — hidden cases', () => {
   test('stamped lead id without any linkage and no pointer → null', async () => {
     const result = await buildEstimateConsultationOffer(baseArgs({ leadLinkage: null }));
     expect(result).toBeNull();
+  });
+
+  test('the linked lead is no longer the estimate\'s contact (edited pointer, another person) → null, no probe', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: OPEN_RECURRING_LEAD, pointing: [LEAD_ID] });
+    expect(await buildEstimateConsultationOffer(baseArgs({ leadId: null, customerPhone: '(941) 555-9999' }))).toBeNull();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('two live leads pointing at the estimate → ambiguous, null', async () => {

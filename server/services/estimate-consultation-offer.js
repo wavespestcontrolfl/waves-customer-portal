@@ -5,8 +5,7 @@
  * is the fallback). Links to the SAME /inspection/:token self-booking page
  * the recurring-lead new_lead email offers (lead-consultation-email-block.js).
  *
- * estimateConsultationLead is the eligibility every surface shares (see its
- * comment). buildEstimateConsultationOffer is the estimate PAGE's offer,
+ * buildEstimateConsultationOffer is the estimate PAGE's offer,
  * dark behind GATE_ESTIMATE_CONSULTATION_OFFER plus the /inspection page's
  * GATE_LEAD_INSPECTION_LINK: the long URL with no channel claim and no
  * write of any kind (a public GET stays read-only). It never throws — any
@@ -70,16 +69,15 @@ async function linkedLeadIdFor(estimateId, estimateData) {
   return candidates.size === 1 ? [...candidates][0] : null;
 }
 
-// The lead a consultation offer on this estimate may invite, or null — the
-// eligibility every surface shares (the estimate page here; the estimate
-// email calls it too). Each caller checks its OWN gate first; this checks
-// the /inspection page's gate and everything else:
+// The lead a consultation offer on this estimate may invite, or null. The
+// caller checks its own gate first; this checks the /inspection page's gate
+// and everything else:
 //   - accept-active (the caller's verdict) and quote-first: not drafted
 //     from a visit (estimate_data.scheduled_service_id — the assessment
 //     pre-draft already had its look, Codex #4853 r2 P1) and not grouped
 //     (estimate_group_id spans properties);
-//   - an unambiguous linked lead (linkedLeadIdFor) that passes
-//     leadLinkRefusal and wants a recurring plan;
+//   - an unambiguous linked lead (linkedLeadIdFor) that is still the
+//     estimate's contact, passes leadLinkRefusal and wants a recurring plan;
 //   - the page's probe finds an open slot (#4853 r1 P2) at the address it
 //     resolved, which must be this estimate's property (r2 P1, r3 P0).
 // Throws on unexpected errors — callers fail soft.
@@ -92,6 +90,12 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
   const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
     .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
   if (!lead) return null;
+  // The pointer is editable on its own (PUT /api/admin/leads/:id), so the
+  // lead must still be the estimate's contact (Codex #4906 r1 P1): the
+  // same customer, or the same phone or email — the rule attaching a lead
+  // to an estimate uses (lead-estimate-link.js).
+  const { leadMatchesEstimateContact } = require('./lead-estimate-link');
+  if (!leadMatchesEstimateContact(lead, estimate)) return null;
   if (await leadLinkRefusal(lead)) return null;
   if (!leadWantsRecurringPlan(lead)) return null;
 
@@ -118,4 +122,4 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
   }
 }
 
-module.exports = { buildEstimateConsultationOffer, estimateConsultationLead, _test: { sameProperty, linkedLeadIdFor } };
+module.exports = { buildEstimateConsultationOffer, _test: { sameProperty, linkedLeadIdFor } };
