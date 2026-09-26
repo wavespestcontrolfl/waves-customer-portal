@@ -3119,6 +3119,9 @@ describe('lineIsRetiredSale drives the customer-switch effect end to end (codex 
     // The retired quarterly line is gone; the current 6x line survives.
     await waitFor(() => expect(screen.queryByLabelText('Repeats for Tree & Shrub Care')).toBeNull());
     expect(screen.getByLabelText('Repeats for Bi-Monthly Tree & Shrub Care Service')).toBeTruthy();
+    // Nothing was ever submitted in this test — the drop is a pure client
+    // effect, with no server round trip.
+    expect(schedulePosts(fetcher)).toHaveLength(0);
   });
 });
 
