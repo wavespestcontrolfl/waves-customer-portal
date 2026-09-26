@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/messaging/push-channel-routing.js',
+    snippet: "const existing = await db('sms_log').where({ customer_id: customerId, from_phone: 'push' })",
+    reason: 'existence check for an accepted push proof row (from_phone push) before repairing it; a send reservation is never a push proof, and nothing is presented as a message.',
+  },
+  {
     file: 'services/billing-retry-email-obligation.js',
     snippet: "const existing = await trx('sms_log')",
     reason: 'Exact billing_retry_email_key lookup owns queue deduplication across every status; it never presents a reservation as delivered contact history.',
