@@ -7,18 +7,18 @@
  * layered on top of GATE_LEAD_INSPECTION_LINK (checked inside the shared
  * estimateConsultationLead eligibility every consultation surface uses).
  *
- * Two steps, split around the engine's own send checks (Codex #4918
- * r7–r13). The shared eligibility includes a slot probe that can take up to
- * 3 s, and every read the engine judges or sends from must be taken AFTER
- * it — so the slow step runs before the engine's fresh re-read, and only
- * fast, probe-free work (this link's mint and re-judge, then the engine's
- * own last re-read of the estimate) sits between the engine's claim and its
- * send:
+ * Two steps, placed by the engine around its own send checks (Codex #4918
+ * r7–r14). The shared eligibility includes a slot probe that can take up to
+ * 3 s: the engine probes a job only once it has passed every check, then
+ * judges the whole job again from the top on state read after the probe,
+ * and only fast, probe-free work (this link's mint and re-judge, then the
+ * engine's own last re-read) sits between its claim and its send:
  *
- *   - probeGoneQuietConsultation(estimateId) — the slow step, called BEFORE
- *     the engine re-reads the estimate. Returns the context the second step
- *     needs (the eligible lead and the property its probe resolved), or null
- *     for no offer. Mints nothing and judges no recipient.
+ *   - probeGoneQuietConsultation(estimateId) — the slow step, once a
+ *     gone-quiet job has passed every engine check. Returns the context the
+ *     second step needs (the eligible lead and the property its probe
+ *     resolved), or null for no offer. Mints nothing and judges no
+ *     recipient.
  *   - finalizeGoneQuietConsultationUrl(context, recipientEmail) — after the
  *     engine's claim, right before its send (only the engine's own final
  *     re-read of the estimate follows): mints the short link, then re-runs
@@ -58,7 +58,8 @@ async function probeGoneQuietConsultation(estimateId) {
     if (!estimate?.customer_email) return null;
     // The page's own accept-active verdict (status, expiry, and every
     // off-customer-surface hold), lazily required like the shared helper
-    // does — this step runs before the engine's own status checks.
+    // does — the offer's eligibility is judged on this row, not the
+    // engine's.
     const { isEstimateAcceptActive } = require('../routes/estimate-public');
     const context = {};
     // Everything else (inspection gate, quote-first/not-grouped, unambiguous

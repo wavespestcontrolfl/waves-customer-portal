@@ -32,7 +32,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, estimateEmailConsultationOfferLive } = require('../config/feature-gates');
 const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 // A pricing-authority block is TEMPORARY (the operator re-saves the row
 // through the engine), so the job is deferred — never made terminal — and
@@ -523,7 +523,14 @@ async function processDueBatch(now = new Date()) {
     }
   };
 
-  for (const job of jobs) {
+  // Gone-quiet jobs whose consultation-offer slot probe already ran this
+  // batch (Codex #4918 r14): a job is probed only after it passes every
+  // check in the loop, then judged once more from the top on state read
+  // after the probe — the second pass reuses the result, never re-probes.
+  const probedOffers = new Map();
+  const queue = [...jobs];
+  while (queue.length) {
+    const job = queue.shift();
     let claimed = false;
     let trig = {};
     try {
@@ -538,19 +545,6 @@ async function processDueBatch(now = new Date()) {
         await markJob(job.id, 'skipped', 'rule-disabled');
         continue;
       }
-      // ONE new variable, ONE rule (owner ruling 2026-09-26): only the
-      // gone-quiet email carries the consultation-offer link; every other
-      // rule's payload is byte-identical and never calls either step.
-      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
-      // The offer's slot probe can take up to 3 s, so it runs FIRST — before
-      // the fresh re-read below (Codex #4918 r7–r12): every check and every
-      // payload field this job uses is then read after the probe, exactly as
-      // before the offer existed. Only its probe-free finalize runs later,
-      // after the claim, followed by one last re-read of the estimate before
-      // the send. Shadow jobs never send, so they never probe.
-      const consultationContext = live && isGoneQuiet
-        ? await probeGoneQuietConsultation(job.estimate_id)
-        : null;
       // Re-read the estimate fresh — everything below judges CURRENT state,
       // not what was true at enqueue time.
       const est = await db('estimates').where({ id: job.estimate_id }).first();
@@ -739,6 +733,23 @@ async function processDueBatch(now = new Date()) {
         await deferOrShadow(live, job, new Date(nowMs + PRICING_AUTHORITY_RECHECK_MS), 'pricing-authority-not-server');
         continue;
       }
+      // ONE new variable, ONE rule (owner ruling 2026-09-26): only the
+      // gone-quiet email carries the consultation-offer link; every other
+      // rule's payload is byte-identical and never calls either step.
+      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
+      // The offer's slot probe can take up to 3 s. It runs only for a job
+      // that has passed every check above — no probe, and no time under the
+      // follow-up lock, for a job about to be skipped or deferred (Codex
+      // #4918 r14) — and the job is then judged once more from the top, on
+      // state read AFTER the probe (r7–r12): every check and every payload
+      // field of the send is post-probe. Shadow jobs never reach this point;
+      // with the offer's gate off, no job probes or takes a second pass.
+      if (isGoneQuiet && estimateEmailConsultationOfferLive() && !probedOffers.has(job.id)) {
+        probedOffers.set(job.id, await probeGoneQuietConsultation(job.estimate_id));
+        queue.unshift(job);
+        continue;
+      }
+      const consultationContext = probedOffers.get(job.id) || null;
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
         job_id: job.id,
         trigger: job.trigger,
@@ -789,18 +800,22 @@ async function processDueBatch(now = new Date()) {
         : '';
       if (consultationContext) {
         // finalize's mint and re-judge are the only awaits this offer adds
-        // between the engine's estimate read and its send, and the send —
-        // recipient, name, address, price, services — is built from that
-        // read (Codex #4918 r12/r13). Re-read the row as the last step
-        // before sending: if anything changed besides this job's own counter
-        // heal, give the claim back and retry the whole job on fresh state
-        // (the checks at the top then skip it if it is no longer sendable) —
-        // never send from, or patch, a stale snapshot. Nothing awaits after
-        // this read but the provider call itself.
+        // between the engine's reads and its send, and the send — recipient,
+        // name, address, price, services, the customer's email opt-out — is
+        // built on those reads (Codex #4918 r12–r14). Re-read the estimate
+        // row and the opt-out as the last step before sending: if the row
+        // changed besides this job's own counter heal, or the customer has
+        // opted out of email since, give the claim back and retry the whole
+        // job on fresh state (the checks at the top then skip it if it is no
+        // longer sendable) — never send from, or patch, a stale snapshot. A
+        // read error throws to the loop's catch: claim released, bounded
+        // retry. Nothing awaits after these reads but the provider call.
         const current = await db('estimates').where({ id: est.id }).first();
         const changed = !current || Object.keys(current).some((col) => !OWN_ESTIMATE_WRITES.has(col)
           && JSON.stringify(current[col]) !== JSON.stringify(est[col]));
-        if (changed) {
+        const optedOut = !changed && Boolean(current.customer_id)
+          && (await db('notification_prefs').where({ customer_id: current.customer_id }).first('email_enabled'))?.email_enabled === false;
+        if (changed || optedOut) {
           await followupShared.releaseFollowupSend(est.id, rule.rule_key);
           claimed = false;
           await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));

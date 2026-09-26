@@ -1,10 +1,10 @@
 /**
  * The estimate.engage_gone_quiet follow-up email's "Rather have us come look
  * first?" link (services/estimate-email-consultation-offer.js), in two steps
- * split around the engine's own send checks (Codex #4918 r7–r12):
+ * placed by the engine around its own send checks (Codex #4918 r7–r14):
  *
  *   - probeGoneQuietConsultation(estimateId): the slow step (shared
- *     eligibility + slot probe), BEFORE the engine re-reads the estimate.
+ *     eligibility + slot probe), once a job has passed every engine check.
  *     A context for an eligible lead, else null. Never mints, and never
  *     judges a recipient from its pre-probe row.
  *   - finalizeGoneQuietConsultationUrl(context, recipientEmail): the last
@@ -97,7 +97,7 @@ beforeEach(() => {
   mockShortWrap.mockResolvedValue(SHORT_URL);
 });
 
-describe('probeGoneQuietConsultation — the slow step, before the engine re-reads the estimate', () => {
+describe('probeGoneQuietConsultation — the slow step, once the engine\'s checks pass', () => {
   test('eligible lead → the context the helper recorded; nothing minted, no recipient judged', async () => {
     const context = await probeGoneQuietConsultation('est-1');
 

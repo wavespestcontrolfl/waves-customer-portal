@@ -6,9 +6,9 @@
  *
  * Reads, in order: probeGoneQuietConsultation reads the estimate, the lead
  * (pre-probe), runs the slot probe, then re-reads the estimate and lead
- * (post-probe, Codex #4918 r5). finalizeGoneQuietConsultationUrl — the last
- * await before the engine's send — mints, then re-reads both once more
- * (Codex #4918 r9/r12). A change in either window drops the link.
+ * (post-probe, Codex #4918 r5). finalizeGoneQuietConsultationUrl — after the
+ * engine's claim, right before its send — mints, then re-reads both once
+ * more (Codex #4918 r9/r12). A change in either window drops the link.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
