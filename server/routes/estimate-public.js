@@ -16400,9 +16400,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // row-existence oracle; docs/public-route-contracts.md). The admin
     // extension keeps extendEstimate's explicit 409.
     {
-      const { gatedSendAuthorityPredicateApplies } = require('../services/pricing-authority-gate');
       const { extensionDeliverableUnderGate } = require('../services/estimate-extension');
-      if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
+      if (!(await extensionDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
@@ -25661,8 +25660,8 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // row — or group link — the shared verdict refuses answers the family's
     // generic 404, before either provider path.
     {
-      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
-      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      const { estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (!(await estimateDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
