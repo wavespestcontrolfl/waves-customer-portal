@@ -16,6 +16,9 @@ const {
 const { phoneMatchDigits } = require('../utils/phone');
 const { lockCustomerComms, withSmsConsentLock } = require('../utils/customer-comms-lock');
 const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
+// Two-segment ceiling for the agent's text, STOP line included (policy.js
+// maxSegments for customer SMS; the send pipeline itself only advises).
+const LEAD_RESPONSE_MAX_SEGMENTS = 2;
 
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
@@ -281,6 +284,18 @@ async function executeLeadTool(toolName, input, context) {
       // dedup lookup that could not be read — fail closed) means NO send:
       // the lead goes to the owner instead.
       const { claimLeadFirstTouch, resolveLeadAutoReplyClaim, isDeliveredSms, clearServiceMenuIntakeState } = require('./lead-auto-reply');
+      // Customer texts stay within two SMS segments, and the STOP line below
+      // is added after the agent drafts. Measure the composed text before
+      // taking the claim, so the agent can shorten and retry.
+      const messageBody = `${input.message}\n\nReply STOP to opt out.`;
+      const { countSegments } = require('./messaging/segment-counter');
+      const { segmentCount } = countSegments(messageBody);
+      if (segmentCount > LEAD_RESPONSE_MAX_SEGMENTS) {
+        return {
+          error: `Message too long: with the required "Reply STOP to opt out." line it is ${segmentCount} SMS segments (max ${LEAD_RESPONSE_MAX_SEGMENTS}). Shorten it to about 250 characters, no emoji, and call send_lead_response again.`,
+          validationError: true,
+        };
+      }
       const firstTouch = await claimLeadFirstTouch(customer.phone, customer.id);
       if (!firstTouch.claimed) {
         return {
@@ -291,7 +306,6 @@ async function executeLeadTool(toolName, input, context) {
           name: customer.first_name,
         };
       }
-      const messageBody = `${input.message}\n\nReply STOP to opt out.`;
 
       // Routed through the customer-message middleware so consent /
       // suppression / identity / voice / segment checks all apply, and

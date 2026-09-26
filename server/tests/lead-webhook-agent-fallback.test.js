@@ -20,7 +20,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 
 const { _test } = require('../routes/lead-webhook');
-const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS } = _test;
+const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS, flushPendingLeadFallbacks, pendingLeadFallbacks } = _test;
+
+// Runs that never settle stay registered in the module-level set.
+beforeEach(() => pendingLeadFallbacks.clear());
 
 function harness(processLeadImpl) {
   const sendFallback = jest.fn(async () => {});
@@ -75,6 +78,28 @@ describe('settleLeadResponseAgentRun — agent configured', () => {
     }
   });
 
+  test('timed out, then the run ends without a send → the fallback is tried again', async () => {
+    // The first try can find the agent's in-flight claim and skip; if that
+    // send then fails and releases the claim, the retry greets the lead.
+    let finish;
+    const { sendFallback, onError, processLead } = harness(() => new Promise((resolve) => { finish = resolve; }));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 10 });
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+    finish({ actionTaken: 'queued_for_adam' });
+    await new Promise(r => setImmediate(r));
+    expect(sendFallback).toHaveBeenCalledTimes(2);
+    expect(pendingLeadFallbacks.size).toBe(0);
+  });
+
+  test('timed out, then the agent sends → no second try', async () => {
+    let finish;
+    const { sendFallback, onError, processLead } = harness(() => new Promise((resolve) => { finish = resolve; }));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 10 });
+    finish({ actionTaken: 'auto_sent' });
+    await new Promise(r => setImmediate(r));
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+  });
+
   test('an agent that sends before the bounded wait ends → no fallback', async () => {
     const { sendFallback, onError, processLead } = harness(() => new Promise((resolve) => setTimeout(() => resolve({ actionTaken: 'auto_sent' }), 5)));
     await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 1000 });
@@ -121,3 +146,30 @@ describe('settleLeadResponseAgentRun — agent not configured', () => {
   });
 });
 
+
+describe('flushPendingLeadFallbacks (deploy shutdown)', () => {
+  test('a run still pending at shutdown gets its standard reply now', async () => {
+    const { sendFallback, onError, processLead } = harness(() => new Promise(() => {}));
+    const settling = settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 60000 });
+    await new Promise(r => setImmediate(r));
+    expect(pendingLeadFallbacks.size).toBe(1);
+    await expect(flushPendingLeadFallbacks(1000)).resolves.toBe(1);
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+    expect(pendingLeadFallbacks.size).toBe(0);
+    void settling;
+  });
+
+  test('a settled run is no longer pending', async () => {
+    const { sendFallback, onError, processLead } = harness(async () => ({ actionTaken: 'auto_sent' }));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError });
+    await expect(flushPendingLeadFallbacks(1000)).resolves.toBe(0);
+    expect(sendFallback).not.toHaveBeenCalled();
+  });
+
+  test('a hanging fallback cannot hold shutdown past the bound', async () => {
+    pendingLeadFallbacks.add(() => new Promise(() => {}));
+    const started = Date.now();
+    await expect(flushPendingLeadFallbacks(20)).resolves.toBe(1);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});

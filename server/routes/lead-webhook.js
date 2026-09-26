@@ -1813,11 +1813,32 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
 // first, and the agent's send_lead_response is then refused.
 const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
 
+// Agent runs whose fallback has not been settled yet. Both live only in this
+// process, so a deploy's SIGTERM flushes them (flushPendingLeadFallbacks,
+// called from index.js shutdown): the standard reply goes out at once
+// instead of dying with the process. The shared first-touch claim still
+// allows exactly one text, so an agent send that already landed wins.
+const pendingLeadFallbacks = new Set();
+
+async function flushPendingLeadFallbacks(timeoutMs = 10000) {
+  const pending = [...pendingLeadFallbacks];
+  pendingLeadFallbacks.clear();
+  if (!pending.length) return 0;
+  let timer;
+  await Promise.race([
+    Promise.allSettled(pending.map(sendFallback => Promise.resolve().then(sendFallback))),
+    new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); }),
+  ]);
+  clearTimeout(timer);
+  return pending.length;
+}
+
 
 async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
   if (!agentConfigured) {
     return processLead().catch(err => onError(err));
   }
+  pendingLeadFallbacks.add(sendFallback);
   let timer;
   const timedOut = new Promise((resolve) => {
     timer = setTimeout(() => resolve({ timedOut: true }), fallbackAfterMs);
@@ -1826,6 +1847,19 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
   const run = Promise.resolve().then(processLead).then(outcome => ({ outcome }), err => ({ err }));
   const settled = await Promise.race([run, timedOut]);
   clearTimeout(timer);
+  if (settled.timedOut) {
+    // The fallback below may find the agent's claim still held by a send in
+    // flight and skip. If that send then fails and releases the claim, the
+    // lead would get nothing, so once the run ends without a send the
+    // standard reply is tried again (the claim keeps it to one text).
+    void run.then(({ outcome, err }) => {
+      pendingLeadFallbacks.delete(sendFallback);
+      if (err) onError(err);
+      return outcome?.actionTaken === 'auto_sent' ? undefined : sendFallback();
+    }).catch(lateErr => onError(lateErr));
+    return sendFallback();
+  }
+  pendingLeadFallbacks.delete(sendFallback);
   if (settled.err) onError(settled.err);
   if (settled.outcome?.actionTaken !== 'auto_sent') return sendFallback();
 }
@@ -1864,6 +1898,7 @@ function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
 }
 
 module.exports = router;
+module.exports.flushPendingLeadFallbacks = flushPendingLeadFallbacks;
 module.exports._test = {
   buildExistingCustomerLeadUpdates,
   attachVoicemailPrefillLead,
@@ -1879,6 +1914,8 @@ module.exports._test = {
   shouldApplyTriageServiceInterest,
   shouldRunLeadAcquisition,
   settleLeadResponseAgentRun,
+  flushPendingLeadFallbacks,
+  pendingLeadFallbacks,
   LEAD_AGENT_FALLBACK_AFTER_MS,
   applyLeadEstimateAutomationGate,
   determineLeadSource,

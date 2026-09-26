@@ -159,3 +159,24 @@ test('a provider throw that DID carry an accepted providerOutcome is treated as 
   expect(result).toMatchObject({ sent: true });
   expect(mockResolveClaim).toHaveBeenCalledWith('9415550100', acceptedOutcome);
 });
+
+test('a draft that would pass two segments with the STOP line is sent back to the agent, before any claim', async () => {
+  mockClaim.mockResolvedValue({ claimed: true, phoneDigits: '9415550100' });
+  const long = 'A'.repeat(290);
+
+  const result = await executeLeadTool('send_lead_response', { message: long }, context);
+
+  expect(result).toMatchObject({ validationError: true });
+  expect(result.error).toMatch(/Shorten it/);
+  expect(mockClaim).not.toHaveBeenCalled();
+  expect(mockMessage).not.toHaveBeenCalled();
+});
+
+test('a draft that fits two segments with the STOP line goes out', async () => {
+  mockClaim.mockResolvedValue({ claimed: true, phoneDigits: '9415550100' });
+  const fits = 'A'.repeat(306 - '\n\nReply STOP to opt out.'.length);
+
+  const result = await executeLeadTool('send_lead_response', { message: fits }, context);
+
+  expect(result).toMatchObject({ sent: true });
+});

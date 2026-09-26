@@ -16,7 +16,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { sendCustomerMessage, normalizeRecipient } = require('./messaging/send-customer-message');
+const { sendCustomerMessage, normalizeRecipient, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
 /**
@@ -132,7 +132,10 @@ async function resolveLeadAutoReplyClaim(phoneDigits, smsResult, dbc = db) {
       return;
     }
     const deterministicNoDelivery = !!smsResult && (
-      smsResult.blocked === true
+      // The messaging wrapper's canonical verdict: a throw before dispatch
+      // carries deliveryOutcome 'not_sent' (provider never called).
+      classifyDeliveryCertainty(smsResult) === 'not_sent'
+      || smsResult.blocked === true
       || smsResult.sent === true // sentinel sid: gate-blocked / template-disabled / owner-silence
       || (smsResult.sent === false && smsResult.terminal === true)
     );

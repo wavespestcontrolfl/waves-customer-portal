@@ -167,6 +167,8 @@ describe('resolveLeadAutoReplyClaim', () => {
     ['gate/template sentinel sid', { sent: true, providerMessageId: 'gate-blocked' }],
     ['owner-silence sentinel sid', { sent: true, providerMessageId: 'owner-silence' }],
     ['terminal provider rejection', { sent: false, blocked: false, terminal: true, code: 'PROVIDER_FAILURE' }],
+    // A throw before dispatch carries the wrapper's canonical not_sent.
+    ['pre-dispatch throw (deliveryOutcome not_sent)', { sent: false, deliveryOutcome: 'not_sent' }],
   ])('deterministic no-delivery: %s → claim released', async (_label, smsResult) => {
     const dbc = mkDbc();
     await resolveLeadAutoReplyClaim('9415551234', smsResult, dbc);
@@ -178,6 +180,7 @@ describe('resolveLeadAutoReplyClaim', () => {
 
   test.each([
     ['retryable transport error (may have been accepted by Twilio)', { sent: false, blocked: false, retryable: true, terminal: false, code: 'PROVIDER_FAILURE' }],
+    ['uncertain delivery (deliveryOutcome uncertain)', { sent: false, deliveryOutcome: 'uncertain' }],
     ['unknown result shape', undefined],
     ['null result', null],
   ])('AMBIGUOUS outcome: %s → claim KEPT (fail closed) and warns', async (_label, smsResult) => {

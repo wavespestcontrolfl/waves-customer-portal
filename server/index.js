@@ -1600,10 +1600,17 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
 // error), then close the HTTP listener so in-flight requests finish.
 function shutdown(signal) {
   logger.info(`[shutdown] ${signal} received, draining sockets + closing server`);
+  // New website leads waiting on the Lead Response agent get their standard
+  // reply now rather than never (the fallback lives only in this process).
+  // Must finish before the DB pool closes: the send needs its claim row.
+  const leadFallbacksFlushed = require('./routes/lead-webhook').flushPendingLeadFallbacks(10000)
+    .then((count) => { if (count) logger.info(`[shutdown] sent ${count} pending lead fallback reply(ies)`); })
+    .catch(err => logger.warn(`[shutdown] lead fallback flush failed: ${err.message}`));
   io.close(() => {
     logger.info('[shutdown] Socket.io closed');
     httpServer.close(async () => {
       logger.info('[shutdown] HTTP server closed, exiting');
+      await leadFallbacksFlushed;
       try {
         const db = require('./models/db');
         await Promise.race([
