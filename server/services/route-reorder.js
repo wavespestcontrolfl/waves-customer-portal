@@ -1166,7 +1166,17 @@ async function runRouteReorder(opts = {}, conn = db) {
   // order beats a stale one"): opts.canonicalizeStale opts in directly (the
   // route-order-cleanup script), or the gate opts in the nightly pass itself.
   // Read at call time — unset/false is byte-for-byte today's behavior.
-  const canonicalizeStaleEnabled = opts.canonicalizeStale === true || gateEnvValue('GATE_ROUTE_REORDER_STALE_ORDER');
+  // NEVER for opts.repairOnly (codex pre-push P1): a change-triggered repair
+  // run is a narrow, surgical fix for the exact dates a schedule change just
+  // touched — it must behave identically whether the gate is on or off.
+  // Without this exclusion, a coordless/over-cap stale day reaches the
+  // canonicalize-only write attempts BEFORE the `opts.repairOnly && !repair`
+  // skip below even runs, so a repair pass could canonicalize a day the
+  // nightly band hasn't reached yet. Canonicalization only ever runs from
+  // the nightly band pass or the cleanup script's own explicit
+  // canonicalizeStale run, neither of which ever sets opts.repairOnly.
+  const canonicalizeStaleEnabled = !opts.repairOnly
+    && (opts.canonicalizeStale === true || gateEnvValue('GATE_ROUTE_REORDER_STALE_ORDER'));
   const lastDate = etDateString(addETDays(now, 30));
   // Custom dates (D+1..D+30 ET) are honored for opts.repairOnly (unchanged)
   // and, ONLY when canonicalization is actually enabled, for a caller (the

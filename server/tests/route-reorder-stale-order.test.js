@@ -142,6 +142,53 @@ describe('mode OFF — byte-for-byte the pre-existing behavior', () => {
   });
 });
 
+describe('opts.repairOnly excludes canonicalization entirely, even with the gate on', () => {
+  // codex pre-push P1: a coordless/over-cap stale day reached the
+  // canonicalize-only write attempt BEFORE the `opts.repairOnly && !repair`
+  // skip even ran, so a change-triggered repair pass could canonicalize a
+  // day the nightly band hasn't reached yet. Canonicalization only ever
+  // runs from the nightly band pass or the cleanup script's own
+  // canonicalizeStale run — neither sets opts.repairOnly.
+  const repairGateEnv = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_ROUTE_REORDER'];
+  beforeEach(() => {
+    for (const g of repairGateEnv) process.env[g] = 'true';
+    process.env.GATE_ROUTE_REORDER_STALE_ORDER = 'true';
+  });
+  afterEach(() => {
+    for (const g of repairGateEnv) delete process.env[g];
+    delete process.env.GATE_ROUTE_REORDER_STALE_ORDER;
+  });
+
+  test('a coordless stale day under repairOnly skips COORDLESS_STOPS — no canonicalize write, Google never called', async () => {
+    stopsByDate[DAY] = [
+      stop('a', { window_start: '09:00', route_order: null }), // stale (null position)
+      stop('b', { window_start: '11:00', route_order: 2 }),
+      stop('c', { window_start: '13:00', route_order: 3, lat: null, lng: null }), // coordless
+    ];
+    const res = await runRouteReorder({ now: NOW, repairOnly: true, dates: [DAY] });
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    const skip = ledger().skips.find((s) => s.date === DAY);
+    expect(skip).toMatchObject({ reason: 'COORDLESS_STOPS' });
+    expect(skip.canonicalized).toBeUndefined();
+  });
+
+  test('the same stale day WITHOUT repairOnly (nightly band) DOES canonicalize — proving the gate genuinely works outside repairOnly', async () => {
+    stopsByDate[DAY] = [
+      stop('a', { window_start: '09:00', route_order: null }),
+      stop('b', { window_start: '11:00', route_order: 2 }),
+      stop('c', { window_start: '13:00', route_order: 3, lat: null, lng: null }),
+    ];
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(1);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled(); // still coordless — baseline needs no Google either
+    expect(trxUpdates.length).toBeGreaterThan(0);
+    const applied = ledger().reorders.find((r) => r.date === DAY);
+    expect(applied).toMatchObject({ source: 'promised_window' });
+  });
+});
+
 describe('mode ON — canonicalization', () => {
   test('nothing beats the promised-window baseline: the baseline itself is written, renumbering the gap', async () => {
     // A(2), B(null), C(3) — window ties (all 09:00), so currentOrder =
