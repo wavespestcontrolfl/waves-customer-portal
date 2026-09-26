@@ -155,11 +155,11 @@ const NEGATED_NEED_RE = /\b(?:don'?t|do\s+not|doesn'?t|does\s+not|no|not|never|w
 
 // A symptom tied to a treatment or product is a reaction ("My child is
 // vomiting after the pesticide treatment", "rash after the lawn chemicals").
-const SYMPTOM_WORDS = '(?:vomit\\w*|throw\\w*\\s+up|dizz\\w*|rash\\w*|hives|swell\\w*|swoll\\w*|nause\\w*|headaches?|cough\\w*|wheez\\w*|burn(?:ing|s)?|itch\\w*|fever|faint\\w*|seiz\\w*|drool\\w*|sick|ill|v[oó]mit\\w*|mare[oa]\\w*|sarpullido|ronchas|hinchad\\w*|n[aá]usea\\w*|tos|ardor|fiebre|enferm[oó]\\w*)';
+const SYMPTOM_WORDS = '(?:shak\\w*|trembl\\w*|shiver\\w*|letharg\\w*|limp\\w*|collaps\\w*|unconscious|foam\\w*|temblando|colaps\\w*|vomit\\w*|throw\\w*\\s+up|dizz\\w*|rash\\w*|hives|swell\\w*|swoll\\w*|nause\\w*|headaches?|cough\\w*|wheez\\w*|burn(?:ing|s)?|itch\\w*|fever|faint\\w*|seiz\\w*|drool\\w*|sick|ill|v[oó]mit\\w*|mare[oa]\\w*|sarpullido|ronchas|hinchad\\w*|n[aá]usea\\w*|tos|ardor|fiebre|enferm[oó]\\w*)';
 const TREATMENT_WORDS = `(?:treat\\w*|spray\\w*|appli\\w*|chemicals?|fumig\\w*|tratamiento\\w*|fumigaci\\w*|roci\\w*|aplicaci\\w*|qu[ií]mic\\w*|${PRODUCT_NOUN})`;
 const TREATMENT_FIRST_SYMPTOM_RE = new RegExp(`\\b(?:after|since|following|ever\\s+since|desde|despu[eé]s\\s+de[l]?|tras)\\b[^.?!\\n]{0,40}?\\b${TREATMENT_WORDS}(?![a-zñáéíóú])[^.?!\\n]{0,50}?\\b${SYMPTOM_WORDS}(?![a-zñáéíóú])`, 'i');
 const CAUSED_SYMPTOM_RE = new RegExp(`\\b${TREATMENT_WORDS}(?![a-zñáéíóú])[^.?!\\n]{0,25}?\\b(?:made|makes|making|caused|causes|causing|gave|gives|left|triggered|hizo|hace|caus[oó]|provoc[oó]|dej[oó])\\b[^.?!\\n]{0,40}?\\b${SYMPTOM_WORDS}(?![a-zñáéíóú])`, 'i');
-const TREATMENT_SYMPTOM_RE = new RegExp(`\\b(?:vomit\\w*|throw\\w*\\s+up|dizz\\w*|rash\\w*|hives|swell\\w*|swoll\\w*|nause\\w*|headaches?|cough\\w*|wheez\\w*|burn(?:ing|s)?|itch\\w*|fever|faint\\w*|seiz\\w*|drool\\w*|(?:got|feels?|is|are|was|became)\\s+sick|ill|v[oó]mit\\w*|mare[oa]\\w*|sarpullido|ronchas|hinchad\\w*|n[aá]usea\\w*|tos|ardor|fiebre|enferm[oó]\\w*)(?![a-zñáéíóú])[^.?!\\n]{0,40}?\\b(?:after|since|from|following|when|desde|despu[eé]s|tras|por)\\b[^.?!\\n]{0,40}?\\b(?:treat\\w*|spray\\w*|appli\\w*|chemicals?|fumig\\w*|tratamiento\\w*|fumigaci\\w*|roci\\w*|aplicaci\\w*|qu[ií]mic\\w*|${PRODUCT_NOUN})(?![a-zñáéíóú])`, 'i');
+const TREATMENT_SYMPTOM_RE = new RegExp(`\\b${SYMPTOM_WORDS}(?![a-zñáéíóú])[^.?!\\n]{0,40}?\\b(?:after|since|from|following|when|desde|despu[eé]s|tras|por)\\b[^.?!\\n]{0,40}?\\b(?:treat\\w*|spray\\w*|appli\\w*|chemicals?|fumig\\w*|tratamiento\\w*|fumigaci\\w*|roci\\w*|aplicaci\\w*|qu[ií]mic\\w*|${PRODUCT_NOUN})(?![a-zñáéíóú])`, 'i');
 
 // A denied exposure ("did not swallow", "never ate the bait", "no se tragó")
 // is a correction, not an emergency. Never breathing: "is not breathing" is
@@ -175,17 +175,28 @@ function affirmedAfterDenial(turn) {
   return AFFIRMED_PRONOUN_EXPOSURE_RE.test(turn) && new RegExp(`\\b${PRODUCT_NOUN}(?![a-zñáéíóú])`, 'i').test(turn);
 }
 
+const SYMPTOM_PATIENT_RE = /\b(?:i|i'?m|me|my|we|our|he|she|him|her|his|son|daughter|child|children|kids?|baby|babies|toddler|infant|husband|wife|family|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|birds?|rabbits?|beagles?|labs?|labradors?|poodles?|terriers?|retrievers?|yo|mi|mis|hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?)\b/i;
 function treatmentSymptom(turn) {
   const u = turn.replace(NEGATED_REACTION_RE, ' ');
+  // A person or pet must be the patient — "the pesticide made the ants sick"
+  // is efficacy, not a reaction.
+  if (!SYMPTOM_PATIENT_RE.test(u)) return false;
   return TREATMENT_SYMPTOM_RE.test(u) || TREATMENT_FIRST_SYMPTOM_RE.test(u) || CAUSED_SYMPTOM_RE.test(u);
+}
+
+// Denied breathing trouble ("not having trouble breathing", "no shortness
+// of breath") — never the bare "is not breathing", which stays an emergency.
+const NEGATED_BREATHING_RE = /\b(?:not|no|without|isn'?t|doesn'?t\s+have|has\s+no|have\s+no|not\s+having|no\s+tiene)\s+(?:any\s+|real\s+)?(?:trouble|difficulty|problems?|issues?)\s+breathing\b|\bnot\s+short\s+of\s+breath\b|\bno\s+shortness\s+of\s+breath\b|\bbreathing\s+(?:fine|normally|ok|okay|well)\b|\brespira\s+(?:bien|normal\w*)|\bsin\s+dificultad\s+para\s+respirar|\bno\s+tiene\s+(?:ninguna\s+)?dificultad\s+para\s+respirar/gi;
+function stripDenials(text) {
+  return String(text || '').split('\n')
+    .map((turn) => turn.replace(NEGATED_ALLERGY_RE, ' ').replace(NEGATED_NEED_RE, ' ').replace(NEGATED_EXPOSURE_RE, ' ').replace(NEGATED_BREATHING_RE, ' '))
+    .join('\n');
 }
 
 function looksLikeEmergency(text) {
   // Denials are stripped one turn at a time, so a "no" ending one turn can
   // never swallow a statement in the next.
-  const t = String(text || '').split('\n')
-    .map((turn) => turn.replace(NEGATED_ALLERGY_RE, ' ').replace(NEGATED_NEED_RE, ' ').replace(NEGATED_EXPOSURE_RE, ' '))
-    .join('\n');
+  const t = stripDenials(text);
   // Exposure shapes are judged one turn (line) at a time — "I ate lunch" in
   // history must not pair with "Which bug spray do you use?" now.
   const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn) || treatmentSymptom(turn) || affirmedAfterDenial(turn));
@@ -345,7 +356,7 @@ const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|ly|ty)?|harmless|gentle|non-?toxic|ris
 // Negation directly governing a hazard, allowing only filler words between
 // ("doesn't pose any risk", "will not cause any harm") — so "We can't treat
 // dangerous wasp nests at height" is not a claim.
-const HAZARD_FILLER = '(?:(?:a|an|any|much|real|serious|significant|health|to|your|you|for|the|be|pose|poses|cause|causes|bring|of|at|all|known|major|big|present|presents|create|creates|result|results|in|produce|produces|carry|carries|involve|involves|lead|leads)\\s+){0,3}';
+const HAZARD_FILLER = '(?:(?:a|an|any|much|real|serious|significant|health|to|your|you|for|the|be|pose|poses|cause|causes|bring|of|at|all|known|major|big|present|presents|create|creates|result|results|in|produce|produces|carry|carries|involve|involves|lead|leads|considered|classified|deemed|regarded|rated|labeled|labelled|listed|thought|known|as)\\s+){0,3}';
 const NEGATED_HAZARD_RE = new RegExp(`\\b(?:no|zero|not|never|without|poses?\\s+no|presents?\\s+no|free\\s+(?:of|from)|won['’]?t|will\\s+not|doesn['’]?t|does\\s+not|isn['’]?t|is\\s+not|aren['’]?t|are\\s+not|can['’]?t|cannot|shouldn['’]?t|should\\s+not)\\s+${HAZARD_FILLER}(?:harm\\w*|hurt\\w*|danger\\w*|hazard\\w*|threat\\w*|risk\\w*|toxic\\w*|poison\\w*|affect\\w*|ill(?:ness(?:es)?)?|sick(?:ness)?|health\\s+(?:problems?|issues?|risks?|effects?|concerns?|hazards?)|diseases?|side[-\\s]?effects?|adverse\\s+(?:effects?|reactions?|health\\s+effects?)|adverse\\w*|injur\\w*)\\b`, 'i');
 const NEGATED_HAZARD_ES_RE = /\b(?:no|sin|ning[uú]n|ninguna|cero|nunca|libre\s+de)\s+(?:(?:hay|representa|representan|causa|causan|produce|producen|provoca|provocan|genera|generan|tiene|tienen|es|son|un|una|ning[uú]n|ninguna|mayor|gran|alg[uú]n|alguna|para|a|la|el|los|las|su|sus|le|les|hace|hacen)\s+){0,3}(?:peligr\w*|riesgos?|da[ñn]\w*|t[oó]xic\w*|afect\w*|venen\w*|nociv\w*|perjudicial\w*|da[ñn]in[oa]s?|enfermedad\w*|problemas?\s+de\s+salud|efectos?\s+secundarios|efectos?\s+adversos|reacciones\s+adversas)\b/i;
 // Any negated action aimed at a person, pet or the home is a no-harm
@@ -396,7 +407,7 @@ const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|
 const CLOCK_TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b|\b(?:noon|midday|midnight|tonight|tomorrow|this\s+(?:morning|afternoon|evening)|sunset|sundown|sunrise|(?:next\s+|this\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|week)|(?:(?:in|by|until|till|through|before|after|early|mid|late)[-\s]+may|may\s+\d{1,2}(?:st|nd|rd|th)?)|(?:january|february|march|april|june|july|august|september|october|november|december)|(?:el\s+)?(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)|(?:el\s+)?fin\s+de\s+semana|la\s+pr[oó]xima\s+semana|(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)|dark|darkness|(?:the\s+)?sun\s+(?:goes|sets|has\s+set|is)\s+down|oscurecer|oscurezca|se\s+ponga\s+el\s+sol|puesta\s+del\s+sol|dawn|dusk|daybreak|nightfall|morning|evening|night|afternoon|amanecer|anochecer|atardecer|dinner\s*time|bedtime|mediod[ií]a|medianoche|esta\s+(?:tarde|noche)|ma[ñn]ana|la\s+(?:tarde|noche))\b|\blas?\s+\d{1,2}(?::\d{2})?\b|\blas?\s+(?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\b/i;
 // A visit / scheduling duration ("The visit takes about 45 minutes", "every
 // 21 days") — exempt only when no drying or re-entry wording is present.
-const SCHEDULING_DURATION_RE = /\b(?:protect\w*|residual|effective\w*|keeps?\s+working|works?\s+for|up\s+to|guarantee\w*|warrant\w*|control\s+for|protecci[oó]n|efectiv\w*|hasta\s+por|same-?\s*day|next-?\s*day|days?\s+(?:a|per)\s+week|weekdays?|weekends?|24\/7|(?:service|office|business|opening)\s+hours|hours\s+(?:are|of)|open|horario|mismo\s+d[ií]a|visits?|appointments?|arriv\w*|window|inspections?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|inspecci[oó]n|cada|programad\w*)\b/i;
+const SCHEDULING_DURATION_RE = /\b(?:cancel\w*|refund\w*|billing|charge\w*|payments?|invoices?|posts?|posted|credit\w*|contract\w*|trial|renew\w*|notice|reembolso\w*|cancelaci[oó]n|factura\w*|pago\w*|protect\w*|residual|effective\w*|keeps?\s+working|works?\s+for|up\s+to|guarantee\w*|warrant\w*|control\s+for|protecci[oó]n|efectiv\w*|hasta\s+por|same-?\s*day|next-?\s*day|days?\s+(?:a|per)\s+week|weekdays?|weekends?|24\/7|(?:service|office|business|opening)\s+hours|hours\s+(?:are|of)|open|horario|mismo\s+d[ií]a|visits?|appointments?|arriv\w*|window|inspections?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|inspecci[oó]n|cada|programad\w*)\b/i;
 // Generic length verbs ("takes about 45 minutes") exempt a duration only when
 // the visitor didn't ask a timing / access question — "It takes about 30
 // minutes" answering "How long after treatment can I re-enter?" is a claim.
@@ -564,7 +575,7 @@ const VET_DIRECTION_RE = /\b(?:seek|get|find|obtain|needs?)\s+(?:\w+\s+){0,2}?(?
 // symptom verb ("my dog ate the bait", "our cat was stung", "mi perro se
 // comió…"), or the agent of a passive exposure ("eaten by my dog") — not a
 // mere mention ("after a dog bite", "walking my dog when a wasp stung me").
-const PET_WORD = '(?:birds?|parrots?|parakeets?|rabbits?|bunn(?:y|ies)|hamsters?|guinea\\s+pigs?|ferrets?|horses?|tortoises?|turtles?|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|p[aá]jar\\w*|aves?|loros?|conejos?|caballos?|tortugas?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\\w*)';
+const PET_WORD = '(?:labs?|labradors?|beagles?|poodles?|terriers?|retrievers?|shepherds?|bulldogs?|chihuahuas?|dachshunds?|huskies|husky|pugs?|boxers?|collies?|spaniels?|schnauzers?|yorkies?|shih\\s*tzus?|pit\\s*bulls?|pitbulls?|corgis?|doodles?|goldendoodles?|labradoodles?|maltese|rottweilers?|dobermans?|greyhounds?|kitty|kitties|birds?|parrots?|parakeets?|rabbits?|bunn(?:y|ies)|hamsters?|guinea\\s+pigs?|ferrets?|horses?|tortoises?|turtles?|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|p[aá]jar\\w*|aves?|loros?|conejos?|caballos?|tortugas?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\\w*)';
 const PET_PATIENT_RE = new RegExp(`\\b${PET_WORD}(?:\\s+(?:and|y)\\s+(?:i|me|we|yo|my\\s+\\w+|mi\\s+\\w+))?\\s+(?:(?:just|also|both|all|may|might|has|have|had|is|was|were|got|seems?|probably|se|le|ha|est[aá]|fue|ambos)\\s+){0,3}(?:swallow\\w*|ingest\\w*|ate|eaten|eating|drank|drinking|lick\\w*|chew\\w*|consum\\w*|tast\\w*|inhal\\w*|breath\\w*|got\\s+into|stung|bitten|(?<=(?:was|got|been|is)\\s)bit|exposed|sprayed|touched|splashed|expuest[oa]|rociad[oa]|toc[oó]|cough\\w*|wheez\\w*|rash\\w*|hives|dizz\\w*|nause\\w*|faint\\w*|itch\\w*|scratch\\w*|letharg\\w*|limp\\w*|tos|tosiendo|mare[oa]\\w*|swell\\w*|swoll\\w*|vomit\\w*|throw\\w*\\s+up|seiz\\w*|drool\\w*|sick|collaps\\w*|shak\\w*|trag\\w*|comi[oó]|vomit\\w*|picad[oa]|mordid[oa]|enferm\\w*|hinchad[oa])(?![a-zñáéíóú])|\\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten|drunk|chewed|licked|consumed|tasted|inhaled|comid[oa]s?|ingerid[oa]s?|tragad[oa]s?|inhalad[oa]s?)\\b[^.?!\\n]{0,30}?\\b(?:by|por)\\s+(?:(?:my|our|the|mi|su|el|la)\\s+)?${PET_WORD}\\b|\\b${PET_WORD}'?s?\\s+(?:eyes?|mouth|skin|face|paws?|nose)\\b`, 'i');
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:(?<!(?:animal|pet)\s)poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
@@ -599,7 +610,8 @@ function emergencyContextOf(contextText, activeMessage) {
 // `trustIntent` false (the claim scrub): the model's "emergency" label alone
 // is not evidence — a routine safety answer it mislabels gets label copy.
 function productExposureIn(context) {
-  return INGESTION_RE.test(context) || EAT_EXPOSURE_RE.test(context) || CONTACT_EXPOSURE_RE.test(context);
+  const c = stripDenials(context);
+  return INGESTION_RE.test(c) || EAT_EXPOSURE_RE.test(c) || CONTACT_EXPOSURE_RE.test(c) || AFFIRMED_PRONOUN_EXPOSURE_RE.test(c);
 }
 
 function emergencyGuidance(result, contextText = '', { trustIntent = true } = {}) {
