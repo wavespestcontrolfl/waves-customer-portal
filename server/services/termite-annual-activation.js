@@ -1036,8 +1036,11 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
 
 // Re-rings the install-scheduling handoff for activated plans whose bell
 // never durably landed (see ringInstallHandoff). A term already anchored to
-// its completed installation needs no scheduling, and a cancelled term
-// none either. Oldest activation first, never-stamped activation times
+// its completed installation needs no scheduling, and a void/refund
+// cancelled term none either — but a term the customer declined to RENEW
+// before installation (decided lapse) is still a paid coverage year that
+// needs its installation, so it stays eligible (same anchorable-state rule
+// as anchoring). Oldest activation first, never-stamped activation times
 // ahead of all, bounded.
 async function retryInstallHandoffs({ conn, limit, counts }) {
   try {
@@ -1047,7 +1050,7 @@ async function retryInstallHandoffs({ conn, limit, counts }) {
       .whereNull('e.annual_plan_install_handoff_at')
       .whereNull('apt.renewed_from_term_id')
       .whereNull('apt.installation_anchored_at')
-      .whereIn('apt.status', ANCHORABLE_TERM_STATUSES)
+      .modify((qb) => whereAnchorableTermState(qb, 'apt'))
       .orderBy('e.annual_plan_activated_at', 'asc', 'first')
       .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice')
       .limit(limit);

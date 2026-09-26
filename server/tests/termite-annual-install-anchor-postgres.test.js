@@ -420,6 +420,17 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('install handoff: a plan the customer declined to RENEW before installation still gets its scheduling bell (a paid year); a refunded one does not', async () => {
+    const { sweep, db } = load();
+    await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect((await sweep()).handoffScanned).toBe(1);
+
+    await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: null });
+    expect((await sweep()).handoffScanned).toBe(0);
+  });
+
   test('install handoff: an installation staff already booked on the estimate is the handoff — stamped, no bell', async () => {
     const { sweep, notifyAdmin, db } = load();
     await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
