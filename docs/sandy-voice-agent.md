@@ -113,7 +113,7 @@ this or the prior three PRs:
 - **Collections outbound calls are untouched.** `VOICE_RELAY_INBOUND_MODEL`
   and `VOICE_RELAY_SANDBOX_MODEL` are read only by
   `relay-conversation.js`'s `resolveSessionModel`;
-  `server/services/collections/outbound-voice/collections-conversation.js:136`
+  `server/services/collections/outbound-voice/collections-conversation.js:68`
   keeps reading `VOICE_RELAY_MODEL` directly and never sees either override
   (comment pinned at `relay-conversation.js:141-142`; regression coverage in
   `server/tests/voice-relay-model-override.test.js`).
