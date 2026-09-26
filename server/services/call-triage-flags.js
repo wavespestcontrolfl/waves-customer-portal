@@ -954,8 +954,16 @@ function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   if (turnHasNegationOrHedge(ns)) return true;
   if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
   if (RETRACTION_MARKER_TERMS.some((t) => padded.includes(t))) return true;
+  // Codex round 24, P1 (:958): slot binding alone let "Sunday at noon is
+  // off." through as a same-slot mention. A later sentence with scheduling
+  // content passes only as a full RESTATEMENT — the same checks the pinned
+  // commitment sentence itself must pass.
   if (sentenceHasSchedulingPredicate(stripBenignTopicPhrases(ns))) {
-    return sentence.interrogative || !quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt);
+    return !(!sentence.interrogative
+      && commitmentTurnVocabularyOk(ns)
+      && !turnHasUnresolvedConditional(ns)
+      && turnHasAffirmativeCommitmentForm(ns)
+      && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
   }
   return false;
 }
