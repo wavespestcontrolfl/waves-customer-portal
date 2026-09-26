@@ -157,6 +157,7 @@ export default function DayScorecardPanel() {
       </Card>
       <div className={cn('text-11 text-ink-tertiary mt-3')}>
         Drive model: {request.data?.driveModel === 'calibrated' ? 'calibrated (fitted from real trips)' : 'legacy (straight-line estimate)'}.
+        {' '}Actual drive minutes exclude personal trips; unclassified trips are counted as day driving.
       </div>
     </div>
   );

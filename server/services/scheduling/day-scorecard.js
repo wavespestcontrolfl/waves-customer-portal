@@ -139,24 +139,51 @@ function actualPastRow(plan, mileage) {
     driveMinutes, driveTrips, spanMinutes };
 }
 
-async function mileageByTechDay(conn, techs, from, to) {
-  if (!techs.length) return new Map();
+// bouncie-mileage.js's own canonical predicates (getIrsReport, the daily/
+// monthly summaries): purpose === 'personal' is the ONE definitive,
+// non-suggested classification (a matched personal-address geofence) —
+// proven NOT work driving. 'commute' is the schema's third documented
+// purpose (server/models/migrations/20260401000070_mileage_bouncie.js), never
+// actually written by the sync code today, excluded on the same basis if it
+// ever is. Everything else — 'business', or 'unclassified' (no job/fence
+// match; getIrsReport deliberately treats that as neither business nor
+// personal for the TAX deduction question, $0 until an operator confirms
+// it) — counts as day driving HERE, because this is an OPERATIONAL
+// drive-time metric, not a deduction: an unclassified trip is still time the
+// vehicle was moving that workday. Reported so this choice is visible, not
+// silent (see getDayScorecard's assumptions and the UI's drive-model note).
+const EXCLUDED_MILEAGE_PURPOSES = ['personal', 'commute'];
+const MILEAGE_NOTE = 'Actual drive minutes sum mileage_log trips for the day, excluding personal trips; '
+  + 'unclassified trips (no confirmed business/personal match) are counted as day driving.';
+
+// Date range + technician_id IS NOT NULL only — NOT the assignable-tech
+// list (a deactivated/no-longer-eligible technician's own history must not
+// vanish; see getDayScorecard). Aggregated in JS, not SQL: mileage_log has
+// no index-friendly way to express "purpose is NULL or not personal/commute"
+// without a NULL-handling trap in a raw NOT IN, and the row volume for an
+// admin-only, <=31-day report is trivial either way.
+async function mileageByTechDay(conn, from, to) {
   const rows = await conn('mileage_log')
-    .whereIn('technician_id', techs.map(tech => tech.id))
+    .whereNotNull('technician_id')
     .whereBetween('trip_date', [from, to])
-    .groupBy('technician_id', 'trip_date')
-    .select('technician_id', 'trip_date')
-    .sum({ minutes: 'duration_minutes' })
-    .count({ trips: 'id' });
-  return new Map(rows.map(row => [`${dateOnly(row.trip_date)}|${row.technician_id}`,
-    { minutes: Number(row.minutes) || 0, trips: Number(row.trips) || 0 }]));
+    .select('technician_id', 'trip_date', 'duration_minutes', 'purpose');
+  const byKey = new Map();
+  for (const row of rows) {
+    if (EXCLUDED_MILEAGE_PURPOSES.includes(row.purpose)) continue;
+    const key = `${dateOnly(row.trip_date)}|${row.technician_id}`;
+    const entry = byKey.get(key) || { minutes: 0, trips: 0 };
+    entry.minutes += Number(row.duration_minutes) || 0;
+    entry.trips += 1;
+    byKey.set(key, entry);
+  }
+  return byKey;
 }
 
-function pastTechRow(techQuality, planByKey, mileageByKey, date) {
-  const key = `${date}|${techQuality.technicianId}`;
+function pastTechRow({ technicianId, technician }, planByKey, mileageByKey, date) {
+  const key = `${date}|${technicianId}`;
   const plan = planByKey.get(key) || null;
   const mileage = mileageByKey.get(key) || null;
-  return { technicianId: techQuality.technicianId, technician: techQuality.technician,
+  return { technicianId, technician,
     driveModel: plan ? plan.driveModel : null,
     planned: plannedPastRow(plan), actual: actualPastRow(plan, mileage) };
 }
@@ -171,6 +198,39 @@ async function futureTechRows(conn, day, driveModel) {
   }));
 }
 
+// keyed "date|technicianId" -> Map(date -> Set(technicianId)), shared by the
+// plan and mileage lookups so a past day's roster can include a technician
+// history alone still evidences.
+function idsByDate(keyedMap) {
+  const byDate = new Map();
+  for (const key of keyedMap.keys()) {
+    const [date, technicianId] = key.split('|');
+    if (!byDate.has(date)) byDate.set(date, new Set());
+    byDate.get(date).add(technicianId);
+  }
+  return byDate;
+}
+
+async function resolveHistoricalNames(conn, techs, planIdsByDate, mileageIdsByDate) {
+  const known = new Set(techs.map(tech => tech.id));
+  const historicalIds = new Set([...planIdsByDate.values(), ...mileageIdsByDate.values()].flatMap(set => [...set]));
+  const missingIds = [...historicalIds].filter(id => !known.has(id));
+  const extra = missingIds.length ? await conn('technicians').whereIn('id', missingIds).select('id', 'name') : [];
+  return new Map([...techs.map(tech => [tech.id, tech.name]), ...extra.map(tech => [tech.id, tech.name])]);
+}
+
+// PAST rosters are NOT day.byTech (getScheduleQualityMeasurements' own
+// applyAssignable-filtered list) — a deactivated/no-longer-eligible
+// technician's saved snapshot or mileage history would silently vanish from
+// their own PAST day. Instead: the union of technicianIds evidenced in the
+// plans/mileage for THIS date, plus every currently-assignable technician
+// (so a day with no history for an active technician still shows their
+// empty row, matching the future/today board's own "every technician gets a
+// row" behavior).
+function pastDayRoster(date, techs, planIdsByDate, mileageIdsByDate) {
+  return new Set([...techs.map(tech => tech.id), ...(planIdsByDate.get(date) || []), ...(mileageIdsByDate.get(date) || [])]);
+}
+
 async function getDayScorecard(input = {}, conn = require('../../models/db'), now = new Date()) {
   const from = input.date_from;
   const to = input.date_to;
@@ -183,19 +243,25 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
   const techs = await applyAssignable(conn('technicians')).select('technicians.id', 'technicians.name');
   const performance = await getRoutePerformance({ from, to, now }, conn);
   const planByKey = new Map(performance.plans.map(plan => [`${plan.date}|${plan.technicianId}`, plan]));
-  const mileageByKey = await mileageByTechDay(conn, techs, from, to);
+  const mileageByKey = await mileageByTechDay(conn, from, to);
+  const planIdsByDate = idsByDate(planByKey);
+  const mileageIdsByDate = idsByDate(mileageByKey);
+  const nameById = await resolveHistoricalNames(conn, techs, planIdsByDate, mileageIdsByDate);
 
   const days = [];
   for (const day of quality.days) {
     const byTech = day.date < today
-      ? day.byTech.map(techQuality => pastTechRow(techQuality, planByKey, mileageByKey, day.date))
+      ? [...pastDayRoster(day.date, techs, planIdsByDate, mileageIdsByDate)].map(technicianId => pastTechRow(
+        { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey, day.date))
       : await futureTechRows(conn, day, quality.driveModel);
     days.push({ date: day.date, closed: day.closed, byTech });
   }
   return {
     range: { from, to }, driveModel: quality.driveModel, days,
+    assumptions: { actualDriveMinutes: MILEAGE_NOTE },
     note: 'Future/today rows are planned only — nothing recorded yet to compare against. '
-      + 'Past rows compare the saved pre-service plan with recorded work. Unknown values are null, never 0.',
+      + 'Past rows compare the saved pre-service plan with recorded work. Unknown values are null, never 0. '
+      + MILEAGE_NOTE,
   };
 }
 

@@ -16,21 +16,24 @@ const {
 
 const TECHS = [{ id: 'tech1', name: 'Tech One' }];
 
-// A minimal thenable query-builder for the mileage_log rollup chain: every
-// chain method returns itself, and awaiting it resolves to `rows`.
+// A minimal thenable query-builder for the mileage_log raw-rows read: every
+// chain method returns itself, and the terminal select() resolves `rows`.
 function mileageBuilder(rows) {
-  const builder = {
-    whereIn: () => builder, whereBetween: () => builder, groupBy: () => builder,
-    select: () => builder, sum: () => builder, count: () => builder,
-    then: (resolve) => resolve(rows),
-  };
+  const builder = { whereNotNull: () => builder, whereBetween: () => builder, select: () => Promise.resolve(rows) };
   return builder;
 }
 
-function conn(mileageRows = []) {
+// resolveHistoricalNames' direct (non-applyAssignable) technicians lookup —
+// conn('technicians') is also called as applyAssignable's own argument, but
+// that mock ignores it entirely, so one shape here covers both call sites.
+function techniciansBuilder(extraTechs) {
+  return { whereIn: () => ({ select: async () => extraTechs }) };
+}
+
+function conn(mileageRows = [], extraTechs = []) {
   return jest.fn((table) => {
     if (table === 'mileage_log') return mileageBuilder(mileageRows);
-    if (table === 'technicians') return {};
+    if (table === 'technicians') return techniciansBuilder(extraTechs);
     throw new Error(`day-scorecard test: unexpected table ${table}`);
   });
 }
@@ -147,8 +150,10 @@ describe('getDayScorecard', () => {
         ],
       }],
     });
-    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([{ technician_id: 'tech1', trip_date: date, minutes: '30', trips: '2' }]),
-      new Date('2026-09-08T12:00:00Z'));
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 15, purpose: 'business' },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 15, purpose: 'business' },
+    ]), new Date('2026-09-08T12:00:00Z'));
     const row = result.days[0].byTech[0];
     expect(row.planned).toMatchObject({ stops: 2, onSiteMinutes: 90, driveMinutes: 25, returnMinute: 600 });
     expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: 30, driveTrips: 2, spanMinutes: 120 });
@@ -186,8 +191,11 @@ describe('getDayScorecard', () => {
     // 45m on-site + the arrival-to-completion span (60m): span(60) -
     // onSite(45) - drive(60) would be -45 if computed — proof the field
     // really is gone, not just usually positive in the other fixtures.
-    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([{ technician_id: 'tech1', trip_date: date, minutes: '60', trips: '3' }]),
-      new Date('2026-09-08T12:00:00Z'));
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 20, purpose: 'business' },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 20, purpose: 'business' },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 20, purpose: 'unclassified' },
+    ]), new Date('2026-09-08T12:00:00Z'));
     const row = result.days[0].byTech[0];
     expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 4 }, driveMinutes: 60, spanMinutes: 60 });
     expect(row.actual).not.toHaveProperty('idleMinutes');
@@ -206,5 +214,83 @@ describe('getDayScorecard', () => {
     const row = result.days[0].byTech[0];
     expect(row.planned).toBeNull();
     expect(row.actual).toMatchObject({ onSiteMinutes: null, driveMinutes: null });
+  });
+
+  // Codex P1: quality.days[].byTech (and the old mileage query) were both
+  // filtered through applyAssignable, so a deactivated/no-longer-eligible
+  // technician's own PAST history silently vanished from their own day.
+  test('a deactivated technician with a saved snapshot still shows their PAST history', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'ghost', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date },
+      conn([], [{ id: 'ghost', name: 'Former Tech' }]), new Date('2026-09-08T12:00:00Z'));
+    const ids = result.days[0].byTech.map(row => row.technicianId);
+    expect(ids).toEqual(expect.arrayContaining(['tech1', 'ghost']));
+    const ghostRow = result.days[0].byTech.find(row => row.technicianId === 'ghost');
+    // Name resolved via the direct, non-applyAssignable technicians lookup —
+    // never dropped just because the roster query excludes this technician.
+    expect(ghostRow.technician).toBe('Former Tech');
+    expect(ghostRow.planned).toMatchObject({ stops: 1, onSiteMinutes: 60 });
+    expect(ghostRow.actual).toMatchObject({ onSiteMinutes: 55 });
+  });
+
+  test('a deactivated technician with ONLY mileage history (no saved snapshot) still shows a past row', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({ plans: [] });
+    // The mileage query itself must not filter by the assignable roster.
+    const result = await getDayScorecard({ date_from: date, date_to: date },
+      conn([{ technician_id: 'ghost', trip_date: date, duration_minutes: 40, purpose: 'business' }], [{ id: 'ghost', name: 'Former Tech' }]),
+      new Date('2026-09-08T12:00:00Z'));
+    const ghostRow = result.days[0].byTech.find(row => row.technicianId === 'ghost');
+    expect(ghostRow).toBeTruthy();
+    expect(ghostRow.technician).toBe('Former Tech');
+    expect(ghostRow.planned).toBeNull();
+    expect(ghostRow.actual).toMatchObject({ driveMinutes: 40, driveTrips: 1 });
+  });
+
+  // Codex P1: the mileage rollup summed every trip including ones Bouncie
+  // classified as personal, inflating "actual drive" with non-work driving.
+  test('personal and commute trips are excluded from actual drive minutes; unclassified and business count', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }],
+      }],
+    });
+    const rows = [
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 20, purpose: 'business' },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 15, purpose: 'unclassified' },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 5, purpose: null },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 100, purpose: 'personal' },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 50, purpose: 'commute' },
+    ];
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn(rows), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech.find(r => r.technicianId === 'tech1');
+    // 20 (business) + 15 (unclassified) + 5 (no purpose recorded) = 40;
+    // personal (100) and commute (50) are never counted as day driving.
+    expect(row.actual).toMatchObject({ driveMinutes: 40, driveTrips: 3 });
+    // The policy is documented, not silent.
+    expect(result.assumptions.actualDriveMinutes).toMatch(/personal/i);
+    expect(result.note).toMatch(/personal/i);
   });
 });
