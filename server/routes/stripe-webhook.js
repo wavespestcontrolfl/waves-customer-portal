@@ -22,7 +22,7 @@ const { triggerNotification } = require('../services/notification-triggers');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETBusinessDays } = require('../utils/datetime-et');
 const {
   assertInvoicePaymentIntentTenderMatches,
   isAchPaymentIntent,
@@ -301,25 +301,6 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
     }
   }
   return result;
-}
-
-// Advance `from` by `days` ET weekdays (Mon–Fri). Used to render the
-// "expected to clear" date in the ACH-processing acknowledgment so the
-// copy ("3–5 business days") doesn't surface a weekend date when the
-// payment was initiated late in the week.
-//
-// Uses ET calendar helpers because Railway runs TZ=UTC: a Sunday-evening-ET
-// payment is already Monday UTC, so native getDay()/getDate() would count
-// the wrong weekday and shift the "expected to clear" date by a day.
-function addBusinessDays(from, days) {
-  let cursor = from;
-  let added = 0;
-  while (added < days) {
-    cursor = addETDays(cursor, 1);
-    const dow = etParts(cursor).dayOfWeek;
-    if (dow !== 0 && dow !== 6) added += 1;
-  }
-  return cursor;
 }
 
 /**
@@ -6326,7 +6307,12 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
   const initiatedAt = eventCreated
     ? new Date(eventCreated * 1000)
     : new Date();
-  const expectedClearDate = addBusinessDays(initiatedAt, 5);
+  // "expected to clear" date for the ACH-processing acknowledgment copy
+  // ("3–5 business days") — never a weekend date when initiated late in
+  // the week. Shared with routes/booking.js's re-service latency guard
+  // (server/utils/datetime-et.js's addETBusinessDays), which is why it
+  // lives there rather than as a local helper here.
+  const expectedClearDate = addETBusinessDays(initiatedAt, 5);
   const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
     customerId: freshInvoice.customer_id,
     invoiceId: freshInvoice.id,
