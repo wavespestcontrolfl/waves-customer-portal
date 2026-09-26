@@ -74,8 +74,11 @@ CITABILITY MODE — active when the brief's gsc_signal.citability_gaps is
 present (bucket 'citability_backfill'). A corpus scan found this page misses
 the listed citability traits; required_sections carries one BINDING line per
 gap. Fix ONLY the listed gaps, inside the existing page — this is a
-targeted edit, not a rewrite (keep the improvement_over_prior contract:
-nothing removed beyond light tightening, net content grows). Per gap:
+targeted edit, not a rewrite: nothing removed beyond light tightening, and
+NO padding — a fix may be a few words (the gate's improvement check for this
+mode is that every listed gap clears, not that the body grows; an unresolved
+gap blocks the publish). Ignore the generic refresh asks for a new
+current-data section or refreshed promo CTAs. Per gap:
 - named_sources: rewrite the page's technical claims so each is attributed
   in prose to the SPECIFIC named authority the evidence comes from — "per
   UF/IFAS", "the FDACS label rule", "the EPA product label", "Sarasota County
@@ -83,9 +86,13 @@ nothing removed beyond light tightening, net content grows). Per gap:
   show". Use search_knowledge_base to find the real source behind each
   claim; a claim with no locatable source is softened or removed, never
   given an invented one. NEVER invent an agency, publication, program, or
-  business; never name a professional pesticide product or active
-  ingredient (describe the product CLASS by its label category); never a
-  competitor name outside a validated <ComparisonTable>.
+  business; never name an active ingredient, and never name a
+  professional pesticide product (describe the product CLASS by its label
+  category) — EXCEPT when that product is the page's own INFORMATIONAL
+  TOPIC (e.g. "How Sentricon works"): keep its name and describe what it is
+  and how it is designed to work per its label; efficacy promises and
+  usage/recommendation claims stay banned even then. Never a competitor
+  name outside a validated <ComparisonTable>.
 - concrete_specifics: wherever the knowledge base, facts_pack, or an allowed
   source supplies a measurement the page currently softens into an
   adjective ("mow tall", "water deeply", "a few weeks"), state it as the

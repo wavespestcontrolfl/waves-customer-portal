@@ -81,20 +81,57 @@ const CATEGORY_TO_SERVICE = {
   rodent: 'rodent',
 };
 
+function relatedServiceFor(slug) {
+  const s = String(slug || '').toLowerCase();
+  if (s.startsWith('lawn-care')) return 'lawn';
+  if (s.startsWith('termite')) return 'termite';
+  if (s.startsWith('mosquito')) return 'mosquito';
+  if (s.startsWith('tree-and-shrub') || s.startsWith('tree-shrub')) return 'tree-shrub';
+  if (s.startsWith('rodent')) return 'rodent';
+  if (s.startsWith('pest-control')) return 'pest';
+  return null;
+}
+
+// The blog schema files rodent / bed-bug / cockroach / spider / wasp posts
+// under the broad 'pest-control' category, so a specific related service
+// outranks a category that maps to 'pest' (Codex r6 P2).
 function serviceForPost(frontmatter = {}) {
   const cat = String(frontmatter.category || '').toLowerCase().trim();
-  if (CATEGORY_TO_SERVICE[cat]) return CATEGORY_TO_SERVICE[cat];
   const related = Array.isArray(frontmatter.related_services) ? frontmatter.related_services : [];
-  for (const slug of related) {
-    const s = String(slug || '').toLowerCase();
-    if (s.startsWith('lawn-care')) return 'lawn';
-    if (s.startsWith('termite')) return 'termite';
-    if (s.startsWith('mosquito')) return 'mosquito';
-    if (s.startsWith('tree-and-shrub') || s.startsWith('tree-shrub')) return 'tree-shrub';
-    if (s.startsWith('rodent')) return 'rodent';
-    if (s.startsWith('pest-control')) return 'pest';
-  }
-  return 'pest';
+  const specific = related.map(relatedServiceFor).find((svc) => svc && svc !== 'pest') || null;
+  const byCategory = CATEGORY_TO_SERVICE[cat] || null;
+  if (byCategory && byCategory !== 'pest') return byCategory;
+  if (specific) return specific;
+  if (byCategory) return byCategory;
+  return related.map(relatedServiceFor).find(Boolean) || 'pest';
+}
+
+// Specialty topics the FAQ_BLOCKED_SERVICE guard keys on (content-guardrails
+// FAQ_BLOCKED_SERVICES) that the coarse service hides. Rides the row as
+// signal_metadata.specialty_topic → brief gsc_signal.specialty_topic →
+// guardrail-options, the same path mined family rows use (Codex r6 P2).
+const SPECIALTY_TOPIC_PATTERNS = [
+  ['bed-bug', /\bbed[- ]?bugs?\b/],
+  ['cockroach', /\b(?:cockroach(?:es)?|roach(?:es)?)\b/],
+  ['rodent', /\b(?:rodents?|rats?|mice|mouse)\b/],
+  ['spider', /\bspiders?\b/],
+  ['wasp', /\b(?:wasps?|hornets?|yellow[- ]?jackets?|mud[- ]?daubers?)\b/],
+  ['drywood', /\bdrywood\b/],
+  ['termite', /\btermites?\b/],
+  ['palm', /\bpalms?\b/],
+  ['aeration', /\baerat(?:e|ion|ing)\b/],
+  ['plugging', /\bplugg?(?:ing|s)\b/],
+  ['lawn-pest', /\b(?:chinch[- ]?bugs?|sod[- ]?webworms?|armyworms?|mole[- ]?crickets?|grubs?)\b/],
+  ['commercial', /\bcommercial\b/],
+];
+
+function specialtyTopicForPost(frontmatter = {}, url = '') {
+  const related = Array.isArray(frontmatter.related_services) ? frontmatter.related_services.join(' ') : '';
+  const hay = [url, frontmatter.title, related, Array.isArray(frontmatter.tags) ? frontmatter.tags.join(' ') : '']
+    .map((v) => String(v || '').toLowerCase().replace(/[/_]+/g, ' '))
+    .join(' ');
+  const hit = SPECIALTY_TOPIC_PATTERNS.find(([, re]) => re.test(hay));
+  return hit ? hit[0] : null;
 }
 
 /**
@@ -202,6 +239,7 @@ function rowForPost(post, scan, { now = new Date(), dayOffset = 0, scannedRef = 
       scanned_ref: scannedRef,
       source_file: post.file || null,
       post_title: scan.title || null,
+      specialty_topic: specialtyTopicForPost(scan.frontmatter, post.url),
     },
     status: 'pending',
     mined_at: now,
@@ -312,5 +350,5 @@ async function seedAll({ dryRun = false, perDay = DEFAULT_PER_DAY, minGaps = DEF
 module.exports = { seedAll, planRows, scanPost, rescanLive, loadBlogCorpus, CITABILITY_BACKFILL_BUCKET };
 module.exports._internals = {
   GAP_CHECKS, CATEGORY_TO_SERVICE, BASE_SCORE, DEFAULT_PER_DAY, DEFAULT_MIN_GAPS, EXPIRES_DAYS_AFTER_AVAILABLE,
-  serviceForPost, splitPost, dedupeKeyFor, availableAtFor, rowForPost,
+  serviceForPost, specialtyTopicForPost, splitPost, dedupeKeyFor, availableAtFor, rowForPost,
 };

@@ -1077,3 +1077,18 @@ describe('compose — citability backfill re-scans the live page first (Codex P2
     expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['named_sources', 'comparison']);
   });
 });
+
+describe('citability backfill refresh requirements are scoped (Codex r6 P2)', () => {
+  test('no generic current-data section or promo-CTA ask on a backfill refresh', () => {
+    const builder = new ContentBriefBuilder();
+    const base = { id: 1, page_url: '/termite/x/', service: 'termite', city: null, query: null };
+    const decision = { action_type: 'refresh_existing_page', page_type: 'refresh', human_review_required: false, human_review_reason: null };
+    const signals = { serp_profile: null, customer_signal: null, conversion_feedback: null };
+    const backfill = builder._composeBrief({ opportunity: { ...base, bucket: 'citability_backfill', signal_metadata: { citability_gaps: ['named_sources'] } }, signals, decision, existingBriefVersions: 0 });
+    expect(backfill.required_sections).not.toContain('add 1+ new section reflecting current data');
+    expect(backfill.required_sections).not.toContain('refresh CTAs to current promo');
+    expect(backfill.required_sections.some((l) => l.startsWith('citability (named_sources)'))).toBe(true);
+    const generic = builder._composeBrief({ opportunity: { ...base, bucket: 'decay_refresh', signal_metadata: {} }, signals, decision, existingBriefVersions: 0 });
+    expect(generic.required_sections).toContain('add 1+ new section reflecting current data');
+  });
+});

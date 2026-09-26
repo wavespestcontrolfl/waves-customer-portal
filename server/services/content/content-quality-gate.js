@@ -146,6 +146,12 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Citability backfill only: the row's planned gaps must actually clear
+    // before the refresh may publish and complete the row (Codex r6 P2).
+    // Weight-0 hard, scoped by isCitabilityBackfillBrief — the global
+    // nudges stay signal-only; an unresolved row fails, gets its one
+    // feedback redraft, then skips instead of closing as done.
+    { name: 'citability_backfill_gaps_cleared', weight: 0, isHard: true, evaluate: checkCitabilityBackfillGapsCleared },
     // Citability nudges ride the refresh lane too (2026-09-25 backfill):
     // weight 0, signal-only, and each short-circuits to ok on a non-blog
     // target (the runner resolves target_page_type from the live file). The
@@ -951,12 +957,16 @@ function checkRedactionPassed(draft) {
 
 // ── refresh checks ──────────────────────────────────────────────────
 
-function checkImprovementOverPrior(draft, _brief, context) {
+function checkImprovementOverPrior(draft, brief, context) {
   const prev = context.previousVersion;
   if (!prev) return { ok: false, reason: 'no_previous_version_to_compare' };
   const prevLen = (prev.body || '').length;
   const newLen = String(draft.body || '').length;
   if (newLen < prevLen * 0.8) return { ok: false, reason: 'refresh_lost_>20%_of_prior_content' };
+  // A citability backfill is a targeted edit (an attribution or a number
+  // can be a few words): its improvement proof is
+  // citability_backfill_gaps_cleared, not body growth (Codex r6 P2).
+  if (isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'citability_backfill_targeted_edit' };
   if (newLen < prevLen + 200) return { ok: false, reason: 'refresh_adds_less_than_200_chars' };
   return { ok: true };
 }
@@ -1277,6 +1287,27 @@ function checkCitabilityHowToChoose(draft, brief) {
   return { ok: true };
 }
 
+const CITABILITY_GAP_CHECKS = {
+  named_sources: checkCitabilityNamedSources,
+  concrete_specifics: checkCitabilityConcreteSpecifics,
+  comparison: checkCitabilityComparison,
+  how_to_choose: checkCitabilityHowToChoose,
+};
+
+function checkCitabilityBackfillGapsCleared(draft, brief, context) {
+  if (!isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'not_citability_backfill' };
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const unresolved = [];
+  for (const gap of brief.gsc_signal.citability_gaps) {
+    const check = CITABILITY_GAP_CHECKS[gap];
+    if (!check) continue;
+    const r = check(draft, brief, context || {});
+    if (!r.ok) unresolved.push(`${gap}(${r.reason})`);
+  }
+  if (unresolved.length) return { ok: false, reason: `planned_gaps_unresolved:${unresolved.join(',')}` };
+  return { ok: true };
+}
+
 // ── metadata checks ─────────────────────────────────────────────────
 
 function checkTitleLengthBounds(draft, brief, context) {
@@ -1452,6 +1483,7 @@ module.exports._internals = {
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
+  checkCitabilityBackfillGapsCleared,
   countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,

@@ -94,6 +94,8 @@ const getConversionMiner = lazy('conversion-feedback-miner', '../seo/conversion-
 
 // ── required-sections matrix (per page-type, per v3.1 brief schema) ─
 
+const CITABILITY_BACKFILL_REFRESH_SECTIONS = ['preserve existing slug', 'update dateModified'];
+
 const REQUIRED_SECTIONS = {
   'city-service': [
     'local intro',
@@ -679,7 +681,13 @@ class ContentBriefBuilder {
     const aeo = applyAeoTreatment({
       isAeoGap: opportunity.bucket === 'aeo_gap',
       pageType,
-      requiredSections: REQUIRED_SECTIONS[pageType] || [],
+      // Citability backfills are targeted edits: the generic refresh
+      // asks (a new current-data section, refreshed promo CTAs) would force
+      // padding onto a surgical fix (Codex r6 P2). Keep slug + dateModified;
+      // the gap lines added below are the binding work.
+      requiredSections: opportunity.bucket === 'citability_backfill' && pageType === 'refresh'
+        ? CITABILITY_BACKFILL_REFRESH_SECTIONS
+        : (REQUIRED_SECTIONS[pageType] || []),
       schemaTypes: SCHEMA_TYPES[pageType] || [],
       voiceConstraints: VOICE_CONSTRAINTS,
     });

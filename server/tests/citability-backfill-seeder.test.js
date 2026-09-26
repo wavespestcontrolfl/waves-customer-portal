@@ -21,7 +21,7 @@ const gateInternals = gate._internals;
 const { CITABILITY_GAP_SECTIONS } = require('../services/content/content-brief-builder')._internals;
 const { REFRESH_AGENT_CONFIG } = require('../services/content/agents/refresh-agent-config');
 
-const { serviceForPost, rowForPost, dedupeKeyFor, availableAtFor, BASE_SCORE } = seeder._internals;
+const { serviceForPost, specialtyTopicForPost, rowForPost, dedupeKeyFor, availableAtFor, BASE_SCORE } = seeder._internals;
 
 afterEach(() => jest.clearAllMocks());
 
@@ -88,6 +88,17 @@ describe('scanPost — same four heuristics as the quality gate', () => {
     expect(serviceForPost({ category: 'seasonal', related_services: ['mosquito-control-sarasota-fl'] })).toBe('mosquito');
     expect(serviceForPost({ category: 'seasonal', related_services: ['tree-and-shrub-care-venice-fl'] })).toBe('tree-shrub');
     expect(serviceForPost({})).toBe('pest');
+    // Broad pest-control category: a specific related service wins (Codex r6 P2).
+    expect(serviceForPost({ category: 'pest-control', related_services: ['rodent-control-venice-fl'] })).toBe('rodent');
+    expect(serviceForPost({ category: 'pest-control', related_services: ['pest-control-venice-fl'] })).toBe('pest');
+    expect(serviceForPost({ category: 'lawn-care', related_services: ['termite-control-venice-fl'] })).toBe('lawn');
+  });
+  test('specialtyTopicForPost tags the FAQ-blocked topic the coarse service hides', () => {
+    expect(specialtyTopicForPost({ title: 'Bed Bugs in Sarasota Condos', category: 'pest-control' }, '/pest-control/bed-bugs-sarasota/')).toBe('bed-bug');
+    expect(specialtyTopicForPost({ title: 'Do Mud Daubers Sting?' }, '/pest-control/mud-daubers/')).toBe('wasp');
+    expect(specialtyTopicForPost({ title: 'Ghost Ants After Rain' }, '/pest-control/ghost-ants/')).toBeNull();
+    const row = rowForPost({ url: '/pest-control/mud-daubers/' }, { gaps: ['named_sources'], results: {}, frontmatter: { title: 'Do Mud Daubers Sting?' }, title: 'Do Mud Daubers Sting?' }, { now: new Date('2026-09-26T12:00:00Z') });
+    expect(row.signal_metadata.specialty_topic).toBe('wasp');
   });
 });
 
@@ -226,7 +237,8 @@ describe('content-quality-gate — backfill evidence exemption + refresh nudges'
     expect(checkSerpBriefAttached({}, { target_url: '/termite/bait-vs-liquid/', target_keyword: null, gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['comparison'] } })).toEqual({ ok: true, reason: 'serp_skip_page_only' });
   });
   test('refresh bundle carries the four nudges at weight 0; threshold unchanged at 47', () => {
-    const names = gateInternals.PAGE_TYPE_CHECKS.refresh.filter((c) => c.name.startsWith('citability_'));
+    // The backfill completion check (hard, backfill-scoped) is covered in content-quality-gate.test.js.
+    const names = gateInternals.PAGE_TYPE_CHECKS.refresh.filter((c) => c.name.startsWith('citability_') && c.name !== 'citability_backfill_gaps_cleared');
     expect(names.map((c) => c.name)).toEqual(['citability_named_sources', 'citability_concrete_specifics', 'citability_comparison', 'citability_how_to_choose']);
     for (const c of names) { expect(c.weight).toBe(0); expect(c.isHard).toBeFalsy(); }
     expect(gate.MIN_TOTAL_SCORES.refresh).toBe(47);

@@ -1496,3 +1496,31 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(softNames).not.toContain('citability_how_to_choose'); // no table on a non-choice post_type → n/a
   });
 });
+
+describe('citability backfill completion (Codex r6 P2s)', () => {
+  const { checkCitabilityBackfillGapsCleared, checkImprovementOverPrior, PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
+  const backfill = (gaps) => ({ gsc_signal: { bucket: 'citability_backfill', citability_gaps: gaps } });
+  const prior = { previousVersion: { body: 'Experts say ants trail after rain. Water deeply.' } };
+
+  test('registered on refresh as a weight-0 HARD check', () => {
+    const c = PAGE_TYPE_CHECKS.refresh.find((x) => x.name === 'citability_backfill_gaps_cleared');
+    expect(c).toMatchObject({ weight: 0, isHard: true });
+  });
+  test('non-backfill briefs are untouched', () => {
+    expect(checkCitabilityBackfillGapsCleared({ body: 'x' }, {}, {})).toEqual({ ok: true, reason: 'not_citability_backfill' });
+  });
+  test('an unresolved planned gap fails; clearing every planned gap passes', () => {
+    const r = checkCitabilityBackfillGapsCleared({ body: 'Experts say ants trail after rain. Water 1/2 inch per week.' }, backfill(['named_sources', 'concrete_specifics']), prior);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^planned_gaps_unresolved:named_sources\(/);
+    const fixed = checkCitabilityBackfillGapsCleared({ body: 'Per UF/IFAS, ants trail after rain. Water 1/2 inch per week.' }, backfill(['named_sources', 'concrete_specifics']), prior);
+    expect(fixed).toEqual({ ok: true });
+  });
+  test('improvement_over_prior: a backfill targeted edit needs no +200 chars, but the 20% loss floor holds', () => {
+    const small = { body: 'Per UF/IFAS, ants trail after rain. Water deeply.' };
+    expect(checkImprovementOverPrior(small, {}, prior).ok).toBe(false);
+    expect(checkImprovementOverPrior(small, backfill(['named_sources']), prior)).toEqual({ ok: true, reason: 'citability_backfill_targeted_edit' });
+    expect(checkImprovementOverPrior({ body: 'Ants.' }, backfill(['named_sources']), prior).ok).toBe(false);
+    expect(checkImprovementOverPrior(small, backfill(['named_sources']), {}).ok).toBe(false);
+  });
+});
