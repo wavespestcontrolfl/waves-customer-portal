@@ -153,7 +153,7 @@
       {
         "slug": "southern-toad",
         "difference": "Cane toad's glands behind the eyes are much larger, often as big as the eye; southern toad has smaller glands and bony head knobs it lacks",
-        "next_photo": "A close-up from above of the head and the gland size just behind the eyes",
+        "next_photo": "From a safe distance, zoom in from above on the head and the size of the glands just behind the eyes; don't touch it.",
         "photo_can_confirm": true
       }
     ],
@@ -227,7 +227,7 @@
       "https://www.cvcboca.com/keep-your-dog-safe-how-to-spot-treat-bufo-toad-poisoning/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Verdict set to 'watch' rather than 'call' since most encounters don't involve pet contact and there's no Waves pest treatment for this species; urgency set to 'high' to reflect how serious the small number of pet-poisoning cases can be. Owner should confirm this balance reads right. Per audit item 16: safety.irritant set to true (cane toad secretion is a materially stronger skin/eye/mucous-membrane irritant than the southern toad's, which is already marked irritant true) and safety_line updated with wipe-the-gums first aid; a Florida vet clinic source (cvcboca.com, loaded this session) specifically warns against unrestricted running-water rinsing due to drowning/aspiration risk, so the line favors wiping with a cloth and only rinses with the head tilted down."
     },
     "role": "wildlife",
@@ -265,7 +265,7 @@
       {
         "slug": "cane-toad",
         "difference": "Southern toad has smaller glands and distinct bony head knobs; cane toad's parotoid glands are much larger, often as big as the eye itself",
-        "next_photo": "A close-up from above of the head and the gland size just behind the eyes",
+        "next_photo": "From a safe distance, zoom in from above on the head and the size of the glands just behind the eyes; don't touch it.",
         "photo_can_confirm": true
       }
     ],

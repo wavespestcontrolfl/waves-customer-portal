@@ -369,7 +369,7 @@
       {
         "slug": "brahminy-blind-snake",
         "difference": "Ring-necked snake has a neck ring and orange-yellow belly; blind snake is uniform dark gray/purple with no ring, like a shiny earthworm",
-        "next_photo": "A close-up checking for a neck ring and belly color versus a uniform worm-like body",
+        "next_photo": "From a safe distance, zoom in on the neck (is there a ring?) and belly color versus a uniform worm-like body.",
         "photo_can_confirm": true
       }
     ],
@@ -436,7 +436,7 @@
       "https://en.wikipedia.org/wiki/Ring-necked_snake"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 44: safety.bites changed from false to true (rule 5: capability, not danger) since it can bite if handled, even though it strongly prefers to flip and flash its belly instead; risk changed from low to defensive to match, consistent with other harmless-but-technically-can-bite snakes in this file."
     },
     "role": "wildlife",

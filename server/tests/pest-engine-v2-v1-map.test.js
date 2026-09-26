@@ -49,6 +49,17 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
     expect(built.nextPhoto.photo_can_confirm).toBe(false);
   });
 
+  test('a confirmable runner-up pair never masks an unconfirmable look-alike (Formosan termite; Codex #4974 r5)', () => {
+    const built = buildAnswer(ctx([cand('formosan-termite', 0.95), cand('subterranean-termite', 0.3)]));
+    expect(built.answer.wording).not.toBe('pretty_sure');
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+  });
+
+  test('a bare "bat" does not name one bat species', () => {
+    const r = catalog.resolveName('bats');
+    expect(r?.node?.slug).not.toBe('brazilian-free-tailed-bat');
+  });
+
   test('bats get the exclusion-only referral, never a trapper', () => {
     expect(catalog.getEntry('brazilian-free-tailed-bat').service.referral).toBe('bat_exclusion');
     expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/never trapped or handled/);

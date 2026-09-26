@@ -358,7 +358,7 @@
       {
         "slug": "spiny-tailed-iguana",
         "difference": "Green iguana has a large round chin scale and a smoother tail; spiny-tailed iguana has rings of large spiky tail scales and no big chin scale",
-        "next_photo": "A close-up of the chin for a round scale and the tail for spiky rings",
+        "next_photo": "From a safe distance, zoom in on the chin (a large round scale) and the tail (spiky rings vs. smooth bands).",
         "photo_can_confirm": true
       }
     ],
@@ -430,7 +430,7 @@
       "https://en.wikipedia.org/wiki/Common_green_iguana"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "wildlife",
@@ -472,7 +472,7 @@
       {
         "slug": "green-iguana",
         "difference": "Spiny-tailed iguana has rings of large spiky scales around its tail and no big round chin scale; green iguana has a large round chin scale and a smoother tail",
-        "next_photo": "A close-up of the chin for a round scale and the tail for spiky rings",
+        "next_photo": "From a safe distance, zoom in on the chin (a large round scale) and the tail (spiky rings vs. smooth bands).",
         "photo_can_confirm": true
       }
     ],
@@ -544,7 +544,7 @@
       "https://pubmed.ncbi.nlm.nih.gov/24382291/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Confirmed and refined this session with a peer-reviewed source: Avery & Tillman 2014 (Integrative Zoology, PubMed 24382291), \"Invasive black spiny-tailed iguanas (Ctenosaura similis) on Gasparilla Island, Florida, USA,\" documents the population growing from 3 founders in 1979 to \"numbers in the thousands\" on Gasparilla Island specifically, with a 2008-2011 USDA Wildlife Services removal program that trapped 9,467 animals (declining from 32/day to 1.9/day, suggesting the removal effort meaningfully reduced but didn't eliminate the localized population). Separately, a 2004 FWC/Florida Museum peer-reviewed paper on Nile monitors (Southeastern Naturalist, cited on this entry's look-alike page) independently corroborates that this species co-occurs with Nile monitors on Gasparilla Island. Both sources confirm a very large, well-documented, but still geographically localized (Gasparilla Island/Lee-Charlotte County) population; neither source documents broader spread across SWFL, so range 'occasional' (common only within that specific localized area) is confirmed rather than contradicted."
     },
     "role": "wildlife",
@@ -584,7 +584,7 @@
       {
         "slug": "argentine-tegu",
         "difference": "Nile monitor has a long neck and a deeply forked, snake-like tongue; tegu has a shorter neck, a stockier body, and a tail banded in yellow and black",
-        "next_photo": "A close-up of the neck length and tongue, plus the tail banding pattern",
+        "next_photo": "From a safe distance, zoom in on the neck length, tongue and tail banding; keep people and pets well back.",
         "photo_can_confirm": true
       }
     ],
@@ -658,7 +658,7 @@
       "https://www.jstor.org/stable/3878019"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Confirmed and refined this session with a peer-reviewed, FWC-affiliated source: Enge, Krysko, Hankins, Campbell & King 2004, \"Status of the Nile Monitor (Varanus niloticus) in Southwestern Florida\" (Southeastern Naturalist 3(4):571-582; lead author is an FWC biologist). It documents the population first observed ca. 1990 in Cape Coral (Lee County), 146 reports of 159 animals compiled 2001-2003 (mostly confined to Cape Coral but expanding to Pine Island and reported at Sanibel), and separate, less-established observations from Charlotte County (Gasparilla Island, alongside black spiny-tailed iguanas), Collier County (Naples/Haldeman Creek), De Soto County (Peace River) and Miami-Dade/Broward. This directly confirms the entry's 'concentrated in Cape Coral/Lee-Charlotte' framing and that density drops off outside that core area, matching 'occasional' region-wide / effectively common within Cape Coral specifically."
     },
     "role": "wildlife",
@@ -700,7 +700,7 @@
       {
         "slug": "nile-monitor",
         "difference": "Tegu has a shorter neck, a stockier body, and a tail banded in yellow and black; Nile monitor has a long neck and a deeply forked, snake-like tongue",
-        "next_photo": "A close-up of the neck length and tongue, plus the tail banding pattern",
+        "next_photo": "From a safe distance, zoom in on the neck length, tongue and tail banding; keep people and pets well back.",
         "photo_can_confirm": true
       }
     ],
@@ -767,7 +767,7 @@
       "https://myfwc.com/wildlifehabitats/profiles/reptiles/lizards/argentine-black-and-white-tegu/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 31: tech_notes previously omitted the FWC-confirmed Charlotte County (Punta Gorda area) population, which is inside our five-county SWFL service area. myfwc.com's tegu profile (loaded this session) states plainly: \"Reproducing populations of Argentine black and white tegus are established in Hillsborough and Miami-Dade and Charlotte Counties.\" Range kept 'occasional' rather than 'common' since the confirmed population is localized to Charlotte County (Punta Gorda area) rather than spread across all five counties."
     },
     "role": "wildlife",

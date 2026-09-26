@@ -359,7 +359,7 @@
       {
         "slug": "virginia-opossum",
         "difference": "Raccoon has a black mask across its eyes and a ringed, bushy tail; opossum has an all-white face with a pointed pink nose and a bare, rat-like tail",
-        "next_photo": "A close-up of the face and tail",
+        "next_photo": "From a safe distance, zoom in on the face and tail; never corner or approach the animal.",
         "photo_can_confirm": true
       }
     ],
@@ -430,7 +430,7 @@
       "https://ask.ifas.ufl.edu/uw033"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Peak months confirmed and corrected this session: UF/IFAS EDIS WEC-34/UW033 (\"Northern Raccoon\") states raccoons have one litter per year and that birth \"generally occurs in March and April\" in Florida. Given a roughly two-month gestation, that puts mating around January-February, so peak_months is narrowed to January-April (mating through birth) and the previously unsupported October-December spike is removed as not backed by this or any other source checked."
     },
     "role": "wildlife",
@@ -472,7 +472,7 @@
       {
         "slug": "raccoon",
         "difference": "Opossum has an all-white face with a pointed pink nose and a bare tail; raccoon has a black eye mask and a bushy, ringed tail",
-        "next_photo": "A close-up of the face and tail",
+        "next_photo": "From a safe distance, zoom in on the face and tail; never corner or approach the animal.",
         "photo_can_confirm": true
       }
     ],
@@ -544,7 +544,7 @@
       "https://ask.ifas.ufl.edu/publication/UW471/pdf"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Peak months confirmed and corrected this session: UF/IFAS \"Wildlife of Florida Factsheet: Virginia Opossum\" (WEC426/UW471, UF/IFAS Range Cattle Research and Education Center, Ona FL) states \"most young are born between February and June, though breeding may continue through November,\" and flags spring/summer as the breeding icons. peak_months corrected from the previously unsupported Sep-Jan window to Feb-Jun, matching this Florida-specific source directly."
     },
     "role": "wildlife",
@@ -564,8 +564,6 @@
       "brazilian free-tailed bat",
       "mexican free-tailed bat",
       "free-tailed bat",
-      "bat",
-      "bats",
       "tadarida brasiliensis"
     ],
     "scientific_name": "Tadarida brasiliensis",

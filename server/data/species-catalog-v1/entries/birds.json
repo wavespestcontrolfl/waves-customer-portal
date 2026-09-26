@@ -29,7 +29,7 @@
       {
         "slug": "burrowing-owl",
         "difference": "Muscovy duck is large, black-and-white, found near ponds; burrowing owl is small, mottled brown, stands at a burrow entrance in dry, open ground",
-        "next_photo": "A photo of the setting (near water vs. a dry open burrow) plus the overall size and color",
+        "next_photo": "From a safe distance, zoom in on the setting (near water vs. a dry open burrow) plus overall size and color.",
         "photo_can_confirm": true
       }
     ],
@@ -98,7 +98,7 @@
       "https://en.wikipedia.org/wiki/Muscovy_duck"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "No genuinely similar-looking bird exists elsewhere in this 239-entry catalog (only 3 bird slugs total, all owned by this worker), so the required look-alike pairs it with burrowing owl on setting/size/color rather than close visual resemblance; flagging this catalog gap for the owner."
     },
     "role": "wildlife",
@@ -251,7 +251,7 @@
       {
         "slug": "muscovy-duck",
         "difference": "Burrowing owl is small, mottled brown, and stands at a burrow entrance in dry, open ground; Muscovy duck is large, black-and-white, and found near ponds",
-        "next_photo": "A photo of the setting (a dry open burrow vs. near water) plus the overall size and color",
+        "next_photo": "From a safe distance, zoom in on the setting (near water vs. a dry open burrow) plus overall size and color.",
         "photo_can_confirm": true
       }
     ],
@@ -321,7 +321,7 @@
       "https://en.wikipedia.org/wiki/Burrowing_owl"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Range marked 'occasional' since the known concentrations (Cape Coral, Marco Island, and other specific open lots) are geographically clustered rather than spread evenly across all five SWFL counties; within those specific areas it is closer to 'common.'"
     },
     "role": "protected_wildlife",

@@ -137,6 +137,15 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
         const x = catalog.getEntry(slug);
         return !!x && x.group === 'snakes' && x.safety.venomous === true;
       };
+      // A wild animal that can bite, scratch or carry disease is photographed
+      // from a distance: no close-ups (Codex #4974 r5).
+      const riskyWildlife = (slug) => {
+        const x = catalog.getEntry(slug);
+        return !!x && x.kind === 'organism' && WILDLIFE_GROUPS.has(x.group) && ['medical', 'defensive'].includes(x.risk);
+      };
+      if (riskyWildlife(e.slug) || riskyWildlife(la.slug)) {
+        expect(la.next_photo).not.toMatch(/close-up|up close/i);
+      }
       if (venomousSnake(e.slug) || venomousSnake(la.slug)) {
         expect(la.photo_can_confirm).toBe(false);
         expect(la.next_photo).toMatch(/never approach/i);

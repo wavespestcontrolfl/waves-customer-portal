@@ -721,14 +721,17 @@ function lookAlikeEdges(entry) {
 }
 
 function governingPair(top, second) {
-  if (second?.entry) {
-    const pair = pairBetween(top?.entry, second.entry);
-    if (pair) return pair;
-  }
-  // No pair with the runner-up: an unconfirmable relationship on either
-  // side governs first, else the entry's first look-alike.
+  // Any look-alike no photo can separate governs first, whoever the
+  // runner-up is: a confirmable runner-up pair must not mask a different
+  // unconfirmable one (Formosan vs. Asian subterranean termite behind a
+  // Formosan/subterranean result; Codex #4974 r5). Prefer the runner-up's
+  // own pair when it is the unconfirmable one.
   const edges = lookAlikeEdges(top?.entry);
-  return edges.find((e) => e.photo_can_confirm === false) || edges[0] || null;
+  const runnerUp = second?.entry ? pairBetween(top?.entry, second.entry) : null;
+  if (runnerUp?.photo_can_confirm === false) return runnerUp;
+  const veto = edges.find((e) => e.photo_can_confirm === false);
+  if (veto) return veto;
+  return runnerUp || edges[0] || null;
 }
 
 function firstApprovedLookAlike(entry) {
@@ -747,6 +750,13 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // (round 2): the pair's `ask`/`why` prose routinely names BOTH species by
   // common name, so this is only used when both sides are approved — an
   // unapproved look-alike must not surface even indirectly through it.
+  // A look-alike no photo can separate outranks the runner-up pair's photo
+  // tip: say so instead (Codex #4974 r5).
+  const governing = level === 'entry' && top?.entry ? governingPair(top, second) : null;
+  if (governing?.photo_can_confirm === false) {
+    if (!isApproved(catalog.getEntry(governing.slug))) return { ...NO_PHOTO_CONFIRMS };
+    return { ask: governing.next_photo || null, why: governing.difference || null, photo_can_confirm: false };
+  }
   if (top?.entry && second?.entry && isApproved(top.entry) && isApproved(second.entry)) {
     const pair = pairIfBothApproved(top.entry, second.entry);
     if (pair) return { ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
@@ -756,7 +766,6 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // look-alike WHOSE OWN TARGET IS APPROVED) — read directly so
   // `photo_can_confirm` survives (`catalog.nextPhoto`'s wrapper drops it).
   if (level === 'entry' && top?.entry) {
-    const governing = governingPair(top, second);
     if (governing && !isApproved(catalog.getEntry(governing.slug))) {
       // Its prose names the unapproved look-alike, so it can't be shown.
       // A pair no photo can settle gets fixed technician guidance (the
