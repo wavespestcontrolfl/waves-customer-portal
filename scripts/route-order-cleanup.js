@@ -248,6 +248,10 @@ function readLiveTechDay(conn, { dateStr, techId, forUpdate = false }, deps) {
     .select(
       'scheduled_services.id',
       ...ROUTE_WRITE_GUARD_COLUMNS.map((col) => `scheduled_services.${col}`),
+      // currentOrder's last tie-break (COALESCE(route_order, 999),
+      // window_start, created_at) — the rollback's legality check runs over
+      // the order dispatch will actually READ (restoredDispatchOrder).
+      'scheduled_services.created_at',
       ...CUSTOMER_PREMISE_ALIASES,
       ...guardedCoordSelects(conn),
     );
@@ -343,6 +347,21 @@ function buildRollbackPositions(liveRows, dayRows) {
 }
 
 /**
+ * The order dispatch will actually READ once the rollback commits: copies of
+ * the live rows carrying the exact restored positions, sorted by the SAME
+ * currentOrder every reader uses (COALESCE(route_order, 999), window_start,
+ * created_at, id). Restored ties — duplicate positions, or several rows
+ * restored to null — are resolved by that sort, NOT by the rollback's own
+ * target sequence: two time_window-only rows restored to null have no
+ * window_start, so dispatch orders them by created_at, and an afternoon row
+ * created first reads BEFORE the morning one (codex pre-push P1). The
+ * window-legality check runs over this order, never the target sequence.
+ */
+function restoredDispatchOrder(liveRows, positions, deps) {
+  return deps.currentOrder(liveRows.map((row) => ({ ...row, route_order: positions.get(row.id) })));
+}
+
+/**
  * The SAME legality guards chooseWindowSafeOrder itself runs before ever
  * certifying an order (route-reorder-window-fit.js's pure checks, reused
  * via `deps` rather than re-implemented): a target order that places a
@@ -385,7 +404,8 @@ async function previewRollback(conn, rows, deps) {
     const mismatchedIds = mismatchedIdsForDay(day.rows, liveRows);
     let conflict = null;
     if (!mismatchedIds.length) {
-      conflict = rollbackWindowConflict(buildRollbackTargetOrder(liveRows, day.rows), liveRows, deps);
+      const dispatchOrder = restoredDispatchOrder(liveRows, buildRollbackPositions(liveRows, day.rows), deps);
+      conflict = rollbackWindowConflict(dispatchOrder, liveRows, deps);
     }
     const wouldRestore = mismatchedIds.length === 0 && !conflict;
     plan.push({
@@ -449,7 +469,11 @@ async function applyRollback(conn, rows, now, deps) {
       continue;
     }
     const finalOrdered = buildRollbackTargetOrder(liveRows, day.rows);
-    const conflict = rollbackWindowConflict(finalOrdered, liveRows, deps);
+    const positions = buildRollbackPositions(liveRows, day.rows);
+    // Legality is checked on the order dispatch will READ after the commit
+    // (restoredDispatchOrder), not on finalOrdered — with explicit positions
+    // the writer's row sequence never decides how ties are read back.
+    const conflict = rollbackWindowConflict(restoredDispatchOrder(liveRows, positions, deps), liveRows, deps);
     if (conflict) {
       summary.skipped.push({
         ...entryBase,
@@ -461,7 +485,7 @@ async function applyRollback(conn, rows, now, deps) {
     try {
       await deps.writeTechDayOrder(conn, {
         dateStr: day.date, techId: day.technician_id, techStops: liveRows, finalOrdered,
-        repair: null, opts: { positions: buildRollbackPositions(liveRows, day.rows) }, now, repairGates: [],
+        repair: null, opts: { positions }, now, repairGates: [],
       });
       restored += day.rows.length;
     } catch (writeErr) {
@@ -682,7 +706,7 @@ async function main() {
     // building blocks, never a second copy of its guards.
     const {
       writeTechDayOrder, classifyWriteError, ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES,
-      _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL, violatesWindowChronology, violatesWindowFeasibility },
+      _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL, violatesWindowChronology, violatesWindowFeasibility, currentOrder },
     } = require('../server/services/route-reorder');
     const { guardedCoordSelects } = require('../server/services/scheduling/day-stops');
     const RouteOptimizer = require('../server/services/route-optimizer');
@@ -690,7 +714,7 @@ async function main() {
       writeTechDayOrder, classifyWriteError,
       ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
       EXCLUDE_STATUSES, LIVE_HOLD_SQL,
-      RouteOptimizer, violatesWindowChronology, violatesWindowFeasibility,
+      RouteOptimizer, violatesWindowChronology, violatesWindowFeasibility, currentOrder,
     };
     await runRollback(db, ROLLBACK_PATH, EXECUTE, new Date(), rollbackDeps);
     await db.destroy();
@@ -794,6 +818,6 @@ if (require.main === module) {
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
   groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, buildRollbackPositions,
-  rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
   outOfHorizonDates, runIsUnhealthy,
 };

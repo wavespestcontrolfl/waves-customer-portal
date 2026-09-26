@@ -15,7 +15,7 @@ const { wasLockSkipped } = require('../utils/cron-lock');
 const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
-  buildRollbackTargetOrder, buildRollbackPositions, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
+  buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
   buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy,
 } = require('../../scripts/route-order-cleanup');
 const {
@@ -38,6 +38,7 @@ function rollbackDeps(overrides = {}) {
     RouteOptimizer,
     violatesWindowChronology: reorderInternals.violatesWindowChronology,
     violatesWindowFeasibility: reorderInternals.violatesWindowFeasibility,
+    currentOrder: reorderInternals.currentOrder,
     ...overrides,
   };
 }
@@ -249,6 +250,19 @@ describe('buildRollbackPositions (the exact values the rollback writes back)', (
     const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
     const backup = [{ id: 'A', before: '6', after: 1 }, { id: 'B', before: 'junk', after: 2 }];
     expect(buildRollbackPositions(live, backup)).toEqual(new Map([['A', 6], ['B', null]]));
+  });
+});
+
+describe('restoredDispatchOrder (the order dispatch reads after the rollback commits)', () => {
+  test('rows restored to null tie on COALESCE(route_order, 999) and fall to window_start, then created_at — dispatch\'s tie-break, not the target sequence', () => {
+    const live = [
+      { id: 'M', route_order: 1, time_window: 'morning', created_at: '2026-09-02T00:00:00Z' },
+      { id: 'P', route_order: 2, time_window: 'afternoon', created_at: '2026-09-01T00:00:00Z' },
+    ];
+    const order = restoredDispatchOrder(live, new Map([['M', null], ['P', null]]), rollbackDeps());
+    expect(order.map((r) => r.id)).toEqual(['P', 'M']);
+    expect(order.map((r) => r.route_order)).toEqual([null, null]);
+    expect(live[0].route_order).toBe(1); // copies — the live read (the writer's snapshot) is untouched
   });
 });
 
@@ -493,6 +507,48 @@ describe('applyRollback — hands each eligible tech-day to the SAME fenced writ
     expect(args.finalOrdered.map((r) => r.id)).toEqual(['A', 'B', 'C']);
     expect(args.opts.positions).toEqual(new Map([['A', 4], ['B', 5], ['C', null]]));
     expect(result.restored).toBe(3);
+  });
+
+  test('codex pre-push P1: two time_window-only rows restored to null — the afternoon row created first reads FIRST at dispatch, so the day is skipped, never written', async () => {
+    // Cleanup numbered morning M=1, afternoon P=2 (both originally null).
+    // The rollback target sequence is M,P (legal), but after restoring both
+    // to null dispatch reads COALESCE 999 tie → no window_start → created_at:
+    // P (created first) before M — afternoon before morning.
+    const liveRows = [
+      { id: 'M', route_order: 1, time_window: 'morning', created_at: '2026-09-02T00:00:00Z' },
+      { id: 'P', route_order: 2, time_window: 'afternoon', created_at: '2026-09-01T00:00:00Z' },
+    ];
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'M', date: '2026-10-05', technician_id: 't1', before: null, after: 1 },
+      { id: 'P', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([expect.objectContaining({
+      date: '2026-10-05', technician_id: 't1', reason: 'WINDOW_ORDER_CONFLICT',
+    })]);
+    const plan = await previewRollback(conn, rows, rollbackDeps());
+    expect(plan[0]).toMatchObject({ would_restore: false, conflict: 'WINDOW_ORDER_CONFLICT' });
+  });
+
+  test('the same null-restored pair with the MORNING row created first reads morning→afternoon — restored normally', async () => {
+    const liveRows = [
+      { id: 'M', route_order: 1, time_window: 'morning', created_at: '2026-09-01T00:00:00Z' },
+      { id: 'P', route_order: 2, time_window: 'afternoon', created_at: '2026-09-02T00:00:00Z' },
+    ];
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'M', date: '2026-10-05', technician_id: 't1', before: null, after: 1 },
+      { id: 'P', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(writeTechDayOrder.mock.calls[0][1].opts.positions).toEqual(new Map([['M', null], ['P', null]]));
+    expect(result.restored).toBe(2);
   });
 
   test('a STALE_TECH_DAY the writer refuses is reported as skipped via the REAL classifyWriteError, not a run-degrading failure', async () => {

@@ -591,6 +591,7 @@ describe('writeTechDayOrder explicit positions (rollback) — persisted values',
       EXCLUDE_STATUSES: _internals.EXCLUDE_STATUSES, LIVE_HOLD_SQL: _internals.LIVE_HOLD_SQL,
       RouteOptimizer, violatesWindowChronology: _internals.violatesWindowChronology,
       violatesWindowFeasibility: _internals.violatesWindowFeasibility,
+      currentOrder: _internals.currentOrder,
     };
   }
 
