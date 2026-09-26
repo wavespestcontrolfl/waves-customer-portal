@@ -199,7 +199,9 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask, termRetrievalDedupeKey }));
+    // doMock outlives resetModules: every load sets the invoice module explicitly.
     if (invoiceModule) jest.doMock('../services/invoice', () => invoiceModule);
+    else jest.dontMock('../services/invoice');
     const Renewals = require('../services/annual-prepay-renewals');
     const { anchorTermToInstallation } = require('../services/termite-annual-activation');
     return {
@@ -932,6 +934,88 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     const bellsBefore = notifyAdmin.mock.calls.length;
     expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: addMonths(fx.today, 24) })).toEqual({ scanned: 0, raised: 0 });
     expect(notifyAdmin.mock.calls.length).toBe(bellsBefore);
+  });
+  // #4940 pre-push P1: a DELAYED installation anchor can resolve a paid term
+  // to a coverage year that has already ended — billing_mode 'annual_prepay'
+  // is stamped only while the anchored year covers today.
+  async function paidTermAwaitingAnchor(db, { installedMonthsAgo, declined }) {
+    await db.raw('ALTER TABLE customers ADD COLUMN IF NOT EXISTS billing_mode text, ADD COLUMN IF NOT EXISTS updated_at timestamptz');
+    const customerId = randomUUID();
+    const today = etToday();
+    const signedOn = addMonths(today, -14);
+    await db('customers').insert({
+      id: customerId, first_name: 'Jane', last_name: 'Doe', billing_mode: 'per_application',
+    });
+    const [estimate] = await db('estimates').insert({ customer_id: customerId }).returning('*');
+    const [invoice] = await db('invoices').insert({
+      customer_id: customerId, status: 'paid', paid_at: new Date(`${signedOn}T17:00:00Z`), stripe_payment_intent_id: `pi_${randomUUID()}`,
+    }).returning('*');
+    const installedOn = addMonths(today, -installedMonthsAgo);
+    await db('scheduled_services').insert({
+      customer_id: customerId, source_estimate_id: estimate.id, status: 'completed',
+      service_type: 'Termite Bait Station Installation', scheduled_date: installedOn,
+    });
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: customerId,
+      source_estimate_id: estimate.id,
+      prepay_invoice_id: invoice.id,
+      plan_label: 'WaveGuard Termite Annual Protection',
+      prepay_amount: 450,
+      coverage_service_type: 'Termite Monitoring Visit',
+      coverage_visit_count: 2,
+      coverage_cadence: 'annual',
+      term_start: signedOn,
+      term_end: addMonths(signedOn, 12),
+      status: declined ? 'cancelled' : 'active',
+      renewal_decision: declined ? 'cancel' : null,
+      cancel_disposition: declined ? 'end_at_term' : null,
+      annual_plan_version: 'v3',
+      created_at: new Date(`${signedOn}T16:00:00Z`),
+    }).returning('*');
+    return {
+      customerId, today, term, installedOn,
+    };
+  }
+  const billingModeOf = async (db, customerId) => (await db('customers').where({ id: customerId }).first()).billing_mode;
+
+  test.each([
+    ['a paid decided lapse (declined before install)', true],
+    ['an undecided active term', false],
+  ])('anchor resolving to an EXPIRED year leaves billing_mode unchanged; a CURRENT year stamps it — %s', async (_label, declined) => {
+    const { db, anchorTermToInstallation } = await load();
+    const expired = await paidTermAwaitingAnchor(db, { installedMonthsAgo: 13, declined });
+    const anchoredExpired = await anchorTermToInstallation({ termId: expired.term.id, conn: db });
+    expect(anchoredExpired).toEqual(expect.objectContaining({ anchored: true, moved: true, termStart: expired.installedOn }));
+    expect(anchoredExpired.termEnd < expired.today).toBe(true);
+    expect(await billingModeOf(db, expired.customerId)).toBe('per_application');
+
+    const current = await paidTermAwaitingAnchor(db, { installedMonthsAgo: 2, declined });
+    const anchoredCurrent = await anchorTermToInstallation({ termId: current.term.id, conn: db });
+    expect(anchoredCurrent).toEqual(expect.objectContaining({ anchored: true, moved: true }));
+    expect(await billingModeOf(db, current.customerId)).toBe('annual_prepay');
+  });
+
+  // An unpaid term anchored (dates only) to a year that has since ended, then
+  // paid late through the ordinary pending -> active payment sync.
+  test('pending term anchored to an EXPIRED year, then paid: billing_mode unchanged; paid within its year: stamped', async () => {
+    const { db, Renewals, anchorTermToInstallation } = await load();
+    // Columns the pending -> active activation reads on the prepay invoice.
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS scheduled_service_id uuid, ADD COLUMN IF NOT EXISTS line_items jsonb, ADD COLUMN IF NOT EXISTS annual_prepay_covered_term_id uuid, ADD COLUMN IF NOT EXISTS payer_id uuid, ADD COLUMN IF NOT EXISTS payment_recorded_at timestamptz, ADD COLUMN IF NOT EXISTS notes text, ADD COLUMN IF NOT EXISTS sent_at timestamptz, ADD COLUMN IF NOT EXISTS payer_statement_id uuid, ADD COLUMN IF NOT EXISTS credit_applied numeric, ADD COLUMN IF NOT EXISTS total numeric, ADD COLUMN IF NOT EXISTS amount_paid numeric, ADD COLUMN IF NOT EXISTS updated_at timestamptz, ADD COLUMN IF NOT EXISTS annual_prepay_term_id uuid');
+    await db.raw('ALTER TABLE scheduled_services ADD COLUMN IF NOT EXISTS service_id uuid, ADD COLUMN IF NOT EXISTS pending_setup_fee numeric, ADD COLUMN IF NOT EXISTS recurring_parent_id uuid');
+    const run = async (installedMonthsAgo) => {
+      const fx = await paidTermAwaitingAnchor(db, { installedMonthsAgo, declined: false });
+      await db('invoices').where({ id: fx.term.prepay_invoice_id }).update({ status: 'sent', paid_at: null });
+      await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'payment_pending' });
+      expect(await anchorTermToInstallation({ termId: fx.term.id, conn: db })).toEqual(expect.objectContaining({ anchored: true }));
+      await db('invoices').where({ id: fx.term.prepay_invoice_id }).update({ status: 'paid', paid_at: new Date() });
+      await Renewals.syncTermForInvoicePayment(fx.term.prepay_invoice_id, db);
+      return fx;
+    };
+    const expired = await run(13);
+    expect(await billingModeOf(db, expired.customerId)).toBe('per_application');
+    const current = await run(2);
+    expect((await db('annual_prepay_terms').where({ id: current.term.id }).first()).status).toBe('active');
+    expect(await billingModeOf(db, current.customerId)).toBe('annual_prepay');
   });
 });
 

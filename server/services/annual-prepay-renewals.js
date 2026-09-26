@@ -3618,6 +3618,23 @@ async function settleDecidedPendingTerms(decided, nextStatus, conn) {
   return settled;
 }
 
+// Paid coverage live TODAY (billing's own test, dated) — the condition for
+// stamping billing_mode 'annual_prepay' on a path whose coverage year may
+// already have ended (#4940 pre-push P1s): on expired coverage the stamp is
+// the nothing-bills limbo (the monthly cron skips the mode).
+async function termCoversToday(termId, conn) {
+  return !!(await coveredTermsAsOf(conn, etDateString()).where('t.id', termId).first('t.id'));
+}
+
+// The pending -> active stamp, skipped when the paid year has already ENDED
+// (#4940 pre-push P1: an installation anchor can move a pending term to an
+// expired year before the late payment lands) — the stamp there is the
+// nothing-bills limbo. A not-yet-started year keeps its stamp, as before.
+async function stampUnlessYearEnded(term, conn) {
+  if (dateOnly(term.term_end) < etDateString()) return;
+  await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
+}
+
 async function followThroughPaidDecidedLapse(lapse, conn) {
   const refreshed = await refreshTermSnapshot(lapse, conn);
   await reconcilePendingWindowCompletions(refreshed || lapse, conn);
@@ -3626,7 +3643,7 @@ async function followThroughPaidDecidedLapse(lapse, conn) {
   // term_end, 'annual_prepay' on expired coverage is the nothing-bills limbo
   // (the monthly cron skips the mode); the historical payment is still
   // reconciled above. A pending term was never stamped, so the mode is left.
-  if (await coveredTermsAsOf(conn, etDateString()).where('t.id', lapse.id).first('t.id')) {
+  if (await termCoversToday(lapse.id, conn)) {
     await stampAnnualPrepayBillingMode(lapse.customer_id, conn, lapse.id);
   }
   if (lapse.dispute_suspended_at) await finishDisputeRecoveryForTerm(lapse, conn);
@@ -3764,7 +3781,8 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // (pre-payment completions bill per application), so this transition
       // is where the pending case picks up its stamp. Idempotent re-stamp
       // for already-active terms; best-effort + column-guarded inside.
-      await stampAnnualPrepayBillingMode(current.customer_id, conn, current.id);
+      // Never on a year that has already ended (stampUnlessYearEnded).
+      await stampUnlessYearEnded(current, conn);
       // Dispute-suspended term returning to life (won dispute /
       // re-collection): monthly dues the cron collected during the open
       // dispute double-charge the reinstated coverage — claw them back,
@@ -5408,6 +5426,16 @@ async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = fals
 // path only (anchorInstallation), a decided-lapse term (declined before its
 // installation) that is still PAID. Its coverage year is untouched by the
 // decline; isPaidDecidedLapseTerm applies billing's own paid test.
+// The born-paid billing-mode stamp. On the installation-anchor path the
+// anchored year can ALREADY have ended (a delayed anchor, #4940 pre-push P1):
+// stamp only while the term covers TODAY (the anchored year starts at a
+// completed installation, so this only ever skips an expired year). Other
+// creates stamp as before (a future-start prepay is stamped at creation).
+async function stampBornPaidBillingMode(term, anchorInstallation, conn) {
+  if (anchorInstallation && !(await termCoversToday(term.id, conn))) return;
+  await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
+}
+
 async function termCountsAsPaidAfterCreate(term, anchorInstallation, conn) {
   if (!term) return false;
   if (ACTIVE_STATUSES.includes(term.status)) return true;
@@ -5658,7 +5686,7 @@ async function createTermForAnnualPrepay({
       // and the annual_prepay stamp would divert them to the
       // monthly-membership dispatch path (Codex round-2). The payment sync
       // (syncTermForInvoicePayment) stamps on pending→active.
-      await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
+      await stampBornPaidBillingMode(refreshed, anchorInstallation, conn);
     }
     return refreshed;
   }
@@ -5709,7 +5737,7 @@ async function createTermForAnnualPrepay({
     // ACTIVE (born-paid) only — a payment_pending term keeps the customer
     // 'per_application' so pre-payment completions bill per application; the
     // payment sync stamps when the invoice pays (Codex round-2).
-    await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
+    await stampBornPaidBillingMode(refreshed, anchorInstallation, conn);
   }
   return refreshed;
 }
