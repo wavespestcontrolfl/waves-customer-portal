@@ -232,6 +232,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['No need to worry about pets after we spray.', ''],
     ['This treatment does not cause illness in children.', ''],
     ['It cannot cause health problems.', ''],
+    ['This treatment does not present any danger to children.', ''],
+    ["This pesticide doesn't present a threat to your pets.", ''],
+    ['Our spray will not create any risk for your family.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -732,6 +735,7 @@ describe('normalizeIntakeResult', () => {
     ['You can re-enter once your technician confirms the product is dry.', ''],
     ['You may re-enter once your technician confirms the product is dry.', ''],
     ['We will return in two weeks for the follow-up.', ''],
+    ['We place dry bait in 2 stations.', 'How do you treat for roaches?'],
     ["The EPA doesn't approve pesticides; it registers them.", ''],
     ["The EPA didn't approve this product; it is EPA-registered.", ''],
     ['This product is not EPA-approved; it is EPA-registered.', ''],
@@ -880,6 +884,20 @@ describe('normalizeIntakeResult', () => {
       'How much is service?',
     );
     expect(out.reply).toMatch(/Get my price/);
+  });
+
+  test.each([
+    'What should he do?',
+    'Is this serious?',
+    'Could this get worse?',
+  ])('a third-person / severity follow-up to an emergency keeps the emergency script: %s', (active) => {
+    const out = normalizeIntakeResult(
+      { reply: 'He should be safe.', intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      `My son cannot breathe after the spray\n${active}`,
+      active,
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
   test('a vague "now" is not a follow-up to an old emergency', () => {
@@ -1617,6 +1635,12 @@ describe('looksLikeEmergency', () => {
     "Bug spray got into my child's eyes",
     "Pesticide splashed on my son's skin",
     "Rat poison got in my dog's mouth",
+    "Pesticide splashed on my child's arm",
+    "Bug spray got on my child's hands",
+    "Rat poison got on my dog's paws",
+    'My child is vomiting after the pesticide treatment',
+    'My son is dizzy after you sprayed the house',
+    'I have a rash after the lawn chemicals were applied',
     'my dog licked the roach spray',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
