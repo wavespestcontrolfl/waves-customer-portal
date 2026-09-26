@@ -104,6 +104,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
   const [open, setOpen] = useState(false);
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState("");
+  const [detailLoading, setDetailLoading] = useState(false);
   const requestRef = useRef(0);
   const abortRef = useRef(null);
 
@@ -112,6 +113,11 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
     const request = ++requestRef.current;
     const controller = new AbortController();
     abortRef.current = controller;
+    if (customerId) {
+      setState((current) => ({ ...current, records: [] }));
+      setError("");
+      setDetailLoading(true);
+    }
     try {
       const path = customerId
         ? `/admin/customer-geocodes/${encodeURIComponent(customerId)}?scope=primary`
@@ -135,7 +141,10 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
       }
       setError(loadError.message || "Address review could not load.");
     } finally {
-      if (abortRef.current === controller) abortRef.current = null;
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setDetailLoading(false);
+      }
     }
   }, [customerId, offset, refreshToken]);
 
@@ -167,7 +176,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
               <Button variant="secondary" onClick={load}>Refresh</Button>
             </div>
           )}
-          {!error && state.records.length === 0 ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">No addresses need review.</div> : state.records.map((record) => (
+          {detailLoading ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">Loading address review…</div> : !error && state.records.length === 0 ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">No addresses need review.</div> : state.records.map((record) => (
             <ReviewRecord key={record.customer.id} record={record} onSelectCustomer={onSelectCustomer} />
           ))}
           {!customerId && state.total > PAGE_SIZE && (

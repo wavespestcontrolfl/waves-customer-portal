@@ -137,6 +137,33 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.queryByText("Verified")).not.toBeInTheDocument();
   });
 
+  it("suppresses stale detail while a profile-triggered refresh is pending or fails", async () => {
+    const verified = record({
+      customer: { ...record().customer, address_line1: "100 Old Address" },
+      review: { status: "verified", source: "site_visit", reviewed_at: "2026-09-24T15:30:00.000Z" },
+    });
+    let finishRefresh;
+    const pendingRefresh = new Promise((resolve) => { finishRefresh = resolve; });
+    vi.stubGlobal("fetch", vi.fn()
+      .mockImplementationOnce(() => response({ enabled: true, ...verified }))
+      .mockImplementationOnce(() => pendingRefresh));
+
+    const view = render(<CustomerGeocodeReviewPanel customerId="customer-1" refreshToken={1} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Primary service location review/ }));
+    expect(await screen.findByText("Verified")).toBeInTheDocument();
+
+    view.rerender(<CustomerGeocodeReviewPanel customerId="customer-1" refreshToken={2} />);
+    expect(await screen.findByText("Loading address review…")).toBeInTheDocument();
+    expect(screen.queryByText("Verified")).not.toBeInTheDocument();
+    expect(screen.queryByText("100 Old Address, Bradenton, FL, 34205")).not.toBeInTheDocument();
+
+    finishRefresh(await response({ error: "Synthetic refresh failure" }, 503));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic refresh failure");
+    expect(screen.queryByText("Verified")).not.toBeInTheDocument();
+    expect(screen.queryByText("100 Old Address, Bradenton, FL, 34205")).not.toBeInTheDocument();
+    expect(screen.queryByText("No addresses need review.")).not.toBeInTheDocument();
+  });
+
   it("distinguishes reviewed statuses and keeps the read slice free of pin actions", async () => {
     const verified = record({
       review: {
