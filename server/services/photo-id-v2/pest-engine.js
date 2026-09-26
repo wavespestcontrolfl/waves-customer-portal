@@ -191,12 +191,9 @@ function dedupeCandidates(list) {
       seen.set(key, c);
     }
   }
-  // Checked candidates rank above unchecked guesses, then by confidence —
-  // with no checks at all (verify and escalation both missed) this is the
-  // plain confidence order.
-  return [...seen.values()]
-    .sort((a, b) => (!!b.verified - !!a.verified) || (b.confidence - a.confidence))
-    .slice(0, 3);
+  // Ranking stays by confidence: `verified` gates wording and evidence, never
+  // which identity a provider put first (Codex round-0 P1, round 16).
+  return [...seen.values()].sort((a, b) => b.confidence - a.confidence).slice(0, 3);
 }
 
 function sameCandidateKey(a, b) {
@@ -953,7 +950,10 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
       verified: !!(geminiTop.verified || openaiTop.verified),
     };
     return {
-      finalCandidates: dedupeCandidates([bumped, ...geminiCandidates.slice(1), ...openaiCandidates.slice(1)]),
+      // Both providers' own top is the answer's top; a stale runner-up with
+      // a higher raw number must not displace it (Codex round-0 P1, round 15).
+      finalCandidates: [bumped, ...dedupeCandidates([...geminiCandidates.slice(1), ...openaiCandidates.slice(1)])
+        .filter((c) => !sameCandidateKey(c, bumped))].slice(0, 3),
       disagreed: false,
       disagreementNode: null,
       openaiAnswered,

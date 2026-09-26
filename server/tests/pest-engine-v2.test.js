@@ -655,6 +655,26 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.v2.answer.wording).not.toBe('pretty_sure');
   });
 
+  test('an unchecked new OpenAI top is still OpenAI\'s top: disagreement is not erased by verification — Codex round-0 P1 (round 16)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'ghost-ant', confidence: 0.75 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'ghost-ant', confidence: 0.75, traits_visible: [1], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [
+            { slug: 'fire-ant', confidence: 0.95, traits_visible: [], traits_not_visible: [] },
+            { slug: 'ghost-ant', confidence: 0.20, traits_visible: [1], traits_not_visible: [] },
+          ],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.disagreed).toBe(true);
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+
   test('self-contradiction (candidates-call top != verify-call top) triggers escalation', async () => {
     dispatch
       .mockResolvedValueOnce(candidatesReply([
