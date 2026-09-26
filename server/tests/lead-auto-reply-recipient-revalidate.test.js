@@ -6,6 +6,7 @@
 // off) keeps today's plain send.
 
 let mockCustomerRow = null;
+let mockLeads = [];
 const mockSend = jest.fn();
 const mockLockCalls = [];
 
@@ -19,6 +20,7 @@ jest.mock('../models/db', () => {
       whereRaw: jest.fn(() => chain),
       forNoKeyUpdate: jest.fn(() => { chain.locked = true; return chain; }),
       first: jest.fn(async () => (table === 'customers' ? mockCustomerRow : null)),
+      select: jest.fn(async () => (table === 'leads' ? mockLeads : [])),
       insert: jest.fn(() => chain),
       onConflict: jest.fn(() => chain),
       ignore: jest.fn(() => chain),
@@ -45,10 +47,11 @@ jest.mock('../utils/customer-comms-lock', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...args) => mockSend(...args),
   normalizeRecipient: phone => phone,
-  classifyDeliveryCertainty: () => 'unknown',
+  classifyDeliveryCertainty: outcome => (outcome?.deliveryOutcome === 'not_sent' ? 'not_sent' : 'unknown'),
 }));
 
-const { recipientStillCurrent, sendLeadAutoReplyOnce } = require('../services/lead-auto-reply');
+const { recipientStillCurrent, delayedLeadReplyStillEligible, sendLeadAutoReplyOnce } = require('../services/lead-auto-reply');
+const { resolveLeadAutoReplyClaim } = require('../services/lead-auto-reply');
 
 const args = {
   customer: { id: 'cust-1' },
@@ -61,7 +64,8 @@ const args = {
 beforeEach(() => {
   mockSend.mockReset();
   mockLockCalls.length = 0;
-  mockCustomerRow = { phone: '(941) 555-1234' };
+  mockCustomerRow = { phone: '(941) 555-1234', lead_intake_status: 'awaiting_service' };
+  mockLeads = [{ status: 'new', deleted_at: null }];
 });
 
 describe('recipientStillCurrent', () => {
@@ -117,5 +121,44 @@ describe('sendLeadAutoReplyOnce({ revalidateRecipient })', () => {
 
     expect(mockSend.mock.calls[0][0]).not.toHaveProperty('withSmsHandoff');
     expect(mockLockCalls).toEqual([]);
+  });
+});
+
+describe('delayedLeadReplyStillEligible', () => {
+  test('untouched lead → ok', async () => {
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234')).resolves.toEqual({ ok: true });
+  });
+
+  test.each(['estimate_drafted'])('customer already replied (intake %s) → refused', async (status) => {
+    mockCustomerRow = { phone: '+19415551234', lead_intake_status: status };
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234')).resolves.toMatchObject({ ok: false, code: 'LEAD_CONVERSATION_STARTED' });
+  });
+
+  test.each([
+    ['contacted by staff', [{ status: 'contacted', deleted_at: null }]],
+    ['lost', [{ status: 'lost', deleted_at: null }]],
+    ['deleted', [{ status: 'new', deleted_at: new Date() }]],
+  ])('lead %s → refused', async (_label, leads) => {
+    mockLeads = leads;
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234')).resolves.toMatchObject({ ok: false, code: 'LEAD_NO_LONGER_PRE_CONTACT' });
+  });
+
+  test('no lead row at all (lead insert failed) → still ok', async () => {
+    mockLeads = [];
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234')).resolves.toEqual({ ok: true });
+  });
+});
+
+describe('a rejected send still settles the claim', () => {
+  test('a refused or failed locked handoff throw releases the claim via its tagged not_sent outcome', async () => {
+    const err = Object.assign(new Error('handoff failed'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+    mockSend.mockRejectedValue(err);
+    const db = require('../models/db');
+    db.mockClear();
+
+    await expect(sendLeadAutoReplyOnce({ ...args, revalidateRecipient: true })).rejects.toBe(err);
+
+    const delCalls = db.mock.results.filter((r, i) => db.mock.calls[i][0] === 'lead_auto_reply_sends').map(r => r.value.del.mock.calls.length);
+    expect(delCalls.some(n => n > 0)).toBe(true);
   });
 });

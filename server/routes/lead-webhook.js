@@ -767,7 +767,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // shutdown flush) returns that same send, so the flush waits for the
     // real dispatch instead of a duplicate that finds the claim and returns.
     const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient: true })
-      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed: ${fallbackErr.message}`)));
+      // Stable code + id only: provider/messaging errors can carry the phone or body.
+      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed for customer ${customer.id}: ${fallbackErr?.code || fallbackErr?.name || 'error'}`)));
     // With the agent configured, the lead's one-minute clock starts here,
     // where the immediate reply is skipped, not after the estimate work
     // below. The guard sends the standard reply at the deadline even if
@@ -777,7 +778,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     let leadFallbackGuard = null;
     if (leadAgentConfigured) {
       leadFallbackDeadlineAt = Date.now() + LEAD_AGENT_FALLBACK_AFTER_MS;
-      pendingLeadFallbacks.add(sendFallbackAutoReply);
+      pendingLeadFallbacks.set(sendFallbackAutoReply, null);
       leadFallbackGuard = setTimeout(() => { void sendFallbackAutoReply(); }, LEAD_AGENT_FALLBACK_AFTER_MS);
       leadFallbackGuard.unref?.();
     }
@@ -1204,7 +1205,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         sendFallback: sendFallbackAutoReply,
         ...(leadFallbackDeadlineAt ? { fallbackAfterMs: Math.max(0, leadFallbackDeadlineAt - Date.now()) } : {}),
         onError: err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`),
-      }).catch(err => logger.error(`[lead-agent] Fallback chain error: ${err.message}`));
+      }).catch(err => logger.error(`[lead-agent] Fallback chain error for customer ${customer.id}: ${err?.code || err?.name || 'error'}`));
     } catch (e) {
       logger.error(`[lead-agent] Init error: ${e.message}`);
       // A synchronous require/init throw also means "the agent didn't
@@ -1840,7 +1841,9 @@ const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
 // called from index.js shutdown): the standard reply goes out at once
 // instead of dying with the process. The shared first-touch claim still
 // allows exactly one text, so an agent send that already landed wins.
-const pendingLeadFallbacks = new Set();
+// sendFallback → a promise that settles when that run's fallback work is
+// finished (null while only the route has registered it).
+const pendingLeadFallbacks = new Map();
 
 // Wraps an async function so overlapping calls share the one in flight; a
 // call after it settles starts a fresh one.
@@ -1857,11 +1860,14 @@ function singleFlight(fn) {
 // that started after the first. The senders are single-flight and the claim
 // allows one text, so flushing an entry twice is safe.
 async function flushPendingLeadFallbacks(timeoutMs = 10000) {
-  const pending = [...pendingLeadFallbacks];
+  const pending = [...pendingLeadFallbacks.entries()];
   if (!pending.length) return 0;
   let timer;
   await Promise.race([
-    Promise.allSettled(pending.map(sendFallback => Promise.resolve().then(sendFallback))),
+    // Send now, and also wait (within the bound) for the run itself: an agent
+    // send in flight holds the claim, and if it then fails the late retry
+    // must still go out before the process exits.
+    Promise.allSettled(pending.flatMap(([sendFallback, finished]) => [Promise.resolve().then(sendFallback), finished || null])),
     new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); }),
   ]);
   clearTimeout(timer);
@@ -1873,7 +1879,8 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
   if (!agentConfigured) {
     return processLead().catch(err => onError(err));
   }
-  pendingLeadFallbacks.add(sendFallback);
+  let markFinished;
+  pendingLeadFallbacks.set(sendFallback, new Promise((resolve) => { markFinished = resolve; }));
   let timer;
   const timedOut = new Promise((resolve) => {
     timer = setTimeout(() => resolve({ timedOut: true }), fallbackAfterMs);
@@ -1884,7 +1891,7 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
   clearTimeout(timer);
   // The fallback stays registered for the shutdown flush until its last
   // send attempt has settled, not just until the agent's run has.
-  const done = () => pendingLeadFallbacks.delete(sendFallback);
+  const done = () => { pendingLeadFallbacks.delete(sendFallback); markFinished(); };
   const finalFallback = () => Promise.resolve().then(sendFallback).finally(done);
   if (settled.timedOut) {
     // The fallback below may find the agent's claim still held by a send in

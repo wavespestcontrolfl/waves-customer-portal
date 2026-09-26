@@ -22,7 +22,7 @@ jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() })
 const { _test } = require('../routes/lead-webhook');
 const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS, flushPendingLeadFallbacks, pendingLeadFallbacks, singleFlight } = _test;
 
-// Runs that never settle stay registered in the module-level set.
+// Runs that never settle stay registered in the module-level registry.
 beforeEach(() => pendingLeadFallbacks.clear());
 
 function harness(processLeadImpl) {
@@ -209,7 +209,7 @@ describe('flushPendingLeadFallbacks (deploy shutdown)', () => {
   });
 
   test('a hanging fallback cannot hold shutdown past the bound', async () => {
-    pendingLeadFallbacks.add(() => new Promise(() => {}));
+    pendingLeadFallbacks.set(() => new Promise(() => {}), null);
     const started = Date.now();
     await expect(flushPendingLeadFallbacks(20)).resolves.toBe(1);
     expect(Date.now() - started).toBeLessThan(1000);
@@ -222,7 +222,7 @@ describe('singleFlight (the route\'s fallback sender)', () => {
     const send = jest.fn(() => new Promise((resolve) => { finishSend = resolve; }));
     const sendFallback = singleFlight(send);
     const guardSend = sendFallback();
-    pendingLeadFallbacks.add(sendFallback);
+    pendingLeadFallbacks.set(sendFallback, null);
     let flushed = false;
     const flushing = flushPendingLeadFallbacks(1000).then(() => { flushed = true; });
     await new Promise(r => setImmediate(r));
@@ -241,5 +241,26 @@ describe('singleFlight (the route\'s fallback sender)', () => {
     await sendFallback();
     await sendFallback();
     expect(send).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('flushPendingLeadFallbacks waits for the agent run itself', () => {
+  test('an agent send in flight at shutdown: the flush waits for the run and its late retry', async () => {
+    let finishRun;
+    const send = jest.fn(async () => {}); // the claim is held by the agent: returns at once
+    const sendFallback = singleFlight(send);
+    const processLead = jest.fn(() => new Promise((resolve) => { finishRun = resolve; }));
+    const settling = settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn(), fallbackAfterMs: 60000 });
+    await new Promise(r => setImmediate(r));
+    let flushed = false;
+    const flushing = flushPendingLeadFallbacks(1000).then(() => { flushed = true; });
+    await new Promise(r => setImmediate(r));
+    expect(flushed).toBe(false); // still waiting on the run, not just the fallback call
+    finishRun({ actionTaken: 'queued_for_adam' }); // the agent released the claim without sending
+    await flushing;
+    await settling;
+    expect(flushed).toBe(true);
+    expect(send).toHaveBeenCalledTimes(2); // the flush's call + the run's final fallback
+    expect(pendingLeadFallbacks.size).toBe(0);
   });
 });

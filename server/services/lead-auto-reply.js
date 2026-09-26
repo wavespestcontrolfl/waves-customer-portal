@@ -160,6 +160,29 @@ async function recipientStillCurrent(customerId, phoneDigits, conn = db) {
     : { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'Customer deleted or phone changed before the delayed lead reply' };
 }
 
+// The delayed fallback goes out up to a minute after the form; in that time
+// staff may have contacted, disqualified or deleted the lead, or the
+// customer may have texted first. Send only while the lead is still
+// untouched: the recipient is current, intake has not moved past the
+// webhook's own seeding (a customer reply advances it), and the customer's
+// lead rows (if any) include a live pre-contact one.
+const UNTOUCHED_INTAKE_STATUSES = [null, 'awaiting_service', 'awaiting_address'];
+const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
+async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db) {
+  const recipient = await recipientStillCurrent(customerId, phoneDigits, conn);
+  if (!recipient.ok) return recipient;
+  const customer = await conn('customers').where({ id: customerId }).first('lead_intake_status');
+  if (!UNTOUCHED_INTAKE_STATUSES.includes(customer?.lead_intake_status ?? null)) {
+    return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'The lead conversation moved on before the delayed lead reply' };
+  }
+  const leads = await conn('leads').where({ customer_id: customerId }).select('status', 'deleted_at');
+  const livePreContact = leads.some(lead => !lead.deleted_at && (lead.status == null || PRE_CONTACT_LEAD_STATUSES.includes(lead.status)));
+  if (leads.length && !livePreContact) {
+    return { ok: false, code: 'LEAD_NO_LONGER_PRE_CONTACT', reason: 'The lead was contacted, closed or deleted before the delayed lead reply' };
+  }
+  return { ok: true };
+}
+
 // Auto-reply to lead — send AT MOST ONCE per person, ever (owner ruling
 // 2026-08-05). Callers gate this to new customer rows; the same person can
 // still produce a second "new" row (phone stored in a different format,
@@ -209,6 +232,9 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
     return;
   }
 
+  // A throw (for example a refused or failed locked handoff) carries the
+  // wrapper's tagged outcome; settle the claim on it (a provable not_sent
+  // releases it) before rethrowing, as the agent's send path does.
   const smsResult = await sendCustomerMessage({
     to: phoneFormatted,
     body: replyMsg,
@@ -226,7 +252,7 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
     // which releases the claim below) or waits until Twilio has the request.
     ...(revalidateRecipient ? {
       withSmsHandoff: dispatch => withSmsConsentLock(db, { phone: phoneFormatted, customerId: customer.id }, async (trx) => {
-        const current = await recipientStillCurrent(customer.id, phoneDigits, trx);
+        const current = await delayedLeadReplyStillEligible(customer.id, phoneDigits, trx);
         return current.ok ? dispatch(trx) : current;
       }),
     } : {}),
@@ -235,6 +261,9 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
       customerLocationId: location.id,
       lead_source: leadSource.source,
     },
+  }).catch(async (err) => {
+    await resolveLeadAutoReplyClaim(phoneDigits, err?.providerOutcome || null);
+    throw err;
   });
   if (!smsResult.sent) {
     logger.warn(`[lead-auto-reply] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
@@ -307,6 +336,7 @@ async function clearServiceMenuIntakeState(customerId, dbc = db) {
 
 module.exports = {
   recipientStillCurrent,
+  delayedLeadReplyStillEligible,
   clearServiceMenuIntakeState,
   LEAD_AUTO_REPLY_AUDIT_CUTOVER,
   hasPriorLeadAutoReply,
