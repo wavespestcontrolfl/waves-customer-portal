@@ -102,7 +102,11 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     chain.first = async () => (table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : null);
     chain.then = (resolve) => {
       if (table !== 'service_records') return Promise.resolve([]).then(resolve);
-      const rows = recommendationRead ? recommendationRows || [] : sentRows;
+      // History fixtures are published by default; visibility-negative cases
+      // opt out explicitly with report_view_token: null.
+      const rows = recommendationRead
+        ? (recommendationRows || []).map((row) => ({ report_view_token: `token-${row.id}`, ...row }))
+        : sentRows;
       const bounded = throughDate
         ? rows.filter((row) => String(row.service_date instanceof Date
           ? row.service_date.toISOString() : row.service_date || '').slice(0, 10) <= throughDate)
@@ -335,6 +339,112 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(JSON.stringify(res.body)).not.toMatch(/Primary lawn|Internal mosquito|Wrong companion/);
   });
 
+  test('delivery posture without a published report artifact exposes no primary or companion history', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: SERVICE,
+      recommendationRows: [{
+        id: 'unpublished', scheduled_service_id: 'unpublished-svc', service_line: 'mosquito', service_date: '2026-08-01',
+        report_view_token: null,
+        structured_notes: { typedReportDelivery: 'auto_send', formRecommendations: ['Unpublished primary'] },
+        service_data: {
+          typedReportSnapshot: { nextStepChips: ['Unpublished primary snapshot'] },
+          companionReportSnapshots: [{
+            type: 'mosquito_event', delivery: 'auto_send', nextStepChips: ['Unpublished companion'],
+          }],
+        },
+      }],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([]);
+  });
+
+  test('typed snapshot recommendations use frozen customer wording and keep multi-select parts separate', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: SERVICE,
+      recommendationRows: [{
+        id: 'frozen-copy', scheduled_service_id: 'frozen-copy-svc', service_line: 'mosquito', service_date: '2026-08-01',
+        service_data: {
+          typedReportSnapshot: {
+            values: {
+              treatment_recommendation: 'Raw value that may map differently now',
+              inspection_recommendations: 'Raw first, Raw second',
+              injection_recommended: 'Yes',
+            },
+            findings: [
+              {
+                fieldKey: 'treatment_recommendation',
+                value: 'Raw value that may map differently now',
+                customerValueLabel: 'Frozen treatment wording',
+              },
+              {
+                fieldKey: 'inspection_recommendations',
+                value: 'Raw first, Raw second',
+                customerValueLabel: 'Frozen first, Frozen second, with detail',
+                customerValueParts: ['Frozen first', 'Frozen second, with detail'],
+              },
+            ],
+          },
+        },
+      }],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([
+      { text: 'Frozen treatment wording', serviceDate: '2026-08-01', serviceRecordId: 'frozen-copy' },
+      { text: 'Frozen first', serviceDate: '2026-08-01', serviceRecordId: 'frozen-copy' },
+      { text: 'Frozen second, with detail', serviceDate: '2026-08-01', serviceRecordId: 'frozen-copy' },
+      { text: 'A palm injection is recommended', serviceDate: '2026-08-01', serviceRecordId: 'frozen-copy' },
+    ]);
+    expect(JSON.stringify(res.body)).not.toMatch(/Raw value|Raw first|Raw second/);
+  });
+
+  test('completion history counts scheduled visits once, deduplicates sibling text, and treats unlinked records separately', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: SERVICE,
+      recommendationRows: [
+        {
+          id: 'sibling-a', scheduled_service_id: 'shared-visit', service_line: 'mosquito', service_date: '2026-08-10',
+          structured_notes: { formRecommendations: ['Shared recommendation'] },
+        },
+        {
+          id: 'sibling-b', scheduled_service_id: 'shared-visit', service_line: 'mosquito', service_date: '2026-08-10',
+          structured_notes: { formRecommendations: ['Shared recommendation', 'Sibling-only recommendation'] },
+        },
+        {
+          id: 'legacy-a', scheduled_service_id: null, service_line: 'mosquito', service_date: '2026-08-05',
+          structured_notes: { formRecommendations: ['First legacy recommendation'] },
+        },
+        {
+          id: 'legacy-b', scheduled_service_id: null, service_line: 'mosquito', service_date: '2026-08-04',
+          structured_notes: { formRecommendations: ['Second legacy recommendation'] },
+        },
+        {
+          id: 'past-bound', scheduled_service_id: 'past-bound-svc', service_line: 'mosquito', service_date: '2026-08-03',
+          structured_notes: { formRecommendations: ['Past visit bound'] },
+        },
+      ],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([
+      { text: 'Shared recommendation', serviceDate: '2026-08-10', serviceRecordId: 'sibling-a' },
+      { text: 'Sibling-only recommendation', serviceDate: '2026-08-10', serviceRecordId: 'sibling-b' },
+      { text: 'First legacy recommendation', serviceDate: '2026-08-05', serviceRecordId: 'legacy-a' },
+      { text: 'Second legacy recommendation', serviceDate: '2026-08-04', serviceRecordId: 'legacy-b' },
+    ]);
+    expect(JSON.stringify(res.body)).not.toContain('Past visit bound');
+  });
+
   test('completion history is bounded to twelve suggestions', async () => {
     process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'on';
     mockDbCurrent = scriptedDb({
@@ -498,7 +608,7 @@ describe('route wiring contracts', () => {
     expect(block).toContain(".where('service_date', '<=', visitDay)");
     expect(block).toContain('PREVIOUS_RECOMMENDATION_VISIT_LIMIT');
     expect(block).toContain('PREVIOUS_RECOMMENDATION_ITEM_LIMIT');
-    expect(block).toContain("'structured_notes', 'service_data'");
+    expect(block).toContain("'structured_notes', 'service_data', 'report_view_token'");
     expect(block).not.toContain('technician_notes');
   });
 });

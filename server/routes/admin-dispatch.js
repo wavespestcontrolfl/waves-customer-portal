@@ -288,6 +288,8 @@ function irrigationSettingsOnFile(prefs) {
 const PREVIOUS_RECOMMENDATION_VISIT_LIMIT = 3;
 const PREVIOUS_RECOMMENDATION_ITEM_LIMIT = 12;
 const PREVIOUS_RECOMMENDATION_SCAN_LIMIT = 500;
+const RECOMMENDATION_FIELD_PATTERN = /(^|_)(?:recommendation|recommendations|recommended)(?:_|$)/i;
+const NEGATIVE_RECOMMENDATION_PATTERN = /^(?:no|false|none|not recommended)$/i;
 
 function recommendationTextValues(value) {
   const values = Array.isArray(value) ? value : [value];
@@ -297,14 +299,20 @@ function recommendationTextValues(value) {
     .filter(Boolean);
 }
 
-function recommendationTextsFromSnapshot(snapshot = null) {
-  const texts = recommendationTextValues(snapshot?.nextStepChips);
-  const values = snapshot?.values && typeof snapshot.values === 'object' && !Array.isArray(snapshot.values)
-    ? snapshot.values : {};
+function frozenRecommendationTexts(finding = {}) {
+  const rawValues = recommendationTextValues(finding.value);
+  if (rawValues.some((value) => NEGATIVE_RECOMMENDATION_PATTERN.test(value))) return [];
+  const parts = recommendationTextValues(finding.customerValueParts);
+  return parts.length ? parts : recommendationTextValues(finding.customerValueLabel);
+}
+
+function legacyRecommendationTexts(values, frozenKeys) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return [];
+  const texts = [];
   for (const [key, value] of Object.entries(values)) {
-    if (!/(^|_)(?:recommendation|recommendations|recommended)(?:_|$)/i.test(key)) continue;
+    if (frozenKeys.has(key) || !RECOMMENDATION_FIELD_PATTERN.test(key)) continue;
     for (const raw of recommendationTextValues(value)) {
-      if (/^(?:no|false|none|not recommended)$/i.test(raw)) continue;
+      if (NEGATIVE_RECOMMENDATION_PATTERN.test(raw)) continue;
       const mapped = ActivityIndicators.customerLabelForValue(key, raw);
       texts.push(mapped === raw && /^(?:yes|true)$/i.test(raw)
         ? `${ActivityIndicators.customerLabelForField(key)}: ${raw}`
@@ -314,6 +322,23 @@ function recommendationTextsFromSnapshot(snapshot = null) {
   return texts;
 }
 
+function recommendationTextsFromSnapshot(snapshot = null) {
+  const texts = recommendationTextValues(snapshot?.nextStepChips);
+  const frozenKeys = new Set();
+  const findings = Array.isArray(snapshot?.findings) ? snapshot.findings : [];
+  for (const finding of findings) {
+    const key = String(finding?.fieldKey || '');
+    if (!RECOMMENDATION_FIELD_PATTERN.test(key)) continue;
+    const frozenTexts = frozenRecommendationTexts(finding);
+    // Current snapshots freeze the exact customer copy in findings. Raw
+    // value reconstruction remains only when the legacy finding omitted it.
+    if (!frozenTexts.length) continue;
+    frozenKeys.add(key);
+    texts.push(...frozenTexts);
+  }
+  return texts.concat(legacyRecommendationTexts(snapshot?.values, frozenKeys));
+}
+
 function recommendationHistoryFromRecord(record = {}, visitLine = '') {
   const structured = parseJsonObject(record.structured_notes);
   if (structured.backfill || String(structured.visitOutcome || '') === 'incomplete') {
@@ -321,7 +346,10 @@ function recommendationHistoryFromRecord(record = {}, visitLine = '') {
   }
   const serviceData = parseJsonObject(record.service_data);
   const primaryLine = String(record.service_line || '').trim() || detectServiceLine(record.service_type);
-  const primaryVisible = primaryLine === visitLine
+  // Delivery posture describes intent. The report token proves that a
+  // customer-facing artifact was actually published for this record.
+  const reportPublished = Boolean(record.report_view_token);
+  const primaryVisible = reportPublished && primaryLine === visitLine
     && String(structured.typedReportDelivery || 'auto_send') === 'auto_send';
   const snapshots = [];
   if (primaryVisible && serviceData.typedReportSnapshot
@@ -330,6 +358,7 @@ function recommendationHistoryFromRecord(record = {}, visitLine = '') {
   }
   const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
     ? serviceData.companionReportSnapshots.filter((snapshot) => snapshot
+      && reportPublished
       && typeof snapshot === 'object'
       && snapshot.delivery === 'auto_send'
       && detectServiceLine(snapshot.type) === visitLine)
@@ -355,9 +384,11 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
   if (!customerId || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDay || ''))) return [];
   const visitLine = detectServiceLine(serviceType);
   const output = [];
-  let eligibleVisits = 0;
+  const eligibleVisits = new Set();
+  const seenRecommendations = new Set();
   let offset = 0;
-  while (eligibleVisits < PREVIOUS_RECOMMENDATION_VISIT_LIMIT) {
+  let reachedVisitLimit = false;
+  while (!reachedVisitLimit) {
     const rows = await db('service_records')
       .where({ customer_id: customerId, status: 'completed' })
       .where('service_date', '<=', visitDay)
@@ -368,7 +399,7 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
       .offset(offset)
       .select(
         'id', 'scheduled_service_id', 'service_type', 'service_line', 'service_date',
-        'structured_notes', 'service_data',
+        'structured_notes', 'service_data', 'report_view_token',
       )
       .catch(() => []);
     for (const row of rows) {
@@ -378,15 +409,28 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
       // incomplete/suppressed primary reports, and internal-only companions
       // cannot consume one of the customer's visible-history slots.
       if (!history.eligible) continue;
-      eligibleVisits += 1;
+      // A scheduled visit may intentionally own multiple completed records.
+      // Legacy rows without a visit FK remain independent history entries.
+      const visitKey = row.scheduled_service_id
+        ? `scheduled:${row.scheduled_service_id}`
+        : `legacy:${row.id}`;
+      if (!eligibleVisits.has(visitKey)) {
+        if (eligibleVisits.size >= PREVIOUS_RECOMMENDATION_VISIT_LIMIT) {
+          reachedVisitLimit = true;
+          continue;
+        }
+        eligibleVisits.add(visitKey);
+      }
       const serviceDate = dateOnlyString(row.service_date) || '';
       for (const text of history.texts) {
+        const recommendationKey = text.toLowerCase();
+        if (seenRecommendations.has(recommendationKey)) continue;
+        seenRecommendations.add(recommendationKey);
         output.push({ text, serviceDate, serviceRecordId: row.id });
         if (output.length >= PREVIOUS_RECOMMENDATION_ITEM_LIMIT) return output;
       }
-      if (eligibleVisits >= PREVIOUS_RECOMMENDATION_VISIT_LIMIT) break;
     }
-    if (rows.length < PREVIOUS_RECOMMENDATION_SCAN_LIMIT) break;
+    if (reachedVisitLimit || rows.length < PREVIOUS_RECOMMENDATION_SCAN_LIMIT) break;
     offset += rows.length;
   }
   return output;
