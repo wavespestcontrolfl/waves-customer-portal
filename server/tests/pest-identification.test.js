@@ -124,6 +124,25 @@ describe('mergeModelResults', () => {
     expect(report.recommendation.inspection_required).toBe(true);
   });
 
+  test('a cross-group conflict photo keeps both candidates, so the dispute falls back to inspection-first', () => {
+    const ghost = mergeModelResults(null, claude());
+    const antVsTermite = mergeModelResults(claude({ best_match: 'subterranean termite' }), claude());
+    expect(antVsTermite).toMatchObject({ agreement: 'conflict', entry: null });
+    const identification = _test.aggregateIdentification([ghost, antVsTermite]);
+    expect(identification.contested).toBe(true);
+    const contract = buildPestReportContract({ ...ghost, identification });
+    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
+    expect(contract.safety.structural_threat).toBe(false);
+  });
+
+  test('a conflict with an unlisted name leaves the service unknown: inspection-first consultation', () => {
+    const ghost = mergeModelResults(null, claude());
+    const ghostVsUnlisted = mergeModelResults(claude({ best_match: 'white-footed ant' }), claude());
+    const identification = _test.aggregateIdentification([ghost, ghostVsUnlisted]);
+    const contract = buildPestReportContract({ ...ghost, identification });
+    expect(contract.service).toMatchObject({ label: 'Pest Consultation', key: null, inspection_required: true });
+  });
+
   test('a split that includes the winner stays an inconclusive photo, not a dispute', () => {
     const ghost = mergeModelResults(null, claude());
     const ghostFire = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));

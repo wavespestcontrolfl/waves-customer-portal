@@ -610,7 +610,7 @@ function mergeModelResults(openai, gemini) {
         return { ...base, entry: null, group: a.match.group, candidates: [a.match, b.match], shared, confidence: 'low', category, agreement: 'group' };
       }
       const category = a.category === b.category ? a.category : 'other';
-      return { ...base, entry: null, confidence: 'low', category, agreement: 'conflict' };
+      return { ...base, entry: null, candidates: [a.match, b.match], confidence: 'low', category, agreement: 'conflict' };
     }
     const single = a.match ? a : (b.match ? b : null);
     if (single) {
@@ -625,7 +625,9 @@ function mergeModelResults(openai, gemini) {
       }
       const otherCategory = other.notAPest ? 'not_a_pest' : other.category;
       const category = otherCategory === single.match.category ? otherCategory : 'other';
-      return { ...base, entry: null, confidence: 'low', category, agreement: 'conflict' };
+      // The other side named something outside the library: an unknown
+      // candidate, so no service can be derived from the known one alone.
+      return { ...base, entry: null, candidates: [single.match], unknownCandidate: true, confidence: 'low', category, agreement: 'conflict' };
     }
     const category = a.category === b.category ? a.category : 'other';
     const notAPest = a.notAPest && b.notAPest;
@@ -669,11 +671,11 @@ function aggregateIdentification(perPhoto) {
     const group = groups.length === 1
       && perPhoto.every((r) => r.group === groups[0] || (r.category === 'other' && r.agreement !== 'conflict'))
       ? groups[0] : null;
-    const groupCandidates = group ? candidateEntries(perPhoto.filter((r) => r.group === group)) : [];
+    const groupPhotos = group ? perPhoto.filter((r) => r.group === group) : [];
     return {
       entry: null,
       group,
-      shared: groupCandidates.length ? sharedFacts(groupCandidates.map(entryFacts)) : null,
+      shared: groupPhotos.length ? disputedFacts(groupPhotos) : null,
       confidence: 'low',
       category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
       contested: false,
@@ -695,15 +697,23 @@ function aggregateIdentification(perPhoto) {
   const inconclusive = unmatched.length > 0 && !contradicting;
   const contested = ranked.length > 1 || contradicting;
   // A disputed answer never publishes the winner's own facts: it carries only
-  // what every candidate species shares (inspection-first if any needs it).
-  const candidates = contested ? candidateEntries(perPhoto) : [];
+  // what every candidate species shares (inspection-first if any needs it),
+  // including both sides of every split or conflict. When any photo's models
+  // disagreed with an unlisted name, the service is unknown and falls back to
+  // the inspection-first consultation.
   return {
     entry: winner.entry,
     confidence: (contested || inconclusive) ? lowerConfidenceOf(winner.best, 'moderate') : winner.best,
     category: winner.entry.category,
     contested,
-    shared: candidates.length > 1 ? sharedFacts(candidates.map(entryFacts)) : null,
+    shared: contested ? disputedFacts(perPhoto) : null,
   };
+}
+
+function disputedFacts(perPhoto) {
+  const known = candidateEntries(perPhoto);
+  const facts = sharedFacts(known.map(entryFacts));
+  return perPhoto.some((result) => result.unknownCandidate) ? { ...facts, service: null } : facts;
 }
 
 // Every library species any photo put forward: agreed/lone picks and both
