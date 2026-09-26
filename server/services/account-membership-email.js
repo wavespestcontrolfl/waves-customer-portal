@@ -4,6 +4,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { isTrackTokenLive } = require('./track-token-expiry');
 const { getPrimaryContact, getInvoiceEmailRecipients } = require('./customer-contact');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { currency } = require('./email-template');
@@ -525,7 +526,10 @@ async function sendCancellationReceived({
 // routes AR mail to the payer's bookkeeper. (billing_reminder is RETIRED —
 // owner ruling 2026-08-01: billing notices carry no per-purpose opt-out; and
 // owner ruling 2026-09-26: the portal-wide email switch does not stop them
-// either.) The SMS leg's prefs are enforced inside send-customer-message —
+// either.) Where billing goes is still the customer's choice: an explicit
+// billing channel selection without Email means no email leg, the same
+// choice the SMS leg's consent check honors; no selection at all keeps the
+// email. The SMS leg's prefs are enforced inside send-customer-message —
 // this is the email leg's equivalent, shared with the sweep so hasEmailLeg
 // is only declared when the email can actually send.
 /**
@@ -558,6 +562,9 @@ async function resolvePrevisitBalanceEmailRecipient(customerId) {
   try {
     prefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
   } catch { prefs = {}; }
+  if (billingChannelAllowed(prefs, 'billing', 'email') === false) {
+    return { recipient: null, reason: 'billing_email_not_selected' };
+  }
   const [recipient] = getInvoiceEmailRecipients(customer, prefs).filter((r) => isEmailLike(r.email));
   if (!recipient?.email) return { recipient: null, reason: 'missing_email' };
   return { recipient, reason: null };

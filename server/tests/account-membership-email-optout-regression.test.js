@@ -130,11 +130,12 @@ describe('account-membership-email distinguishes a transient prefs failure from 
 // Owner ruling 2026-09-26: payment emails cannot be turned off. A billing.*
 // notice sent through this family's sendTemplate ignores the portal-wide
 // email switch that still silences membership.* / account.* mail above.
+// Where billing goes stays the customer's choice: an explicit billing channel
+// selection without Email means no pre-visit balance email.
 describe('billing notices ignore the portal-wide email switch', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  test('billing.previsit_balance is emailed to a customer with email_enabled=false', async () => {
-    const prefs = { customer_id: 'cust-1', email_enabled: false };
+  function previsitDb(prefs) {
     const queues = {
       customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
       customer_interactions: [chain(), chain(), chain()],
@@ -145,17 +146,39 @@ describe('billing notices ignore the portal-wide email switch', () => {
       if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
       return q.shift();
     });
-    const result = await AccountMembershipEmail.sendPrevisitBalanceReminder({
-      customerId: 'cust-1',
-      amount: '$129.00',
-      serviceType: 'Pest Control',
-      visitDate: 'Tuesday, October 6',
-      billingUrl: 'https://portal.example/pay',
-      idempotencyKey: 'previsit:cust-1:2026-10-06',
-    });
+  }
+
+  const sendPrevisit = () => AccountMembershipEmail.sendPrevisitBalanceReminder({
+    customerId: 'cust-1',
+    amount: '$129.00',
+    serviceType: 'Pest Control',
+    visitDate: 'Tuesday, October 6',
+    billingUrl: 'https://portal.example/pay',
+    idempotencyKey: 'previsit:cust-1:2026-10-06',
+  });
+
+  test.each([
+    { customer_id: 'cust-1', email_enabled: false },
+    { customer_id: 'cust-1', email_enabled: false, billing_channels: ['email', 'sms'] },
+  ])('billing.previsit_balance is emailed with the email switch off: %j', async (prefs) => {
+    previsitDb(prefs);
+    const result = await sendPrevisit();
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'billing.previsit_balance' }));
     expect(result).not.toMatchObject({ skipped: true });
     expect(result.reason).not.toBe('email_opted_out');
+  });
+
+  test.each([
+    { customer_id: 'cust-1', email_enabled: false, billing_channels: ['sms'] },
+    { customer_id: 'cust-1', email_enabled: true, billing_channels: ['push'] },
+  ])('a billing channel choice without Email gets no pre-visit balance email: %j', async (prefs) => {
+    previsitDb(prefs);
+    await expect(AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient('cust-1'))
+      .resolves.toEqual({ recipient: null, reason: 'billing_email_not_selected' });
+    previsitDb(prefs);
+    const result = await sendPrevisit();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
   });
 });
