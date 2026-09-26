@@ -12,6 +12,9 @@ const SAFETY_SUBJECT_RE = /\b(pets?|dogs?|cats?|kids?|child(?:ren)?)\b/;
 // Bare "come back" / "go back" / "wait" are NOT cues: "When will you come
 // back?" is a scheduling question.
 const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bback\s*(?:out|outside|in|inside)\b/;
+// A scheduled return ("When will you come back in October?", "Will you be
+// back in two weeks?") is a visit question, not re-entry.
+const SCHEDULED_RETURN_RE = /\b(?:come|coming|be)\s+back\b[^?.!]*\b(?:in|on|next|by|around)\s+(?:\d+|a|an|one|two|three|four|five|six|few|couple|the\s+next|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weeks|month|months|spring|summer|fall|winter)\b/;
 // A location word still means re-entry ("When can we go outside again?")
 // unless the question is about what was applied there.
 const LOCATION_RE = /\b(outside|inside|outdoors|indoors)\b/;
@@ -56,8 +59,11 @@ const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:
 // re-entry — unless it also asks about safety or going back out.
 const REENTRY_ASK_RE = /\b(safe|okay|ok|fine|alright|when\s+can|can\s+(?:i|we|they|he|she|my)|go\s+(?:out|back|in)|let\s+(?:my|the|them))\b/;
 function isReentryIntent(q) {
+  if (SCHEDULED_RETURN_RE.test(q)) return false;
   const askedAboutApplication = TREATMENT_QUESTION_RE.test(q) && PAST_TENSE_RE.test(q) && !REENTRY_ASK_RE.test(q);
-  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q) && !askedAboutApplication)
+  // Appointment wording keeps a pet/kid noun from meaning re-entry ("When is
+  // my next appointment for the kids' room?").
+  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q) && !askedAboutApplication && !APPOINTMENT_RE.test(q))
     || REENTRY_PHRASE_RE.test(q)
     || REENTRY_TEMPORAL_RE.test(q)
     // A bare location word is re-entry only without treatment, findings or
@@ -572,6 +578,11 @@ function questionRoutingRules({
     { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
     // Preparation wording outranks appointment nouns — codex #4839 P2.
     { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    // Explicit advice outranks treatment inflections ("What do you recommend
+    // after spraying?") — codex #4839 P2.
+    { test: (q) => ADVICE_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    // Scheduled returns go to the appointment.
+    { test: (q) => SCHEDULED_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
     // Future treatment timing is scheduling, not today's application.
     {
       test: (q) => TREATMENT_QUESTION_RE.test(q) && FUTURE_TREATMENT_RE.test(q) && !PAST_VERB_RE.test(q),
@@ -606,7 +617,7 @@ function questionRoutingRules({
       test: (q) => /\b(do|watch|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q),
       answer: () => answerNextSteps({ data, nextAppointment }),
     },
-    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back)\b/.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
     {
       test: (q) => /\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q) || FINDINGS_QUESTION_RE.test(q),
       answer: () => answerFindings({ data }),

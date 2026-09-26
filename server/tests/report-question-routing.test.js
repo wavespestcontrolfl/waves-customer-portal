@@ -374,6 +374,20 @@ describe('service report — every shipped chip answers its own category (AW-06)
   });
 
   // codex #4839 round 6: precedence follows the question's form.
+  test.each([
+    'When will you come back in October?',
+    'Will you be back in two weeks?',
+    "When is my next appointment for the kids' room?",
+    "When is the next visit for my dogs' area?",
+  ])('scheduled returns and appointment questions naming kids/pets go to the appointment: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Your next appointment is/);
+  });
+
+  test('"What do you recommend after spraying?" gets next steps, not the applied products', () => {
+    expect(answerServiceReportQuestion({ question: 'What do you recommend after spraying?', data: pestData, nextAppointment }))
+      .toBe(answerServiceReportQuestion({ question: 'What do you recommend?', data: pestData, nextAppointment }));
+  });
+
   test('"When is my next treatment after today?" goes to the appointment', () => {
     expect(answerServiceReportQuestion({ question: 'When is my next treatment after today?', data: pestData, nextAppointment }))
       .toMatch(/Your next appointment is/);
