@@ -158,7 +158,7 @@ async function recoverStaleClaims(now = new Date()) {
     .select('id', 'send_attempt_token', 'provider_handoff_phase');
   let uncertain = 0;
   for (const claim of ambiguous) {
-    uncertain += await db.transaction(async (trx) => {
+    const updated = await db.transaction(async (trx) => {
       const query = retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING], false)
         .where({ id: claim.id, send_attempt_token: claim.send_attempt_token, status: 'queued' });
       const [row] = await query
@@ -169,10 +169,14 @@ async function recoverStaleClaims(now = new Date()) {
           error_message: 'Provider outcome unknown: interrupted provider retry without positive pending evidence',
           updated_at: now,
         }).returning('*');
-      if (!row) return 0;
+      if (!row) return null;
       await reconcileExhaustedSummary(row, trx);
-      return 1;
+      return row;
     });
+    if (updated) {
+      uncertain += 1;
+      await alertExhausted(updated, updated.error_message);
+    }
   }
   const requeued = await retryEvidence(stale(), [HANDOFF_PHASE_PENDING])
     .update({

@@ -36,7 +36,8 @@ never from docs, which go stale.
 
 | Tier | Use for |
 |---|---|
-| `DEEP` | Deepest reasoning, latency-tolerant, low-volume (fable line: always-on thinking, minutes-long turns possible): agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate |
+| `DEEP` | Deepest reasoning, latency-tolerant, low-volume: agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate. Defaults to the same Opus model as FLAGSHIP, with an OpenAI backup on refusal or API failure (`llm/deep.js`) |
+| `EXTREME` | Explicit, latency-tolerant Fable opt-in only — no automatic live workflow routes here; callers must deliberately select it |
 | `FLAGSHIP` | Best general reasoning: Intelligence Bar, advisors, analysis, agents |
 | `WORKHORSE` | Drafting + content generation |
 | `FAST` | High-volume classification, tagging, signals |
@@ -85,20 +86,22 @@ const response = await createDeepMessage(anthropicClient, { ...params });
 ```
 
 Why (both have caused real parsing bugs):
-- **Thinking blocks.** fable-5 always thinks; `thinking` blocks precede the
-  `text` block, so `content[0].text` reads the wrong block. The helper strips
-  them.
-- **Refusals.** fable-5's safety classifiers can refuse benign
+- **Thinking blocks.** Always-thinking models (Fable, and Opus 5.5 once the
+  tiers flip) put `thinking` blocks ahead of the `text` block, so
+  `content[0].text` reads the wrong block. The helper strips them.
+- **Refusals.** The model's safety classifiers can refuse benign
   pesticide/termiticide-adjacent content (HTTP 200, `stop_reason: 'refusal'`).
-  The helper retries the identical request once on FLAGSHIP — the lane
-  degrades to Opus, it never gaps.
+  The helper retries on OpenAI (`TEXT_POLICIES.deepAnalysis.fallback`), and
+  API failures get the same backup. On the raw-message path the backup is
+  skipped when less than `FALLBACK_MIN_MS` of the caller's time budget
+  remains; structured calls (`options.jsonSchema`) go through
+  `dispatchWithFallback`, where both legs share one deadline and the OpenAI
+  leg runs whenever any budget is left.
 
 Also required at DEEP sites:
 - `max_tokens` **≥ 4096** — thinking spends from the same budget.
 - Pass your own Anthropic client (per-site timeout/retry config and test
   mocks keep working).
-- Kill switch: setting `MODEL_DEEP` to the current FLAGSHIP Opus ID (see
-  `models.js`) reverts every DEEP lane to Opus with no deploy.
 
 Enforced mechanically: `check:domain-rules` fails on a file referencing
 `MODELS.DEEP` without the helper.
@@ -146,17 +149,23 @@ a provider issue never causes a gap:
   The generated-image SCREEN is the ruled exception (owner 2026-09-25):
   `TEXT_POLICIES.imageScreen` is GPT-5.6 Sol first with Claude VISION as the
   backup; hero alt text stays on `visionAnalysis`.
-  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
-  `pest-identification.js#analyzePhoto`/`identifyPest`, and
-  `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
+  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day)
+  and `tree-shrub-assessment.js#analyzePhoto` call Gemini only; Claude runs
   ONLY when Gemini returns nothing (HTTP/parse/empty/schema-invalid miss). A
   single-model result still goes through each file's own single-model path
-  (pest-identification downgrades confidence a notch via `mergeModelResults`;
-  lawn/tree-shrub's `averageScores` passes the lone result through unchanged)
-  — a one-model read can never surface as the two-model "agreed" case.
-  `averageScores`/`mergeModelResults` still exist and still work with two
-  results handed to them directly (tests, or any future caller), but live
-  scoring never calls either with two live results anymore.
+  (lawn/tree-shrub's `averageScores` passes the lone result through
+  unchanged) — a one-model read can never surface as the two-model "agreed"
+  case.
+  **Photo ID ruling 2026-09-26:** `pest-identification.js#analyzePhoto` /
+  `identifyPest` (website funnel, SMS photo triage, admin assessments, the
+  customer app) use `TEXT_POLICIES.photoIdVision`: Gemini 3.8 Flash first;
+  the same photo goes to ChatGPT's best vision model (`OPENAI_FRONTIER`)
+  when Gemini misses, scores itself under `PHOTO_ID_ESCALATE_BELOW` (default
+  0.80), or lists a runner-up of different risk. Sequential per photo, no
+  Claude leg. The second look's answer decides (`resolvePhoto`): an agreement
+  on the same species keeps the lower confidence, otherwise it is the lone
+  answer (downgraded a notch); a risky runner-up whose second look never
+  came back makes the upload an inspection-first consultation.
   **Estimate-image ruling 2026-09-25:** `satellite-analyzer.js` and
   `property-lookup-v2.js` use `TEXT_POLICIES.estimateVision`: Gemini 3.8 Flash
   first, GPT-6 Sol only when Gemini fails or its output is invalid. No Claude,
