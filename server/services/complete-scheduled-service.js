@@ -650,11 +650,14 @@ function classifyCoveredVisitInvoice(invoice, svc, addons) {
 // adoption, deposit roll-forward). An invoice another writer committed first
 // is adopted only when it provably bills this visit's add-ons alone; anything
 // else comes back as a conflict for the office rather than as this bill.
-async function mintAnnualPrepayExtrasInvoice(svc, record, lines, addons) {
+async function mintAnnualPrepayExtrasInvoice(svc, record, lines, addons, { coveredInvoiceId = null } = {}) {
   const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
   const serviceDate = serviceDateOnly(record?.service_date);
   const minted = await mintScheduledServiceInvoiceWithDeposit({
     svc,
+    // The covered-base settlement this completion just made is the bill's
+    // sibling, not a replay of it.
+    excludeFromAdoption: coveredInvoiceId ? [coveredInvoiceId] : [],
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       serviceRecordId: record?.id || null,
@@ -10802,7 +10805,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // ADMIN-BUG-R13 (owner ruling 2026-09-26: auto-bill): add-ons on an
     // annual-prepay-covered visit are owed on top of the coverage. Bill them
     // alone through the shared mint, or park an office alert when the amount
-    // is unclear or the invoice can't be cut here. `voidedInvoiceId` names an
+    // is unclear or the invoice can't be cut here. `voidedInvoice` is an
     // office invoice this block just voided (its base was covered).
     // Add-ons are owed but only alerted: the completion text must not say
     // "all paid" (the plain report-ready text goes instead).
@@ -10819,7 +10822,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         logger.error(`[dispatch] annual-prepay add-ons alert FAILED for ${svc.id} (${reason}): ${bellErr.message}`);
       }
     };
-    const billAnnualPrepayAddons = async ({ voidedInvoiceId = null } = {}) => {
+    const billAnnualPrepayAddons = async ({ voidedInvoice = null, coveredInvoiceId = null } = {}) => {
+      const voidedInvoiceId = voidedInvoice?.id || null;
       // One fresh read of the visit feeds both the add-on lines and the
       // mint's stale-price guard, so they agree with each other.
       let current;
@@ -10837,11 +10841,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (extras.ambiguous) {
         return alertAnnualPrepayAddons('a visit-wide discount applies, so the add-ons\' share is unclear', { voidedInvoiceId, addonTotal: extras.total });
       }
+      // A voided office invoice may have priced the add-ons its own way (a
+      // discount typed on the invoice, a credit spanning its lines). Re-bill
+      // automatically only when it carried no other credit and billed the
+      // add-ons exactly as the visit prices them.
+      if (voidedInvoice) {
+        const InvoiceService = require('../services/invoice');
+        const primaryId = `scheduled_${svc.id}_primary`;
+        const voidedLines = InvoiceService._parseInvoiceLineItems(voidedInvoice.line_items);
+        const onAddons = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
+        const voidedAddonLines = voidedLines.filter(onAddons);
+        const otherCredit = voidedLines.some((li) => Number(li.amount) < 0 && !onAddons(li) && li.discount_for !== primaryId);
+        const voidedAddonTotal = Math.round(voidedAddonLines.reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
+        if (otherCredit || (voidedAddonLines.length && voidedAddonTotal !== extras.total)) {
+          return alertAnnualPrepayAddons(`invoice ${voidedInvoice.invoice_number || voidedInvoiceId} priced the add-ons differently (it billed $${voidedAddonTotal.toFixed(2)}${otherCredit ? ' and carried another credit' : ''}; the visit prices them at $${extras.total.toFixed(2)})`, { voidedInvoiceId, addonTotal: extras.total, voidedAddonTotal });
+        }
+      }
       if (packetEffects) {
         return alertAnnualPrepayAddons('this visit is billed on its grouped closeout', { voidedInvoiceId, addonTotal: extras.total });
       }
       try {
-        const minted = await mintAnnualPrepayExtrasInvoice(current, record, extras.lines, addons);
+        const minted = await mintAnnualPrepayExtrasInvoice(current, record, extras.lines, addons, { coveredInvoiceId });
         if (minted.conflict) {
           return alertAnnualPrepayAddons(`invoice ${minted.conflict.invoice_number || minted.conflict.id} already bills this visit including its covered base`, { voidedInvoiceId, conflictInvoiceId: minted.conflict.id, addonTotal: extras.total });
         }
@@ -10902,15 +10922,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             alreadyPaid = true;
             // An office invoice that predates the visit's add-ons settles as
             // covered; the add-ons it never carried are still owed.
-            if (visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons();
+            if (visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ coveredInvoiceId: settleRes.invoice?.id || null });
           } else if (['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
-            const voidedInvoiceId = invoice.id;
+            const voidedInvoice = invoice;
+            const voidedInvoiceId = voidedInvoice.id;
             await InvoiceService.voidInvoice(voidedInvoiceId);
             invoice = null;
             invoiceCreated = false;
             payUrl = null;
             alreadyPaid = true;
-            if (visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ voidedInvoiceId });
+            if (visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ voidedInvoice });
             // Lines that were neither the covered base nor this visit's
             // add-ons are the office's to re-bill; nothing here can name them.
             if (invoiceLines.unknownCharges) {

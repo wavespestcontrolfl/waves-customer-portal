@@ -174,6 +174,28 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(linesOf(invoices[0]).some((li) => String(li.client_id).endsWith('_primary'))).toBe(false);
   });
 
+  test('an office invoice that discounted the add-on its own way is voided but not re-billed at list — the office reconciles', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x),
+      { client_id: `discount_office_${x.addonId}`, _kind: 'discount', discount_for: addonLine(x).client_id, description: 'Office courtesy', amount: -10, quantity: 1, unit_price: -10 },
+    ] });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('void');
+    expect(await liveInvoices(f)).toHaveLength(0);
+    expect(await addonsAlert(f)).toBeTruthy();
+  });
+
+  test('a base-only office invoice settles as covered and the add-ons it never carried are still billed', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)] });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('prepaid');
+    const bills = (await liveInvoices(f)).filter((i) => i.id !== f.invoiceId);
+    expect(bills).toHaveLength(1);
+    expect(Number(bills[0].total)).toBe(ADDON);
+    expect(await addonsAlert(f)).toBeUndefined();
+  });
+
   test('an invoice that already bills only the add-ons is kept as the bill (no void, no second invoice)', async () => {
     const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
     const out = await complete(f);

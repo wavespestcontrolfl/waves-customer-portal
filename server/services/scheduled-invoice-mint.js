@@ -144,14 +144,17 @@ function scheduledPriceMovedError(lockedSvc) {
 // invoice; adoption = a replay transaction waking under the mint lock to
 // find another writer (Charge Now / completion mint) already committed one.
 // Same predicate either way — the ONE terminal-status filter.
-async function findAdoptableScheduledInvoice(trx, scheduledServiceId) {
+// excludeInvoiceIds: a sibling the caller already accounted for (the
+// annual-prepay covered-base settlement beside an add-ons bill) is not the
+// replay it is looking for.
+async function findAdoptableScheduledInvoice(trx, scheduledServiceId, { excludeInvoiceIds = [] } = {}) {
   await assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId);
-  return trx('invoices')
+  const query = trx('invoices')
     .where({ scheduled_service_id: scheduledServiceId })
     .whereNot('status', 'void')
-    .whereNotIn('status', TERMINAL_INVOICE_STATUSES)
-    .orderBy('created_at', 'desc')
-    .first();
+    .whereNotIn('status', TERMINAL_INVOICE_STATUSES);
+  if (excludeInvoiceIds.length) query.whereNotIn('id', excludeInvoiceIds);
+  return query.orderBy('created_at', 'desc').first();
 }
 
 // Take the mint lock, adopt whatever non-terminal invoice landed first.
@@ -173,7 +176,7 @@ async function adoptScheduledInvoiceUnderMintLock(trx, scheduledServiceId) {
 // caller's read and this lock — retrying re-reads and bills the current
 // price instead of silently minting the stale one.
 async function mintScheduledServiceInvoiceWithDeposit({
-  svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false,
+  svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false, excludeFromAdoption = [],
 }) {
   const InvoiceService = require('../services/invoice');
   const {
@@ -209,7 +212,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
           e.code = 'SCHEDULED_BILLING_SOURCE_MOVED';
           throw e;
         }
-        const replayed = await findAdoptableScheduledInvoice(trx, svc.id);
+        const replayed = await findAdoptableScheduledInvoice(trx, svc.id, { excludeInvoiceIds: excludeFromAdoption });
         if (replayed) return { invoice: replayed, reused: true };
         // Stale-price refusal — CREATE only (an adopted replay invoice is
         // the extension probe/re-probe's problem, handled there). Both
