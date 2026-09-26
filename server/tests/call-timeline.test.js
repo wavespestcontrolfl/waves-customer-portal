@@ -27,6 +27,22 @@ describe('callStartedAt — created_at means different things on different rows'
     expect(started.toISOString()).toBe('2026-09-27T03:50:00.000Z');
   });
 
+  // codex #4919 round-14 P1: a /call-status fallback row created by a
+  // NON-terminal event was inserted near the call's start.
+  test('a status_callback row inserted on a non-terminal event keeps created_at as the start', () => {
+    for (const status of ['initiated', 'ringing', 'in-progress']) {
+      const row = { created_at: '2026-09-27T04:02:00Z', duration_seconds: 600, metadata: { source: 'status_callback', inserted_on_status: status } };
+      expect(callStartedAt(row).toISOString()).toBe('2026-09-27T04:02:00.000Z');
+    }
+  });
+
+  test('a status_callback row inserted on a terminal event (or with no stamp) is still post-call', () => {
+    for (const meta of [{ source: 'status_callback', inserted_on_status: 'completed' }, { source: 'status_callback', inserted_on_status: 'no-answer' }, { source: 'status_callback' }]) {
+      const row = { created_at: '2026-09-27T04:02:00Z', duration_seconds: 600, metadata: meta };
+      expect(callStartedAt(row).toISOString()).toBe('2026-09-27T03:52:00.000Z');
+    }
+  });
+
   test('every documented POST_CALL_ROW_SOURCES value is treated as post-call', () => {
     for (const source of ['status_callback', 'twilio_recording_status_recovered', 'twilio_studio_recording_status']) {
       const row = { created_at: '2026-09-26T18:10:00Z', duration_seconds: 600, metadata: { source } };
