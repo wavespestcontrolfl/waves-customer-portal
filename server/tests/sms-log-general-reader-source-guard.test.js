@@ -330,14 +330,18 @@ const ALLOWLIST = [
   },
   {
     file: 'services/invoice.js',
-    snippet: 'const existingQueued = await db("sms_log")',
-    nth: 1,
+    // queuePendingChannelReplay takes its `database` handle as a param
+    // (Codex round-3 P1/P2 #4963: runs under finalizeInvoiceAfterSms's own
+    // transaction so a queue-insert failure is retried with the delivery
+    // stamp) — its own dedup read reads through that param, not the bare
+    // `db` the wrapper's held-SMS-leg queue below still uses, so the two
+    // no longer share one snippet.
+    snippet: 'const existingQueued = await database("sms_log")',
     reason: 'queuePendingChannelReplay (Codex round-3 P1 #4963): metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/invoice.js',
     snippet: 'const existingQueued = await db("sms_log")',
-    nth: 2,
     reason: 'sendViaSMSAndEmail\'s held-SMS-leg queue: same metadata key (entry_point = \'invoice_send_deferred\') exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
