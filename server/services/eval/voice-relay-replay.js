@@ -43,6 +43,7 @@ const Ajv = require('ajv');
 const logger = require('../logger');
 const { attemptReplay, emailFailure, defaultNotify, defaultSendEmail } = require('./call-extraction-replay');
 const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES } = require('./voice-relay-spoken-checks');
+const { normalizeSpanishSpokenText } = require('./voice-relay-spanish-numbers');
 // Same provider-usage normaliser the LLM call ledger uses (input/output/cache
 // read/cache write token columns) — reused here, not duplicated, purely for
 // its field shape; nothing here reads or writes llm_dispatch_log. Sandy's own
@@ -1501,13 +1502,30 @@ function allowedToolsCheck(scenario, record) {
   };
 }
 
+// Codex round-3 structural fix: the SINGLE place every check obtains the
+// record it grades. For an `es` scenario, agent-spoken text is normalized
+// here — spelled-out Spanish numbers/times/phone digits become plain
+// digits — before ANY check regex sees it, so the existing digit-based
+// price/time/readback checks close a whole class of "spelled-out Spanish
+// number" gap by construction instead of each maintaining its own Spanish
+// word list. Tool response text is untouched (fixtures are always English).
+// A shallow clone, never a mutation of the caller's own record/events.
+function gradedRecordFor(scenario, record) {
+  if (scenario.language !== 'es') return record;
+  return {
+    ...record,
+    events: (record.events || []).map((e) => (e.kind === 'agent' ? { ...e, text: normalizeSpanishSpokenText(e.text) } : e)),
+  };
+}
+
 function evaluateChecks(scenario, record) {
+  const graded = gradedRecordFor(scenario, record);
   // Receipt evidence is mandatory for every scenario, including custom fixtures.
   // Ignore explicit copies so they cannot weaken or double-count the invariant.
   return [
-    allowedToolsCheck(scenario, record),
-    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, record),
-    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, record)),
+    allowedToolsCheck(scenario, graded),
+    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, graded),
+    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, graded)),
   ];
 }
 

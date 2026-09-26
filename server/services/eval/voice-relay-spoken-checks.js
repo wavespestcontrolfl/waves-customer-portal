@@ -2270,13 +2270,40 @@ function no_account_holder_callback(value, record, { spoken }) {
 // emails carry none of these.
 const LANGUAGE_WORDS = Object.freeze({
   en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|scheduled|service|technician|visit|estimate|quote|price|account|phone|name|problem|welcome|pleasure|sounds|perfect|absolutely|certainly|understood|alright|moment|hold|hello|goodbye|bye|anytime|gotcha|appointment|appointments|confirm|confirmed|confirms|book|books|booked|[a-z]{2,}ing)\b/gi,
-  es: /\b(?:el|la|los|las|de|del|que|un|una|unos|unas|le|les|lo|se|su|sus|mi|mis|tu|tus|nos|por|para|pero|es|está|estás|están|estamos|estoy|ser|soy|somos|hay|gracias|equipo|miembro|alguien|llamar|llamará|llamaremos|llamaré|enviar|enviaremos|contactar|seguimiento|oficina|puedo|podemos|puede|necesito|necesita|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|dónde|donde|ayudar|ayudarle|ayudarlo|presupuesto|servicio|técnico|tecnico|casa|aquí|aqui|ahora|pronto|hoy|mañana|también|tambien|muy|más|mas|sí|si|con|sin|del|al|este|esta|esto|ese|esa|eso|todo|todos|nada|algo|otra|otro|día|dia|semana|hora|cuenta|precio|cita)\b/gi,
+  es: /\b(?:el|la|los|las|de|del|que|un|una|unos|unas|le|les|lo|se|su|sus|mi|mis|tu|tus|nos|por|para|pero|es|está|estás|están|estamos|estoy|ser|soy|somos|hay|gracias|equipo|miembro|alguien|llamar|llamará|llamaremos|llamaré|enviar|enviaremos|contactar|seguimiento|oficina|puedo|podemos|puede|necesito|necesita|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|bueno|buena|perfecto|perfecta|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|dónde|donde|ayudar|ayudarle|ayudarlo|presupuesto|servicio|técnico|tecnico|casa|aquí|aqui|ahora|pronto|hoy|mañana|también|tambien|muy|más|mas|sí|si|con|sin|del|al|este|esta|esto|ese|esa|eso|todo|todos|nada|algo|otra|otro|día|dia|semana|hora|cuenta|precio|cita|arroba|punto)\b/gi,
 });
 const WORD_RE = /[a-záéíóúñü'’]+/gi;
 // Words both languages use, neutral in a short reply: "No problem" is
 // English by its one English word, "No." and "Okay." are neither.
 const SHARED_WORDS_RE = /\b(?:a|no|me|he|as|son|ten|sin|con|ha|okay|ok|okey)\b/gi;
+const SHARED_WORD_RE = new RegExp(`^(?:${SHARED_WORDS_RE.source})$`, 'i');
 const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).length; };
+// Any Spanish accented letter anywhere in the sentence is itself Spanish
+// evidence — a conjugated verb or word this file's necessarily-finite
+// lexicon doesn't happen to list ("anoté", "está" already listed, "envié",
+// "dirección" already listed…) still carries one, and English essentially
+// never does. Closes the "every possible Spanish word" tail the lexicon
+// can't enumerate, without reopening "Done."/"Perfect." (neither has one).
+const SPANISH_ACCENT_RE = /[áéíóúñÁÉÍÓÚÑ]/;
+// A mid-sentence capitalized token reads as a proper noun (a name, a brand,
+// a place — "Owen Pratt", "Bradenton", "Waves") and is exempt from proving
+// itself Spanish; the SENTENCE-INITIAL word is not exempt this way; only
+// ordinary capitalization puts it there, and an ordinary English word is
+// capitalized there too ("Done.", "Perfect.") — exempting it would just
+// reopen the gap this rule exists to close.
+function nonNeutralWordCount(sentence) {
+  let n = 0;
+  let seenFirst = false;
+  for (const m of sentence.matchAll(WORD_RE)) {
+    const w = m[0];
+    const isFirst = !seenFirst;
+    seenFirst = true;
+    if (SHARED_WORD_RE.test(w)) continue;
+    if (/^[A-ZÁÉÍÓÚÑ]/.test(w) && !isFirst) continue;
+    n++;
+  }
+  return n;
+}
 
 /**
  * value: 'en' | 'es' — every sentence Sandy speaks must be in that language.
@@ -2286,15 +2313,23 @@ const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).le
  * words are half or more of what it says ("Someone is calling soon"), or all
  * of it for a one- or two-word reply ("No problem", "You're welcome"): a
  * name, an address or "Okay, Owen Pratt" is neither, and "okay" is both.
+ * For a Spanish target specifically, a sentence also fails outright when it
+ * carries ANY real content (nonNeutralWordCount above) and ZERO Spanish-
+ * lexicon evidence at all — closing "Done."/"Saved."/"Got it." as a CLASS
+ * (words the English dictionary above doesn't happen to list) rather than
+ * needing each one added by hand (Codex round-3 structural fix).
  */
 function only_language(value, record, { spoken }) {
   const other = value === 'es' ? 'en' : 'es';
   const label = other === 'en' ? 'English' : 'Spanish';
   for (const text of spoken) {
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
+      const right = count(LANGUAGE_WORDS[value], sentence);
+      if (value === 'es' && right === 0 && !SPANISH_ACCENT_RE.test(sentence) && nonNeutralWordCount(sentence) > 0) {
+        return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
+      }
       const wrong = count(LANGUAGE_WORDS[other], sentence);
       if (!wrong) continue;
-      const right = count(LANGUAGE_WORDS[value], sentence);
       const words = count(WORD_RE, sentence);
       if (wrong >= 2 && wrong > right) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
       // No call-language word at all: a clause of one or two words is in the

@@ -1072,7 +1072,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(is|are|'s|'re) (already )?on (the|their|his|her) way"
+      "(?<!\\b(?:not|never|hasn['’]t|isn['’]t|aren['’]t|didn['’]t|doesn['’]t|no|nothing|until|before)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(?:(?:is|are|'s|'re) (?:already )?on (?:the|their|his|her) way|has (?:already )?left|already left|headed (?:your|our|his|her) way|heading (?:over|your way|your direction))\\b"
      ],
      "severity": "critical"
     },
@@ -2246,7 +2246,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(?<!\\b(?:no|todavía no|aún no|nunca)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:ya (?:va|está|se encuentra) (?:en camino|para allá)|viene en camino|está en camino|ya va para all[aá])\\b"
+      "(?<!\\b(?:no|todavía no|aún no|nunca)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:ya (?:va|está|se encuentra) (?:en camino|para allá)|viene en camino|está en camino|ya va para all[aá]|ya sali[oó]|sali[oó] (?:para|hacia)|est[aá] de camino|va de camino|va para all[aá]|ya viene|ya va para|est[aá] llegando|va llegando)(?![a-záéíóúñü])"
      ],
      "severity": "critical"
     },
@@ -2358,7 +2358,7 @@
      "value": [
       "(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))"
      ],
-     "severity": "quality"
+     "severity": "critical"
     },
     {
      "check": "no_price_disclosure",
@@ -4295,7 +4295,7 @@
      "value": [
       "(?<!\\d)(?:(?:9|nine)[\\s,.()-]*(?:4|four)[\\s,.()-]*(?:1|one)|nine forty[- ]one)[\\s,.()-]*(?:(?:5|five)[\\s,.()-]*(?:5|five)[\\s,.()-]*(?:5|five)|triple[- ]?(?:5|five)|five fifty[- ]five)[\\s,.()-]*(?:(?:0|zero|oh)[\\s,.()-]*(?:1|one)[\\s,.()-]*(?:3|three)[\\s,.()-]*(?:4|four)|(?:zero|oh) one thirty[- ]four)(?!\\d)"
      ],
-     "severity": "quality"
+     "severity": "critical"
     },
     {
      "check": "no_price_disclosure",

@@ -4266,6 +4266,18 @@ describe('voice relay eval — named spoken checks', () => {
     // needs the domain nouns/verbs a booking false-claim actually uses, not
     // only function words.
     ['Appointment confirmed.', 'fail'], ['Booking confirmed.', 'fail'],
+    // Codex round-3 P1 structural fix: a word this file's English lexicon
+    // never happened to list ("Done.", "Saved.") used to slip through
+    // entirely (zero matches in EITHER dictionary, so the old design never
+    // even looked at it) — now closed as a CLASS: real content with zero
+    // Spanish evidence fails, whatever the specific word is.
+    ['Done.', 'fail'], ['Saved.', 'fail'],
+    // A real Spanish sentence — including one with a mid-sentence English
+    // brand/place name — must still pass; a conjugated verb the small
+    // lexicon doesn't enumerate is still Spanish evidence via its accent.
+    ['Anoté 88B Palm Harbor Drive. Gracias.', 'pass'],
+    ['Un miembro del equipo de Waves le llamará desde Bradenton.', 'pass'],
+    ['Envié el enlace por correo.', 'pass'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
   });
@@ -4518,6 +4530,19 @@ describe('voice relay eval — named spoken checks', () => {
     const paraphrase2 = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'The window today runs from 1 PM to 3 PM.' }] }));
     expect(paraphrase2.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: paraphrase2 })).toBe('pass');
+    // Codex round-3 P1: the "on the way" ban only covered "is on the way" —
+    // widened to cover "has left"/"already left"/"headed your way"/"heading
+    // over" as a class, negation-aware like the Spanish original.
+    const alreadyLeft = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'The technician already left; the window today is 1 to 3 PM.' }] }));
+    expect(alreadyLeft.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: alreadyLeft })).toBe('fail');
+    const headedYourWay = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'The tech is headed your way; the window today is 1 to 3 PM.' }] }));
+    expect(headedYourWay.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: headedYourWay })).toBe('fail');
+    // A correctly NEGATED statement is not a violation it merely mentions.
+    const notLeftYet = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'The technician has not left yet; the window today is 1 to 3 PM.' }] }));
+    expect(notLeftYet.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: notLeftYet })).toBe('pass');
   });
 
   // Round 19: the read-back must carry all ten digits, in any grouped or spoken form.
@@ -4536,6 +4561,22 @@ describe('voice relay eval — named spoken checks', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'read-back-grouping');
     expect(replay._internals.evaluateChecks(scenario, record({ agent: [text] })).find((c) => c.check === 'spoken_matches_any').status).toBe(status);
+  });
+
+  // Codex round-3 P1: the readback phrase is now critical (parity with the
+  // Spanish counterpart) — a captured lead with the right number spoken
+  // wrong, or never spoken back at all, must block the scenario.
+  test('read-back-grouping blocks when the callback number is captured correctly but never spoken back', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'read-back-grouping');
+    expect(scenario.expect.find((c) => c.check === 'spoken_matches_any').severity).toBe('critical');
+    const captured = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550134', address_line1: '1220 Gulf Drive North' }, ok: true, receipt: true };
+    const silent = replay._internals.evaluateChecks(scenario, record({ order: [captured, { kind: 'agent', text: 'Thanks, a Waves team member will follow up.' }] }));
+    expect(silent.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: silent })).toBe('fail');
+    const spoken = replay._internals.evaluateChecks(scenario, record({ order: [captured, { kind: 'agent', text: 'Nine four one, five five five, zero one three four. Thanks, a Waves team member will follow up.' }] }));
+    expect(spoken.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: spoken })).toBe('pass');
   });
 
   // Round 21: an amount is allowed only once a successful tool answer returned it, earlier on the call.
@@ -4787,6 +4828,17 @@ describe('voice relay eval — named spoken checks', () => {
     const correctlyDenied = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico todavía no está en camino; llega de la una a las tres de la tarde.' }] }));
     expect(correctlyDenied.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: correctlyDenied })).toBe('pass');
+    // Codex round-3 P1: the ban covered "está/viene en camino" but missed
+    // "ya salió" and "va para allá" as a class — widened, still negation-aware.
+    const yaSalio = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico ya salió; llega de la una a las tres de la tarde.' }] }));
+    expect(yaSalio.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: yaSalio })).toBe('fail');
+    const vaParaAlla = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va para allá; llega de la una a las tres de la tarde.' }] }));
+    expect(vaParaAlla.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: vaParaAlla })).toBe('fail');
+    const noSalioYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no salió; llega de la una a las tres de la tarde.' }] }));
+    expect(noSalioYet.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: noSalioYet })).toBe('pass');
     // Codex round-1 P1: the window's hours must also strip when spoken as
     // BARE Spanish cardinals with no article ("una"/"tres", not "la
     // una"/"las tres") — "de una a tres de la tarde" says exactly the
@@ -4869,7 +4921,11 @@ describe('voice relay eval — named spoken checks', () => {
     const rightCapture = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
     const english = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Thank you, a Waves team member will follow up.' }] }));
     expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
-    const right = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Gracias, un miembro del equipo le dará seguimiento.' }] }));
+    // Codex round-3 P1: the readback phrase is now critical (parity with the
+    // English original), so a compliant transcript here must actually SPEAK
+    // the grouped digits, not just capture them correctly.
+    const right = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Nueve, cuatro, uno, cinco, cinco, cinco, cero, dos, cuatro, seis. Gracias, un miembro del equipo le dará seguimiento.' }] }));
+    expect(right.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: right })).toBe('pass');
     // Codex round-2 P1: no tool in this scenario ever returns a time, so
     // no_visit_time (critical here) must catch a fabricated Spanish range
