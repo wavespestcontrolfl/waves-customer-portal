@@ -70,45 +70,50 @@ function shareOf(numerator, denominator) {
 }
 
 // ─── 1. drive_minutes_per_stop ──────────────────────────────────────────
-// Business driving minutes (mileage_log, Bouncie) on days in the window,
-// divided by completed stops on those same days. mileage_log.trip_date is
-// already an ET calendar date (bouncie-mileage.js tripDateForBouncieStart ->
-// etDateString), so it is compared directly against the ET window bounds —
-// no timestamp-window conversion needed, unlike call_log/scheduled_services
-// created_at below. is_business is read strictly (`= true`), matching the
-// codebase's one canonical business-flag rule (bouncie-mileage.js: "ONLY an
-// explicit is_business=true deducts" — unclassified/null and personal trips
-// are excluded). scheduled_services.drive_time_minutes /
-// distance_from_previous_miles and mileage_daily_summary are NOT used —
-// verified empty/non-running in prod per the brief.
+// Drive time to each stop, from the technician's own status taps: en route
+// (en_route_at) to arrived (arrived_at) on completed stops in the window.
+// `share` here is the average minutes per timed stop. Verified in prod
+// 2026-09-26: ~95% of completed stops carry both taps and the values are
+// plausible (7–15 min typical, 11 min average over 94 stops). A gap over
+// MAX_TAP_DRIVE_MINUTES is a forgotten tap, not a drive, and is left out.
+//
+// The van's GPS trips (mileage_log, Bouncie) cannot be tied to stops: none
+// carry a job_id, none are classified business (every row is still
+// 'needs_review'), and a trip has no start time to bound it to the route.
+// So GPS appears only as the secondary "all van driving" total.
+// scheduled_services.drive_time_minutes / distance_from_previous_miles are
+// empty in prod and are not used.
+const MAX_TAP_DRIVE_MINUTES = 180;
+
+function tapDriveMinutes(stop) {
+  const start = new Date(stop.en_route_at || NaN).getTime();
+  const end = new Date(stop.arrived_at || NaN).getTime();
+  const minutes = (end - start) / 60000;
+  return minutes > 0 && minutes <= MAX_TAP_DRIVE_MINUTES ? minutes : null;
+}
+
 async function computeDriveMinutesPerStop({ from, to }, conn) {
-  const [mileage, stopCount] = await Promise.all([
-    conn('mileage_log')
-      .where('trip_date', '>=', from)
-      .where('trip_date', '<=', to)
-      .where('is_business', true)
-      .select(
-        conn.raw('COALESCE(SUM(duration_minutes), 0) as total_minutes'),
-        conn.raw('COALESCE(SUM(distance_miles), 0) as total_miles'),
-      )
-      .first(),
+  const [stops, trips] = await Promise.all([
     conn('scheduled_services')
       .where('status', 'completed')
       .where('scheduled_date', '>=', from)
       .where('scheduled_date', '<=', to)
-      .count('id as cnt')
-      .first(),
+      .select('en_route_at', 'arrived_at'),
+    conn('mileage_log')
+      .where('trip_date', '>=', from)
+      .where('trip_date', '<=', to)
+      .select('duration_minutes', 'distance_miles'),
   ]);
-  const totalMinutes = parseFloat(mileage?.total_minutes || 0);
-  const totalMiles = parseFloat(mileage?.total_miles || 0);
-  const completedStops = parseInt(stopCount?.cnt, 10) || 0;
+  const timed = stops.map(tapDriveMinutes).filter((minutes) => minutes != null);
+  const driveMinutes = timed.reduce((sum, minutes) => sum + minutes, 0);
   return {
-    numerator: totalMinutes,
-    denominator: completedStops,
-    share: shareOf(totalMinutes, completedStops),
-    totalDriveMinutes: totalMinutes,
-    totalMiles,
-    completedStops,
+    numerator: driveMinutes,
+    denominator: timed.length,
+    share: shareOf(driveMinutes, timed.length),
+    completedStops: stops.length,
+    timedStops: timed.length,
+    vanDrivingMinutes: trips.reduce((sum, trip) => sum + (Number(trip.duration_minutes) || 0), 0),
+    vanDrivingMiles: trips.reduce((sum, trip) => sum + (Number(trip.distance_miles) || 0), 0),
   };
 }
 
@@ -330,18 +335,9 @@ async function computeOpsScoreboard(range = {}, conn = db) {
       + 'stamps a distinct source) are counted as staff, not customer '
       + 'self-serve, because the data does not distinguish a staff conversion '
       + 'from a customer accept in that case. See ops-scoreboard.js comments.',
-    // Verified in prod 2026-09-26: EVERY mileage_log row in the last 30 days
-    // is is_business=false (0 true, 0 null) — not a bug in this query. Per
-    // bouncie-mileage.js, is_business is only ever set true by an operator-
-    // configured business geo-fence; a proximity job match is a review
-    // SUGGESTION and never auto-sets it, and the Tax Center manual-review
-    // step that would flip a trip to business apparently has not been used.
-    // drive_minutes_per_stop will read 0 until trips are classified there
-    // (or the owner decides this metric should count all van driving
-    // regardless of the tax-deduction business flag).
-    'drive_minutes_per_stop: currently 0 in prod because no mileage_log trip '
-      + 'has ever been marked is_business=true — a real reading of today\'s '
-      + 'data, not a query bug. See ops-scoreboard.js comments.',
+    'drive_minutes_per_stop: average en-route → arrived minutes from the '
+      + 'technician\'s status taps; van GPS trips are reported only as total '
+      + 'driving because they are not linked to stops. See ops-scoreboard.js.',
   ];
 
   const results = await Promise.all([

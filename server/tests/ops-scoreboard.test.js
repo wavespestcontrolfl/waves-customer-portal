@@ -145,7 +145,18 @@ function evalRaw(row, sql, bindings = []) {
 
 function evalCall(row, [method, args]) {
   switch (method) {
-    case 'where': return row[args[0]] === args[1];
+    case 'where': {
+      if (args.length === 3) {
+        const [column, op, value] = args;
+        const cell = row[column];
+        if (op === '>=') return cell >= value;
+        if (op === '<=') return cell <= value;
+        if (op === '>') return cell > value;
+        if (op === '<') return cell < value;
+        return cell === value;
+      }
+      return row[args[0]] === args[1];
+    }
     case 'whereNull': return row[args[0]] == null;
     case 'whereNotNull': return row[args[0]] != null;
     case 'whereIn': return (args[1] || []).includes(row[args[0]]);
@@ -160,31 +171,15 @@ function evalCall(row, [method, args]) {
 }
 
 function makeRecorder(calls = []) {
-  const builder = { calls, selectArgs: [], isCount: false };
+  const builder = { calls };
   ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereRaw', 'whereNot'].forEach((m) => {
     builder[m] = (...args) => { calls.push([m, args]); return builder; };
   });
   builder.modify = (fn) => { fn(builder); return builder; };
-  builder.select = (...args) => { builder.selectArgs.push(...args); return builder; };
-  builder.count = () => { builder.isCount = true; return builder; };
+  builder.select = () => builder;
   builder.orderBy = () => builder;
   builder.limit = () => builder;
   return builder;
-}
-
-// computeDriveMinutesPerStop's aggregate queries (mileage_log SUM, and a
-// scheduled_services COUNT) don't fit the row-array shape the other
-// compute* functions use — this reduces the filtered rows into the same
-// shape conn.raw()/`.count()` would hand back from real Postgres.
-function resolveAggregate(builder, filteredRows) {
-  if (builder.isCount) return { cnt: filteredRows.length };
-  if (builder.selectArgs.some((arg) => typeof arg === 'string' && arg.includes('total_minutes'))) {
-    return {
-      total_minutes: filteredRows.reduce((sum, row) => sum + (row.duration_minutes || 0), 0),
-      total_miles: filteredRows.reduce((sum, row) => sum + (row.distance_miles || 0), 0),
-    };
-  }
-  return filteredRows[0];
 }
 
 function makeFilteringDb(rowsByTable, { throwOnTable } = {}) {
@@ -196,7 +191,7 @@ function makeFilteringDb(rowsByTable, { throwOnTable } = {}) {
     const rows = rowsByTable[table] || [];
     const resolved = () => rows.filter((row) => recorder.calls.every((call) => evalCall(row, call)));
     recorder.then = (resolve, reject) => Promise.resolve(resolved()).then(resolve, reject);
-    recorder.first = () => Promise.resolve(resolveAggregate(recorder, resolved()));
+    recorder.first = () => Promise.resolve(resolved()[0]);
     return recorder;
   };
   dbFn.raw = (sql) => sql;
@@ -290,6 +285,41 @@ describe('computeOpsScoreboard — bookings_without_staff', () => {
     expect(out.bookingsWithoutStaff).toEqual({
       numerator: 4, denominator: 6, share: 4 / 6, ai: 2, customerSelfServe: 2, staff: 2,
     });
+  });
+});
+
+describe('computeOpsScoreboard — drive_minutes_per_stop', () => {
+  test('averages the en-route → arrived taps of completed stops in the window', async () => {
+    const rows = {
+      scheduled_services: [
+        { status: 'completed', scheduled_date: '2026-09-02', en_route_at: '2026-09-02T13:00:00Z', arrived_at: '2026-09-02T13:10:00Z' },
+        { status: 'completed', scheduled_date: '2026-09-03', en_route_at: '2026-09-03T14:00:00Z', arrived_at: '2026-09-03T14:20:00Z' },
+      ],
+      mileage_log: [
+        { trip_date: '2026-09-02', duration_minutes: 30, distance_miles: 12.5 },
+        { trip_date: '2026-09-03', duration_minutes: 45, distance_miles: 20 },
+        { trip_date: '2026-08-20', duration_minutes: 99, distance_miles: 99 },
+      ],
+    };
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    expect(out.driveMinutesPerStop).toMatchObject({ denominator: 2, completedStops: 2, timedStops: 2, vanDrivingMinutes: 75, vanDrivingMiles: 32.5 });
+    expect(out.driveMinutesPerStop.share).toBeCloseTo(15);
+  });
+
+  test('a stop missing a tap, a reversed pair, or a >3h gap is not timed — but still counts as completed', async () => {
+    const rows = {
+      scheduled_services: [
+        { status: 'completed', scheduled_date: '2026-09-02', en_route_at: null, arrived_at: '2026-09-02T13:10:00Z' },
+        { status: 'completed', scheduled_date: '2026-09-02', en_route_at: '2026-09-02T14:10:00Z', arrived_at: '2026-09-02T14:00:00Z' },
+        { status: 'completed', scheduled_date: '2026-09-03', en_route_at: '2026-09-03T08:00:00Z', arrived_at: '2026-09-03T12:00:00Z' },
+        { status: 'completed', scheduled_date: '2026-09-03', en_route_at: '2026-09-03T15:00:00Z', arrived_at: '2026-09-03T15:08:00Z' },
+        { status: 'pending', scheduled_date: '2026-09-03', en_route_at: '2026-09-03T16:00:00Z', arrived_at: '2026-09-03T16:30:00Z' },
+      ],
+      mileage_log: [],
+    };
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    expect(out.driveMinutesPerStop).toMatchObject({ completedStops: 4, timedStops: 1, vanDrivingMinutes: 0 });
+    expect(out.driveMinutesPerStop.share).toBeCloseTo(8);
   });
 });
 
