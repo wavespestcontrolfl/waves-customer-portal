@@ -802,9 +802,9 @@ describe('identifyPestV2 — malformed provider responses never throw (Codex rou
       .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' }); // escalation unavailable
 
     const result = await identifyPestV2([PHOTO]);
-    expect(result.ok).toBe(true);
-    expect(result.internal.escalation_reasons).toContain('gemini_missed');
-    expect(result.v2.answer.level).toBe('unknown'); // no usable candidate from either leg
+    // Neither leg produced a valid envelope: a failed analysis (503 at the
+    // route), never an "unknown" read and never a throw (Codex #4916 r2 P1).
+    expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
   });
 
   test('an escalation response with a non-array `candidates` field never throws and is treated as unavailable', async () => {
@@ -1025,9 +1025,39 @@ describe('Codex #4916 r1', () => {
       .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.95 }] } }) // no quality, no shows
       .mockResolvedValueOnce({ ok: false, reason: 'provider_error' }); // escalation unavailable
     const result = await identifyPestV2([PHOTO]);
+    // Neither leg's envelope is valid, so nothing analyzed the photos.
+    expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
+  });
+
+  test('P1: an envelope-less leg plus a valid second look still answers from the second look', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.95 }] } }) // no quality, no shows
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [] } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
     expect(result.internal.escalation_reasons).toContain('gemini_missed');
-    expect(result.v2.tier).toBe('needs_more_evidence');
     expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+
+  test('Codex #4916 r2 P1: an identity-less candidate never suppresses the second look', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: '', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_error' });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  test('Codex #4916 r2 P2: a named descendant maps to its nearest mapped v1 ancestor, and a climbed answer keeps its leading differential', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.35), cand('ghost-ant', 0.30), cand('white-footed-ant', 0.10)] }));
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(built.topEntrySlug).toBeNull();
+    expect(v1.report_contract.alternate_slugs).toEqual(['fire-ant', 'ghost-ant']);
+
+    const named = mapToV1({ ...buildAnswer(baseCtx({ candidates: [cand('honey-bee-wall-colony', 0.85)] })), disagreed: false });
+    expect(named.species_slug).toBe('honey-bee');
   });
 
   test('P1: a candidate missing confidence is dropped; the leg\'s valid candidates survive', async () => {

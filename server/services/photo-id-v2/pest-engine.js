@@ -140,11 +140,21 @@ const LEG_CONTRACT = {
   escalation: { envelope: ajv.compile(envelopeOf(ESCALATION_SCHEMA)), item: ajv.compile(itemOf(ESCALATION_SCHEMA)) },
 };
 
+/** A candidate names something only with a slug, or — off-catalog — with
+ * both its own name and a group. `{ slug: '', confidence: 0.95 }` names
+ * nothing, and its confidence must never suppress escalation (Codex #4916
+ * r2 P1). */
+function namesAnIdentity(c) {
+  const filled = (v) => typeof v === 'string' && v.trim().length > 0;
+  return filled(c?.slug) || (filled(c?.off_catalog_name) && filled(c?.group_id));
+}
+
 /** The leg's JSON when its envelope matches `kind`'s contract, else null;
- * the returned object's `candidates` holds only schema-valid items. */
+ * the returned object's `candidates` holds only schema-valid items that
+ * name an identity. */
 function validLegJson(result, kind) {
   if (!result?.ok || !result.json || !LEG_CONTRACT[kind].envelope(result.json)) return null;
-  return { ...result.json, candidates: result.json.candidates.filter((c) => LEG_CONTRACT[kind].item(c)) };
+  return { ...result.json, candidates: result.json.candidates.filter((c) => LEG_CONTRACT[kind].item(c) && namesAnIdentity(c)) };
 }
 
 /** The `candidates` array, with any non-object element (a raw provider
@@ -835,6 +845,21 @@ function buildV2ToV1Map() {
 
 const V2_TO_V1_SLUG = buildV2ToV1Map();
 
+/** The v1 slug for a v2 node: its own legacy mapping, else the nearest
+ * ancestor's (`aedes-mosquito` -> the `mosquitoes` group -> v1 `mosquito`).
+ * Every v1 slug mapped at a group/subgroup carries a generic v1 label
+ * ("Mosquitoes", "Widow Spiders"), so this never over-claims a species
+ * (Codex #4916 r2 P2). */
+function v1SlugFor(v2Slug) {
+  if (!v2Slug) return null;
+  const rungs = catalog.lineage(v2Slug).slice().reverse();
+  for (const rung of rungs) {
+    const v1 = V2_TO_V1_SLUG.get(rung.id);
+    if (v1) return v1;
+  }
+  return null;
+}
+
 function categoryForV2Slug(slug) {
   const entry = catalog.getEntry(slug);
   const group = entry ? catalog.getGroup(entry.group) : null;
@@ -864,7 +889,7 @@ const DEFAULT_SAFETY = { stinging: false, venomous: false, disease_vector: false
  */
 function mapToV1(built) {
   const topEntrySlug = built.topEntrySlug;
-  const v1Slug = topEntrySlug ? (V2_TO_V1_SLUG.get(topEntrySlug) || null) : null;
+  const v1Slug = v1SlugFor(topEntrySlug);
   const v1Item = v1Slug ? V1_BY_SLUG.get(v1Slug) : null;
   const v2Entry = topEntrySlug ? catalog.getEntry(topEntrySlug) : null;
 
@@ -892,8 +917,11 @@ function mapToV1(built) {
     // Codex #4916 r1 P2: the stored contract is pest_id_v1, and the admin
     // differential resolves each alternate through the v1 library — so
     // alternates are mapped like the primary; v2-only entries are dropped.
-    alternate_slugs: [...new Set(built.candidatesBlock.slice(1)
-      .map((c) => (c.slug ? V2_TO_V1_SLUG.get(c.slug) : null))
+    // With no named primary (a climb or disagreement), the leading
+    // candidate is a differential too — only the primary itself is
+    // filtered out (Codex #4916 r2 P2).
+    alternate_slugs: [...new Set(built.candidatesBlock
+      .map((c) => v1SlugFor(c.slug))
       .filter((v) => v && v !== v1Slug))],
   };
 
@@ -916,6 +944,7 @@ function mapToV1(built) {
 function isValidEscalationCandidate(raw) {
   if (!raw || typeof raw !== 'object') return false;
   if (typeof raw.confidence !== 'number' || raw.confidence < 0 || raw.confidence > 1) return false;
+  if (!namesAnIdentity(raw)) return false;
   const hasSlug = typeof raw.slug === 'string' && raw.slug.trim().length > 0;
   if (hasSlug && (!Array.isArray(raw.traits_visible) || !Array.isArray(raw.traits_not_visible))) return false;
   return true;
@@ -1104,7 +1133,9 @@ async function identifyPestV2(photos = []) {
     || (catalogCandidates1.length > 0 && !verifyCoversAllCandidates(verifyResult, catalogCandidates1));
   const contradicted = catalogCandidates1.length > 0 && detectSelfContradiction(candidatesJson, verifiedCandidates);
   const lookAlikeClose = consequentialLookAlikeClose(verifiedCandidates);
-  const verifiedTop = dedupeCandidates(verifiedCandidates)[0] || null;
+  // Only a candidate that resolves to a catalog node can vouch for the
+  // read; an unresolvable name's confidence must not suppress escalation.
+  const verifiedTop = dedupeCandidates(verifiedCandidates.filter((c) => candidateNodeId(c)))[0] || null;
   const topConfidenceForTrigger = verifiedTop ? verifiedTop.confidence : 0;
 
   const escalationReasons = [];
@@ -1151,6 +1182,13 @@ async function identifyPestV2(photos = []) {
   }
 
   const escalationJson = validLegJson(escalationResult, 'escalation');
+  // Neither vision leg produced a valid envelope (keys missing, timeouts,
+  // provider errors, malformed output): nobody analyzed the photos, so
+  // this is a failure, not an "unknown" read. A valid envelope with an
+  // empty candidates list still is a genuine unknown (Codex #4916 r2 P1).
+  if (!candidatesJson && !escalationJson) {
+    return { ok: false, reason: 'vision_unavailable' };
+  }
   const quality = combineQuality(candidatesJson?.quality, escalationJson?.quality);
   // A leg that names a candidate while reporting the photos show nothing
   // contradicts itself; one such read (or two agreeing ones) is as weak as

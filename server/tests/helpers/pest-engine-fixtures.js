@@ -262,6 +262,8 @@ const FIXTURE = buildFixtureCatalog({
   legacySlugMap: {
     'ghost-ant': { node: 'ghost-ant', kind: 'entry', note: '' },
     'fire-ant': { node: 'fire-ant', kind: 'entry', note: '' },
+    // A v1 slug mapped at a group: its entries reach it through ancestry.
+    'honey-bee': { node: 'wasps-bees', kind: 'group', note: '' },
   },
 });
 
