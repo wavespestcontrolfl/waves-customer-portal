@@ -1,5 +1,5 @@
 jest.mock('../models/db', () => ({}));
-const { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops } = require('../services/scheduling/route-performance');
+const { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops, getRoutePerformance } = require('../services/scheduling/route-performance');
 
 const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
 
@@ -62,6 +62,22 @@ test('changed promises and route membership are visible instead of scored as mis
   expect(measureRoutePerformance(snapshot, []).arrivalCounts).toEqual({ missing_visit: 1 });
 });
 
+// Codex P2 (round 6): grouped work's DURATION is never comparable, so its
+// recorded* minutes stay null — but a completed grouped row's corroborated
+// arrival/completion still happened on this route and is carried as
+// lifecycle* for a caller's day span. Work not completed on this route
+// carries none.
+test('a completed grouped stop carries its lifecycle arrival/completion separately from the comparable fields', () => {
+  const [grouped] = measureRoutePerformance(snapshot, [recorded({ visit_id: 'group' })]).stops;
+  expect(grouped).toMatchObject({ arrivalOutcome: 'grouped_work_requires_review', recordedArrivalMinute: null,
+    recordedCompletionMinute: null, recordedServiceMinutes: null, lifecycleArrivalMinute: 490, lifecycleCompletionMinute: 535 });
+  expect(measureRoutePerformance(snapshot, [recorded()]).stops[0])
+    .toMatchObject({ recordedArrivalMinute: 490, lifecycleArrivalMinute: 490, lifecycleCompletionMinute: 535 });
+  for (const row of [recorded({ status: 'pending' }), recorded({ technician_id: 'other' })]) {
+    expect(measureRoutePerformance(snapshot, [row]).stops[0]).toMatchObject({ lifecycleArrivalMinute: null, lifecycleCompletionMinute: null });
+  }
+});
+
 test('late arrival minutes use the immutable two-hour deadline in Eastern time', () => {
   const row = recorded({ actual_start_time: '2026-09-08T14:10:00Z', actual_end_time: '2026-09-08T14:55:00Z',
     statusHistory: [
@@ -95,6 +111,41 @@ test('malformed or duplicated baseline stops remain missing evidence instead of 
   const run = { id: 'bad', created_at: snapshot.as_of, result: { route_quality: [null, { ...snapshot, plannedStops: [null] },
     { ...snapshot, plannedStops: [snapshot.plannedStops[0], snapshot.plannedStops[0]] }] } };
   expect(selectPlanningSnapshots([run], { from: day, to: day, now: new Date('2026-09-09T12:00:00Z') })).toEqual([]);
+});
+
+// Minimal chainable knex stand-in for getRoutePerformance: records every
+// builder call (a where(fn) callback runs against the same builder) and
+// resolves select() with the fixture rows for its table.
+function recordingConn(tables) {
+  const calls = [];
+  const conn = table => {
+    const builder = { select: async () => tables[table] || [] };
+    for (const method of ['whereIn', 'where', 'whereRaw', 'orderBy', 'limit', 'orWhereBetween']) {
+      builder[method] = (...args) => {
+        calls.push([table, method, ...args]);
+        if (typeof args[0] === 'function') args[0](builder);
+        return builder;
+      };
+    }
+    return builder;
+  };
+  return { conn, calls };
+}
+
+// Codex P2 (round 6): plannedStops ids are untrusted retained JSONB; an empty
+// or corrupted one reached whereIn('id', ...) against the uuid-typed
+// scheduled_services.id and raised 22P02, failing the whole read. The
+// snapshot is refused like any other malformed one instead.
+test('getRoutePerformance refuses a snapshot whose planned stop ids are not UUIDs and never queries them', async () => {
+  const goodId = '11111111-1111-4111-8111-111111111111';
+  const plan = (technicianId, id) => ({ ...snapshot, technician_id: technicianId, plannedStops: [{ ...snapshot.plannedStops[0], id }] });
+  const run = { id: 'run', created_at: snapshot.as_of,
+    result: { route_quality: [plan('tech-ok', goodId), plan('tech-empty', ''), plan('tech-garbage', 'not-a-uuid')] } };
+  const { conn, calls } = recordingConn({ route_optimization_planner_runs: [run] });
+  const result = await getRoutePerformance({ from: day, to: day, now: new Date('2026-09-09T12:00:00Z') }, conn);
+  const idQuery = calls.find(([table, method, column]) => table === 'scheduled_services' && method === 'whereIn' && column === 'id');
+  expect(idQuery[3]).toEqual([goodId]);
+  expect(result.plans.map(measured => measured.technicianId)).toEqual(['tech-ok']);
 });
 
 // Codex P2 (round 3): a missing-baseline tech-day (no saved plan) still has

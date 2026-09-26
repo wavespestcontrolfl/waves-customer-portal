@@ -162,6 +162,13 @@ export default function DayScorecardPanel() {
   const technicianIds = new Set(days.flatMap((day) => day.byTech.map((row) => row.technicianId)));
   const showTechName = technicianIds.size > 1;
   const rows = days.flatMap((day) => day.byTech.map((row) => ({ date: day.date, row })));
+  // The server's own caveat for past PLANNED on-site minutes (a saved
+  // snapshot can't detect a co-visit and may double-count one — see
+  // day-scorecard.js PLANNED_ONSITE_NOTE). Shown whenever a past planned
+  // value is on screen, so an inflated number never reads as authoritative
+  // (Codex P2).
+  const plannedOnSiteNote = rows.some(({ row }) => row.actual != null && row.planned != null)
+    ? request.data?.assumptions?.plannedOnSiteMinutes : null;
 
   return (
     <div>
@@ -211,8 +218,9 @@ export default function DayScorecardPanel() {
       )}
       <div className={cn('text-11 text-ink-tertiary mt-3')}>
         Future/today drive model: {request.data?.driveModel === 'calibrated' ? 'calibrated (fitted from real trips)' : 'legacy (straight-line estimate)'}.
-        {' '}Past rows label their own saved model instead. Actual drive minutes exclude personal trips; unclassified trips are counted as day driving.
+        {' '}Past rows label their own saved model instead. Actual drive minutes exclude personal and commute trips; unclassified trips are counted as day driving.
       </div>
+      {plannedOnSiteNote && <div className="text-11 text-ink-tertiary mt-3">{plannedOnSiteNote}</div>}
     </div>
   );
 }

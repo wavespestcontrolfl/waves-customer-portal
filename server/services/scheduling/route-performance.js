@@ -2,6 +2,7 @@
  * Status events corroborate lifecycle timestamps; a stored timestamp alone
  * may have been inferred by closeout and is not evidence of a real arrival.
  * This reader never trains a model or changes an appointment. */
+const { validate: isUuid } = require('uuid');
 const { etDateString, etParts, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 const { finiteDate, firstFiniteDate, positiveMinutesBetween, positiveNumber } = require('../../utils/service-duration-capture');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
@@ -32,6 +33,12 @@ function boundedMinutes(value) {
 function minuteInET(value) {
   const parts = etParts(value);
   return parts.hour * 60 + parts.minute + parts.second / 60;
+}
+
+// One row's recorded lifecycle arrival/completion as ET minutes of the day.
+function lifecycleMinutes(timing) {
+  return { arrival: timing.arrival ? minuteInET(timing.arrival) : null,
+    completion: timing.completion ? minuteInET(timing.completion) : null };
 }
 
 function recordedTiming(row) {
@@ -75,10 +82,27 @@ function recordedTiming(row) {
     completion: durationEvidence === 'recorded_lifecycle_interval' ? end : null };
 }
 
+const anyStringId = id => typeof id === 'string';
+
+// Every planned stop well-formed and unique. `validId` defaults to the plain
+// string check; getRoutePerformance passes a UUID check (Codex P2) because
+// its plannedIds feed whereIn('id', ...) against the uuid-typed
+// scheduled_services.id — an empty or corrupted id in retained JSONB would
+// otherwise raise 22P02 and fail the whole read. Such a snapshot is refused
+// like any other malformed one, so the route reads as missing a baseline
+// instead of half-measured.
+function validPlannedStops(plannedStops, validId) {
+  const validStops = plannedStops.every(stop => stop && validId(stop.id)
+    && Number.isFinite(stop.serviceMinutes) && stop.serviceMinutes > 0
+    && (stop.arrivalWindow == null || (Number.isFinite(stop.arrivalWindow.startMin)
+      && Number.isFinite(stop.arrivalWindow.endMin) && stop.arrivalWindow.endMin >= stop.arrivalWindow.startMin)));
+  return validStops && new Set(plannedStops.map(stop => stop.id)).size === plannedStops.length;
+}
+
 /** Choose the latest snapshot captured BEFORE the service day. The applied
  * order wins its same-run before-image. Never manufacture a historical plan
  * from the schedule as it looks after completion. */
-function selectPlanningSnapshots(runs, { from, to, now = new Date() }) {
+function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId = anyStringId }) {
   const selected = new Map();
   const today = etDateString(now);
   for (const run of runs) {
@@ -86,11 +110,7 @@ function selectPlanningSnapshots(runs, { from, to, now = new Date() }) {
     if (!Array.isArray(snapshots)) continue;
     for (const plan of snapshots) {
       if (!plan || !validCalendarDate(plan.date) || !Array.isArray(plan.plannedStops)) continue;
-      const validStops = plan.plannedStops.every(stop => stop && typeof stop.id === 'string'
-        && Number.isFinite(stop.serviceMinutes) && stop.serviceMinutes > 0
-        && (stop.arrivalWindow == null || (Number.isFinite(stop.arrivalWindow.startMin)
-          && Number.isFinite(stop.arrivalWindow.endMin) && stop.arrivalWindow.endMin >= stop.arrivalWindow.startMin)));
-      if (!validStops || new Set(plan.plannedStops.map(stop => stop.id)).size !== plan.plannedStops.length) continue;
+      if (!validPlannedStops(plan.plannedStops, validStopId)) continue;
       const captured = finiteDate(plan.as_of);
       const created = finiteDate(run.created_at);
       const midnight = parseETDateTime(`${plan.date}T00:00`);
@@ -120,7 +140,15 @@ function measureRoutePerformance(plan, rows) {
     const changedPromise = (range?.startMin ?? null) !== (currentWindow?.startMin ?? null)
       || (range?.endMin ?? null) !== (currentWindow?.endMin ?? null);
     const sameRoute = row && dateOnly(row.scheduled_date) === plan.date && row.technician_id === plan.technician_id;
-    const comparable = sameRoute && row.status === 'completed' && !row.visit_id && !stop.visitId;
+    const completedOnRoute = sameRoute && row.status === 'completed';
+    const comparable = completedOnRoute && !row.visit_id && !stop.visitId;
+    // Grouped (visit_id) work is never comparable — its duration is a
+    // SUM-of-members model — but a completed grouped row's own corroborated
+    // arrival/completion still happened on this route. Carried separately
+    // (Codex P2) so a caller measuring the day's first-arrival-to-last-
+    // completion span keeps grouped work that opened or closed the day,
+    // without that row ever reading as a comparable duration.
+    const lifecycle = completedOnRoute ? lifecycleMinutes(timing) : { arrival: null, completion: null };
     let arrivalOutcome = 'unknown';
     if (!row) arrivalOutcome = 'missing_visit';
     else if (!sameRoute) arrivalOutcome = 'day_or_technician_changed';
@@ -136,7 +164,7 @@ function measureRoutePerformance(plan, rows) {
     const duration = comparable ? timing.durationMinutes ?? null : null;
     return {
       appointmentId: stop.id, arrivalOutcome,
-      recordedArrivalMinute: comparable && timing.arrival ? minuteInET(timing.arrival) : null,
+      recordedArrivalMinute: comparable ? lifecycle.arrival : null,
       arrivalEvidence: timing.arrival ? 'lifecycle_corroborated_by_status_event' : 'unknown',
       lateMinutes: scoredArrival ? Math.max(0, minuteInET(timing.arrival) - range.endMin) : null,
       predictedArrivalMinute: stop.predictedArrivalMinute ?? null,
@@ -146,7 +174,8 @@ function measureRoutePerformance(plan, rows) {
       recordedServiceMinutes: duration,
       durationEvidence: comparable ? timing.durationEvidence : 'unmatched_or_uncompleted_work',
       servicePredictionErrorMinutes: duration != null ? duration - stop.serviceMinutes : null,
-      recordedCompletionMinute: comparable && timing.completion ? minuteInET(timing.completion) : null,
+      recordedCompletionMinute: comparable ? lifecycle.completion : null,
+      lifecycleArrivalMinute: lifecycle.arrival, lifecycleCompletionMinute: lifecycle.completion,
     };
   });
   const arrivalCounts = {};
@@ -194,7 +223,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     .where('start_date', '<=', to).where('end_date', '>=', from)
     .whereRaw("jsonb_typeof(result->'route_quality') = 'array'").orderBy('created_at', 'desc').limit(501)
     .select('id', 'created_at', 'result');
-  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now });
+  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now, validStopId: isUuid });
   const plannedIds = [...new Set(plans.flatMap(plan => plan.plannedStops.map(stop => stop.id)))];
   const rows = await conn('scheduled_services').where(query => query.whereIn('id', plannedIds).orWhereBetween('scheduled_date', [from, to]))
     .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'status', 'visit_id', 'is_callback', 'followup_included', 'window_start', 'time_window',
@@ -250,11 +279,10 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     if (row.status !== 'completed') continue;
     const key = routeKey(dateOnly(row.scheduled_date), row.technician_id);
     if (coveredRoutes.get(key)?.has(row.id)) continue;
-    const timing = recordedTiming(row);
+    const lifecycle = lifecycleMinutes(recordedTiming(row));
     const entry = unbaselinedByRoute.get(key) || [];
     entry.push({ appointmentId: row.id,
-      recordedArrivalMinute: timing.arrival ? minuteInET(timing.arrival) : null,
-      recordedCompletionMinute: timing.completion ? minuteInET(timing.completion) : null });
+      recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion });
     unbaselinedByRoute.set(key, entry);
   }
   return {
@@ -298,11 +326,11 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
       && (row.technician_id || null) === route.technicianId && row.status === 'completed');
     byKey.set(routeKey(route.date, route.technicianId), completed.map(row => {
       const timing = recordedTiming(row);
+      const lifecycle = lifecycleMinutes(timing);
       return { appointmentId: row.id,
         durationEvidence: row.visit_id ? 'unmatched_or_uncompleted_work' : timing.durationEvidence,
         recordedServiceMinutes: row.visit_id ? null : timing.durationMinutes,
-        recordedArrivalMinute: timing.arrival ? minuteInET(timing.arrival) : null,
-        recordedCompletionMinute: timing.completion ? minuteInET(timing.completion) : null };
+        recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion };
     }));
   }
   return byKey;

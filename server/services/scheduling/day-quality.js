@@ -76,17 +76,22 @@ function durationBasis(stops) {
  * service-visit group (visit_id) is also one physical stop no matter how
  * many member rows it has (arrival-route's SUM-of-durations contract —
  * doubleBookedPairs above collapses co-visits the same way for its own
- * purpose). Walks the board order so a 3+ member co-visit chain (not just a
- * pair) still collapses to one.
+ * purpose), and so is a version-2 combined booking's allocation
+ * (allocationKey: one shared arrival anchor even with no visit_id — Codex
+ * P2), keyed on its own id rather than the coordinate-dependent co-visit
+ * rule, which fails closed when a member lacks usable coordinates. Walks the
+ * board order so a 3+ member co-visit chain (not just a pair) still
+ * collapses to one.
  */
 function physicalStopCount(stops) {
   const ordered = currentOrder(stops);
-  const seenVisitIds = new Set();
+  const seenGroups = new Set();
   let count = 0;
   let chainTail = null;
   for (const stop of ordered) {
-    if (stop.visit_id) {
-      if (!seenVisitIds.has(stop.visit_id)) { seenVisitIds.add(stop.visit_id); count += 1; }
+    const group = stop.visit_id ? `visit:${stop.visit_id}` : allocationKey(stop);
+    if (group) {
+      if (!seenGroups.has(group)) { seenGroups.add(group); count += 1; }
       chainTail = null;
       continue;
     }

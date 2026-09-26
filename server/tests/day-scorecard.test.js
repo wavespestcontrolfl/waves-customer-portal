@@ -98,6 +98,19 @@ describe('physicalStopCount', () => {
     const secondProperty = stop('bb', { customer_id: a.customer_id, lat: 5, lng: 5, service_address_line1: '9 Other Rd' });
     expect(physicalStopCount([a, secondProperty])).toBe(2);
   });
+  // Codex P2 (round 6): a version-2 combined booking with no visit_id is
+  // still ONE shared arrival (allocationKey) — the coordinate-dependent
+  // co-visit rule fails closed when a member lacks coordinates and used to
+  // count each member separately.
+  test('a V2 allocation is one physical stop even when a member has no usable coordinates', () => {
+    const mix = { version: 2, allocatedServiceIds: ['a', 'bb'] };
+    const a = stop('a', { scheduled_date: '2026-09-08', reservation_service_mix: mix });
+    const b = stop('bb', { scheduled_date: '2026-09-08', reservation_service_mix: mix, customer_id: a.customer_id, lat: null, lng: null });
+    expect(physicalStopCount([a, b])).toBe(1);
+    // A row the allocation doesn't name is still its own stop.
+    const other = stop('ccc', { scheduled_date: '2026-09-08', reservation_service_mix: mix, customer_id: 'someone-else', lat: null, lng: null });
+    expect(physicalStopCount([a, b, other])).toBe(2);
+  });
 });
 
 describe('getDayScorecard', () => {
@@ -340,6 +353,43 @@ describe('getDayScorecard', () => {
     });
     const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
     expect(result.days[0].byTech[0].actual.spanMinutes).toBe(60);
+  });
+
+  // Codex P2 (round 6): measureRoutePerformance nulls recorded* minutes on
+  // grouped (visit_id) work — its DURATION isn't comparable — but carries the
+  // corroborated arrival/completion as lifecycle*; grouped work that opened
+  // or closed the day must still bound the span.
+  test('grouped work\'s lifecycle arrival/completion bounds the actual span; an all-grouped route has one', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    const grouped = { arrivalOutcome: 'grouped_work_requires_review', durationEvidence: 'unmatched_or_uncompleted_work',
+      recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null,
+      lifecycleArrivalMinute: 450, lifecycleCompletionMinute: 500 };
+    const plain = { arrivalOutcome: 'on_time', durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 50,
+      recordedArrivalMinute: 510, recordedCompletionMinute: 560, lifecycleArrivalMinute: 510, lifecycleCompletionMinute: 560 };
+    const plan = stops => ({ date, technicianId: 'tech1', plannedVisits: stops.length, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+      plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy', stops });
+
+    getRoutePerformance.mockResolvedValueOnce({ plans: [plan([grouped, plain])] });
+    const mixed = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(mixed.days[0].byTech[0].actual.spanMinutes).toBe(110); // 560 - 450, not 560 - 510
+    // The grouped row still never contributes an on-site duration.
+    expect(mixed.days[0].byTech[0].actual).toMatchObject({ onSiteMinutes: 50, onSiteCoverage: { covered: 1, total: 2 } });
+
+    getRoutePerformance.mockResolvedValueOnce({ plans: [plan([grouped])] });
+    const allGrouped = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(allGrouped.days[0].byTech[0].actual.spanMinutes).toBe(50);
+  });
+
+  test('the actual-drive assumption names both excluded purposes (personal and commute)', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'legacy', days: [{ date, closed: false, byTech: [] }] });
+    getRoutePerformance.mockResolvedValue({ plans: [] });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.assumptions.actualDriveMinutes).toMatch(/personal and commute/);
   });
 
   // Codex P1 (round 4): measureRoutePerformance forces durationEvidence to

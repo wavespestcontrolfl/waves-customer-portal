@@ -167,9 +167,16 @@ function actualPastRow(plan, mileage, fallbackStops) {
   // completion span for the tech-day, not just the snapshot's own stops. It
   // never contributes to onSiteMinutes/onSiteCoverage — its duration still
   // isn't independently trusted the way a planned, matched stop's is.
+  //
+  // A saved-plan stop reads its lifecycle* minutes (Codex P2, round 6):
+  // measureRoutePerformance nulls recorded* on grouped (visit_id) work
+  // because its DURATION isn't comparable, but its corroborated arrival/
+  // completion still bound the day. Fallback and unbaselined stops already
+  // carry grouped work's times in recorded* (their durations are what gets
+  // forced null there), so they fall through to it.
   const spanStops = plan && Array.isArray(plan.unbaselinedStops) ? [...stops, ...plan.unbaselinedStops] : stops;
-  const arrivals = spanStops.map(stop => stop.recordedArrivalMinute).filter(Number.isFinite);
-  const completions = spanStops.map(stop => stop.recordedCompletionMinute).filter(Number.isFinite);
+  const arrivals = spanStops.map(stop => stop.lifecycleArrivalMinute ?? stop.recordedArrivalMinute).filter(Number.isFinite);
+  const completions = spanStops.map(stop => stop.lifecycleCompletionMinute ?? stop.recordedCompletionMinute).filter(Number.isFinite);
   const spanMinutes = arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null;
   const unbaselined = plan && Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
   const completedStops = plan
@@ -194,7 +201,7 @@ function actualPastRow(plan, mileage, fallbackStops) {
 // vehicle was moving that workday. Reported so this choice is visible, not
 // silent (see getDayScorecard's assumptions and the UI's drive-model note).
 const EXCLUDED_MILEAGE_PURPOSES = ['personal', 'commute'];
-const MILEAGE_NOTE = 'Actual drive minutes sum mileage_log trips for the day, excluding personal trips; '
+const MILEAGE_NOTE = 'Actual drive minutes sum mileage_log trips for the day, excluding personal and commute trips; '
   + 'unclassified trips (no confirmed business/personal match) are counted as day driving.';
 const PLANNED_ONSITE_NOTE = "Future/today on-site minutes count a co-visited pair once. Past PLANNED on-site minutes "
   + 'come from the saved snapshot, which cannot detect a co-visit (no customer/premise/coordinate columns) and may '

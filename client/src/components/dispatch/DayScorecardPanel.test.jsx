@@ -280,3 +280,39 @@ it('rounds the total minutes once, never carrying a fractional minute into "60m"
   expect(within(row).getByText('2h 0m')).toBeInTheDocument();
   expect(within(row).queryByText(/60m/)).not.toBeInTheDocument();
 });
+
+// Codex P2 (round 6): the server excludes BOTH personal and commute mileage
+// (EXCLUDED_MILEAGE_PURPOSES); a footer naming only personal trips left a
+// commute-heavy day's lower drive total looking unexplained.
+it('the drive-model footer discloses that commute trips are excluded along with personal ones', async () => {
+  mockAdminFetch.mockResolvedValue(ok({ driveModel: 'legacy', days: [] }));
+  render(<DayScorecardPanel />);
+  await screen.findByText('No scheduled days in range');
+  expect(screen.getByText(/exclude personal and commute trips/)).toBeInTheDocument();
+});
+
+// Codex P2 (round 6): a past PLANNED on-site value comes from a snapshot
+// that can't detect a co-visit and may double-count one — the server's own
+// assumptions.plannedOnSiteMinutes caveat must be on screen next to it.
+it('shows the planned on-site caveat whenever a past planned value is displayed, and not otherwise', async () => {
+  const caveat = 'Past PLANNED on-site minutes may double-count a co-visit.';
+  mockAdminFetch.mockResolvedValueOnce(ok({
+    ...pastPayload({ onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130 }),
+    assumptions: { plannedOnSiteMinutes: caveat },
+  }));
+  const { unmount } = render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  expect(screen.getByText(caveat)).toBeInTheDocument();
+  unmount();
+
+  // Future/today rows only (no past planned snapshot on screen): no caveat.
+  mockAdminFetch.mockResolvedValueOnce(ok({
+    driveModel: 'legacy', assumptions: { plannedOnSiteMinutes: caveat },
+    days: [{ date: '2026-10-01', byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'legacy',
+      planned: { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 540, lateVisits: 0 },
+      actual: null }] }],
+  }));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-10-01');
+  expect(screen.queryByText(caveat)).not.toBeInTheDocument();
+});
