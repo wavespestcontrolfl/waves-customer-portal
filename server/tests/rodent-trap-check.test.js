@@ -313,5 +313,16 @@ describe('rodent trap check allowance', () => {
     expect(copy.oneTimeOnlyIntelligenceCopy([legacy]).aiBody).not.toMatch(/one trap check/);
     expect(copy.oneTimeOnlyIntelligenceCopy([current]).aiBody).toMatch(/one trap check/);
     expect(copy.oneTimeOnlyIntelligenceCopy([legacy]).hero.sub).toMatch(/until the activity stops/);
+    // An older numeric allowance (e.g. 2 checks) is never shown the 1-check copy.
+    const twoChecks = { service: 'rodent_trapping', price: 350, includedFollowUps: 2 };
+    expect(copy.resolveOneTimeServiceCopy(twoChecks).includes.join(' ')).not.toMatch(/1 trap-check/);
+  });
+
+  test('Pricing Logic refuses any trapping allowance other than 1', () => {
+    const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+    const base = { emergency_multiplier: 1.2, emergency_minimum_surcharge: 75 };
+    expect(validatePricingConfigData('rodent_trapping', { ...base, included_followups: 1 }).ok).toBe(true);
+    expect(validatePricingConfigData('rodent_trapping', { ...base, included_followups: 2 }).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_trapping', { ...base, included_followups: 'unlimited' }).ok).toBe(false);
   });
 });

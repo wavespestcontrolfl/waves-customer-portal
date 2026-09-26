@@ -189,14 +189,15 @@ function bedBugMethod(item = {}) {
 // `includes` carries the assurance as its last bullet when present, so the
 // renderers list it exactly like the recurring card's guarantee bullet.
 // Rodent trapping rows priced before the 2-visit rule (owner ruling
-// 2026-09-26) carry unlimitedCallbacks:true / includedFollowUps:'unlimited',
-// or predate those fields; those jobs are grandfathered, so their saved
-// estimate keeps the open-ended trap-check wording. Only a row that states
-// a numeric allowance gets the setup + 1 check copy.
+// 2026-09-26) carry unlimitedCallbacks:true, an 'unlimited' or other
+// allowance, or predate those fields. Those jobs are grandfathered, so their
+// saved estimate keeps the open-ended trap-check wording. Only a row priced
+// under the rule — an allowance of exactly 1, which the Pricing Logic
+// validator now pins — gets the setup + 1 check copy.
 function isLegacyUnlimitedTrapping(item = {}) {
   if (item.unlimitedCallbacks === true) return true;
   const allowance = item.includedFollowUps ?? item.includedCallbacks;
-  return !(allowance !== '' && allowance != null && Number.isFinite(Number(allowance)));
+  return allowance === '' || allowance == null || Number(allowance) !== 1;
 }
 
 function resolveOneTimeServiceCopy(item = {}) {

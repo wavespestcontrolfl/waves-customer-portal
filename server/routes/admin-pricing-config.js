@@ -241,6 +241,13 @@ function validatePricingConfigData(configKey, data, oldConfig) {
   // thing while estimates price off the in-code default.
   if (configKey === 'global_labor_rate') {
     if (!isPositive(data?.value)) return fail('global_labor_rate.value must be a positive $/hr number');
+  } else if (configKey === 'rodent_trapping') {
+    // Fixed by owner ruling 2026-09-26: $350 covers setup + ONE trap check.
+    // The customer copy, the booking advisory, and the $95 extra-check row
+    // all assume 1, so a different allowance would contradict them.
+    if (data?.included_followups !== undefined && num(data.included_followups) !== 1) {
+      return fail('rodent_trapping.included_followups is fixed at 1 (setup + 1 trap check; extra checks are the $95 Rodent Trap Check - Additional row)');
+    }
   } else if (['global_drive_time', 'global_admin_annual', 'global_conditional_ceiling'].includes(configKey)) {
     if (!isPositive(data?.value)) return fail(`${configKey}.value must be a positive number (the runtime sync ignores zero values)`);
   } else if (['global_margin_floor', 'global_margin_target_ts'].includes(configKey)) {
