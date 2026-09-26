@@ -65,16 +65,15 @@
  * sms-auto-send.js's own reply-in-flight/cleanup sweeps, which are scoped
  * by PHONE thread, not by customer+notice — reusing one of those markers
  * would make an unrelated billing text visible to (and possibly swept by)
- * that machinery. Our own marker is structurally invisible to it, and to
- * every other current sms_log reader: no reader in this codebase selects a
- * bare 'sending' row without EITHER a status filter that already excludes
- * it, a message_type/marker scope that cannot match ours, OR (the
- * scheduled-SMS recovery sweeps in scheduler.js) `scheduled_for IS NOT
- * NULL`, which this claim never sets. `findAcceptedBillingTextLeg` also
- * calls `excludeUnresolvedSendReservations` on top (matching this
- * codebase's sms_log general-reader source guard,
- * server/tests/sms-log-general-reader-source-guard.test.js) even though
- * its own status filter already excludes 'sending' rows, ours included.
+ * that machinery. General sms_log readers (customer-health, the context
+ * aggregator, the click follow-up gate, …) hide it through the shared
+ * excludeUnresolvedSendReservations / isUnresolvedSendReservation, which
+ * treat BILLING_TEXT_LEG_CLAIM_MARKER as a synthetic placeholder hidden
+ * while 'sending' at any age — a claim can persist (see step 3), and an
+ * empty row must never read as customer contact. The scheduled-SMS
+ * recovery sweeps in scheduler.js require `scheduled_for IS NOT NULL`,
+ * which this claim never sets. `findAcceptedBillingTextLeg` applies the
+ * shared exclusion too, on top of its own status filter.
  *
  * A claim can outlive its own send when the owning process crashes or is
  * killed between claiming and settling. CLAIM_STALE_MS (5 minutes — far
@@ -96,7 +95,10 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { excludeUnresolvedSendReservations } = require('./review-ask-reservation');
+const {
+  excludeUnresolvedSendReservations,
+  BILLING_TEXT_LEG_CLAIM_MARKER: CLAIM_MARKER,
+} = require('./review-ask-reservation');
 
 // A provider handoff Twilio genuinely accepted for this exact notice.
 // Never 'failed'/'blocked' (a refused attempt still owes a resend) and
@@ -119,7 +121,6 @@ const DEDUPE_RETRY_MS = 5 * 60 * 1000;
 const IN_FLIGHT_RETRY_MS = 2 * 60 * 1000;
 const CLAIM_STALE_MS = 5 * 60 * 1000;
 
-const CLAIM_MARKER = 'billing_text_leg_claim';
 // sms_log.from_phone is varchar(20) — this sentinel must fit (mirrors
 // push-channel-routing.js's own short 'push' sentinel for the same reason).
 const CLAIM_FROM_PHONE = 'billing-text-claim';

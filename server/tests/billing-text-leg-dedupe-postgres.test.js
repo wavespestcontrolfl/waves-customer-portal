@@ -193,6 +193,15 @@ postgres('billing text leg dedupe (private PostgreSQL)', () => {
     expect(replaySend).not.toHaveBeenCalled();
     expect(replay).toMatchObject({ sent: false, code: 'BILLING_TEXT_LEG_IN_FLIGHT' });
 
+    // The kept claim is an empty placeholder — general readers (customer
+    // health, context history, the click follow-up gate) must not see it
+    // as customer contact, however long it lingers.
+    const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
+    await mockPg('sms_log').update({ created_at: new Date(Date.now() - 30 * 24 * 3600000) });
+    const visible = await excludeUnresolvedSendReservations(mockPg('sms_log').where({ customer_id: customerId }));
+    expect(visible).toHaveLength(0);
+    await mockPg('sms_log').update({ created_at: new Date() });
+
     // Once the claim ages past CLAIM_STALE_MS it becomes the operator hold.
     await mockPg('sms_log').update({ created_at: new Date(Date.now() - CLAIM_STALE_MS - 1000) });
     const later = await withBillingTextLegLock(input, replaySend);
