@@ -327,4 +327,31 @@ describe('termite annual plan renewal card', () => {
     expect(await screen.findByRole('button', { name: 'Don’t renew my plan' })).toBeInTheDocument();
     expect(screen.queryByText(/couldn.t be loaded/i)).not.toBeInTheDocument();
   });
+
+  // Codex #4940 r7 P1: a plan declined before its station installation has
+  // only a PROVISIONAL term_end — the My Plan billing summary never quotes it.
+  describe('plan billing summary line', () => {
+    const planCustomer = (annualPrepay) => ({ ...customer, tier: 'Bronze', annualPrepay });
+    const base = { id: 'term-1', planLabel: 'WaveGuard Termite Annual Protection', prepayAmount: 450, termStart: '2026-09-25', termEnd: '2027-05-20' };
+
+    it('a term still awaiting installation reads "Paid — 12 months from your station installation", never a date', async () => {
+      api.getTermiteAnnualPlan.mockResolvedValue({ available: false });
+      render(<MyPlanTab customer={planCustomer({ ...base, status: 'cancelled', renewalDeclined: true, awaitsInstallation: true })} />);
+      expect(await screen.findByText('Paid — 12 months from your station installation')).toBeInTheDocument();
+      expect(screen.queryByText(/Paid through/)).not.toBeInTheDocument();
+    });
+
+    it('an unpaid term awaiting installation reads "Invoice pending · 12 months from your station installation"', async () => {
+      api.getTermiteAnnualPlan.mockResolvedValue({ available: false });
+      render(<MyPlanTab customer={planCustomer({ ...base, status: 'payment_pending', awaitsInstallation: true })} />);
+      expect(await screen.findByText('Invoice pending · 12 months from your station installation')).toBeInTheDocument();
+      expect(screen.queryByText(/term ends/)).not.toBeInTheDocument();
+    });
+
+    it('an installed (anchored) term keeps "Paid through <date>"', async () => {
+      api.getTermiteAnnualPlan.mockResolvedValue({ available: false });
+      render(<MyPlanTab customer={planCustomer({ ...base, status: 'active', awaitsInstallation: false })} />);
+      expect(await screen.findByText('Paid through May 20, 2027')).toBeInTheDocument();
+    });
+  });
 });

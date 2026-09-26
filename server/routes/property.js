@@ -687,7 +687,13 @@ function renewalDateText(ymd) {
 }
 
 function distinctTermLabels(rows, labels) {
-  const out = new Map(rows.map((term) => [term.id, labels.get(term.id) || null]));
+  // Codex #4940 r7 P1: on a multi-term account only a TERM-TIED label (the
+  // estimate's linked property or its quoted address) can tell cards apart
+  // — the customer's own profile address is the same fallback for every
+  // term, so it counts as unresolved there (never "disambiguated" by date).
+  // A single term may keep the profile fallback.
+  const labelFor = (entry) => (entry && (rows.length < 2 || entry.termTied) ? entry.label : null);
+  const out = new Map(rows.map((term) => [term.id, labelFor(labels.get(term.id))]));
   if (rows.length < 2) return out;
   const tally = () => {
     const counts = new Map();

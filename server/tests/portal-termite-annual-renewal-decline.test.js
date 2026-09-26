@@ -44,6 +44,10 @@ const mockIsPaidDecidedLapseTerm = jest.fn().mockResolvedValue(true);
 // SQL runs for real in termite-annual-plan-property-label-postgres.test.js).
 // Defaults to no labels.
 const mockTermPropertyLabels = jest.fn().mockResolvedValue(new Map());
+// Labels tied to their own term (the estimate's property / quoted address),
+// the shape termPropertyLabelsForCustomer returns (Codex #4940 r7).
+const tiedLabels = (entries) => new Map(entries.map(([id, label]) => [id, { label, termTied: true }]));
+const profileLabel = (label) => ({ label, termTied: false });
 // Paid re-check for an unprocessed renewed term (Codex #4940 r4).
 const mockIsCoveredTerm = jest.fn().mockResolvedValue(true);
 jest.mock('../services/annual-prepay-renewals', () => ({
@@ -232,7 +236,7 @@ describe('GET /api/property/termite-annual-plan', () => {
         annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
       },
     ];
-    mockTermPropertyLabels.mockResolvedValue(new Map([['term-a', '12 Palm Ave'], ['term-b', '400 Gulf Dr']]));
+    mockTermPropertyLabels.mockResolvedValue(tiedLabels([['term-a', '12 Palm Ave'], ['term-b', '400 Gulf Dr']]));
     const { body } = await invoke(getHandler());
     expect(body).toEqual({
       available: true,
@@ -261,7 +265,7 @@ describe('GET /api/property/termite-annual-plan', () => {
         annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
       },
     ];
-    mockTermPropertyLabels.mockResolvedValue(new Map([
+    mockTermPropertyLabels.mockResolvedValue(tiedLabels([
       ['term-a', '12 Palm Ave, Bradenton, FL 34202'],
       ['term-b', '400 Gulf Dr, Unit 3, Holmes Beach, FL 34217'],
     ]));
@@ -325,9 +329,46 @@ describe('GET /api/property/termite-annual-plan', () => {
     annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z', ...extra,
   });
 
+  // Codex #4940 r7 P1: the customer's own profile address is the SAME
+  // fallback for every term — on a multi-term account it identifies none of
+  // them, so it is unresolved (propertyUnclear, no decline control) and is
+  // never "disambiguated" by a renewal date.
+  test('several terms: a profile-address fallback label is unresolved — no decline control, never date-disambiguated', async () => {
+    state.rows = [anchoredActive('term-a', '2027-05-20'), anchoredActive('term-b', '2027-08-01')];
+    mockTermPropertyLabels.mockResolvedValue(new Map([
+      ['term-a', profileLabel('1 Home St, Bradenton, FL 34202')],
+      ['term-b', profileLabel('1 Home St, Bradenton, FL 34202')],
+    ]));
+    const { body } = await invoke(getHandler());
+    expect(body.terms.map((term) => [term.id, term.propertyLabel, term.canDecline, Boolean(term.propertyUnclear)])).toEqual([
+      ['term-a', null, false, true],
+      ['term-b', null, false, true],
+    ]);
+  });
+
+  test('several terms: a term-tied label stays; the one relying on the profile fallback is unresolved', async () => {
+    state.rows = [anchoredActive('term-a', '2027-05-20'), anchoredActive('term-b', '2027-08-01')];
+    mockTermPropertyLabels.mockResolvedValue(new Map([
+      ['term-a', { label: '12 Palm Ave, Bradenton, FL 34202', termTied: true }],
+      ['term-b', profileLabel('1 Home St, Bradenton, FL 34202')],
+    ]));
+    const { body } = await invoke(getHandler());
+    expect(body.terms.map((term) => [term.id, term.propertyLabel, term.canDecline])).toEqual([
+      ['term-a', '12 Palm Ave, Bradenton, FL 34202', true],
+      ['term-b', null, false],
+    ]);
+  });
+
+  test('a SINGLE term keeps the profile-address fallback label', async () => {
+    state.rows = [anchoredActive('term-a', '2027-05-20')];
+    mockTermPropertyLabels.mockResolvedValue(new Map([['term-a', profileLabel('1 Home St, Bradenton, FL 34202')]]));
+    const { body } = await invoke(getHandler());
+    expect(body.terms[0]).toEqual(expect.objectContaining({ propertyLabel: '1 Home St, Bradenton, FL 34202', canDecline: true }));
+  });
+
   test('two terms resolving to the SAME label are told apart by their (anchored) renewal date', async () => {
     state.rows = [anchoredActive('term-a', '2027-05-20'), anchoredActive('term-b', '2027-08-01')];
-    mockTermPropertyLabels.mockResolvedValue(new Map([['term-a', '1 Home St, Bradenton, FL 34202'], ['term-b', '1 Home St, Bradenton, FL 34202']]));
+    mockTermPropertyLabels.mockResolvedValue(tiedLabels([['term-a', '1 Home St, Bradenton, FL 34202'], ['term-b', '1 Home St, Bradenton, FL 34202']]));
     const { body } = await invoke(getHandler());
     expect(body.terms.map((term) => [term.propertyLabel, term.canDecline])).toEqual([
       ['1 Home St, Bradenton, FL 34202 (renews May 20, 2027)', true],
@@ -337,7 +378,7 @@ describe('GET /api/property/termite-annual-plan', () => {
 
   test('a shared label on a term still awaiting installation is marked as such — never its provisional date', async () => {
     state.rows = [anchoredActive('term-a', '2027-05-20'), anchoredActive('term-b', '2027-08-01', { installation_anchored_at: null })];
-    mockTermPropertyLabels.mockResolvedValue(new Map([['term-a', '1 Home St'], ['term-b', '1 Home St']]));
+    mockTermPropertyLabels.mockResolvedValue(tiedLabels([['term-a', '1 Home St'], ['term-b', '1 Home St']]));
     const { body } = await invoke(getHandler());
     expect(body.terms.map((term) => [term.propertyLabel, term.canDecline])).toEqual([
       ['1 Home St (renews May 20, 2027)', true],
@@ -350,15 +391,15 @@ describe('GET /api/property/termite-annual-plan', () => {
     ['share a label and both still await installation (no real date to tell them apart)', [
       anchoredActive('term-a', '2027-05-20', { installation_anchored_at: null }),
       anchoredActive('term-b', '2027-08-01', { installation_anchored_at: null }),
-    ], new Map([['term-a', '1 Home St'], ['term-b', '1 Home St']]), ['term-a', 'term-b']],
+    ], tiedLabels([['term-a', '1 Home St'], ['term-b', '1 Home St']]), ['term-a', 'term-b']],
     ['share a label AND a renewal date', [
       anchoredActive('term-a', '2027-05-20'),
       anchoredActive('term-b', '2027-05-20'),
-    ], new Map([['term-a', '1 Home St'], ['term-b', '1 Home St']]), ['term-a', 'term-b']],
+    ], tiedLabels([['term-a', '1 Home St'], ['term-b', '1 Home St']]), ['term-a', 'term-b']],
     ['one has no label at all', [
       anchoredActive('term-a', '2027-05-20'),
       anchoredActive('term-b', '2027-08-01'),
-    ], new Map([['term-a', '12 Palm Ave']]), ['term-b']],
+    ], tiedLabels([['term-a', '12 Palm Ave']]), ['term-b']],
   ])('several terms that %s: the indistinguishable ones fail closed (no decline control, propertyUnclear)', async (_label, rows, labels, unclearIds) => {
     state.rows = rows;
     mockTermPropertyLabels.mockResolvedValue(labels);
@@ -380,7 +421,7 @@ describe('GET /api/property/termite-annual-plan', () => {
       anchoredActive('term-provisional', '2027-06-01', { installation_anchored_at: null }),
       anchoredActive('term-renewal', '2027-07-01', { installation_anchored_at: null, renewed_from_term_id: 'term-0' }),
     ];
-    mockTermPropertyLabels.mockResolvedValue(new Map([['term-anchored', 'A St'], ['term-provisional', 'B St'], ['term-renewal', 'C St']]));
+    mockTermPropertyLabels.mockResolvedValue(tiedLabels([['term-anchored', 'A St'], ['term-provisional', 'B St'], ['term-renewal', 'C St']]));
     const { body } = await invoke(getHandler());
     expect(body.terms.map((term) => [term.id, term.awaitsInstallation])).toEqual([
       ['term-anchored', false], ['term-provisional', true], ['term-renewal', false],

@@ -2679,10 +2679,12 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     // looks for another live plan, raises, then writes the settled marker.
     let markerInsert;
     let taskRowProbe;
-    const freshDecline = (termRow, otherPlan = null, { taskRow = { id: 'notif-task' } } = {}) => {
+    let serviceProbe;
+    const freshDecline = (termRow, otherPlan = null, { taskRow = { id: 'notif-task' }, otherService = null, bond = null } = {}) => {
       const decided = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
       markerInsert = query();
       taskRowProbe = query({ first: taskRow });
+      serviceProbe = query({ first: otherService });
       setDeclineQueues({
         annual_prepay_terms: [query({ first: termRow }), query({ returning: [decided] }), query({ first: decided }), query({ first: otherPlan })],
         activity_log: [query(), query({ first: { id: 'decline-row', created_at: '2026-09-26T14:00:00Z', metadata: { term_id: 'term-1', decided_at: '2026-09-26T14:00:00.000Z' } } }), query({ first: null }), markerInsert],
@@ -2690,6 +2692,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
         // Codex #4940 r6: the marker is written only once THIS decline's
         // own task row is confirmed to exist.
         notifications: [taskRowProbe],
+        // Codex #4940 r7: other live termite coverage on the account.
+        scheduled_services: [serviceProbe],
+        termite_bonds: [query({ first: bond })],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
       return AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
@@ -2756,6 +2761,30 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect(result.ok).toBe(true);
       expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
       expect(result.retrieval).toEqual({ raised: false, reason: 'caller_transaction' });
+    });
+
+    // Codex #4940 r7 P1: stations are counted per ACCOUNT — any other live
+    // termite coverage means staff confirm which stations to pull.
+    test.each([
+      ['a live termite service still on the calendar', { otherService: { id: 'svc-quarterly' } }, 'other_termite_service', 'still has termite service on the calendar'],
+      ['an active termite bond', { bond: { id: 7 } }, 'termite_bond', 'has an active termite bond'],
+    ])('%s on the account: no automatic task; the bell asks staff to confirm; settled', async (_label, extra, outcome, wording) => {
+      await freshDecline(anchored, null, extra);
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(bellBody()).toContain(wording);
+      expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: expect.objectContaining({ outcome }),
+      }));
+    });
+
+    test('the live-service check skips visits of THIS plan and anything not live', async () => {
+      await freshDecline({ ...anchored, source_estimate_id: 'est-1' });
+      expect(serviceProbe.whereRaw).toHaveBeenCalledWith("LOWER(COALESCE(service_type, '')) LIKE '%termite%'");
+      expect(serviceProbe.whereRaw).toHaveBeenCalledWith('annual_prepay_term_id IS DISTINCT FROM ?', ['term-1']);
+      expect(serviceProbe.whereRaw).toHaveBeenCalledWith('source_estimate_id IS DISTINCT FROM ?', ['est-1']);
+      expect(serviceProbe.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']));
+      expect(serviceProbe.where).toHaveBeenCalledWith('scheduled_date', '>=', expect.any(String));
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
     });
 
     test('a helper result of supersededByNewer is NOT raised — no marker (the sweep re-checks), and the bell says a newer instruction stands', async () => {

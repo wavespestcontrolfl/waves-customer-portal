@@ -387,10 +387,17 @@ function annualPrepayStatusLabel(term) {
   return 'Annual prepay';
 }
 
+// Codex #4940 r7: a termite annual term still awaiting its station
+// installation (/me annualPrepay.awaitsInstallation) has only a PROVISIONAL
+// term_end — never quote it; coverage runs 12 months from the installation.
+const FROM_INSTALLATION = '12 months from your station installation';
+
 function annualPrepayTermLine(term) {
   if (!term) return null;
+  const pending = term.status === 'payment_pending';
+  if (term.awaitsInstallation === true) return pending ? `Invoice pending · ${FROM_INSTALLATION}` : `Paid — ${FROM_INSTALLATION}`;
   const termEnd = term.termEnd ? fmtDate(term.termEnd, { month: 'short', day: 'numeric', year: 'numeric' }) : null;
-  if (term.status === 'payment_pending') {
+  if (pending) {
     return termEnd ? `Invoice pending · term ends ${termEnd}` : 'Invoice pending';
   }
   return termEnd ? `Paid through ${termEnd}` : 'Prepaid account';

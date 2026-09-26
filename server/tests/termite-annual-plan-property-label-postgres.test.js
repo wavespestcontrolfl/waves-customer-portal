@@ -92,11 +92,13 @@ describeOrSkip('termPropertyLabelsForCustomer — per-term, ownership-scoped pro
       db,
     );
 
-    expect(labels.get(termA.id)).toBe('12 Palm Ave, Bradenton, FL 34202');
-    expect(labels.get(termB.id)).toBe('400 Gulf Dr, Unit 3, Holmes Beach, FL 34217');
-    expect(labels.get(termQuoted.id)).toBe('77 Quoted Ln, Sarasota, FL 34236');
-    expect(labels.get(termBare.id)).toBe('1 Home St, Bradenton, FL 34202');
-    expect(labels.get(termNoEstimate.id)).toBe('1 Home St, Bradenton, FL 34202');
+    // termTied: only the estimate's linked property or its quoted address
+    // identifies WHICH plan this is; the profile fallback does not (r7).
+    expect(labels.get(termA.id)).toEqual({ label: '12 Palm Ave, Bradenton, FL 34202', termTied: true });
+    expect(labels.get(termB.id)).toEqual({ label: '400 Gulf Dr, Unit 3, Holmes Beach, FL 34217', termTied: true });
+    expect(labels.get(termQuoted.id)).toEqual({ label: '77 Quoted Ln, Sarasota, FL 34236', termTied: true });
+    expect(labels.get(termBare.id)).toEqual({ label: '1 Home St, Bradenton, FL 34202', termTied: false });
+    expect(labels.get(termNoEstimate.id)).toEqual({ label: '1 Home St, Bradenton, FL 34202', termTied: false });
   });
 
   test("ownership scope: another customer's term, estimate or property never contributes a label", async () => {
@@ -123,10 +125,10 @@ describeOrSkip('termPropertyLabelsForCustomer — per-term, ownership-scoped pro
 
     const labels = await termPropertyLabelsForCustomer(me.id, [termMislinked.id, termForeignEstimate.id, othersTerm.id], db);
 
-    expect(labels.get(termMislinked.id)).toBe('5 Mine Ct, Bradenton, FL 34205');
-    expect(labels.get(termForeignEstimate.id)).toBe('1 Home St, Bradenton, FL 34202');
+    expect(labels.get(termMislinked.id)).toEqual({ label: '5 Mine Ct, Bradenton, FL 34205', termTied: true });
+    expect(labels.get(termForeignEstimate.id)).toEqual({ label: '1 Home St, Bradenton, FL 34202', termTied: false });
     expect(labels.has(othersTerm.id)).toBe(false);
-    expect([...labels.values()].some((label) => label.includes('Elsewhere'))).toBe(false);
+    expect([...labels.values()].some(({ label }) => label.includes('Elsewhere'))).toBe(false);
   });
 
   test('no customer id or no term ids: empty map', async () => {

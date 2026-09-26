@@ -77,6 +77,13 @@ async function createScratchDb() {
   await db.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, scheduled_service_id uuid)');
   // ADMIN-BUG-R18 (#4970): the end-at-term lapse upkeep checks for an open
   // end-now Cancel plan acceptance before stamping a decided lapse's visits.
+  // Other live termite coverage the retrieval guard reads (Codex #4940 r7).
+  await db.raw(`CREATE TABLE termite_bonds (
+    id serial PRIMARY KEY,
+    customer_id uuid NOT NULL,
+    service_type text,
+    status text NOT NULL DEFAULT 'active'
+  )`);
   await db.raw(`CREATE TABLE service_requests (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
@@ -236,8 +243,9 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
       installation_anchor_visit_id: installVisit.id,
       created_at: new Date(`${termStart}T15:00:00Z`),
     }).returning('*');
+    // Booked as this plan's coverage (linked to the term, as attach does).
     const [coveredVisit] = await db('scheduled_services').insert({
-      customer_id: customerId, status: 'pending', service_type: 'Termite Monitoring Visit', scheduled_date: addMonths(today, 3),
+      customer_id: customerId, annual_prepay_term_id: term.id, status: 'pending', service_type: 'Termite Monitoring Visit', scheduled_date: addMonths(today, 3),
     }).returning('*');
     return {
       customerId, today, term, invoice, coveredVisit,
@@ -456,5 +464,56 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(2);
     expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).not.toContain(staffDeclined.customerId);
     expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).not.toContain(refunded.customerId);
+  });
+
+  // Codex #4940 r7 P1: raiseTermiteRetrievalTask counts every station on the
+  // ACCOUNT, so any OTHER live termite coverage means no automatic task —
+  // staff are belled to confirm which stations to pull. Settled (marker)
+  // with the reason, so the sweep doesn't re-bell daily.
+  test.each([
+    ['another termite annual term', async (db, fx) => {
+      await db('annual_prepay_terms').insert({
+        customer_id: fx.customerId, term_start: addMonths(fx.today, -1), term_end: addMonths(fx.today, 11), status: 'active', annual_plan_version: 'v3',
+        installation_anchored_at: new Date(),
+      });
+    }, 'other_termite_plan', 'another termite annual plan'],
+    ['a live quarterly termite service at another property', async (db, fx) => {
+      await db('scheduled_services').insert({
+        customer_id: fx.customerId, status: 'confirmed', service_type: 'Quarterly Termite Bait Monitoring', scheduled_date: addMonths(fx.today, 2),
+      });
+    }, 'other_termite_service', 'still has termite service on the calendar'],
+    ['an active termite bond', async (db, fx) => {
+      await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'active' });
+    }, 'termite_bond', 'has an active termite bond'],
+  ])('other live termite coverage (%s): no automatic task, staff belled, settled', async (_label, addCoverage, outcome, wording) => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await db('activity_log').insert({
+      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+    });
+    await addCoverage(db, fx);
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+    expect(notifyAdmin.mock.calls.map((c) => c[2]).join(' ')).toContain(wording);
+    const marker = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).first();
+    expect(marker.metadata).toEqual(expect.objectContaining({ term_id: fx.term.id, outcome }));
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+  });
+
+  test('coverage that is NOT live never blocks the task: a completed / cancelled termite visit, an expired bond', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await db('activity_log').insert({
+      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+    });
+    await db('scheduled_services').insert([
+      { customer_id: fx.customerId, status: 'completed', service_type: 'Termite Liquid Treatment', scheduled_date: addMonths(fx.today, -3) },
+      { customer_id: fx.customerId, status: 'cancelled', service_type: 'Quarterly Termite Bait Monitoring', scheduled_date: addMonths(fx.today, 2) },
+    ]);
+    await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'expired' });
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
   });
 });

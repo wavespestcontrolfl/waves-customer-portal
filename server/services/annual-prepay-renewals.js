@@ -2759,13 +2759,17 @@ async function hasSuccessorTerm(termId, conn = db) {
 // Pre-push audit P1 (slice 6a): a customer with several termite annual
 // terms (one per property) needs each portal renewal card — and its decline
 // confirmation — to name WHICH property it covers. Returns Map(termId ->
-// label) for the given terms, OWNERSHIP-SCOPED to customerId at every hop:
+// { label, termTied }) for the given terms, OWNERSHIP-SCOPED to customerId
+// at every hop:
 // the term itself, its source estimate (e.customer_id), and the estimate's
 // linked property (cp.customer_id) must all belong to that customer, so a
 // mislinked estimate/property can never leak another account's address.
 // Fallback chain per term: the source estimate's linked customer_properties
 // row (estimates.property_id) -> the estimate's free-text address snapshot
 // (estimates.address — what was quoted) -> the customer's own address.
+// termTied is true only for the first two: the customer's own address says
+// nothing about WHICH of several plans this is (Codex #4940 r7), so a
+// multi-term caller must treat a profile-address label as unresolved.
 // A term with none of those gets no entry (the caller shows no label).
 function formatStructuredAddress(line1, line2, city, state, zip) {
   const street = [line1, line2].map((v) => (v == null ? '' : String(v).trim())).filter(Boolean).join(', ');
@@ -2796,10 +2800,10 @@ async function termPropertyLabelsForCustomer(customerId, termIds, conn = db) {
     );
   for (const row of rows) {
     const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
-    const label = formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip)
-      || estimateAddress
-      || formatStructuredAddress(row.c_line1, row.c_line2, row.c_city, row.c_state, row.c_zip);
-    if (label) labels.set(row.term_id, label);
+    const termLabel = formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip)
+      || estimateAddress;
+    const label = termLabel || formatStructuredAddress(row.c_line1, row.c_line2, row.c_city, row.c_state, row.c_zip);
+    if (label) labels.set(row.term_id, { label, termTied: !!termLabel });
   }
   return labels;
 }
@@ -6160,7 +6164,9 @@ function declineResultFromRow(term, { alreadyDeclined }) {
 const DECLINE_RETRIEVAL_ACTIVITY_ACTION = 'termite_annual_decline_retrieval';
 const DECLINE_RETRIEVAL_EPISODE = 'portal_renewal_decline';
 // Outcomes that settle the term (marker written). failed / not_raised retry.
-const DECLINE_RETRIEVAL_SETTLED = new Set(['raised', 'other_termite_plan', 'no_rented_stations', 'internal_test_customer']);
+const DECLINE_RETRIEVAL_SETTLED = new Set([
+  'raised', 'other_termite_plan', 'other_termite_service', 'termite_bond', 'no_rented_stations', 'internal_test_customer',
+]);
 
 // Every read/write here uses the ROOT pool: raiseTermiteRetrievalTask writes
 // on its own connection, so it must only ever see committed state.
@@ -6168,7 +6174,7 @@ async function raisePortalDeclineRetrievalTask(termId) {
   let term = null;
   try {
     term = await db('annual_prepay_terms').where({ id: termId })
-      .first('id', 'customer_id', 'status', 'renewal_decision', 'term_end', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
+      .first('id', 'customer_id', 'source_estimate_id', 'status', 'renewal_decision', 'term_end', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
     const { reason, portalDecline } = await declineRetrievalBlocker(term);
     if (reason) return { raised: false, reason };
     const termEnd = dateOnly(term.term_end);
@@ -6210,14 +6216,18 @@ async function declineRetrievalBlocker(term) {
   return { portalDecline };
 }
 
-// Raise the decline's dated task and classify what actually happened:
-// { raised: true } only once THIS decline's own task row exists.
-async function raiseTaskForPortalDecline(term, portalDecline, termEnd) {
-  // Another live termite annual term (a second property) may still need
-  // stations on this account — an automatic "pull the stations" task
-  // could not tell which ones, so staff confirm by hand instead.
+// Codex #4940 r4/r7 P1: raiseTermiteRetrievalTask counts EVERY Waves-owned
+// termite station on the ACCOUNT (no property or term key), so an automatic
+// "pull the stations" task is only safe when this declined plan is the
+// account's ONLY live termite coverage. Anything else — another termite
+// annual term, a live termite service still on the calendar (a quarterly
+// series, a one-off treatment), or an active termite bond, at any property —
+// and staff confirm which stations to pull by hand instead. Returns the
+// reason (the staff bell's wording) or null. Visits of THIS plan (linked to
+// the term, or booked from its estimate) don't count.
+async function otherLiveTermiteCoverage(term) {
   const today = etDateString();
-  const other = await db('annual_prepay_terms')
+  const otherPlan = await db('annual_prepay_terms')
     .where({ customer_id: term.customer_id })
     .whereNot({ id: term.id })
     .whereNotNull('annual_plan_version')
@@ -6227,7 +6237,25 @@ async function raiseTaskForPortalDecline(term, portalDecline, termEnd) {
     })
     .where((current) => whereTermCurrentOrAwaitingInstallation(current, today))
     .first('id');
-  if (other) return { raised: false, reason: 'other_termite_plan' };
+  if (otherPlan) return 'other_termite_plan';
+  const liveService = await db('scheduled_services')
+    .where({ customer_id: term.customer_id })
+    .whereRaw("LOWER(COALESCE(service_type, '')) LIKE '%termite%'")
+    .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
+    .where('scheduled_date', '>=', today)
+    .whereRaw('annual_prepay_term_id IS DISTINCT FROM ?', [term.id])
+    .modify((q) => { if (term.source_estimate_id) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [term.source_estimate_id]); })
+    .first('id');
+  if (liveService) return 'other_termite_service';
+  const bond = await db('termite_bonds').where({ customer_id: term.customer_id, status: 'active' }).first('id');
+  return bond ? 'termite_bond' : null;
+}
+
+// Raise the decline's dated task and classify what actually happened:
+// { raised: true } only once THIS decline's own task row exists.
+async function raiseTaskForPortalDecline(term, portalDecline, termEnd) {
+  const otherCoverage = await otherLiveTermiteCoverage(term);
+  if (otherCoverage) return { raised: false, reason: otherCoverage };
   const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
   // Codex #4940 r6 P1: the decline has no service request, so it passes its
   // real event time — without it the helper ranks it as the OLDEST event
@@ -6374,6 +6402,10 @@ function retrievalSentence(retrieval, termEndLabel) {
       return 'No Waves-owned termite stations are on file, so no retrieval task was raised.';
     case 'other_termite_plan':
       return `This customer has another termite annual plan, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
+    case 'other_termite_service':
+      return `This customer still has termite service on the calendar, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
+    case 'termite_bond':
+      return `This customer has an active termite bond, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
     case 'superseded_by_newer':
       return `A newer station-retrieval instruction already stands on this account, so no separate task was raised for this decline — confirm it covers pulling the stations after ${termEndLabel}.`;
     case 'failed':
