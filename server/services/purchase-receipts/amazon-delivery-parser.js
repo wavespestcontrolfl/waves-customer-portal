@@ -112,6 +112,11 @@ function extractShipmentId(text) {
   return m ? m[1] : null;
 }
 
+// A quantity label ("Quantity:", "Qty") and EVERYTHING after it, so a value
+// like "2 units" is judged whole rather than read as absent.
+const QUANTITY_LINE_RE = /^(?:quantity|qty)\b\s*:?\s*(.*)$/i;
+const QUANTITY_INLINE_RE = /\s*\b(?:quantity|qty)\s*:\s*(.*)$/i;
+
 // An explicit "Quantity: N": a whole number above 0 ("2", "2.0"), else null.
 function explicitQuantity(raw) {
   const match = String(raw).trim().match(/^(\d+)(?:\.0+)?$/);
@@ -122,7 +127,8 @@ function explicitQuantity(raw) {
 // Item blocks: a line starting "* " is a title. Its quantity is either
 // inline ("... Quantity: 4" trailing the same line — defensive) or, in the
 // confirmed real template, alone on the NEXT non-blank line ("  Quantity:
-// 4"). No quantity line either way -> 1; an unreadable one -> null.
+// 4"). No quantity label either way -> 1; a labelled value that isn't a
+// clean whole number ("2 units", "not available") -> null.
 function parseItemBlocksFromText(text) {
   const rawLines = String(text || '').split('\n');
   const items = [];
@@ -133,7 +139,7 @@ function parseItemBlocksFromText(text) {
     if (!title) continue;
 
     let quantity = 1;
-    const inlineQty = title.match(/\s*quantity:\s*(\S*)\s*$/i);
+    const inlineQty = title.match(QUANTITY_INLINE_RE);
     if (inlineQty) {
       quantity = explicitQuantity(inlineQty[1]);
       title = title.slice(0, inlineQty.index).trim();
@@ -141,7 +147,7 @@ function parseItemBlocksFromText(text) {
       let j = i + 1;
       while (j < rawLines.length && rawLines[j].trim() === '') j++;
       if (j < rawLines.length) {
-        const nextQty = rawLines[j].trim().match(/^quantity:\s*(\S*)\s*$/i);
+        const nextQty = rawLines[j].trim().match(QUANTITY_LINE_RE);
         if (nextQty) quantity = explicitQuantity(nextQty[1]);
       }
     }

@@ -101,10 +101,16 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
   });
 
   test.each([
-    ['0', null], ['unknown', null], ['', null], ['2.0', 2], ['3', 3],
-  ])('an explicit "Quantity: %s" reads as %s (unreadable -> null, held for review; never a guessed 1)', (raw, expected) => {
-    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: `Order # 900-0000001-0000001\n\n* Some Product\n  Quantity: ${raw}\n` };
+    ['Quantity: 0', null], ['Quantity: unknown', null], ['Quantity:', null], ['Quantity: 2 units', null],
+    ['Quantity: not available', null], ['Quantity: 2.0', 2], ['Quantity: 3', 3], ['Qty: 4', 4],
+  ])('an explicit "%s" reads as %s (unreadable -> null, held for review; never a guessed 1)', (label, expected) => {
+    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: `Order # 900-0000001-0000001\n\n* Some Product\n  ${label}\n` };
     expect(parseAmazonDeliveredEmail(email).items).toEqual([{ title: 'Some Product', quantity: expected }]);
+  });
+
+  test('an inline multi-word quantity is judged whole too', () => {
+    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: 'Order # 900-0000001-0000001\n\n* Some Product Quantity: 2 units\n' };
+    expect(parseAmazonDeliveredEmail(email).items).toEqual([{ title: 'Some Product', quantity: null }]);
   });
 
   test('no Quantity line at all is quantity 1', () => {
