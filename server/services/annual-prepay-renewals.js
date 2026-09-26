@@ -14,6 +14,10 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // decidedCoveredAndPaid branch in coveredTermsAsOf.
 const DECIDED_COVERED_STATUSES = ['renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
+// annual_prepay_terms.cancel_disposition — how a cancel decision ends the
+// term (ADMIN-BUG-R18): 'end_at_term' keeps its paid visits through
+// term_end; 'end_now_refund' pulled them and owes the unused value back.
+const CANCEL_DISPOSITIONS = ['end_at_term', 'end_now_refund'];
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
 // Days BEFORE term_start the unpaid-prepay payment reminder fires (daily cron
 // granularity: 3 days out and the day before the first visit).
@@ -73,6 +77,21 @@ function resetCachesForTests() {
   termColsCache = null;
   scheduledColsCache = null;
   invoiceColsCache = null;
+  cancelDispositionColumnKnown = false;
+}
+
+// ADMIN-BUG-R18: whether annual_prepay_terms.cancel_disposition exists,
+// probed STRICTLY — a failed probe throws. annualPrepayColumns reads a
+// failure as "no column", which would record a cancel decision with no
+// disposition (the upkeep never recognizes it again) or silently skip the
+// end-now upgrade. Only a positive answer is cached.
+let cancelDispositionColumnKnown = false;
+async function cancelDispositionSupported() {
+  if (cancelDispositionColumnKnown) return true;
+  const cols = await db('annual_prepay_terms').columnInfo();
+  const exists = !!cols?.cancel_disposition;
+  if (exists) cancelDispositionColumnKnown = true;
+  return exists;
 }
 
 async function scheduledServiceColumns() {
@@ -695,7 +714,7 @@ function fileCoverageExceptionAfterCommit(scope, term, reason, body) {
   return fileCoverageException(term, reason, body);
 }
 
-async function fileCoverageException(term, reason, body) {
+async function fileCoverageException(term, reason, body, { title = 'Annual prepay: promised first visit needs attention' } = {}) {
   try {
     // notifyAdmin does not interpret dedupeKey — enforce it here (same
     // pattern as appointment-reminders): one open alert per term+reason per
@@ -711,10 +730,10 @@ async function fileCoverageException(term, reason, body) {
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin(
       'alert',
-      'Annual prepay: promised first visit needs attention',
+      title,
       body,
       {
-        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
         metadata: {
           dedupeKey,
           customer_id: term?.customer_id || null,
@@ -728,7 +747,16 @@ async function fileCoverageException(term, reason, body) {
   }
 }
 
-async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString(), nowHHMM = etNowHHMM() } = {}) {
+// seedNotBefore (opt-in, ADMIN-BUG-R18): a gap-fill never seeds a visit
+// dated before it; such slots come back in unseededPastDates for the caller
+// to hand to the office. gapFillOnly (opt-in, same lane): the term is never
+// treated as a first activation — no today floor on the anchor, no window
+// slide persisted to term_end — even when no visit is linked to it yet (a
+// legacy decided lapse): only slots inside the stored window are filled.
+// Unset (every activation / refresh caller), the behavior is unchanged.
+async function ensureCoverageRowsForTerm(term, conn = db, {
+  today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null, gapFillOnly = false,
+} = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
@@ -776,8 +804,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // a dedicated any-status query, NOT the eligible coverage set: cancelling
   // every linked visit must not make a later refresh look like a first
   // activation and reopen the compounding slide.
-  const alreadyActivated = !!cols.annual_prepay_term_id
-    && !!(await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id'));
+  const alreadyActivated = gapFillOnly || (!!cols.annual_prepay_term_id
+    && !!(await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id')));
 
   // Seeding runs at PAYMENT time, so the past-date floor is today: a term paid
   // days after it was minted must not generate a visit that already happened.
@@ -870,8 +898,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // windowless or sitting at a different hour than the operator quoted).
   let adoptedPromisedRow = null;
   const datesToSeed = [];
+  const unseededPastDates = [];
   for (const scheduledDate of targetDates) {
-    if (datesToSeed.length >= remainingToSeed) break;
+    if (datesToSeed.length + unseededPastDates.length >= remainingToSeed) break;
     const exactOnly = scheduledDate === promisedTarget;
     const matchIndex = availableExisting.findIndex((row) => {
       const existingDate = dateOnly(row.scheduled_date);
@@ -882,6 +911,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     if (matchIndex !== -1) {
       const [matched] = availableExisting.splice(matchIndex, 1);
       if (exactOnly) adoptedPromisedRow = matched;
+      continue;
+    }
+    if (seedNotBefore && scheduledDate < seedNotBefore) {
+      unseededPastDates.push(scheduledDate);
       continue;
     }
     datesToSeed.push(scheduledDate);
@@ -1600,6 +1633,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         existingCount: existingRows.length,
         createdRows,
         effectiveTermEnd,
+        unseededPastDates,
         reason: 'palm_concurrent_backfill_failed',
       };
     }
@@ -1611,6 +1645,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     existingCount: existingRows.length,
     createdRows,
     effectiveTermEnd,
+    unseededPastDates,
   };
 }
 
@@ -2776,6 +2811,92 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   }
 }
 
+// ADMIN-BUG-R18: an end-at-term decided lapse ("End of paid coverage", or a
+// renewal-time lapse) is still paid coverage through term_end on the READ
+// side (coveredTermsAsOf's lapsedRenewalStillInTerm). recordDecision flips
+// the term to 'cancelled' the moment the decision is made, and the write
+// side used to stop at ACTIVE_STATUSES right there: a hand-added
+// replacement was never stamped prepaid (completion billed it again), and
+// a skipped kept visit was never replaced (paid for four, got three). An
+// end_now_refund lapse pulled every visit and owes the unused value back —
+// it is never touched.
+function isEndAtTermLapseInWindow(term, today = etDateString()) {
+  const termEnd = dateOnly(term?.term_end);
+  return term?.status === 'cancelled'
+    && term.renewal_decision === 'cancel'
+    && term.cancel_disposition === 'end_at_term'
+    && !!termEnd && termEnd >= today;
+}
+
+// Keep an end-at-term lapse's paid visits owed through term_end. A per-edit
+// refresh only attaches and stamps visits that exist; the nightly sweep
+// (reseed) also replaces a skipped one. Either re-decides under locks, in
+// one transaction with its writes:
+//   - the prepay invoice FOR SHARE, then the paid-coverage check: a dispute
+//     or refund rewriting that invoice waits for this transaction or is
+//     seen by the check, so stamps are never handed back over contested
+//     money (a dispute clears a decided lapse's stamps through that gate);
+//   - the term re-read: the disposition may have moved to end_now_refund
+//     since the caller read it;
+//   - no open end-now Cancel plan run for the customer: one that failed
+//     between pulling the visits and recording the disposition leaves the
+//     term end_at_term with every visit gone (hasOpenEndNowCancellation);
+//   - reseed only: Cancel plan's commit key, try-held — an end-now commit
+//     pulls every visit BEFORE it records the disposition, and a reseed
+//     interleaved with it would recreate a pulled visit. A busy key skips
+//     the term until the next sweep. Attach and stamp create nothing, so
+//     the per-edit path needs no key.
+async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false, today = etDateString() } = {}) {
+  const termId = typeof termOrId === 'object' ? termOrId?.id : termOrId;
+  if (!termId) return { skipped: 'no_term' };
+  const run = async (t) => {
+    const peek = typeof termOrId === 'object' ? termOrId : await t('annual_prepay_terms').where({ id: termId }).first();
+    if (!peek) return { skipped: 'no_term' };
+    if (reseed) {
+      const { tryHoldCancelCommitLockForTransaction } = require('./admin-cancellation');
+      if (!(await tryHoldCancelCommitLockForTransaction(t, peek.customer_id))) return { skipped: 'cancel_commit_in_progress' };
+    }
+    if (peek.prepay_invoice_id) {
+      await t('invoices').where({ id: peek.prepay_invoice_id }).forShare().first('id');
+    }
+    const term = await t('annual_prepay_terms').where({ id: termId }).first();
+    if (!isEndAtTermLapseInWindow(term, today)) return { skipped: 'not_end_at_term_lapse' };
+    const { hasOpenEndNowCancellation } = require('./admin-cancellation');
+    if (await hasOpenEndNowCancellation(term.customer_id, t)) return { skipped: 'end_now_cancellation_open' };
+    if (!(await coveredTermsAsOf(t, today).where('t.id', term.id).first('t.id'))) return { skipped: 'not_paid_coverage' };
+    const termStart = dateOnly(term.term_start);
+    const termEnd = dateOnly(term.term_end);
+    let windowEnd = termEnd;
+    let createdCount = 0;
+    let unseededPastDates = [];
+    if (reseed) {
+      // Never a replacement dated in the past (a visit skipped on its day
+      // regenerates that day): it could not be serviced, and it would fill
+      // the slot on every later sweep. The office books those with the
+      // customer — a hand-booked visit is stamped by the next refresh.
+      const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: inferCoverageCadence(term) }, t, { seedNotBefore: today, gapFillOnly: true });
+      if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
+      createdCount = ensured?.createdCount || 0;
+      unseededPastDates = ensured?.unseededPastDates || [];
+    }
+    await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, t);
+    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, t);
+    if (windowEnd !== termEnd) await syncCustomerRenewalDate(term.customer_id, windowEnd, t);
+    // Attach and stamp swallow their own SQL errors, and a failed statement
+    // aborts this transaction — its COMMIT would then quietly roll back
+    // while the caller counts the visits stamped. This probe fails in an
+    // aborted transaction, so the failure reaches the caller instead.
+    await t.raw('select 1');
+    if (unseededPastDates.length) {
+      await fileCoverageException(term, 'lapse_replacement_unscheduled',
+        `A paid visit${unseededPastDates.length > 1 ? 's' : ''} on this end-of-coverage plan (${unseededPastDates.join(', ')}) was skipped and its date has passed. Book ${unseededPastDates.length > 1 ? 'replacements' : 'a replacement'} with the customer before coverage ends ${windowEnd} — the plan is paid through then.`,
+        { title: 'Annual prepay: a paid visit needs a replacement booked' });
+    }
+    return { kept: true, createdCount, windowEnd, unseededPastDates };
+  };
+  return conn.isTransaction ? run(conn) : conn.transaction(run);
+}
+
 async function refreshTermSnapshot(termOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
@@ -2823,6 +2944,11 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     if (windowEnd !== termEnd) {
       await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
     }
+  } else if (isEndAtTermLapseInWindow(term)) {
+    // Attach + stamp only; a skipped visit is replaced by the nightly
+    // sweep (keepEndAtTermLapseCoverage).
+    const kept = await keepEndAtTermLapseCoverage(term, conn);
+    if (kept?.windowEnd) windowEnd = kept.windowEnd;
   }
   const coveredRows = coverageServiceType && coverageVisitCount
     ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn)
@@ -2849,9 +2975,27 @@ async function refreshActiveTermsForCustomer(customerId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   if (!customerId) return [];
 
+  // ADMIN-BUG-R18: plus end-at-term lapses still inside their window — they
+  // keep their paid visits stamped (isEndAtTermLapseInWindow). A failed
+  // column probe leaves lapses out of this refresh (the nightly sweep
+  // reaches them from each term's own row).
+  let lapseUpkeep = false;
+  try {
+    lapseUpkeep = await cancelDispositionSupported();
+  } catch (err) {
+    logger.warn(`[annual-prepay] cancel_disposition probe failed — end-at-term lapses skipped this refresh for ${customerId}: ${err.message}`);
+  }
   const terms = await conn('annual_prepay_terms')
     .where({ customer_id: customerId })
-    .whereIn('status', ACTIVE_STATUSES)
+    .where(function liveOrEndAtTermLapse() {
+      this.whereIn('status', ACTIVE_STATUSES);
+      if (lapseUpkeep) {
+        this.orWhere(function endAtTermLapseInWindow() {
+          this.where({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' })
+            .andWhere('term_end', '>=', etDateString());
+        });
+      }
+    })
     .select('*');
 
   const refreshed = [];
@@ -2898,6 +3042,105 @@ async function statusForPrepayInvoice(invoiceId, conn = db) {
     logger.warn(`[annual-prepay] invoice status lookup skipped: ${err.message}`);
     return PAYMENT_PENDING_STATUS;
   }
+}
+
+// Canonical cancel-with-restorations pipeline (lifted out of
+// syncTermForInvoicePayment's cancel branch — ADMIN-BUG-R16/R17 direction:
+// every writer that cancels an annual-prepay term must run through here, not
+// a raw status write). Refuses a DECIDED term (renewal_decision set) — a
+// renewal-lapse keeps its paid window; whereNull leaves `updated` undefined
+// and the caller sees null back. On success: clears the per-visit prepaid
+// stamps, reopens any invoice this term settled as non-cash coverage,
+// reverses the pending-window/WaveGuard-extension credits it issued, resets
+// customers.billing_mode to the recorded prior mode, and restores any
+// switch-superseded per-application invoice / retired setup-fee claim. The
+// flip and every restoration commit TOGETHER (codex #3591 r53): an
+// autocommitted flip beside a failed restore would strand the claim forever
+// (a later sync excludes cancelled terms). `throwOnError` is opt-in
+// (default false, matching this pipeline's original void/refund-sync
+// behavior) — a caller that must never leave a half-cancelled term (e.g. an
+// explicit operator action removing the flag) passes true so a stamp-clear
+// or billing_mode-reset failure rolls the whole cancel back instead of
+// silently completing it.
+async function cancelTermWithRestorations(termId, conn = db, { throwOnError = false } = {}) {
+  const runCancel = async (t) => {
+    const [updated] = await t('annual_prepay_terms')
+      .where({ id: termId })
+      .whereNull('renewal_decision')
+      .update({ status: 'cancelled', updated_at: new Date() })
+      .returning('*');
+    if (updated && updated.status === 'cancelled') {
+      // Lock order (deadlock guard, guards round 1): the accept transaction
+      // locks the CUSTOMER at entry, before the extension's scheduled_services
+      // family lock — while this leg would otherwise take scheduled_services
+      // locks (the stamp clears below) first and the customer (credit
+      // reversals) last. Same order both sides or a concurrent accept +
+      // refund for one customer can deadlock. On autocommit (conn === db)
+      // every statement is its own transaction and no multi-statement order
+      // exists to invert.
+      if (t.isTransaction && updated.customer_id) {
+        await t('customers').where({ id: updated.customer_id }).forUpdate().first('id');
+      }
+      await clearPrepaidStampsForTerm(updated.id, t, { throwOnError });
+      // Also reopen any per-visit invoices this term settled as NON-CASH coverage
+      // (status='prepaid' by this term, or a partial with a coverage line) — the
+      // prepay is gone, so the covered work is owed again. Mirrors the stamp
+      // clear; best-effort (never blocks the cancel), and never reopens a
+      // cash-paid invoice.
+      try {
+        // strict under throwOnError: a per-invoice reopen failure throws
+        // (ADMIN-BUG-R17-FINDING-2) instead of being logged inside the
+        // helper, so an explicit operator cancel never commits with an
+        // invoice still covered by the dead term.
+        await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(updated.id, t, { strict: throwOnError });
+      } catch (err) {
+        if (throwOnError) throw err;
+        logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${updated.id}: ${err.message}`);
+      }
+      // And claw back the pending-window completion credits this term
+      // issued — a full cancel would otherwise refund those slices twice
+      // (once inside the cancel, once as kept credit).
+      await reversePendingWindowCompletionCredits(updated, t);
+      // Same double-pay shape for the WaveGuard tier-extension credit: the
+      // cancel returns the prepaid dollars the discounted allocation was
+      // carved from, so the extension's prepaid-difference grant reverses
+      // with it.
+      await reverseWaveguardExtensionCredits(updated, t);
+      // Coverage is gone — return the customer to a billable mode (the
+      // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
+      await resetBillingModeAfterTermCancel(updated, t, { throwOnError });
+      // An ON-SITE SWITCH retired the accept-minted per-application invoice
+      // when this prepay was created; with the prepay dead that AR (setup
+      // fee included) must come back, or it is silently gone forever —
+      // nothing else ever re-mints it. Marker-keyed and idempotent;
+      // best-effort (never blocks the cancel).
+      if (updated.prepay_invoice_id) {
+        try {
+          await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, t);
+        } catch (err) {
+          // The markers are durable, so this is recoverable — but only by a
+          // human who knows: the cancel succeeded and the superseded
+          // per-application AR is still missing. ERROR (Sentry-visible),
+          // with the fix spelled out (Codex on-site-switch P0 r9: a warn
+          // here was a permanent silent AR loss).
+          logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
+        }
+        // A DIRECT rodent series' setup rode this prepay as its own line and
+        // the mint retired the parent's per-application claim; the fee is
+        // owed again now (codex #3591 r34 P1). Record-keyed and one-shot.
+        // PROPAGATES on failure (codex #3591 r46 local P0): the term flip
+        // and this restore commit TOGETHER — a swallowed error left the
+        // cancelled term unselectable by any later sync, the claim record
+        // unused, and the fee cleared forever. A throw rolls the whole
+        // cancel back and the caller can retry.
+        await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, t, { sourceEstimateId: updated.source_estimate_id || null, customerId: updated.customer_id || null, coverageServiceType: updated.coverage_service_type || null });
+      }
+    }
+    return updated || null;
+  };
+  return typeof conn.transaction === 'function' && !conn.isTransaction
+    ? conn.transaction(runCancel)
+    : runCancel(conn);
 }
 
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
@@ -3004,84 +3247,10 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // The cancel flip and EVERY restoration commit TOGETHER (codex #3591
       // r53 local P0 — symmetric with the revival branches): on the global
       // handle an autocommitted flip beside a failed restore stranded the
-      // claim forever (the next sync excludes cancelled terms).
-      const cancelWithRestorations = async (t) => {
-      const [updated] = await t('annual_prepay_terms')
-        .where({ id: term.id })
-        .whereNull('renewal_decision')
-        .update({ status: 'cancelled', updated_at: new Date() })
-        .returning('*');
-      // A true void/refund (no renewal decision) cancels coverage — drop the
-      // per-visit prepaid stamps so future covered visits bill normally. A
-      // renewal-lapse (renewal_decision set) keeps its paid window, so the
-      // whereNull guard leaves `updated` undefined and we don't clear.
-      if (updated && updated.status === 'cancelled') {
-        // Lock order (deadlock guard, guards round 1): the accept
-        // transaction locks the CUSTOMER at entry, before the extension's
-        // scheduled_services family lock — while this leg would otherwise
-        // take scheduled_services locks (the stamp clears below) first and
-        // the customer (credit reversals) last. Same order both sides or a
-        // concurrent accept + refund for one customer can deadlock. On
-        // autocommit (conn === db) every statement is its own transaction
-        // and no multi-statement order exists to invert.
-        if (t.isTransaction && updated.customer_id) {
-          await t('customers').where({ id: updated.customer_id }).forUpdate().first('id');
-        }
-        await clearPrepaidStampsForTerm(term.id, t);
-        // Also reopen any per-visit invoices this term settled as NON-CASH coverage
-        // (status='prepaid' by this term, or a partial with a coverage line) — the
-        // prepay was refunded, so the covered work is owed again. Mirrors the stamp
-        // clear; best-effort (never blocks the refund sync), and never reopens a
-        // cash-paid invoice.
-        try {
-          await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(term.id, t);
-        } catch (err) {
-          logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${term.id}: ${err.message}`);
-        }
-        // And claw back the pending-window completion credits this term
-        // issued — the full-annual refund would otherwise refund those
-        // slices twice (once inside the refund, once as kept credit).
-        await reversePendingWindowCompletionCredits(updated, t);
-        // Same double-pay shape for the WaveGuard tier-extension credit:
-        // the refund returns the prepaid dollars the discounted allocation
-        // was carved from, so the extension's prepaid-difference grant
-        // reverses with it.
-        await reverseWaveguardExtensionCredits(updated, t);
-        // Coverage is gone — return the customer to a billable mode (the
-        // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
-        await resetBillingModeAfterTermCancel(updated, t);
-        // An ON-SITE SWITCH retired the accept-minted per-application
-        // invoice when this prepay was created; with the prepay dead that
-        // AR (setup fee included) must come back, or it is silently gone
-        // forever — nothing else ever re-mints it. Marker-keyed and
-        // idempotent; best-effort (never blocks the void/refund sync).
-        if (updated.prepay_invoice_id) {
-          try {
-            await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, t);
-          } catch (err) {
-            // The markers are durable, so this is recoverable — but only by a
-            // human who knows: the void succeeded and the superseded
-            // per-application AR is still missing. ERROR (Sentry-visible),
-            // with the fix spelled out (Codex on-site-switch P0 r9: a warn
-            // here was a permanent silent AR loss).
-            logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
-          }
-          // A DIRECT rodent series' setup rode this prepay as its own line
-          // and the mint retired the parent's per-application claim; the
-          // fee is owed again now (codex #3591 r34 P1). Record-keyed and
-          // one-shot. PROPAGATES on failure (codex #3591 r46 local P0):
-          // the term flip and this restore commit TOGETHER — a swallowed
-          // error left the cancelled term unselectable by any later sync,
-          // the claim record unused, and the $99 cleared forever. A throw
-          // rolls the whole void/refund sync back and the event retries.
-          await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, t, { sourceEstimateId: updated.source_estimate_id || null, customerId: updated.customer_id || null, coverageServiceType: updated.coverage_service_type || null });
-        }
-      }
-      return updated;
-      };
-      const updated = typeof conn.transaction === 'function' && !conn.isTransaction
-        ? await conn.transaction(cancelWithRestorations)
-        : await cancelWithRestorations(conn);
+      // claim forever (the next sync excludes cancelled terms). Shared with
+      // every other term-cancel writer (DELETE /:id/annual-prepay,
+      // ADMIN-BUG-R16) via cancelTermWithRestorations.
+      const updated = await cancelTermWithRestorations(term.id, conn);
       current = updated || term;
     }
 
@@ -3522,6 +3691,17 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
         summary.disputeRecovered += recovery.credited;
       } catch (err) {
         logger.warn(`[annual-prepay] sweep dispute-recovery leg failed for term ${term.id}: ${err.message}`);
+      }
+    }
+    // ADMIN-BUG-R18: an end-at-term lapse's skipped paid visit is replaced
+    // here, once a night — per-edit refreshes only attach and stamp.
+    if (isEndAtTermLapseInWindow(term, dateOnly(today) || etDateString())) {
+      try {
+        const kept = await keepEndAtTermLapseCoverage(term, conn, { reseed: true, today: dateOnly(today) || etDateString() });
+        if (kept?.createdCount) logger.info(`[annual-prepay] sweep replaced ${kept.createdCount} visit(s) for end-at-term lapse ${term.id}`);
+        if (kept?.skipped === 'cancel_commit_in_progress') logger.info(`[annual-prepay] sweep reseed skipped for term ${term.id}: a cancellation is being committed`);
+      } catch (err) {
+        logger.warn(`[annual-prepay] sweep end-at-term reseed failed for term ${term.id}: ${err.message}`);
       }
     }
     const res = await reconcilePendingWindowCompletions(term, conn);
@@ -4696,15 +4876,22 @@ async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = fals
     // Restore the EXACT prior mode when the stamp recorded it ('none' =
     // legacy NULL); pre-column terms fall back to the source heuristic
     // (estimate-flow term → per-visit, manual prepay → legacy monthly).
+    // Read source_estimate_id from THIS row, never only the caller-supplied
+    // `term` object (pre-push audit P1): a caller with a partial/minimal
+    // term (e.g. just { id, customer_id }, as a route-level demotion
+    // handoff might pass) must not silently lose the estimate-flow fallback
+    // for a legacy term with no prior_billing_mode recorded.
     let restored;
+    let sourceEstimateId = term.source_estimate_id;
     if (await conn.schema.hasColumn('annual_prepay_terms', 'prior_billing_mode')) {
-      const trow = await conn('annual_prepay_terms').where({ id: term.id }).first('prior_billing_mode');
+      const trow = await conn('annual_prepay_terms').where({ id: term.id }).first('prior_billing_mode', 'source_estimate_id');
       if (trow?.prior_billing_mode) {
         restored = trow.prior_billing_mode === 'none' ? null : trow.prior_billing_mode;
       }
+      if (sourceEstimateId === undefined) sourceEstimateId = trow?.source_estimate_id ?? null;
     }
     if (restored === undefined) {
-      restored = term.source_estimate_id ? 'per_application' : null;
+      restored = sourceEstimateId ? 'per_application' : null;
     }
     await conn('customers')
       .where({ id: term.customer_id, billing_mode: 'annual_prepay' })
@@ -5678,10 +5865,11 @@ async function hasAnnualPrepayRenewal(customerId, termEnd) {
   return !!row;
 }
 
-async function recordDecision({ termId, action, adminUserId = null, notes = null } = {}) {
+async function recordDecision({ termId, action, adminUserId = null, notes = null, disposition = null } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const allowed = new Set(['contacted', 'renew', 'cancel', 'switch_plan']);
   if (!allowed.has(action)) throw new Error('invalid annual prepay action');
+  if (disposition != null && !CANCEL_DISPOSITIONS.includes(disposition)) throw new Error('invalid cancel disposition');
   const now = new Date();
   if (action === 'contacted') {
     const update = {
@@ -5708,6 +5896,14 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
     updated_at: now,
   };
   if (notes) update.renewal_notes = notes;
+  // ADMIN-BUG-R18: a cancel decision carries its disposition in the SAME
+  // statement — the write side's one durable answer to "does this decided
+  // lapse keep its paid visits through term_end?". Only Cancel plan's
+  // "end now + refund" is end_now_refund; "End of paid coverage" and a
+  // renewal-time lapse are end_at_term.
+  if (action === 'cancel' && (await cancelDispositionSupported())) {
+    update.cancel_disposition = disposition === 'end_now_refund' ? 'end_now_refund' : 'end_at_term';
+  }
   const [term] = await db('annual_prepay_terms')
     .where({ id: termId })
     .whereIn('status', ACTIVE_STATUSES)
@@ -5717,10 +5913,36 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
   return term || null;
 }
 
+// ADMIN-BUG-R18: Cancel plan re-deciding a term whose cancel decision is
+// already recorded (an end-at-term lapse now ended early, or a retry). The
+// disposition only moves toward end_now_refund — Cancel plan refuses
+// end-now → end-at-term (prepay_term_already_ended) — and end_at_term only
+// fills a missing value. Returns { changed, disposition } — the term's
+// disposition after the call (null when it has no cancel decision) — or
+// null before the column exists.
+async function recordCancelDisposition({ termId, disposition } = {}, conn = db) {
+  if (!CANCEL_DISPOSITIONS.includes(disposition)) throw new Error('invalid cancel disposition');
+  if (!(await cancelDispositionSupported())) return null;
+  const query = conn('annual_prepay_terms').where({ id: termId, renewal_decision: 'cancel' });
+  if (disposition === 'end_now_refund') query.whereRaw("cancel_disposition is distinct from 'end_now_refund'");
+  else query.whereNull('cancel_disposition');
+  const [term] = await query.update({ cancel_disposition: disposition, updated_at: new Date() }).returning('*');
+  if (term) return { changed: true, disposition: term.cancel_disposition };
+  const stored = await conn('annual_prepay_terms').where({ id: termId, renewal_decision: 'cancel' }).first('cancel_disposition');
+  return { changed: false, disposition: stored ? stored.cancel_disposition : null };
+}
+
 module.exports = {
   createTermForAnnualPrepay,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
+  // ADMIN-BUG-R18: Cancel plan annotates an already-decided cancel through
+  // this (admin-cancellation never writes annual_prepay_terms itself), and
+  // the end-at-term lapse upkeep is reachable for its tests.
+  recordCancelDisposition,
+  isEndAtTermLapseInWindow,
+  keepEndAtTermLapseCoverage,
+  CANCEL_DISPOSITIONS,
   // Public: the one-step-prepay booking preflight (admin-schedule) matches the
   // booked service against the quoted coverage with the SAME matcher that
   // stamps/gates coverage — destructuring it from the module root must work
@@ -5756,6 +5978,12 @@ module.exports = {
   coveredTermsAsOf,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
+  // ADMIN-BUG-R16/R17: the canonical term-cancel pipeline and its
+  // billing_mode restore, both now shared by callers OUTSIDE this module
+  // (admin-invoices.js's remove-flag and reverse-prepaid routes) so no
+  // writer can flip a term's status or a customer's billing_mode by hand.
+  cancelTermWithRestorations,
+  resetBillingModeAfterTermCancel,
   // Root exports (not only _private): the annual-prepay-invoice route
   // validates the operator's first-visit time with the SAME normalizer that
   // persists it and the SAME conflict predicate the seeder re-checks with, so
@@ -5771,11 +5999,24 @@ module.exports = {
   // term as "still deciding" add PAYMENT_PENDING_STATUS explicitly.
   ACTIVE_STATUSES,
   PAYMENT_PENDING_STATUS,
+  // The terminal-visit vocabulary clearPrepaidStampsForTerm treats as
+  // "already serviced — leave its stamp for audit" (ADMIN-BUG-R17-FINDING-5):
+  // admin-invoices' remove-flag route detaches the term link from a term's
+  // scheduled_services rows on removal, and must exclude the SAME statuses
+  // clearPrepaidStampsForTerm excludes, or a skipped/rescheduled visit's
+  // coverage-history link is severed while its stamp is kept — orphaning the
+  // audit trail clearPrepaidStampsForTerm deliberately preserves.
+  PREPAID_UPDATE_EXCLUDED_STATUSES,
   // The cadence a term will actually run at (explicit cadence, else the
   // service-type wording, else the stored visit count) — the prepay
   // routes' retired-plan gate reads the same inference the coverage
   // schedule is built from (codex r17 on #4786).
   inferCoverageCadence,
+  // Column-existence probe for annual_prepay_terms, cached like the analogous
+  // scheduled_services/invoices probes — admin-invoices' reverse-prepaid
+  // route needs it to column-guard the SAME dispute_suspended_at marker
+  // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
+  annualPrepayColumns,
   _private: {
     PENDING_COMPLETION_REVERSAL_IDENTITIES,
     dateOnly,

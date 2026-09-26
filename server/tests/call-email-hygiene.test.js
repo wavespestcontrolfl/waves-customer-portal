@@ -307,7 +307,7 @@ describe('alertBouncedContactAddress', () => {
     const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(body).toContain('Pat Roe');
     expect(body).toContain('+19415550000');
-    expect(opts.link).toBe('/admin/customers/cust-9');
+    expect(opts.link).toBe('/admin/customers?customerId=cust-9');
   });
 
   test('a shared inbox on both a customer and an estimate surfaces BOTH accounts', async () => {
