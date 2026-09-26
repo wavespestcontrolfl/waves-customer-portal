@@ -24,6 +24,14 @@ describe('alertAfter', () => {
     expect(alertAt.toISOString()).toBe(alertFrom);
   });
 
+  test.each([
+    ['an HTML-only email', { body_text: '', body_html: '<table><tr><td>Arriving Wednesday</td><td>Order placed September 10</td></tr></table>' }],
+    ['a range followed by another date on the same line', { body_text: '', body_html: '<td>Arriving September 15 - September 16 Order placed September 10</td>' }],
+  ])('%s still reads its promised day (September 16)', (_label, body) => {
+    const { promised } = alertAfter({ ...body, received_at: new Date('2026-09-13T17:12:00Z') });
+    expect(promised.toISOString().slice(0, 10)).toBe('2026-09-16');
+  });
+
   test('no promised day: 3 days after the Shipped email', () => {
     expect(at('Order #\n900-1\n* Thing\n', '2026-09-13T17:12:00Z')).toEqual({ at: new Date('2026-09-16T17:12:00Z'), promised: null });
   });

@@ -385,6 +385,12 @@ describe('processReceiptLine', () => {
     expect(await processReceiptLine(taurusLine({ orderNumber: null, holdAs: 'no_order_number' }))).toEqual({ skipped: true, reason: 'already_processed' });
   });
 
+  test('holdAs covers every matched line: a return whose size doesn\'t match is still held as a return', async () => {
+    mockState.match = { matched: true, product: taurus };
+    const outcome = await processReceiptLine(taurusLine({ holdAs: 'returned', item: { title: 'Taurus SC Termiticide 96 oz', quantity: -1 } }));
+    expect(outcome).toMatchObject({ status: 'returned', product: taurus });
+  });
+
   test('holdAs never touches an unmatched line (no hold, no bell)', async () => {
     const outcome = await processReceiptLine(taurusLine({ holdAs: 'returned', item: { title: 'Chromebook', quantity: -1 } }));
     expect(outcome).toMatchObject({ status: 'unmatched' });

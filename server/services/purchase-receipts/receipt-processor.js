@@ -35,11 +35,12 @@
  * the line from scratch. The claim's ON CONFLICT DO NOTHING is the
  * at-most-once guard against a concurrent run.
  *
- * A caller can hold a line that would move stock under another status
+ * A caller can hold every line matched to a product under another status
  * (holdAs) — an Amazon email with no readable "Order #" ('no_order_number',
  * keyed under order_number 'unknown'), a SiteOne return ('returned') or an
- * invoice whose numbers don't reconcile ('unverified') — so it surfaces for
- * review rather than moving stock. Unmatched lines stay 'unmatched'.
+ * invoice line that can't be trusted ('unverified') — so its bell carries
+ * the right instruction even when sizing failed too, and it never moves
+ * stock. Unmatched lines stay 'unmatched'.
  *
  * A shipment or invoice already handed to a person as a whole is never
  * auto-logged afterwards, or the box would be counted twice:
@@ -236,7 +237,7 @@ async function classifyUnderLock(item, trx) {
  *   forcedStatus: a placeholder line with no matching or sizing at all —
  *   'no_items' (an itemless Delivered email), 'unreadable' (a SiteOne
  *   invoice never read into lines).
- *   holdAs: the status a line that would move stock is held under instead.
+ *   holdAs: the status a line matched to a product is held under instead.
  *   ringBell(outcome, trx): writes the line's bell on its transaction.
  * @returns one of (every recorded outcome carries lineId):
  *   { skipped: true, reason }                                    — nothing written
@@ -259,7 +260,7 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
       return { ...HANDED_TO_PERSON };
     }
     let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
-    if (holdAs && classified.status === 'logged') {
+    if (holdAs && classified.productId) {
       classified = { status: holdAs, productId: classified.productId, product: classified.product };
     }
     const claim = await claimLine(trx, {

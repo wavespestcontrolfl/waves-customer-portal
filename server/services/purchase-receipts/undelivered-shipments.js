@@ -37,7 +37,7 @@ const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { formatETDate, etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
-const { parseAmazonShippedEmail, AMAZON_SHIPPED_FROM } = require('./amazon-delivery-parser');
+const { parseAmazonShippedEmail, extractText, AMAZON_SHIPPED_FROM } = require('./amazon-delivery-parser');
 const { matchTitleToProduct } = require('./product-matcher');
 const { UNKNOWN_ORDER, lockShipment } = require('./receipt-processor');
 
@@ -49,22 +49,29 @@ const SHIPPED_LOOKBACK_MS = 14 * DAY_MS;
 const MIN_ALERT_AGE_MS = DAY_MS;
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-const MONTH_DAY_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
+// "June 16", "Sep 16", or a range "June 16 - June 18" / "June 16 - 18" at
+// the start of the phrase; the range's end is the promised day.
+const MONTH_DAY_RE = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b(?:\s*[-–]\s*(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?(\d{1,2})\b)?/;
 
 // The ET day a Shipped email promises, as an addETDays-style carrier (noon
-// UTC of that calendar date), or null when it names none.
+// UTC of that calendar date), or null when it names none. The phrase is
+// read from the parser's text (body_text, else stripped HTML, where it can
+// run on into the rest of the line), capped to the promise itself.
 function promisedArrivalDay(text, shippedAt) {
-  const phrase = (String(text || '').match(/^\s*arriving\s+(.+)$/im) || [])[1]?.toLowerCase();
+  const phrase = (String(text || '').match(/^\s*arriving\s+(.{1,40})/im) || [])[1]?.toLowerCase();
   if (!phrase) return null;
   if (phrase.startsWith('today')) return addETDays(shippedAt, 0);
   if (phrase.startsWith('tomorrow')) return addETDays(shippedAt, 1);
   const weekday = WEEKDAYS.findIndex((name) => phrase.startsWith(name));
   // "Arriving Wednesday" sent on a Wednesday means next week ("today" otherwise).
   if (weekday >= 0) return addETDays(shippedAt, ((weekday - etParts(shippedAt).dayOfWeek + 7) % 7) || 7);
-  const last = [...phrase.matchAll(MONTH_DAY_RE)].pop();
-  if (!last) return null;
+  const date = phrase.match(MONTH_DAY_RE);
+  if (!date) return null;
+  const [, startMonth, startDay, endMonth, endDay] = date;
+  const month = MONTHS.indexOf(endMonth || startMonth);
+  const day = Number(endDay || startDay);
   const { year } = etParts(shippedAt);
-  const onYear = (y) => new Date(Date.UTC(y, MONTHS.indexOf(last[1]), Number(last[2]), 12));
+  const onYear = (y) => new Date(Date.UTC(y, month, day, 12));
   // Shipped late December, promised early January.
   return onYear(year) < addETDays(shippedAt, -1) ? onYear(year + 1) : onYear(year);
 }
@@ -74,7 +81,7 @@ function promisedArrivalDay(text, shippedAt) {
 // passed, else SHIPPED_GRACE_MS after the Shipped email.
 function alertAfter(email) {
   const shippedAt = new Date(email.received_at);
-  const promised = promisedArrivalDay(email.body_text, shippedAt);
+  const promised = promisedArrivalDay(extractText(email), shippedAt);
   const at = promised
     ? parseETDateTime(`${etDateString(addETDays(promised, 2))}T00:00`)
     : new Date(shippedAt.getTime() + SHIPPED_GRACE_MS);

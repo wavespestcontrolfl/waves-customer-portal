@@ -185,6 +185,7 @@ function parseOrderEmail(email) {
 }
 
 module.exports = {
+  extractText,
   parseAmazonDeliveredEmail,
   parseAmazonShippedEmail,
   isAmazonDeliveredEmail,
