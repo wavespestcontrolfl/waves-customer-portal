@@ -606,6 +606,18 @@ describe('explicit billing channel combinations', () => {
     expect(result.channelResults.push.code).not.toBe('BILLING_PREFERENCES_CHANGED');
   });
 
+  test('the ACH processing acknowledgment stays on its legacy path even with explicit choices on file', async () => {
+    const { billingDeliveryCategory } = require('../services/messaging/billing-channel-routing');
+    expect(billingDeliveryCategory({ purpose: 'payment_failure', metadata: { original_message_type: 'ach_payment_processing' } }))
+      .toBeNull();
+    prefs.payment_issue_channels = ['email', 'sms'];
+    prefs.payment_receipt_channels = ['email', 'sms'];
+    const result = await sendCustomerMessage({ ...input, purpose: 'payment_failure',
+      metadata: { original_message_type: 'ach_payment_processing' } });
+    expect(result.channelResults).toBeUndefined();
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
   test('an explicit channel selection with no recognized channel (empty array, or only unrecognized values) selects nothing and never calls a provider', async () => {
     // Defense in depth: the preferences API's Joi schema enforces
     // .min(1) on every billing channel array, so this should be

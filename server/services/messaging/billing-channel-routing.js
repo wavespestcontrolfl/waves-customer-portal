@@ -15,11 +15,18 @@ const BILLING_MESSAGE_CATEGORIES = Object.freeze({
   bank_verification_incomplete: 'payment_issue', bank_verification_failed: 'payment_issue',
 });
 
+// The Stripe ACH "processing" acknowledgment sends its own lifecycle email
+// and carries no stable event key, so explicit routing would duplicate that
+// email and could resend it on replay. It stays on its legacy path until its
+// producer adopts the router contract.
+const LEGACY_ONLY_MESSAGE_TYPES = new Set(['ach_payment_processing']);
+
 function billingDeliveryCategory(input) {
   if (['invoice', 'payment_issue', 'billing', 'payment_receipt'].includes(input.metadata?.billingDeliveryCategory)) {
     return input.metadata.billingDeliveryCategory;
   }
   const type = input.metadata?.original_message_type;
+  if (LEGACY_ONLY_MESSAGE_TYPES.has(type)) return null;
   return BILLING_MESSAGE_CATEGORIES[type] || ({
     payment_link: 'invoice', payment_failure: 'payment_issue',
     payment_receipt: 'payment_receipt', billing: 'billing', autopay: 'billing',
