@@ -662,6 +662,61 @@ const REGISTRY = {
     },
   },
 
+  // A receipt replay (billing-cron.js's payment_receipt hold branch) —
+  // eligible only while the underlying charge is still the settled payment
+  // the frozen "you were charged $X" copy describes. 'paid' is the only
+  // settled value the payments status enum carries (initial_schema.js +
+  // 20260610000002_payments_status_disputed_canceled.js); a refund,
+  // chargeback, void, or any other non-'paid' status overnight means the
+  // receipt would misstate money the customer no longer owes or was given
+  // back — suppress rather than replay it.
+  billing_receipt_deferred: {
+    // Every receipt row carries requires_registered_dispatch so a receipt
+    // with no phone (Email/App only, or a phone removed while held) still
+    // replays through the router instead of parking on the phone refresh.
+    replayWithoutPhone: true,
+    async dispatch(meta, defaultDispatch) {
+      return defaultDispatch();
+    },
+    async recheck(meta) {
+      try {
+        const payment = await db('payments').where({ id: meta.payment_id, customer_id: meta.customer_id })
+          .first();
+        if (!payment) return { eligible: false, reason: 'payment-missing' };
+        if (payment.status !== 'paid') return { eligible: false, reason: `payment-${payment.status}` };
+        // StripeService.refund persists metadata.pending_refund_key before
+        // calling Stripe and keeps it if the ledger update fails after the
+        // money moved. Until it's reconciled the refund outcome is unknown:
+        // hold the receipt and retry rather than send or drop it.
+        let paymentMeta = payment.metadata || {};
+        if (typeof paymentMeta === 'string') {
+          // Unreadable metadata can't prove there's no refund in flight.
+          try { paymentMeta = JSON.parse(paymentMeta); } catch {
+            return { eligible: false, reason: 'refund-state-unreadable', retryable: true };
+          }
+        }
+        if (paymentMeta.pending_refund_key) {
+          return { eligible: false, reason: 'refund-unresolved', retryable: true };
+        }
+        // A partial refund keeps status 'paid' and records itself in
+        // refund_amount / refund_status (stripe.js refund paths). Any refund
+        // activity makes the frozen full-charge receipt wrong (Codex r1 on
+        // #4951), so suppress it.
+        // refund_status has no default (NULL until a refund exists) and holds
+        // Stripe's refund status; a failed or canceled refund returned nothing.
+        if (Number(payment.refund_amount || 0) > 0
+          || ['pending', 'requires_action', 'succeeded'].includes(payment.refund_status)) {
+          return { eligible: false, reason: 'payment-refunded' };
+        }
+        const customer = await db('customers').where({ id: meta.customer_id }).first();
+        if (!customer || customer.deleted_at) return { eligible: false, reason: 'customer-unavailable' };
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('billing-receipt', meta.payment_id, err);
+      }
+    },
+  },
+
   stripe_webhook_billing_deferred: {
     // A phone-less customer with an explicit Email/App billing selection
     // still gets a held ACH-failure / bank-verification notice queued here

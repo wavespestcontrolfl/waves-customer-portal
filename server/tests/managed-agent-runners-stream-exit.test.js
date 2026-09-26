@@ -13,7 +13,9 @@ const mockBreakerFailure = jest.fn();
 jest.mock('../services/llm-dispatch-metrics', () => ({ recordSessionUsage: (...a) => mockRecordSessionUsage(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/bi-agent-tools', () => ({ executeBITool: (...a) => mockExecuteBITool(...a) }));
-jest.mock('../services/bi-agent-config', () => ({ BI_AGENT_CONFIG: { model: 'bi-model' } }));
+jest.mock('../services/bi-agent-config', () => ({
+  BI_AGENT_CONFIG: { model: 'bi-model', system: 'bi-system-prompt', tools: [{ type: 'custom', name: 'get_revenue_snapshot' }] },
+}));
 jest.mock('../services/content/content-agent-tools', () => ({ executeContentTool: jest.fn() }));
 jest.mock('../services/content/content-agent-config', () => ({ CONTENT_AGENT_CONFIG: { model: 'content-model' } }));
 jest.mock('../models/db', () => () => ({ insert: async () => {}, where: () => ({ first: async () => null }) }));
@@ -265,6 +267,22 @@ describe('bi-agent — current managed agents protocol', () => {
       .filter(([, opts = {}]) => opts.method === 'POST')
       .map(([url, opts]) => ({ url: String(url), body: JSON.parse(opts.body || '{}') }));
   }
+
+  it('the session runs the checked-in BI_AGENT_CONFIG through agent_with_overrides, not the registered agent\'s last sync (Codex #4885 P1)', async () => {
+    global.fetch = fetchFor([{ event: 'done', data: {} }]);
+    await load(path).run({ skipSMS: true });
+    const create = postsSent().find(p => p.url.endsWith('/sessions'));
+    expect(create.body).toEqual({
+      agent: {
+        type: 'agent_with_overrides',
+        id: 'agent_bi_1',
+        model: 'bi-model',
+        system: 'bi-system-prompt',
+        tools: [{ type: 'custom', name: 'get_revenue_snapshot' }],
+      },
+      environment_id: 'env_1',
+    });
+  });
 
   it('opens the stream before sending the kickoff, and the kickoff is {events:[{type:"user.message",...}]}', async () => {
     global.fetch = fetchFor([text('done'), { event: 'done', data: {} }]);
