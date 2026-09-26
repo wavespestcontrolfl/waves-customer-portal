@@ -2,7 +2,8 @@ jest.mock('../services/scheduling/day-quality', () => {
   const actual = jest.requireActual('../services/scheduling/day-quality');
   return { ...actual, getScheduleQualityMeasurements: jest.fn() };
 });
-jest.mock('../services/scheduling/route-performance', () => ({ getRoutePerformance: jest.fn(), getSavedDayPlans: jest.fn() }));
+jest.mock('../services/scheduling/route-performance', () => ({
+  ...jest.requireActual('../services/scheduling/route-performance'), getRoutePerformance: jest.fn(), getSavedDayPlans: jest.fn() }));
 jest.mock('../services/technician-eligibility', () => ({ applyAssignable: jest.fn() }));
 
 const { getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
@@ -482,6 +483,61 @@ describe('getDayScorecard', () => {
     const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
     // 2 physical stops over 08:00 -> 12:00 = 0.5/hr, not 4 rows = 1/hr.
     expect(result.days[0].byTech[0].planned).toMatchObject({ stops: 4, physicalStops: 2, stopsPerHour: 0.5 });
+  });
+
+  // Codex pre-push P1: the saved plan collapses a visitId group to one
+  // physical stop, so the actual side must too — a two-service visit read
+  // Planned 1 / Actual 2. Same rule for plan stops, same-day added rows and a
+  // missing-baseline day's fallback rows.
+  test('a completed two-service visit is one actual physical stop, like its planned side', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }, { technicianId: 'tech2', technician: 'Tech Two' }] }],
+    });
+    applyAssignable.mockImplementation(() => ({ select: async () => [...TECHS, { id: 'tech2', name: 'Tech Two' }] }));
+    const groupedStop = (appointmentId, visitId) => ({ appointmentId, visitId, arrivalOutcome: 'grouped_work_requires_review',
+      durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null,
+      recordedCompletionMinute: null, lifecycleArrivalMinute: 480, lifecycleCompletionMinute: 540 });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 2, plannedPhysicalStops: 1, plannedServiceMinutes: 90,
+        plannedDriveMinutes: 10, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy',
+        stops: [groupedStop('pest', 'visit-1'), groupedStop('lawn', 'visit-1')],
+        // Two added-same-day rows of ONE other visit, plus one ungrouped.
+        unbaselinedCompletedVisits: 3,
+        unbaselinedStops: [
+          { appointmentId: 'x1', visitId: 'visit-2', recordedArrivalMinute: 560, recordedCompletionMinute: 580 },
+          { appointmentId: 'x2', visitId: 'visit-2', recordedArrivalMinute: 560, recordedCompletionMinute: 590 },
+          { appointmentId: 'y', visitId: null, recordedArrivalMinute: 600, recordedCompletionMinute: 620 },
+        ] }],
+      missingBaselineRoutes: [{ date, technicianId: 'tech2' }],
+      missingBaselineStops: new Map([[`${date}|tech2`, [
+        { appointmentId: 'm1', visitId: 'visit-3', durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: 480, recordedCompletionMinute: 540 },
+        { appointmentId: 'm2', visitId: 'visit-3', durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: 480, recordedCompletionMinute: 545 },
+      ]]]),
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const byId = Object.fromEntries(result.days[0].byTech.map(row => [row.technicianId, row]));
+    expect(byId.tech1.planned).toMatchObject({ stops: 2, physicalStops: 1 });
+    // 2 planned rows (1 visit) + 3 added rows (2 visits) = 5 rows, 3 physical.
+    expect(byId.tech1.actual).toMatchObject({ stops: 5, physicalStops: 3 });
+    expect(byId.tech2.actual).toMatchObject({ stops: 2, physicalStops: 1 });
+  });
+
+  test('actual physicalStops is unknown when counted added work was never itemized', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy', unbaselinedCompletedVisits: 1,
+        stops: [{ appointmentId: 'a', visitId: null, arrivalOutcome: 'on_time', durationEvidence: 'recorded_lifecycle_interval',
+          recordedServiceMinutes: 50, recordedArrivalMinute: 480, recordedCompletionMinute: 530 }] }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].actual).toMatchObject({ stops: 2, physicalStops: null });
   });
 
   test('a span across ET midnight (service-day minutes past 1440) is the real interval', async () => {

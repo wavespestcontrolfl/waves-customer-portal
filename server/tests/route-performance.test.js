@@ -124,6 +124,21 @@ test('a saved plan reports planned physical stops with visitId groups collapsed'
   expect(measureRoutePerformance(plan, [])).toMatchObject({ plannedVisits: 3, plannedPhysicalStops: 2 });
 });
 
+// Codex pre-push P1: every stop shape carries its group identity (null when
+// ungrouped) so the scorecard can collapse a completed multi-service visit
+// the same way the saved plan's plannedPhysicalStops does. The recorded
+// row's own visit_id wins over the snapshot's.
+test('plan stops carry visitId (recorded row first, else the snapshot\'s; null when ungrouped)', () => {
+  const plan = { ...snapshot, plannedStops: [
+    { ...snapshot.plannedStops[0], id: 'a', visitId: 'group-1' },
+    { ...snapshot.plannedStops[0], id: 'b', visitId: null },
+    { ...snapshot.plannedStops[0], id: 'c', visitId: null },
+  ] };
+  const stops = measureRoutePerformance(plan, [recorded({ id: 'a', visit_id: 'group-1' }), recorded({ id: 'b', visit_id: 'regrouped' }), recorded({ id: 'c' })]).stops;
+  expect(stops.map(stop => stop.visitId)).toEqual(['group-1', 'regrouped', null]);
+  expect(measureRoutePerformance(plan, []).stops[0].visitId).toBe('group-1');
+});
+
 // Codex P2 (round 8): minutes are measured from the SERVICE day's midnight,
 // so a boundary stamped on the next ET day reads 1440+ and a span taken
 // from them stays positive (23:30 -> 00:30 is 60 minutes, never -1380).
@@ -229,13 +244,13 @@ describe('missingBaselineActualStops', () => {
     // does not re-compose, so the row's OWN recordedTiming is never trusted
     // as its on-site minutes — same forcing measureRoutePerformance applies
     // to a grouped plan stop ('unmatched_or_uncompleted_work', null).
-    expect(stops).toEqual([{ appointmentId: 'a', durationEvidence: 'unmatched_or_uncompleted_work',
+    expect(stops).toEqual([{ appointmentId: 'a', visitId: 'group-1', durationEvidence: 'unmatched_or_uncompleted_work',
       recordedServiceMinutes: null, recordedArrivalMinute: 490, recordedCompletionMinute: 535 }]);
   });
 
   test('each completed row is shaped like a plan stop, with recordedTiming\'s own evidence', () => {
     const stops = missingBaselineActualStops(routes, [recorded({ id: 'a' })], routeKey).get(routeKey(day, 'tech'));
-    expect(stops).toEqual([{ appointmentId: 'a', durationEvidence: 'recorded_lifecycle_interval',
+    expect(stops).toEqual([{ appointmentId: 'a', visitId: null, durationEvidence: 'recorded_lifecycle_interval',
       recordedServiceMinutes: 45, recordedArrivalMinute: 490, recordedCompletionMinute: 535 }]);
   });
 

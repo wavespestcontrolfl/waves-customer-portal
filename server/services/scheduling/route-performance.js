@@ -157,15 +157,22 @@ function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId
 // disagree with what was actually saved.
 //
 // plannedPhysicalStops (Codex P2, round 8): planned stops sharing a visitId
-// are one physical visit, the same collapse the live board's
-// physicalStopCount applies. The snapshot keeps only ids/visitIds/windows/
+// are one physical visit (physicalVisitCount), the same collapse the live
+// board's physicalStopCount applies. The snapshot keeps only ids/visitIds/windows/
 // durations, so a same-property co-visit or a version-2 allocation without
 // a visit_id can't be recognized here and still counts per row.
+// Rows sharing a visitId are one physical visit; every other row is its
+// own. The one rule for both the saved plan's planned stops and the
+// scorecard's completed (actual) stops, so the two columns compare alike.
+function physicalVisitCount(stops) {
+  const grouped = new Set(stops.filter(stop => stop.visitId).map(stop => stop.visitId));
+  return stops.filter(stop => !stop.visitId).length + grouped.size;
+}
+
 function plannedPassthrough(plan) {
   const finiteOrNull = value => (Number.isFinite(value) ? value : null);
-  const grouped = new Set(plan.plannedStops.filter(stop => stop.visitId).map(stop => stop.visitId));
   return {
-    plannedPhysicalStops: plan.plannedStops.filter(stop => !stop.visitId).length + grouped.size,
+    plannedPhysicalStops: physicalVisitCount(plan.plannedStops),
     plannedServiceMinutes: finiteOrNull(plan.serviceMinutes),
     plannedDriveMinutes: finiteOrNull(plan.modeledDriveMinutes),
     plannedWaitingMinutes: finiteOrNull(plan.modeledWaitingMinutes),
@@ -185,7 +192,10 @@ function measureRoutePerformance(plan, rows) {
       || (range?.endMin ?? null) !== (currentWindow?.endMin ?? null);
     const sameRoute = row && dateOnly(row.scheduled_date) === plan.date && row.technician_id === plan.technician_id;
     const completedOnRoute = sameRoute && row.status === 'completed';
-    const comparable = completedOnRoute && !row.visit_id && !stop.visitId;
+    // The recorded row's own group when it exists (it may have been
+    // regrouped since the snapshot), else the snapshot's.
+    const visitId = row?.visit_id || stop.visitId || null;
+    const comparable = completedOnRoute && !visitId;
     // Grouped (visit_id) work is never comparable — its duration is a
     // SUM-of-members model — but a completed grouped row's own corroborated
     // arrival/completion still happened on this route. Carried separately
@@ -197,7 +207,7 @@ function measureRoutePerformance(plan, rows) {
     if (!row) arrivalOutcome = 'missing_visit';
     else if (!sameRoute) arrivalOutcome = 'day_or_technician_changed';
     else if (row.status !== 'completed') arrivalOutcome = 'not_completed';
-    else if (row.visit_id || stop.visitId) arrivalOutcome = 'grouped_work_requires_review';
+    else if (visitId) arrivalOutcome = 'grouped_work_requires_review';
     else if (changedPromise) arrivalOutcome = 'promise_changed';
     else if (!range) arrivalOutcome = 'unpromised';
     else if (timing.arrival) {
@@ -208,6 +218,7 @@ function measureRoutePerformance(plan, rows) {
     const duration = comparable ? timing.durationMinutes ?? null : null;
     return {
       appointmentId: stop.id, arrivalOutcome,
+      visitId,
       recordedArrivalMinute: comparable ? lifecycle.arrival : null,
       arrivalEvidence: timing.arrival ? 'lifecycle_corroborated_by_status_event' : 'unknown',
       lateMinutes: scoredArrival ? Math.max(0, minuteInET(timing.arrival) - range.endMin) : null,
@@ -336,7 +347,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     if (coveredRoutes.get(key)?.has(row.id)) continue;
     const lifecycle = lifecycleMinutes(recordedTiming(row), row);
     const entry = unbaselinedByRoute.get(key) || [];
-    entry.push({ appointmentId: row.id,
+    entry.push({ appointmentId: row.id, visitId: row.visit_id || null,
       recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion });
     unbaselinedByRoute.set(key, entry);
   }
@@ -382,7 +393,7 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
     byKey.set(routeKey(route.date, route.technicianId), completed.map(row => {
       const timing = recordedTiming(row);
       const lifecycle = lifecycleMinutes(timing, row);
-      return { appointmentId: row.id,
+      return { appointmentId: row.id, visitId: row.visit_id || null,
         durationEvidence: row.visit_id ? 'unmatched_or_uncompleted_work' : timing.durationEvidence,
         recordedServiceMinutes: row.visit_id ? null : timing.durationMinutes,
         recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion };
@@ -391,4 +402,4 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
   return byKey;
 }
 
-module.exports = { lifecycleMinutes, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };
+module.exports = { lifecycleMinutes, physicalVisitCount, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };

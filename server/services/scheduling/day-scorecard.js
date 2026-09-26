@@ -28,7 +28,7 @@ const { etDateString, addETDays, validCalendarDate } = require('../../utils/date
 const { etDateDiffDays } = require('../recurring-appointment-seeder');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { getScheduleQualityMeasurements, physicalStopCount } = require('./day-quality');
-const { getRoutePerformance, getSavedDayPlans } = require('./route-performance');
+const { getRoutePerformance, getSavedDayPlans, physicalVisitCount } = require('./route-performance');
 const { applyAssignable } = require('../technician-eligibility');
 
 const MAX_RANGE_DAYS = 30; // Same 31-day inclusive cap as day-quality.
@@ -127,10 +127,11 @@ function plannedPastRow(plan) {
 // earlier round used, which forces 'unmatched_or_uncompleted_work' onto
 // every grouped stop regardless of real completion and silently dropped a
 // completed group from the count, Codex P1) plus any same-day job completed
-// outside the snapshot (unbaselined, below). physicalStops stays null:
-// route-performance's own select carries no premise/coordinate columns, so
-// a co-visit collapse is not cheaply derivable here the way it is from
-// day-quality's own raw-stops read (plannedFutureRow).
+// outside the snapshot (unbaselined, below). physicalStops collapses
+// visitId groups only (actualPhysicalStops): route-performance's own select
+// carries no premise/coordinate columns, so a same-property co-visit
+// collapse is not derivable here the way it is from day-quality's own
+// raw-stops read (plannedFutureRow).
 //
 // fallbackStops (Codex P1/P2, round 3): a MISSING-baseline tech-day (no
 // saved plan at all) still has route-performance's own raw completed rows,
@@ -184,9 +185,25 @@ function actualPastRow(plan, mileage, fallbackStops) {
   const completedStops = plan
     ? plan.stops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome)).length + unbaselined
     : fallbackStops.length;
-  return { stops: completedStops, physicalStops: null, onSiteMinutes,
+  return { stops: completedStops, physicalStops: actualPhysicalStops(plan, fallbackStops), onSiteMinutes,
     onSiteCoverage: { covered: recorded.length, total: stops.length, unbaselined },
     ...drive, ...actualSpan(spanStops) };
+}
+
+// Completed service rows collapsed by visitId — planned-and-completed plan
+// stops, same-day added (unbaselined) rows, or a missing-baseline day's
+// fallback rows — with physicalVisitCount, the SAME rule the saved plan's
+// plannedPhysicalStops uses, so a two-service visit reads Planned 1 /
+// Actual 1, not 1 / 2 (Codex pre-push P1). null when any completed row's
+// group identity is unknown: a row with no visitId key at all, or
+// unbaselined work that was counted but not itemized.
+function actualPhysicalStops(plan, fallbackStops) {
+  const unitemized = plan && !Array.isArray(plan.unbaselinedStops) && plan.unbaselinedCompletedVisits > 0;
+  const completed = plan
+    ? [...plan.stops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome)), ...(plan.unbaselinedStops || [])]
+    : fallbackStops;
+  if (unitemized || !completed.every(stop => 'visitId' in stop)) return null;
+  return physicalVisitCount(completed);
 }
 
 // First recorded arrival to last recorded completion over the COMPLETED
