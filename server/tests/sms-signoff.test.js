@@ -163,6 +163,14 @@ describe('stripTrailingSignature — anySigner', () => {
     ['We can help.\nBest regards,\nSarah Jones, Waves Team', 'We can help.'],
     ['Talk soon!\nSarah', 'Talk soon!'],
     ['We can help.\nThanks!\nSarah Jones', 'We can help.\nThanks!'],
+    // Codex r7 on #4975: the company joined by from/at/with, and a signature
+    // under a list (blank line or not) is not a list value.
+    ['We can help. — Sarah from Waves', 'We can help.'],
+    ['We can help.\n— Sarah with the Waves team', 'We can help.'],
+    ['We can help.\nThanks,\nSarah at Waves Pest Control', 'We can help.'],
+    ['Options:\n- Lawn Care\n\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
+    ['Options:\n- Lawn Care\n\n— Sarah', 'Options:\n- Lawn Care'],
+    ['Options:\n- Lawn Care\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
   ])('%j → %j', (text, expected) => {
     expect(any(text)).toBe(expected);
   });

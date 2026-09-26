@@ -87,7 +87,7 @@ for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureT
 //    trailing spaces included: "Your technician is \n— Sarah" is an answer),
 //    follows a sentence ending in . or ! on the same line, or is the whole
 //    text. The name is one word in any case or script, or two capitalized
-//    words, optionally ", <Company>" in capitalized words;
+//    words, optionally ", <Company>" in capitalized words or "from Waves";
 //  - a known closer on its own line with the name under it ("Thanks,\nSarah")
 //    — a closer from CLOSER, never any comma-ended line ("Here are the
 //    options,\nLawn Care" is a list);
@@ -98,11 +98,6 @@ for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureT
 //    the customer by name looks the same.
 // A name that is the customer's own first name is the addressee, so it stays;
 // a dash after a question on the same line may be the answer, so it stays too.
-const ANY_TOKEN = "\\p{L}[\\p{L}'\\u2019-]*";
-const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
-const CAP_COMPANY = `(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3})?`;
-const CAP_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN})?)${CAP_COMPANY}`;
-const DASH_NAME = `(?<name>${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})${CAP_COMPANY}`;
 // The patterns below are compiled without `i` (under it \p{Lu} also matches
 // lowercase, and "Tuesday works" would read as a capitalized name), so the
 // lowercase-only word lists are made case-insensitive by hand.
@@ -115,6 +110,13 @@ function anyCase(source) {
   }
   return out;
 }
+const ANY_TOKEN = "\\p{L}[\\p{L}'\\u2019-]*";
+const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
+// After the name: ", Waves Team" in capitalized words, or the company joined
+// by from/at/with ("— Sarah from Waves") as SIGNATURE_BLOCK joins it.
+const CAP_COMPANY = `(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3}|\\s+${anyCase(`(?:from|at|with)\\s+${COMPANY}`)})?`;
+const CAP_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN})?)${CAP_COMPANY}`;
+const DASH_NAME = `(?<name>${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})${CAP_COMPANY}`;
 const VALUE_WORD = anyCase('(?:is|are|was|were|be|as|named|called|by)');
 const ANY_CLOSER = anyCase(CLOSER);
 // mode: 'always' strips regardless of the customer; 'keepAddressee' keeps the
@@ -133,10 +135,11 @@ const ANY_SIGNER_RES = [
 // question ("Who will be coming?\n— Sarah") or as the next item of a dashed
 // or bulleted list. Such a text keeps its tail through both passes, known
 // signers included. A broad closing question ("Would you like to
-// schedule?\n— Sarah") is still a sign-off.
+// schedule?\n— Sarah") is still a sign-off, and so is a dashed line set off
+// by a blank line or carrying a company ("— Adam, Waves Pest Control").
 const VALUE_QUESTION = anyCase('(?:who|what|which|where|when|why|how)');
 const DASH_VALUE_TAIL_RE = new RegExp(
-  `(?:^|\\n)(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${VALUE_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)\\n\\s*${DASH}\\s*${DASH_NAME}${TAIL}`,
+  `(?:^|\\n)(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${VALUE_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)\\n[ \\t]*${DASH}[ \\t]*(?:${CAP_TOKEN}[ \\t]+${CAP_TOKEN}|${ANY_TOKEN})${TAIL}`,
   'u',
 );
 
@@ -199,10 +202,12 @@ function stripTrailingSignature(message, { addresseeFirstName, anySigner = false
   const original = String(message || '').trim();
   if (key && THANKS_BY_NAME_RES[key].test(original)) return original;
   let text = original;
+  // Checked before each pass on the text that pass sees: stripping a
+  // signature can expose a dashed value ("Options:\n- Lawn Care\n\n— Adam").
+  const keepsValue = (t) => anySigner && DASH_VALUE_TAIL_RE.test(t);
   for (let i = 0; i < 3; i += 1) {
-    const dashValue = anySigner && DASH_VALUE_TAIL_RE.test(text);
-    let next = dashValue ? text : stripOnce(text, res);
-    if (anySigner && !dashValue) next = stripAnySignerOnce(next, addresseeFirstName);
+    let next = keepsValue(text) ? text : stripOnce(text, res);
+    if (anySigner && !keepsValue(next)) next = stripAnySignerOnce(next, addresseeFirstName);
     if (next === text) break;
     text = next;
   }
