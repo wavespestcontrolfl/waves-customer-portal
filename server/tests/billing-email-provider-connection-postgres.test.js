@@ -25,6 +25,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { dispatchUnderBillingEmailAuthority } = require('../services/billing-channel-email-authority');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { claimDueRetries, retryOne } = require('../services/transactional-email-provider-retry');
+const { recordSuppression } = require('../services/messaging/validators/suppression');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `billing_provider_connection_${randomUUID().replaceAll('-', '')}`;
@@ -32,6 +33,17 @@ const customerId = randomUUID();
 const originalApiKey = process.env.SENDGRID_API_KEY;
 const originalFetch = global.fetch;
 let admin;
+let writer;
+
+async function waitForPhoneLock(pid) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const result = await admin.raw("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = ? AND locktype = 'advisory' AND NOT granted) AS waiting", [pid]);
+    if (result.rows[0].waiting) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('Expected a concurrent phone-lock waiter');
+}
 
 function billingReplayRow(chargeDate, overrides = {}) {
   const event = `precharge:${customerId}:${chargeDate}`;
@@ -62,6 +74,7 @@ postgres('billing Email provider preparation on its held connection', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema],
       pool: { min: 0, max: 1 }, acquireConnectionTimeout: 1500 });
     mockMarkerPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 1 } });
+    writer = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 1 } });
     await mockPg.schema.createTable('customers', (table) => {
       table.uuid('id').primary(); table.text('email'); table.text('phone'); table.timestamp('deleted_at');
       table.boolean('active'); table.boolean('autopay_enabled'); table.decimal('monthly_rate');
@@ -73,6 +86,7 @@ postgres('billing Email provider preparation on its held connection', () => {
     });
     await mockPg.schema.createTable('messaging_suppression', (table) => {
       table.text('phone').primary(); table.text('reason'); table.boolean('active'); table.timestamp('created_at');
+      table.text('source'); table.text('captured_body'); table.timestamp('cleared_at');
     });
     await mockPg.schema.createTable('estimates', (table) => {
       table.uuid('id').primary(); table.text('token'); table.jsonb('estimate_data');
@@ -108,6 +122,7 @@ postgres('billing Email provider preparation on its held connection', () => {
   afterAll(async () => {
     await mockMarkerPg?.destroy();
     await mockPg?.destroy();
+    await writer?.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
 
@@ -271,6 +286,72 @@ postgres('billing Email provider preparation on its held connection', () => {
       });
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  test('a prior suppression writer commits before the handoff recheck and blocks dispatch', async () => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    const { rows: [{ pid }] } = await mockPg.raw('SELECT pg_backend_pid() AS pid');
+    const suppression = await writer.transaction();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    const dispatch = jest.fn();
+    let sending;
+    try {
+      expect(await recordSuppression({ phone, reason: 'manual_dnc', dbh: suppression })).toEqual({ ok: true });
+      sending = dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state, dispatch,
+      });
+      await waitForPhoneLock(pid);
+      // A phone-first writer can still take recipient rows: the waiting
+      // sender must not hold them before acquiring the shared phone lock.
+      await suppression('customers').where({ id: customerId }).update({ phone });
+      await suppression.commit();
+      expect(await sending).toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'SUPPRESSED_MANUAL_DNC' });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      if (!suppression.isCompleted()) await suppression.rollback();
+      await sending;
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  test('a later suppression writer cannot commit between authorization and provider dispatch', async () => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    const { rows: [{ pid }] } = await writer.raw('SELECT pg_backend_pid() AS pid');
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    let suppression;
+    let committed = false;
+    try {
+      const result = await dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state,
+        preSendCheck: async () => {
+          suppression = recordSuppression({ phone, reason: 'manual_dnc', dbh: writer })
+            .then(outcome => { committed = true; return outcome; });
+          await waitForPhoneLock(pid);
+          return { ok: true };
+        },
+        dispatch: async (database) => {
+          expect(committed).toBe(false);
+          await sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic billing update',
+            html: '<p>Authorized</p>', text: 'Authorized', database });
+          expect(committed).toBe(false);
+        },
+      });
+      expect(result).toEqual({ ok: true });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(await suppression).toEqual({ ok: true });
+      expect(committed).toBe(true);
+    } finally {
+      await suppression;
       await mockPg('messaging_suppression').where({ phone }).delete();
       await mockPg('customers').where({ id: customerId }).update({ phone: null });
     }

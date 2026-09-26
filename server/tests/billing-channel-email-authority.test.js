@@ -18,9 +18,11 @@ const mockWithCustomerCommsLock = jest.fn(async (database, _customerId, callback
   database.transaction(callback)
 ));
 const mockLockCustomerEmail = jest.fn(async () => {});
+const mockLockSmsPhone = jest.fn(async () => {});
 jest.mock('../utils/customer-comms-lock', () => ({
   withCustomerCommsLock: mockWithCustomerCommsLock,
   lockCustomerEmail: mockLockCustomerEmail,
+  lockSmsPhone: mockLockSmsPhone,
 }));
 
 const mockWithInvoiceDepositSettlement = jest.fn(async (invoiceId, callback, database) => (
@@ -99,6 +101,7 @@ describe('billing channel email authority', () => {
       database.transaction(callback)
     ));
     mockLockCustomerEmail.mockResolvedValue();
+    mockLockSmsPhone.mockResolvedValue();
     mockLoadTemplateByKey.mockResolvedValue({
       template: { template_key: 'billing.notice', send_stream: 'transactional_required' },
     });
@@ -233,6 +236,19 @@ describe('billing channel email authority', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('defers when the customer phone changes before the recipient row is locked', async () => {
+    rows.customers = { ...rows.customers, phone: '(941) 555-0100' };
+    mockLockSmsPhone.mockImplementationOnce(async (_trx, phone) => {
+      expect(phone).toBe('+19415550100');
+      rows.customers = { ...rows.customers, phone: '+19415550101' };
+    });
+    const { outcome, state, dispatch } = await runAuthority();
+    expect(outcome).toEqual({ ok: false });
+    expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(mockLoadSuppressionState).not.toHaveBeenCalled();
+  });
+
   test('the locked suppression recheck loads billing.notice for a non-receipt category', async () => {
     const { outcome } = await runAuthority();
     expect(outcome.ok).toBe(true);
@@ -274,14 +290,17 @@ describe('billing channel email authority', () => {
   });
 
   test('rechecks invoice ownership while both handoff locks cover provider dispatch', async () => {
+    rows.customers = { ...rows.customers, phone: '+19415550100' };
     let commsLocked = false;
     let invoiceLocked = false;
+    let phoneLocked = false;
     const recipientLocks = [];
     const lockedTrx = jest.fn((table) => {
       const query = defaultDbImplementation(table);
       query.forUpdate.mockImplementation(() => {
         expect(commsLocked).toBe(true);
         expect(invoiceLocked).toBe(true);
+        expect(phoneLocked).toBe(true);
         recipientLocks.push(table);
         return query;
       });
@@ -297,8 +316,16 @@ describe('billing channel email authority', () => {
       expect(invoiceId).toBe('inv-1');
       expect(database).toBe(lockedTrx);
       expect(commsLocked).toBe(true);
+      expect(phoneLocked).toBe(true);
       invoiceLocked = true;
       try { return await callback(lockedTrx, rows.invoices); } finally { invoiceLocked = false; }
+    });
+    mockLockSmsPhone.mockImplementationOnce(async (trx, phone) => {
+      expect(trx).toBe(lockedTrx);
+      expect(phone).toBe('+19415550100');
+      expect(commsLocked).toBe(true);
+      expect(invoiceLocked).toBe(false);
+      phoneLocked = true;
     });
     const dispatch = jest.fn(async () => {
       expect(commsLocked).toBe(true);
