@@ -98,7 +98,8 @@ function recapWithoutStaleAppointment(recap, nextVisit) {
     .replace(/^\s*[,;]?\s*(?:and|then)\s+/i, '')
     .replace(/([.!?])\s*[.!?]+/g, '$1')
     .replace(/\s+([,.;!?])/g, '$1')
-    .replace(/,\s*(?=[.;!?])/g, '');
+    .replace(/,\s*(?=[.;!?])/g, '')
+    .replace(/^[-–—]\s*Waves\s*$/i, '');
   return normalized && normalized !== text
     ? normalized.charAt(0).toUpperCase() + normalized.slice(1)
     : normalized;
@@ -155,7 +156,7 @@ function groundingFacts({
     ? {
       label: cleanText(pestPressure.label) || null,
       trend: cleanText(pestPressure.trend) || null,
-      isZero: pestPressure.displayScore === 0,
+      isZero: Number(pestPressure.displayScore) === 0,
     }
     : null;
   const visibleFindings = (Array.isArray(findings) ? findings : [])
@@ -205,7 +206,7 @@ Return JSON only: {"summary":"<one paragraph>"}.
 
 Use the supplied technician recap as the record of completed work, serviced areas as its scope, the runtime pressure label and verified trend as the activity summary, customer-visible findings as findings, and nextVisit as appointment information. Keep recommendations future-facing. Do not invent product choices, methods, mechanisms, labeled coverage, findings, safety advice, customer contact, or follow-up.
 
-Write normally 3–5 short sentences, fewer when facts are thin. Explain the most relevant recorded action and supported purpose. Mention at most one customer-visible finding and its supplied recommendation when useful. A recorded zero (pressure.isZero) means no visible activity noted within the assessed scope, not a pest-free property. Missing pressure is unknown, not zero. Describe activity in words without repeating its numeric score. Report change only when supplied. Preserve customer-reported concerns as reports, not technician findings.
+Write normally 3–5 short sentences, fewer when facts are thin. Explain the most relevant recorded action and supported purpose. Mention at most one customer-visible finding and its supplied recommendation when useful. A recorded zero (pressure.isZero) means no visible activity noted within the assessed scope, not a pest-free property. Missing pressure is unknown, not zero. Describe activity in words without repeating its numeric score. Report change only when supplied. Preserve customer-reported concerns as reports, not technician findings. Never blame the customer.
 
 When nextVisit is supplied, finish with its exact supplied date and customer-facing arrival window. Do not calculate dates, service durations, or windows. nextVisit is authoritative over appointment text in the recap: omit any different or stale recap appointment, and mention the current appointment only once. If nextVisit is absent, do not invent a visit or monitoring promise.
 

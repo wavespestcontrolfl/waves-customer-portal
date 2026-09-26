@@ -9,6 +9,8 @@ const {
   applyVisitSummaryNarrative,
   _test,
 } = require('../services/service-report/visit-summary-narrative');
+const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
+const { sanitizeRecap } = require('../services/completion-recap');
 
 const {
   groundingFacts,
@@ -81,9 +83,12 @@ test('groundingFacts keeps only usable facts', () => {
 });
 
 test('reviewed prompt keeps pressure qualitative and treats missing or zero pressure correctly', () => {
-  const zero = groundingFacts(input({
-    pestPressure: { enabled: true, displayScore: 0, label: 'No visible activity', trend: 'first_marker' },
-  }));
+  const pressure = buildPestPressureCustomerView({
+    config: { enabled: true, showOnCustomerReport: true },
+    scoreRow: { displayed_score: 0, label_name: 'No visible activity', trend: 'first_marker' },
+  });
+  expect(pressure.displayScore).toBe('0.0');
+  const zero = groundingFacts(input({ pestPressure: pressure }));
   expect(zero.pressure).toEqual({ label: 'No visible activity', trend: 'first_marker', isZero: true });
   expect(groundingFacts(input({
     pestPressure: { enabled: true, displayScore: 0.3, label: 'None' },
@@ -94,6 +99,7 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   expect(SYSTEM_PROMPT).toContain('Missing pressure is unknown, not zero');
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
   expect(SYSTEM_PROMPT).toContain('Mention at most one customer-visible finding');
+  expect(SYSTEM_PROMPT).toContain('Never blame the customer');
   expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v3');
 });
 
@@ -166,10 +172,13 @@ test.each([
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(expected);
 });
 
-test('appointment-only recap retains the authoritative appointment without calling a provider', async () => {
+test.each([
+  'Your next visit is scheduled for Oct 2 at 1 p.m.',
+  sanitizeRecap('Your next visit is scheduled for Oct 2 at 1 p.m.'),
+])('appointment-only recap retains the authoritative appointment without calling a provider: %s', async (recap) => {
   const callModel = jest.fn();
   const out = await applyVisitSummaryNarrative(input({
-    recap: 'Your next visit is scheduled for Oct 2 at 1 p.m.',
+    recap,
   }), { callModel });
   expect(out).toBe('Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.');
   expect(callModel).not.toHaveBeenCalled();
