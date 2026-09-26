@@ -445,11 +445,17 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     expect(result).toMatchObject({ sent: true });
   });
 
-  test('explicit legs carry a pre-dispatch recheck of the quoted prepay invoice', async () => {
+  test.each(['sms', 'email', 'push'])('the %s leg rechecks the quote at its final provider boundary', async (channel) => {
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
-    setDbQueues(standardQueues({ prefs: { billing_channels: ['sms'] } }));
+    setDbQueues(standardQueues({ prefs: { billing_channels: [channel] } }));
     await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
-    expect(typeof sendCustomerMessage.mock.calls[0][0].preDispatchCheck).toBe('function');
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(typeof input.preSendCheck).toBe('function');
+    expect(input.preDispatchCheck).toBeUndefined();
+    if (channel === 'sms') expect(input.providerPreSendCheck).toBe(input.preSendCheck);
+    const handoff = channel === 'sms' ? input.providerPreSendCheck : input.preSendCheck;
+    setDbQueues({ invoices: [query({ first: { id: 'inv-1', customer_id: 'cust-1', status: 'paid', total: '392.04' } })] });
+    await expect(handoff()).resolves.toMatchObject({ ok: false, code: 'PREPAY_QUOTE_CHANGED', retryable: true });
   });
 
   test('an App bell settles the stage, records canonical app history, and is not retried', async () => {
@@ -465,6 +471,9 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     });
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
+    const appInput = sendCustomerMessage.mock.calls[0][0];
+    expect(appInput).toMatchObject({ channel: 'sms', metadata: { billingDeliveryLeg: 'push', appOnly: true } });
+    expect(jest.requireActual('../services/messaging/send-customer-message')._internals.validateContract(appInput)).toEqual({ ok: true });
     expect(reverseAppliedCredit).not.toHaveBeenCalled();
     expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
     expect(global.__ledgerStore[0].metadata.delivered).toBe(true);
@@ -494,6 +503,18 @@ describe('invoiceStillOwedAsQuoted', () => {
   };
   test('passes while the invoice owes exactly the quoted amount', async () => {
     await expect(check(live)).resolves.toEqual({ ok: true });
+  });
+  test.each(['database', 'dbi'])('reads through the provided %s transaction savepoint', async (key) => {
+    const savepoint = jest.fn(() => query({ first: live }));
+    const transaction = Object.assign(jest.fn(), {
+      isTransaction: true,
+      transaction: jest.fn((callback) => callback(savepoint)),
+    });
+    await expect(invoiceStillOwedAsQuoted({ invoiceId: 'inv-1', customerId: 'cust-1', amountDue: 392.04 })({ [key]: transaction }))
+      .resolves.toEqual({ ok: true });
+    expect(transaction.transaction).toHaveBeenCalledTimes(1);
+    expect(savepoint).toHaveBeenCalledWith('invoices');
+    expect(transaction).not.toHaveBeenCalled();
   });
   test.each([
     ['paid', { status: 'paid' }], ['payer-assigned', { payer_id: 'p-1' }],

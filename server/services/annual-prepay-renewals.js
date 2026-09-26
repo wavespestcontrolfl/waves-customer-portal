@@ -7757,6 +7757,7 @@ async function sendExplicitPaymentReminderChannels({
   const priorProgress = await reminderProgress(customer.id, source, explicitChannels);
   const priorEvent = priorProgress.find((event) => event.metadata.notificationEventKey === eventKey);
   const hadPriorDelivery = !!(priorEvent && priorEvent.delivered.size > 0);
+  const preSendCheck = invoiceStillOwedAsQuoted({ invoiceId: invoice.id, customerId: customer.id, amountDue });
   const sendLeg = (channel, ledger) => {
     // Every leg goes through the canonical sender: the Email leg is the
     // billing email adapter's billing.notice carrying this same reminder text
@@ -7765,14 +7766,17 @@ async function sendExplicitPaymentReminderChannels({
     return sendCustomerMessage({
       to: channel === 'sms' ? customer.phone : null,
       body,
-      channel,
+      // App uses the canonical SMS contract and selects only the App leg in
+      // metadata, as other billing producers do.
+      channel: channel === 'push' ? 'sms' : channel,
       audience: 'customer',
       purpose: 'payment_link',
       customerId: customer.id,
       invoiceId: invoice.id,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'annual_prepay_payment_reminder',
-      preDispatchCheck: invoiceStillOwedAsQuoted({ invoiceId: invoice.id, customerId: customer.id, amountDue }),
+      preSendCheck,
+      ...(channel === 'sms' ? { providerPreSendCheck: preSendCheck } : {}),
       metadata: {
         ...(opts.metadata || {}),
         original_message_type: source,
@@ -7887,23 +7891,31 @@ async function sendExplicitPaymentReminderChannels({
   return { sent: anyDelivered, termId: claimedTerm.id, complete: result.complete };
 }
 
-// Right before each explicit leg dispatches, re-read the prepay invoice: it
+// At each explicit leg's provider handoff, re-read the prepay invoice: it
 // must still be this customer's, collectible, self-pay and owe exactly the
 // quoted amount. Any change holds the leg (retryable) so a paid, voided or
 // payer-assigned invoice never gets a stale pay-link reminder.
 function invoiceStillOwedAsQuoted({ invoiceId, customerId, amountDue }) {
   const changed = (reason) => ({ ok: false, code: 'PREPAY_QUOTE_CHANGED', reason, retryable: true });
-  return async () => {
+  const recheck = async (connection) => {
+    const helpers = require('./invoice-helpers');
+    const live = await connection('invoices').where({ id: invoiceId }).first();
+    if (!live || String(live.customer_id) !== String(customerId)
+      || !helpers.isInvoiceCollectibleStatus(live.status)
+      || live.payer_id || helpers.invoiceWithdrawnFromCustomer(live)
+      || Math.round(helpers.invoiceAmountDue(live) * 100) !== Math.round(amountDue * 100)) {
+      return changed(`prepay invoice ${invoiceId} changed before dispatch`);
+    }
+    return { ok: true };
+  };
+  return async ({ database, dbi } = {}) => {
+    // Reuse the Email authority/SMS handoff connection. A savepoint keeps a
+    // failed quote read from aborting the authority's held transaction.
+    const connection = database || dbi || db;
     try {
-      const helpers = require('./invoice-helpers');
-      const live = await db('invoices').where({ id: invoiceId }).first();
-      if (!live || String(live.customer_id) !== String(customerId)
-        || !helpers.isInvoiceCollectibleStatus(live.status)
-        || live.payer_id || helpers.invoiceWithdrawnFromCustomer(live)
-        || Math.round(helpers.invoiceAmountDue(live) * 100) !== Math.round(amountDue * 100)) {
-        return changed(`prepay invoice ${invoiceId} changed before dispatch`);
-      }
-      return { ok: true };
+      return connection.isTransaction
+        ? await connection.transaction((savepoint) => recheck(savepoint))
+        : await recheck(connection);
     } catch (err) {
       return changed(`prepay invoice unreadable before dispatch: ${err.message}`);
     }
