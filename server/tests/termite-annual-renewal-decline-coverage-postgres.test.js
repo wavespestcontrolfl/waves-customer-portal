@@ -821,8 +821,8 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
   // #4940 pre-push P1: the paid follow-through of a declined pending term
   // stamps billing_mode 'annual_prepay' only while the term covers today.
   async function unpaidDeclinedPlan(db, Renewals, { expired }) {
-    await db.raw('ALTER TABLE customers ADD COLUMN billing_mode text, ADD COLUMN updated_at timestamptz');
-    await db.raw('ALTER TABLE invoices ADD COLUMN scheduled_service_id uuid, ADD COLUMN annual_prepay_covered_term_id uuid, ADD COLUMN payer_id uuid, ADD COLUMN payment_recorded_at timestamptz');
+    await db.raw('ALTER TABLE customers ADD COLUMN IF NOT EXISTS billing_mode text, ADD COLUMN IF NOT EXISTS updated_at timestamptz');
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS scheduled_service_id uuid, ADD COLUMN IF NOT EXISTS annual_prepay_covered_term_id uuid, ADD COLUMN IF NOT EXISTS payer_id uuid, ADD COLUMN IF NOT EXISTS payment_recorded_at timestamptz');
     const fx = await paidInstalledTerm(db);
     await db('customers').where({ id: fx.customerId }).update({ billing_mode: 'per_application' });
     await db('invoices').where({ id: fx.invoice.id }).update({ status: 'sent', paid_at: null });
@@ -1127,6 +1127,108 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
 
     await Renewals.reconcileCoveredTermsSweep();
     expect(invoiceModule.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+  });
+  // Codex #4940 r12 P1: paid AFTER term_end with an in-window visit still
+  // pending — it is stamped prepaid (so its completion never bills), and
+  // only then is the reconcile marked done.
+  test('paid after term_end with a PENDING in-window visit: the visit is stamped covered before the reconcile is marked', async () => {
+    const invoiceModule = settleInvoiceModule();
+    const { db, Renewals } = await load({ invoiceModule });
+    const fx = await unpaidDeclinedPlan(db, Renewals, { expired: true });
+    const [pendingVisit] = await db('scheduled_services').insert({
+      customer_id: fx.customerId, status: 'pending', service_type: 'Termite Monitoring Visit', scheduled_date: addMonths(ymd(fx.term.term_start), 6),
+    }).returning('*');
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    const stamped = await db('scheduled_services').where({ id: pendingVisit.id }).first();
+    expect(stamped).toEqual(expect.objectContaining({ prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: fx.term.id }));
+    expect(Number(stamped.prepaid_amount)).toBeGreaterThan(0);
+    // Completion's coverage authority: covered, so completing it bills nothing.
+    expect(await Renewals.annualPrepayCoversVisit(stamped, db)).toBe(true);
+    expect(await db('activity_log').where({ action: 'annual_prepay_paid_lapse_reconciled' })
+      .whereRaw("metadata->>'term_id' = ?", [fx.term.id]).first('id')).toBeTruthy();
+    expect((await db('customers').where({ id: fx.customerId }).first()).billing_mode).toBe('per_application');
+  });
+
+  // Codex #4940 r12 P2: a term whose reconcile keeps failing never starves a
+  // newer one — least-recently-attempted first.
+  test('retry leg with limit 1: an always-failing older term rotates behind a never-attempted newer one', async () => {
+    const holder = { failing: new Set(), failOnce: new Set() };
+    const settleInvoiceAsAnnualPrepayCovered = jest.fn(async (invoiceId, termId) => {
+      if (holder.failing.has(invoiceId)) throw new Error('always fails');
+      if (holder.failOnce.delete(invoiceId)) throw new Error('fails once');
+      await holder.db('invoices').where({ id: invoiceId }).update({ annual_prepay_covered_term_id: termId });
+      return { settled: true };
+    });
+    const { db, Renewals } = await load({ invoiceModule: { settleInvoiceAsAnnualPrepayCovered } });
+    holder.db = db;
+    const older = await unpaidDeclinedPlan(db, Renewals, { expired: true });
+    const newer = await unpaidDeclinedPlan(db, Renewals, { expired: true });
+    const newerStart = addMonths(ymd(older.term.term_start), 1);
+    await db('annual_prepay_terms').where({ id: newer.term.id }).update({ term_start: newerStart, term_end: addMonths(newerStart, 12) });
+    holder.failing.add(older.visitInvoice.id);
+    holder.failOnce.add(newer.visitInvoice.id);
+    for (const fx of [older, newer]) {
+      await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+      await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    }
+    const marked = async (fx) => !!(await db('activity_log').where({ action: 'annual_prepay_paid_lapse_reconciled' })
+      .whereRaw("metadata->>'term_id' = ?", [fx.term.id]).first('id'));
+    expect([await marked(older), await marked(newer)]).toEqual([false, false]);
+
+    const attemptedInvoices = () => settleInvoiceAsAnnualPrepayCovered.mock.calls.map((c) => c[0]);
+    let before = attemptedInvoices().length;
+    expect(await Renewals.retryPaidLapseReconciles(db, 1)).toBe(0);
+    expect(attemptedInvoices().slice(before)).toEqual([older.visitInvoice.id]);
+
+    before = attemptedInvoices().length;
+    expect(await Renewals.retryPaidLapseReconciles(db, 1)).toBe(1);
+    expect(attemptedInvoices().slice(before)).toEqual([newer.visitInvoice.id]);
+    expect(await marked(newer)).toBe(true);
+
+    before = attemptedInvoices().length;
+    expect(await Renewals.retryPaidLapseReconciles(db, 1)).toBe(0);
+    expect(attemptedInvoices().slice(before)).toEqual([older.visitInvoice.id]);
+    // One attempt row per term, re-dated — never one per retry.
+    expect(await db('activity_log').where({ action: 'annual_prepay_paid_lapse_reconcile_attempt' })
+      .whereRaw("metadata->>'term_id' = ?", [older.term.id]).count('* as n').first()).toEqual({ n: '1' });
+  });
+
+  // Codex #4940 r12 P1: the signup-cancellation preview, through the real
+  // previewCancelSignup.
+  async function signupCancelFixture(db) {
+    await db.raw('ALTER TABLE customers ADD COLUMN IF NOT EXISTS waveguard_tier text, ADD COLUMN IF NOT EXISTS billing_mode text, ADD COLUMN IF NOT EXISTS active boolean');
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS scheduled_service_id uuid, ADD COLUMN IF NOT EXISTS payment_recorded_at timestamptz, ADD COLUMN IF NOT EXISTS line_items jsonb, ADD COLUMN IF NOT EXISTS invoice_number text');
+    await db.raw('ALTER TABLE scheduled_services ADD COLUMN IF NOT EXISTS track_state text');
+    await db.raw(`CREATE TABLE IF NOT EXISTS estimate_deposits (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), estimate_id uuid, customer_id uuid, status text,
+      amount numeric, credited_amount numeric, refunded_amount numeric, card_surcharge numeric, credited_invoice_id uuid
+    )`);
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    const [estimate] = await db('estimates').insert({ customer_id: fx.customerId }).returning('*');
+    await db('estimate_deposits').insert({ estimate_id: estimate.id, status: 'received', amount: 99 });
+    return fx;
+  }
+  const LAPSE_BLOCKER = 'annual prepay term is paid through its term (renewal declined, money collected) — out of scope for signup cancellation';
+
+  test('signup-cancel preview: a PAID decided lapse (declined online) is collected annual money — blocked', async () => {
+    const { db } = await load();
+    const fx = await signupCancelFixture(db);
+    const { previewCancelSignup } = require('../services/customer-offboarding');
+    const preview = await previewCancelSignup(fx.customerId);
+    expect(preview.eligible).toBe(false);
+    expect(preview.blockers).toContain(LAPSE_BLOCKER);
+  });
+
+  test('signup-cancel preview: a decided lapse whose prepay was VOIDED holds no collected money — not blocked by it', async () => {
+    const { db } = await load();
+    const fx = await signupCancelFixture(db);
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'void' });
+    const { previewCancelSignup } = require('../services/customer-offboarding');
+    const preview = await previewCancelSignup(fx.customerId);
+    expect(preview.blockers).not.toContain(LAPSE_BLOCKER);
   });
 });
 

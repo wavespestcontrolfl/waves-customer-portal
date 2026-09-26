@@ -3642,6 +3642,9 @@ async function stampUnlessYearEnded(term, conn) {
 }
 
 const PAID_LAPSE_RECONCILED_ACTION = 'annual_prepay_paid_lapse_reconciled';
+// One row per term, re-dated on every retry attempt (Codex #4940 r12 P2): the
+// retry leg rotates least-recently-attempted first, never-attempted ahead.
+const PAID_LAPSE_RECONCILE_ATTEMPT_ACTION = 'annual_prepay_paid_lapse_reconcile_attempt';
 
 // Move 15's historical reconcile (#4940 pre-push P1): settle / credit the
 // visits billed per application before the late annual payment. Runs
@@ -3651,8 +3654,18 @@ const PAID_LAPSE_RECONCILED_ACTION = 'annual_prepay_paid_lapse_reconciled';
 // covered-terms sweep retries unmarked ones (retryPaidLapseReconciles).
 // Idempotent: settled invoices are skipped (annual_prepay_covered_term_id)
 // and credits dedupe on their ledger marker under the customer lock.
+//
+// Codex #4940 r12 P1: an in-window visit still non-terminal when the late
+// payment lands (paid after term_end) must be stamped prepaid too, or its
+// later completion bills separately — the end-at-term upkeep
+// (keepEndAtTermLapseCoverage) stamps it, evaluated as of the year's own
+// last day once that day has passed (its window and paid checks are dated).
+// Anything but a kept result withholds the marker, so the sweep retries.
 async function reconcilePaidDecidedLapse(term, conn) {
   if (!(await isCoveredTerm(term.id, conn))) return false;
+  const asOf = [etDateString(), dateOnly(term.term_end)].sort()[0];
+  const kept = await keepEndAtTermLapseCoverage(term.id, conn, { today: asOf });
+  if (!kept?.kept) return false;
   const summary = await reconcilePendingWindowCompletions(term, conn);
   if (summary.failed) return false;
   await conn('activity_log').insert({
@@ -3666,10 +3679,19 @@ async function reconcilePaidDecidedLapse(term, conn) {
 
 // The retry leg: paid, portal-declined-while-UNPAID terms (move 15 — the
 // decline row carries unpaid) with no completion marker, expired or not.
+// Bounded; least-recently-attempted first (the attempt row's created_at,
+// never-attempted first), then oldest end, so a term that keeps failing
+// rotates instead of starving the others.
 async function retryPaidLapseReconciles(conn = db, limit = 50) {
   let done = 0;
   try {
+    const lastAttempt = conn('activity_log')
+      .where('action', PAID_LAPSE_RECONCILE_ATTEMPT_ACTION)
+      .groupByRaw("metadata->>'term_id'")
+      .select(conn.raw("metadata->>'term_id' as term_id"), conn.raw('max(created_at) as attempted_at'))
+      .as('att');
     const terms = await coveredTermsAsOf(conn, null)
+      .leftJoin(lastAttempt, 'att.term_id', conn.raw('t.id::text'))
       .where({ 't.status': 'cancelled', 't.renewal_decision': 'cancel' })
       .whereExists(function unpaidPortalDecline() {
         this.select(conn.raw('1')).from('activity_log as a')
@@ -3682,10 +3704,12 @@ async function retryPaidLapseReconciles(conn = db, limit = 50) {
           .where('r.action', PAID_LAPSE_RECONCILED_ACTION)
           .whereRaw("r.metadata->>'term_id' = t.id::text");
       })
+      .orderByRaw('att.attempted_at asc nulls first')
       .orderBy('t.term_end', 'asc')
       .limit(limit)
       .select('t.*');
     for (const term of terms) {
+      await stampPaidLapseReconcileAttempt(term, conn);
       if (await reconcilePaidDecidedLapse(term, conn)) done += 1;
     }
     if (done) logger.info(`[annual-prepay] paid-lapse reconcile retry leg completed ${done} term(s)`);
@@ -3693,6 +3717,21 @@ async function retryPaidLapseReconciles(conn = db, limit = 50) {
     logger.warn(`[annual-prepay] paid-lapse reconcile retry leg failed: ${err.message}`);
   }
   return done;
+}
+
+// Stamped BEFORE the attempt, so a failing term rotates to the back.
+async function stampPaidLapseReconcileAttempt(term, conn) {
+  const redated = await conn('activity_log')
+    .where({ action: PAID_LAPSE_RECONCILE_ATTEMPT_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [String(term.id)])
+    .update({ created_at: new Date() });
+  if (redated) return;
+  await conn('activity_log').insert({
+    customer_id: term.customer_id,
+    action: PAID_LAPSE_RECONCILE_ATTEMPT_ACTION,
+    description: 'Retrying the historical reconcile of an annual prepay paid after the online renewal decline.',
+    metadata: { term_id: term.id },
+  });
 }
 
 async function followThroughPaidDecidedLapse(lapse, conn) {
@@ -8911,6 +8950,7 @@ module.exports = {
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   coveredTermsAsOf,
+  retryPaidLapseReconciles,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
   declineTermiteAnnualRenewal,
