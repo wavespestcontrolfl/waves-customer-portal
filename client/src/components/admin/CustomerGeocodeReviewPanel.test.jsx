@@ -109,6 +109,38 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
   });
 
+  it("does not present the previous page under a failed offset and retries that offset", async () => {
+    const first = record();
+    const second = record({ customer: { ...record().customer, id: "customer-26", first_name: "Page two" } });
+    let pageTwoAttempts = 0;
+    const urls = [];
+    vi.stubGlobal("fetch", vi.fn((url) => {
+      urls.push(String(url));
+      if (!String(url).includes("offset=25")) {
+        return response({ enabled: true, records: [first], total: 26 });
+      }
+      pageTwoAttempts += 1;
+      return pageTwoAttempts === 1
+        ? response({ error: "Synthetic page failure" }, 503)
+        : response({ enabled: true, records: [second], total: 26 });
+    }));
+
+    render(<CustomerGeocodeReviewPanel onSelectCustomer={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    expect(screen.getByText("Showing 1–1 of 26")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic page failure");
+    expect(screen.queryByRole("button", { name: "Synthetic Customer" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Showing 26–26 of 26")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByRole("button", { name: "Page two Customer" })).toBeInTheDocument();
+    expect(screen.getByText("Showing 26–26 of 26")).toBeInTheDocument();
+    expect(urls.filter((url) => url.includes("offset=25"))).toHaveLength(2);
+  });
+
   it("reloads the same customer when its profile refresh token changes", async () => {
     const verified = record({
       customer: { ...record().customer, address_line1: "100 Old Address" },

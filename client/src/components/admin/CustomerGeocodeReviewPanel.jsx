@@ -113,10 +113,10 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
     const request = ++requestRef.current;
     const controller = new AbortController();
     abortRef.current = controller;
+    setError("");
+    setDetailLoading(true);
     if (customerId) {
       setState((current) => ({ ...current, records: [] }));
-      setError("");
-      setDetailLoading(true);
     }
     try {
       const path = customerId
@@ -176,10 +176,10 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
               <Button variant="secondary" onClick={load}>Refresh</Button>
             </div>
           )}
-          {detailLoading ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">Loading address review…</div> : !error && state.records.length === 0 ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">No addresses need review.</div> : state.records.map((record) => (
+          {detailLoading ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">Loading address review…</div> : error ? null : state.records.length === 0 ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">No addresses need review.</div> : state.records.map((record) => (
             <ReviewRecord key={record.customer.id} record={record} onSelectCustomer={onSelectCustomer} />
           ))}
-          {!customerId && state.total > PAGE_SIZE && (
+          {!detailLoading && !error && !customerId && state.total > PAGE_SIZE && (
             <div className="pt-3 border-t border-hairline border-zinc-200 flex flex-wrap items-center justify-between gap-2 text-14 text-ink-secondary">
               <span>Showing {offset + 1}–{Math.min(offset + state.records.length, state.total)} of {state.total}</span>
               <div className="flex gap-2">

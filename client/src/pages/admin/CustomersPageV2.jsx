@@ -1038,6 +1038,7 @@ function CustomerDirectoryView({
   openCustomerProfile,
   startEdit,
   handleDeleteCustomer,
+  geocodeReviewRefreshToken,
   isAdmin,
   editingId,
   customerEditor,
@@ -1049,7 +1050,10 @@ function CustomerDirectoryView({
     view === "directory" && (
       <>
         {isAdmin && (
-          <CustomerGeocodeReviewPanel onSelectCustomer={openCustomerProfile} />
+          <CustomerGeocodeReviewPanel
+            onSelectCustomer={openCustomerProfile}
+            refreshToken={geocodeReviewRefreshToken}
+          />
         )}
         {" "}
         <div className="u-nums text-ui-caption text-ink-tertiary text-right mb-3 mt-3">
@@ -1763,11 +1767,16 @@ export default function CustomersPageV2() {
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
+  const [geocodeReviewRefreshToken, setGeocodeReviewRefreshToken] = useState(0);
+  const refreshCustomersAndGeocodeReview = () => {
+    loadCustomers();
+    setGeocodeReviewRefreshToken((current) => current + 1);
+  };
   const {
     editingId,
     startEdit,
     editor: customerEditor,
-  } = useCustomerEditor(() => loadCustomers(), STAGES);
+  } = useCustomerEditor(refreshCustomersAndGeocodeReview, STAGES);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef(null);
 
@@ -1988,7 +1997,7 @@ export default function CustomersPageV2() {
         const err = await r.json().catch(() => ({}));
         throw new Error(err.message || err.error || `HTTP ${r.status}`);
       }
-      loadCustomers();
+      refreshCustomersAndGeocodeReview();
     } catch (e) {
       window.alert("Delete failed: " + e.message);
     }
@@ -2213,6 +2222,7 @@ export default function CustomersPageV2() {
         openCustomerProfile={openCustomerProfile}
         startEdit={startEdit}
         handleDeleteCustomer={handleDeleteCustomer}
+        geocodeReviewRefreshToken={geocodeReviewRefreshToken}
         isAdmin={isAdmin}
         editingId={editingId}
         customerEditor={customerEditor}

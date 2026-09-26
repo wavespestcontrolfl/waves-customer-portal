@@ -16,6 +16,9 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
   },
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
+vi.mock('../../components/admin/CustomerGeocodeReviewPanel', () => ({
+  default: ({ refreshToken = 0 }) => <output data-testid="geocode-review-refresh">{refreshToken}</output>,
+}));
 vi.mock('../../components/AddressAutocomplete', () => ({
   default: ({ id, value, onChange, onSelect }) => (
     <>
@@ -154,6 +157,36 @@ describe('CustomersPageV2 workflow state', () => {
       body: { firstName: 'Edited name', tier: null, serviceContactEmail: '' },
     });
     alert.mockRestore();
+  });
+
+  it('refreshes the address review queue after a successful city save and customer deletion', async () => {
+    const writes = [];
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (options.method === 'PUT' || options.method === 'DELETE') {
+        writes.push({ method: options.method, path: parsed.pathname, body: options.body });
+        return response({ success: true });
+      }
+      return response(parsed.pathname === '/api/admin/customers' ? list : {});
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('0');
+
+    fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
+    const editor = screen.getByRole('region', { name: 'Edit customer' });
+    fireEvent.change(within(editor).getByLabelText('City'), { target: { value: 'Sarasota' } });
+    fireEvent.click(within(editor).getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('1'));
+
+    fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete customer' }));
+    await waitFor(() => expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('2'));
+    expect(writes.map(({ method }) => method)).toEqual(['PUT', 'DELETE']);
+    confirm.mockRestore();
   });
 
   it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {
