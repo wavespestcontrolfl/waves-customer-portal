@@ -76,12 +76,22 @@ const NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleve
 const NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|mil|pocos)';
 // An "amount" is digits OR spelled-out number words — the SAME alternation
 // feeds both the currency branches and the per-cadence branches, so "forty
-// five per month" / "cuarenta al mes" scrub exactly like "45 per month".
-const EN_AMOUNT = `(?:\\d+(?:\\.\\d+)?|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)`;
+// five per month" / "cuarenta al mes" scrub exactly like "45 per month". The
+// digit form also accepts a bare numeric RANGE ("80-120", "80 to 120") so
+// "80-120 dollars" scrubs the same as a single figure (AW-08) — the range is
+// only ever consumed when the currency/cadence suffix follows it, so "21-day"
+// or "2-3 visits" (no dollars/mo/etc. after) never matches.
+const RANGE_CONNECTOR = '(?:-|\\u2013|\\u2014|\\s+to\\s+)';
+const EN_AMOUNT = `(?:\\d+(?:\\.\\d+)?(?:\\s*${RANGE_CONNECTOR}\\s*\\d+(?:\\.\\d+)?)?|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)`;
+// Currency-code amounts: digits or number words, never the bare article "a"
+// ("a USD account" is not a price).
+const USD_AMOUNT = `(?:\\d+(?:\\.\\d+)?|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)`;
 const ES_AMOUNT = `(?:\\d+(?:\\.\\d+)?|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)`;
 const PRICE_TALK_RE = new RegExp(
-  '\\$\\s*\\d' // $45, $ 100
-  + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
+  '\\$\\s*\\d' // $45, $ 100, US$85 (the $ needs no left boundary), $85.00/mo
+  + `|\\bUSD(?:\\s*\\$\\s*|\\s+)${USD_AMOUNT}\\b` // USD 85, USD$85, USD eighty-five — never "USDA" (AW-08)
+  + `|\\b${USD_AMOUNT}\\s*USD\\b` // 85 USD, eighty-five USD (AW-08)
+  + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks, 80-120 dollars
   + `|\\b${ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares
   + `|\\b${EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per month, 108 per quarter, 45 each visit
   + `|\\b${ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes, 90 por trimestre, cuarenta cada mes
@@ -284,6 +294,69 @@ async function logIntakeExchange({ sessionId, message, reply, intent }) {
   }
 }
 
+// Codex round 1 P2 (L437): two turns for the SAME session logging
+// concurrently could race logIntakeExchange's read-then-write session upsert
+// (two "no active session" reads → two inserts, or a stale message_count).
+// The log is best-effort, so an overlapping turn for a session whose previous
+// log is still running is simply skipped — no queue to grow. An entry is
+// removed only when the underlying log actually settles (never on a deadline,
+// so a timed-out write can't overlap the next one), and past a cap nothing
+// new is logged: sessionId is client-supplied on a public endpoint, and a
+// stalled DB must not grow this set without bound.
+const INTAKE_LOG_IN_FLIGHT_MAX = 500;
+const intakeLogInFlight = new Set();
+function logIntakeExchangeOnce({ sessionId, message, reply, intent }) {
+  const key = typeof sessionId === 'string' ? sessionId : null;
+  if (!key) return logIntakeExchange({ sessionId, message, reply, intent });
+  if (intakeLogInFlight.has(key) || intakeLogInFlight.size >= INTAKE_LOG_IN_FLIGHT_MAX) {
+    logger.info('[ask-waves] conversation log skipped: previous log for this session still running');
+    return Promise.resolve();
+  }
+  intakeLogInFlight.add(key);
+  return Promise.resolve(logIntakeExchange({ sessionId, message, reply, intent }))
+    .finally(() => intakeLogInFlight.delete(key));
+}
+
+// AW-09: the website fetch has no abort deadline, and intake passed no
+// timeout to either provider — the primary adapter's default is 10 minutes,
+// and the Anthropic fallback kept the SDK's own retry/timeout behavior on
+// top of that. This is the whole customer-turn wall-clock budget, covering
+// BOTH the live provider attempt and the Anthropic fallback attempt combined
+// (never each getting the full amount) — a synchronous chat box can't leave
+// a visitor waiting minutes for a reply that could be the deterministic
+// fallback in milliseconds. Env-overridable for tests / tuning; read at call
+// time, never cached, so a change needs no restart-sensitive module reload.
+const ASK_WAVES_TURN_BUDGET_MS = 22000;
+function turnBudgetMs() {
+  const n = Number(process.env.ASK_WAVES_TURN_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 ? n : ASK_WAVES_TURN_BUDGET_MS;
+}
+
+// The primary (OpenAI) leg's share of the remaining turn budget — see the
+// Codex round 1 P1 note at its call site below.
+const PRIMARY_LEG_BUDGET_SHARE = 0.6;
+
+// Races a provider call against the remaining turn budget. Passing
+// `timeoutMs` down to dispatch()/callAnthropic() already asks the REAL
+// adapter (fetch AbortSignal / Anthropic SDK `timeout`+`maxRetries:0`) to
+// abort itself at that mark — but this wrapper is the actual guarantee: it
+// bounds the awaited call from ask-waves-intake's own side even if the
+// adapter (or a test double) ignores the budget entirely, so a stalled leg
+// can never hold up the turn past its share. The raced-away promise is left
+// to settle on its own; its rejection is swallowed so it can never surface
+// as an unhandled rejection later.
+function withDeadline(promise, ms) {
+  // A rejection becomes a miss, so the caller's ladder (and the never-throws
+  // contract) holds even if an adapter rejects.
+  const settled = Promise.resolve(promise).catch(() => ({ ok: false, reason: 'provider_error' }));
+  if (!(ms > 0)) return Promise.resolve({ ok: false, reason: 'timeout_budget_exhausted' });
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, reason: 'timeout_budget_exhausted' }), ms);
+  });
+  return Promise.race([settled, timedOut]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Answer one visitor message. Never throws; always returns the wire contract
  * { reply, intent, service_keys, ready_for_quote, source }.
@@ -292,27 +365,46 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
   const text = buildTranscript(message, history);
   let result = null;
 
-  const live = await dispatch(MODELS.ROUTES.askWaves, {
-    laneId: 'ask_waves',
-    system: SYSTEM_PROMPT,
-    text,
-    jsonMode: true,
-    jsonSchema: INTAKE_SCHEMA,
-    maxTokens: 400,
-  });
-  if (live.ok) result = normalizeIntakeResult(live.json, 'openai');
+  const deadline = Date.now() + turnBudgetMs();
 
-  if (!result) {
-    const fallback = await callAnthropic({
+  // Codex round 1 P1 (L388): the primary leg used to get the WHOLE remaining
+  // budget, so a primary that stalls all the way to its own timeout consumes
+  // the entire turn budget and the Anthropic fallback below is skipped
+  // outright (fallbackTimeoutMs lands at ~0). Capping the primary's share
+  // leaves the fallback leg a REAL window even in that worst case; a primary
+  // that answers quickly still leaves the fallback whatever time is actually
+  // left over (not just its capped share) if it's ever reached. withDeadline
+  // remains the hard local guarantee on top either way.
+  const liveRemainingMs = deadline - Date.now();
+  if (liveRemainingMs > 0) {
+    const liveTimeoutMs = Math.max(1, Math.floor(liveRemainingMs * PRIMARY_LEG_BUDGET_SHARE));
+    const live = await withDeadline(dispatch(MODELS.ROUTES.askWaves, {
       laneId: 'ask_waves',
-      model: process.env.ASK_WAVES_MODEL || MODELS.VOICE,
       system: SYSTEM_PROMPT,
       text,
       jsonMode: true,
       jsonSchema: INTAKE_SCHEMA,
       maxTokens: 400,
-    });
-    if (fallback.ok) result = normalizeIntakeResult(fallback.json, 'anthropic');
+      timeoutMs: liveTimeoutMs,
+    }), liveTimeoutMs);
+    if (live.ok) result = normalizeIntakeResult(live.json, 'openai');
+  }
+
+  if (!result) {
+    const fallbackTimeoutMs = deadline - Date.now();
+    if (fallbackTimeoutMs > 0) {
+      const fallback = await withDeadline(callAnthropic({
+        laneId: 'ask_waves',
+        model: process.env.ASK_WAVES_MODEL || MODELS.VOICE,
+        system: SYSTEM_PROMPT,
+        text,
+        jsonMode: true,
+        jsonSchema: INTAKE_SCHEMA,
+        maxTokens: 400,
+        timeoutMs: fallbackTimeoutMs,
+      }), fallbackTimeoutMs);
+      if (fallback.ok) result = normalizeIntakeResult(fallback.json, 'anthropic');
+    }
   }
 
   if (!result) {
@@ -331,7 +423,12 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
         : { ...FALLBACK_RESULT };
   }
 
-  await logIntakeExchange({ sessionId, message, reply: result.reply, intent: result.intent });
+  // Best-effort log: fire-and-forget so a stalled/pending DB read can never
+  // hold up an already-generated reply (AW-09). logIntakeExchange already
+  // catches its own errors and logs them; this .catch is a second, defensive
+  // net so a rejection can never surface as an unhandled promise rejection.
+  logIntakeExchangeOnce({ sessionId, message, reply: result.reply, intent: result.intent })
+    .catch((err) => logger.warn(`[ask-waves] conversation log failed: ${err.message}`));
   return result;
 }
 
@@ -343,6 +440,7 @@ module.exports = {
     buildTranscript,
     scrubPriceTalk,
     logIntakeExchange,
+    logIntakeExchangeOnce,
     QUOTABLE_SERVICES,
     SYSTEM_PROMPT,
     PRICE_TALK_RE,
@@ -352,5 +450,7 @@ module.exports = {
     SUPPORT_RE,
     looksLikeEmergency,
     MESSAGE_MAX_LEN,
+    ASK_WAVES_TURN_BUDGET_MS,
+    PRIMARY_LEG_BUDGET_SHARE,
   },
 };
