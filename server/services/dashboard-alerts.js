@@ -167,7 +167,8 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         count,
         amount: parseFloat(overdue60.amount || 0),
         label: `${count} invoice${count === 1 ? '' : 's'} 60+ days overdue`,
-        href: '/admin/invoices',
+        // Overdue view, oldest first — the 60+ day invoices lead the list.
+        href: '/admin/invoices?filter=overdue&sort=oldest',
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] ar_overdue_60: ${err.message}`); }

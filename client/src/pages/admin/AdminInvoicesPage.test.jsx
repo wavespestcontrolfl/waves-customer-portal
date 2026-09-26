@@ -6,12 +6,15 @@ import {
   batchSendToast,
   buildInvoiceListParams,
   canAddInvoiceAttachments,
+  INVOICE_LIST_FILTERS,
+  INVOICE_LIST_SORTS,
   invoiceAttachmentLimitLabel,
   invoiceCreatedSendFailedToast,
   invoiceCreatedSendToast,
   invoiceDepositCreditTotal,
   invoiceListRowDate,
   isAllowedAttachmentFile,
+  listParamValue,
   noticeCandidateLabel,
   orderNoticeCandidates,
   persistedSendDisposition,
@@ -57,6 +60,19 @@ describe("AdminInvoicesPage customer handoff", () => {
 
   it("omits customerId for the ordinary all-invoices view", () => {
     expect(buildInvoiceListParams().has("customerId")).toBe(false);
+  });
+});
+
+describe("AdminInvoicesPage ?filter= / ?sort= deep links", () => {
+  it("honours a value the page's own control offers (dashboard 60+ overdue card)", () => {
+    expect(listParamValue("overdue", INVOICE_LIST_FILTERS)).toBe("overdue");
+    expect(listParamValue("oldest", INVOICE_LIST_SORTS)).toBe("oldest");
+  });
+
+  it("falls back to the default for a missing or unknown value", () => {
+    expect(listParamValue(null, INVOICE_LIST_FILTERS)).toBe("all");
+    expect(listParamValue("failed", INVOICE_LIST_FILTERS)).toBe("all");
+    expect(listParamValue("due_date", INVOICE_LIST_SORTS)).toBe("newest");
   });
 });
 
