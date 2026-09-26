@@ -3519,10 +3519,7 @@ router.post('/call-status', async (req, res) => {
           status: CallStatus,
           duration_seconds: parseInt(CallDuration || 0),
           source: VOICE_RELAY_SANDBOX_SOURCE,
-          metadata: JSON.stringify({
-            relay_sandbox: true,
-            source: 'status_callback',
-          }),
+          metadata: JSON.stringify({ relay_sandbox: true, source: 'status_callback' }),
         });
         return;
       }
