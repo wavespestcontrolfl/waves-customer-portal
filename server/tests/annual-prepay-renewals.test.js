@@ -2169,6 +2169,7 @@ describe('annual prepay renewal helpers', () => {
   // ---- termite annual plan: 45/30-day renewal-notice rung (slice 5, owner ruling §A2)
 
   test('a termite annual-plan term at 45 days out renders the termite SMS template with every variable, excludes the setup fee from renewal_fee, and stamps notice_45_sent_at only after the SMS actually sends', async () => {
+    pinTermiteToday();
     const term = {
       id: 'term-1',
       customer_id: 'customer-1',
@@ -2258,6 +2259,16 @@ describe('annual prepay renewal helpers', () => {
     });
   });
 
+  // The 45-day witness depends on today vs term_end, so every termite
+  // rung test pins the clock (Date only) instead of drifting into "late".
+  function pinTermiteToday() {
+    jest.useFakeTimers({
+      now: new Date('2026-09-26T16:00:00Z'),
+      doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+    });
+  }
+  afterEach(() => { jest.useRealTimers(); });
+
   // Shared harness for the witness-evidence cases below (Codex #4921 r1).
   function termiteNoticeHarness({ termEnd = '2027-05-20' } = {}) {
     const term = {
@@ -2290,6 +2301,7 @@ describe('annual prepay renewal helpers', () => {
   }
 
   test('an owner-silenced termite SMS (sent:true, deliveryOutcome not_sent) is NOT a witness — the email must confirm, else the claim is released', async () => {
+    pinTermiteToday();
     const { term, secondQuery } = termiteNoticeHarness();
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'owner-silence' });
     AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: false, reason: 'opted_out' });
@@ -2300,6 +2312,7 @@ describe('annual prepay renewal helpers', () => {
   });
 
   test('an owner-silenced termite SMS with a confirmed email stamps the witness via email', async () => {
+    pinTermiteToday();
     const { term, secondQuery } = termiteNoticeHarness();
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'owner-silence' });
     AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
@@ -2309,6 +2322,7 @@ describe('annual prepay renewal helpers', () => {
   });
 
   test('an UNCERTAIN termite SMS with no confirmed email keeps its claim (never re-texted immediately) and records no witness', async () => {
+    pinTermiteToday();
     const { term, secondQuery } = termiteNoticeHarness();
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'uncertain' });
     AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: false });
@@ -2318,8 +2332,8 @@ describe('annual prepay renewal helpers', () => {
   });
 
   test('a LATE 45-day catch-up (under 45 days to term_end) goes to notice_45_late_sent_at, never the 45-day witness, and bells staff', async () => {
-    const termEnd = new Date(Date.now() + 38 * 86400000).toISOString().slice(0, 10);
-    const { term, secondQuery } = termiteNoticeHarness({ termEnd });
+    pinTermiteToday();
+    const { term, secondQuery } = termiteNoticeHarness({ termEnd: '2026-11-03' }); // 38 days out
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
     AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
 
@@ -2335,6 +2349,7 @@ describe('annual prepay renewal helpers', () => {
   });
 
   test('the termite notice names the PLAN\'s property (source estimate), not a different billing address', async () => {
+    pinTermiteToday();
     const term = {
       id: 'term-2',
       customer_id: 'customer-1',
@@ -2577,6 +2592,7 @@ describe('annual prepay renewal helpers', () => {
   });
 
   test('a termite annual-plan term with prepay_amount 0 (a genuine zero-fee term, distinct from NULL) still renders "$0.00" and sends — only a missing amount fails closed', async () => {
+    pinTermiteToday();
     const term = {
       id: 'term-1',
       customer_id: 'customer-1',
