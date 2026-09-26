@@ -1565,15 +1565,22 @@ function buildFailOpenRoutingContext({
 // The known-caller selection shared with the offline routing audits. This
 // mirrors the live Step 2 pre-lookup: an operator relink outranks phone
 // matching, an explicit unlink means no known caller, and call.customer_id
-// is not consulted. opts.db keeps audit reads on the script's own connection.
+// is not consulted. opts.db keeps audit reads on the script's own connection;
+// opts.customerLinkOverride lets the live pass reuse the override it already
+// parsed and pinned for the rest of that processing attempt.
 async function resolveKnownCallerCustomer(call = {}, contactPhone = null, opts = {}) {
   const conn = opts.db || db;
-  let metadata = call.metadata || {};
-  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
-  const override = metadata?.customer_link_override;
-  const customerLinkOverride = override && typeof override === 'object' && 'customer_id' in override
-    ? override
-    : null;
+  let customerLinkOverride;
+  if (Object.prototype.hasOwnProperty.call(opts, 'customerLinkOverride')) {
+    customerLinkOverride = opts.customerLinkOverride;
+  } else {
+    let metadata = call.metadata || {};
+    try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+    const override = metadata?.customer_link_override;
+    customerLinkOverride = override && typeof override === 'object' && 'customer_id' in override
+      ? override
+      : null;
+  }
   if (customerLinkOverride) {
     return customerLinkOverride.customer_id
       ? conn('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
@@ -8714,16 +8721,9 @@ const CallRecordingProcessor = {
     // coordinating a visit, complaining, or asking about billing.
     let knownCaller = null;
     try {
-      // The operator's link outranks the phone lookup here too (Codex #3764
-      // r2 P1): a relink exists because the phone identity was wrong or
-      // ambiguous, so the extraction prompt and the fail-open routing checks
-      // must see the CHOSEN customer — and no known-customer hint at all
-      // after an explicit unlink.
-      const knownCustomer = customerLinkOverride
-        ? (customerLinkOverride.customer_id
-          ? await db('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
-          : null)
-        : await findCustomerForCallContact(contactPhone, {});
+      // The shared live/audit resolver preserves the operator's pinned
+      // relink/unlink before falling back to the production phone matcher.
+      const knownCustomer = await resolveKnownCallerCustomer(call, contactPhone, { customerLinkOverride });
       knownCaller = summarizeKnownCaller(knownCustomer);
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);

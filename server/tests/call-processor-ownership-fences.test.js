@@ -303,12 +303,9 @@ describe('route decisions are keyed on the recording they were derived from', ()
 describe('an explicit unlink gates lead creation', () => {
   const { body } = processRecordingBody();
   test('the known-caller hint follows the operator link — the override target, or none after an explicit unlink (codex #3764 gh-r2 P1)', () => {
-    const at = body.indexOf('const knownCustomer = customerLinkOverride');
+    const at = body.indexOf('const knownCustomer = await resolveKnownCallerCustomer(call, contactPhone, { customerLinkOverride });');
     expect(at).toBeGreaterThan(-1);
-    const site = body.slice(at, at + 400);
-    expect(site).toContain("await db('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()");
-    expect(site).toContain(': null)');
-    expect(site).toContain(': await findCustomerForCallContact(contactPhone, {});');
+    expect(body).not.toContain('const knownCustomer = customerLinkOverride');
     // The override is resolved BEFORE Step 2 reads it.
     expect(body.indexOf('const customerLinkOverride = (() => {')).toBeLessThan(at);
   });

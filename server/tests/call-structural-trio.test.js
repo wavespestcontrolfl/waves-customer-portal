@@ -346,17 +346,23 @@ describe('findCustomerForCallContact cascade', () => {
     }, PHONE, { db: auditDb });
     expect(relinked?.id).toBe('override-customer');
 
+    const pinnedRelink = await resolveKnownCallerCustomer({}, PHONE, {
+      db: auditDb,
+      customerLinkOverride: { customer_id: 'override-customer' },
+    });
+    expect(pinnedRelink?.id).toBe('override-customer');
+
     const phoneMatched = await resolveKnownCallerCustomer({
       customer_id: 'stale-customer',
       metadata: {},
-    }, PHONE, { db: auditDb });
+    }, PHONE, { db: auditDb, customerLinkOverride: null });
     expect(phoneMatched?.id).toBe('phone-customer');
 
     auditDb.mockClear();
-    expect(await resolveKnownCallerCustomer({
-      customer_id: 'stale-customer',
-      metadata: { customer_link_override: { customer_id: null } },
-    }, PHONE, { db: auditDb })).toBeNull();
+    expect(await resolveKnownCallerCustomer({ customer_id: 'stale-customer' }, PHONE, {
+      db: auditDb,
+      customerLinkOverride: { customer_id: null },
+    })).toBeNull();
     expect(await resolveKnownCallerCustomer({ customer_id: 'stale-customer' }, null, { db: auditDb })).toBeNull();
     expect(auditDb).not.toHaveBeenCalled();
   });
