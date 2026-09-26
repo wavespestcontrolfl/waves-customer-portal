@@ -68,7 +68,7 @@ function reopen(inputs, engineProfile, result = RESULT) {
 describe('reopening an estimate saved before the lookup guards', () => {
   it('clears the development lot the lookup filled in and refuses the stored price until regenerated', async () => {
     reopen({ svcPest: true, homeSqFt: '1100', lotSqFt: '400000', stories: '1' }, CONDO_ON_DEVELOPMENT_PARCEL);
-    expect(await screen.findByText(/Cleared values the lookup filled in: lot size\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Removed values the lookup filled in: lot size\./)).toBeInTheDocument();
     expect(screen.getByLabelText('Lot Sq Ft')).toHaveValue(null);
     expect(reviewAndSend()).toBeDisabled();
 
@@ -92,6 +92,13 @@ describe('reopening an estimate saved before the lookup guards', () => {
     reopen({ svcPest: true, homeSqFt: '', lotSqFt: '9000', stories: '1' }, HOUSE, resultWith(pestLine({ footprintWasDefaulted: true })));
     expect(await screen.findByText(/a guess at a 2,000 sq ft house — enter home sq ft\./)).toBeInTheDocument();
     expect(screen.getByLabelText('Lot Sq Ft')).toHaveValue(9000);
+    expect(reviewAndSend()).toBeDisabled();
+  });
+
+  it('asks an association aggregate for stories, not home sq ft (codex r1 P2)', async () => {
+    reopen({ svcPest: true, homeSqFt: '48000', lotSqFt: '90000', stories: '1' },
+      { ...HOUSE, homeSqFt: 48000, footprintUnknown: true }, resultWith(pestLine({ footprintWasDefaulted: true })));
+    expect(await screen.findByText(/a guess at the home's footprint — enter the number of stories\./)).toBeInTheDocument();
     expect(reviewAndSend()).toBeDisabled();
   });
 

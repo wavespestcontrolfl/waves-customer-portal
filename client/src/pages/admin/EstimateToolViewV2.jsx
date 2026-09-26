@@ -1824,9 +1824,13 @@ export default function EstimateToolViewV2({
     const guessedHomeSize = linesPricedOnGuessedHomeSize(d.result).length > 0;
     const notice = [
       cleared.length > 0
-        ? `This estimate was saved before a pricing fix. Cleared values the lookup filled in: ${cleared.join(", ")}.`
+        ? `This estimate was saved before a pricing fix. Removed values the lookup filled in: ${cleared.join(", ")}.`
         : null,
-      guessedHomeSize ? "Its saved price was a guess at a 2,000 sq ft house — enter home sq ft." : null,
+      // An association aggregate's missing input is the story count, as in
+      // the Generate guard (codex r1 P2).
+      guessedHomeSize && d.engineProfile?.footprintUnknown === true
+        ? "Its saved price was a guess at the home's footprint — enter the number of stories."
+        : guessedHomeSize ? "Its saved price was a guess at a 2,000 sq ft house — enter home sq ft." : null,
     ].filter(Boolean);
     if (notice.length > 0) notice.push("Generate the estimate again before saving or sending.");
     return { restored, seeded, stale: notice.length > 0, notice: notice.join(" ") };

@@ -88,6 +88,9 @@ const UNIT_PARCEL_AREA_READS = [
   "estimatedBedAreaSf", "estimatedBedAreaPercent", "bedAreaSource",
 ];
 
+// The unit_parcel reads that size a price (turf, beds).
+const PARCEL_PRICED_AREA_READS = ["estimatedTurfSf", "turfFallbackPreviewSf", "estimatedBedAreaSf"];
+
 /**
  * The profile the estimator works from, scoped once where it enters the
  * tool (fresh lookup AND a reopened estimate's priced profile), so every
@@ -118,10 +121,15 @@ const AUTO_DERIVED_TERMITE_MEASUREMENTS = [
  * values the tool filled itself are cleared — anything the operator typed
  * (_manualFields / the edited flags) stays.
  * - A unit-address lookup: no `_unitLookup` flag (saved before unit scope)
- *   and termite boxes auto-derived from one unit's interior area.
+ *   and, while the form still types it a condo (the same test as the
+ *   tool's unit scope), termite boxes auto-derived from one unit's interior
+ *   area and a trenching perimeter "estimated from footprint".
  * - A condo record carrying the development's parcel (unit_parcel): the
  *   development's lot, the lookup's bed area, and a flea exterior area
- *   copied from the development's turf.
+ *   copied from the development's turf — and, even with a typed lot, a
+ *   priced profile that still carries the parcel's turf / bed reads (the
+ *   stored price was computed from them; scopeUnitParcelProfile only
+ *   removes them from the next calculation).
  * Returns the form plus the labels of what was cleared, so the caller can
  * refuse the stored price that was computed from them.
  */
@@ -131,6 +139,12 @@ export function scrubReopenedEstimateForm(form, engineProfile) {
   const typed = (key) => (form._manualFields || []).includes(key);
   if (engineProfile?.residentialUnitLookup) {
     next._unitLookup = true;
+  }
+  if (engineProfile?.residentialUnitLookup && /^condo/i.test(String(form.propertyType || ""))) {
+    if (form.svcTrenching && form.trenchingEstimateFromFootprint) {
+      next.trenchingEstimateFromFootprint = false;
+      cleared.push("trenching perimeter estimated from footprint");
+    }
     for (const [key, autoFlag] of AUTO_DERIVED_TERMITE_MEASUREMENTS) {
       if (next[autoFlag] && String(next[key] || "").trim() !== "") {
         next[key] = "";
@@ -152,6 +166,9 @@ export function scrubReopenedEstimateForm(form, engineProfile) {
       next.fleaExteriorAreaSqFt = "0";
       next.fleaExteriorAreaSource = "UNKNOWN";
       cleared.push("flea exterior area");
+    }
+    if (PARCEL_PRICED_AREA_READS.some((key) => Number(engineProfile[key]) > 0)) {
+      cleared.push("lawn and bed areas from the development's parcel");
     }
   }
   return { form: next, cleared: [...new Set(cleared)] };

@@ -126,6 +126,7 @@ describe("reopened estimate scrub (legacy-reopen follow-up to #4862 / #4871)", (
     const { form, cleared } = scrubReopenedEstimateForm({
       termiteFootprintSqFt: "725", _termiteFootprintAuto: true,
       trenchingPerimeterLF: "140", _trenchingPerimeterAuto: false,
+      propertyType: "Condo",
     }, UNIT);
     expect(form._unitLookup).toBe(true);
     expect(form.termiteFootprintSqFt).toBe("");
@@ -147,6 +148,29 @@ describe("reopened estimate scrub (legacy-reopen follow-up to #4862 / #4871)", (
     }, UNIT_PARCEL);
     expect(typed.form).toMatchObject({ lotSqFt: "1500", bedArea: "200", fleaExteriorAreaSqFt: "300" });
     expect(typed.cleared).toEqual([]);
+  });
+
+  it("refuses a unit quote that estimated trenching from footprint (codex r1 P1)", () => {
+    const { form, cleared } = scrubReopenedEstimateForm(
+      { propertyType: "Condo", svcTrenching: true, trenchingEstimateFromFootprint: true }, UNIT);
+    expect(form.trenchingEstimateFromFootprint).toBe(false);
+    expect(cleared).toEqual(["trenching perimeter estimated from footprint"]);
+  });
+
+  it("leaves a unit staff retyped as a whole structure alone (codex r1 P2)", () => {
+    const input = { propertyType: "Single Family", termiteFootprintSqFt: "1200", _termiteFootprintAuto: true,
+      svcTrenching: true, trenchingEstimateFromFootprint: true };
+    const { form, cleared } = scrubReopenedEstimateForm(input, UNIT);
+    expect(form).toEqual({ ...input, _unitLookup: true });
+    expect(cleared).toEqual([]);
+  });
+
+  it("refuses a typed-lot price whose profile still carries the parcel's turf (codex r1 P1)", () => {
+    const { form, cleared } = scrubReopenedEstimateForm(
+      { lotSqFt: "1500", _lotSqFtEdited: true, _manualFields: ["lotSqFt"] },
+      { ...UNIT_PARCEL, estimatedTurfSf: 25000 });
+    expect(form.lotSqFt).toBe("1500");
+    expect(cleared).toEqual(["lawn and bed areas from the development's parcel"]);
   });
 
   it("leaves a whole-home estimate alone", () => {
