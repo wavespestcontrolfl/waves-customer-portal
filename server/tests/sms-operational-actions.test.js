@@ -733,6 +733,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Call me in a year', 'Contact me within 2 yrs', 'Check back next year', 'Follow up in 6 mos', 'Over the next 2 years please check in',
     'Call early next year', 'Reach out by end of the year', 'Call me this month', 'Call me tomorrow, about the invoice',
     'Call me about the invoice. Tomorrow works', 'At the next visit please call about the bait',
+    'Please call before my next appointment', 'Have it ready by the next service', 'Call me next time you are out',
     'Please call me about my invoice tomorrow', 'Call about the invoice on Friday',
     'Call me regarding the estimate next week', 'Call about the termite quote this afternoon'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
@@ -767,7 +768,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     "Please call me about this month's invoice", "Call me about tomorrow's appointment", "Can someone call about Friday's visit?",
     "Call me about next week's service", 'Please call me about my next visit', 'Can you call regarding the next appointment?',
     'Call me about tomorrow and the treatment plan', 'Please send me the report from this morning',
-    "Send the photos from Friday's visit"])(
+    "Send the photos from Friday's visit", 'Can you call to discuss the next appointment?', 'Please call, the next visit needs a gate code'])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
         .toBe('default_kind');

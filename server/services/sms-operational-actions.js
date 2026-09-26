@@ -140,7 +140,11 @@ const STATED_TIMING = new RegExp([
   // The period forms TEMPORARY_INSTRUCTION already knows (Codex #4816 r27).
   String.raw`\bover the (?:weekend|summer|winter|holidays?|next (?:${COUNT} )?${SPAN_UNIT})\b`,
   String.raw`\b(?:through|thru) the (?:weekend|week|month)\b`,
-  String.raw`\b(?:next|coming|following) (?:${COUNT} )?${SPAN_UNIT}\b${NOT_POSSESSIVE}|\bnext (?:visit|appointment|service|time)\b`,
+  String.raw`\b(?:next|coming|following) (?:${COUNT} )?${SPAN_UNIT}\b${NOT_POSSESSIVE}|\bnext time\b`,
+  // A next visit is timing only when a timing preposition introduces it
+  // ("at the next visit", "before my next appointment"); "call to discuss
+  // the next appointment" names the topic (Codex #4816 r42).
+  String.raw`\b(?:at|on|during|before|after|by|until|till|for)(?: (?:the|my|our|your))? next (?:visit|appointment|service)\b`,
   String.raw`\b(?:after|before) (?:work|school|lunch|dinner|noon)\b|\b(?:at )?lunch ?time\b`,
   String.raw`\b${WEEKDAY}${NOT_POSSESSIVE}`,
   // Undotted abbreviations ("call me Fri"). Wed/sat/sun double as ordinary
