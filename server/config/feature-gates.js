@@ -2137,6 +2137,10 @@ const gates = {
   // Explicit opt-in in every environment.
   routeReorderRepair: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
 
+  // Durable primary-address review and staff-verified pins. Explicit opt-in;
+  // an existing verified pin stays protected after the UI is disabled.
+  geocodeReview: gateEnvValue('GATE_GEOCODE_REVIEW'),
+
   // Nightly reorder pass only: on an unfrozen tech-day whose stored
   // route_order is incomplete (a null or a duplicate position), write any
   // strictly shorter promise-safe order instead of requiring the 805 m floor.

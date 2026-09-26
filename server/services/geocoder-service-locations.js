@@ -58,6 +58,12 @@ async function persistServicePin(conn, snapshot, location) {
   return conn.transaction(async trx => {
     await lockTechDays(trx, [{ techId: snapshot.technician_id, date: toDateStr(snapshot.scheduled_date) }]);
     if (!enabled()) return false;
+    // Staff can revoke a still-null pin while the provider call is in flight.
+    // Recheck under the same day lock as that action, even if the service row
+    // itself is unchanged. A verified address uses the staff-selected point.
+    const reviewed = await require('./customer-geocode-review').reviewedServiceLocation(snapshot, trx);
+    if (reviewed && !reviewed.location) return false;
+    if (reviewed?.location) location = reviewed.location;
     // Every input to the lookup and eligibility decision stays pinned. This
     // also refuses a concurrent map correction, start, cancellation or move.
     let write = trx('scheduled_services');
@@ -69,7 +75,7 @@ async function persistServicePin(conn, snapshot, location) {
     if (!count) return false;
     await recordAuditEvent({ actor_type: 'system', action: 'service_coordinates_recovered',
       resource_type: 'scheduled_service', resource_id: snapshot.id, critical: true, trx,
-      metadata: { source: 'verified_service_address_geocode', property_id: snapshot.property_id,
+      metadata: { source: reviewed ? 'staff_verified_pin' : 'verified_service_address_geocode', property_id: snapshot.property_id,
         scheduled_date: toDateStr(snapshot.scheduled_date) } });
     if (!enabled()) throw Object.assign(new Error('Coordinate recovery disabled'), { code: 'COORDINATE_RECOVERY_DISABLED' });
     return true;
@@ -81,9 +87,20 @@ async function persistServicePin(conn, snapshot, location) {
 async function sweepUngeocodedServices({ limit = 25, now = new Date(), dryRun = true } = {}, conn = db) {
   if (!dryRun && !enabled()) return { status: 'gate_off' };
   if (!dryRun) await pruneUnresolved(conn);
+  const review = require('./customer-geocode-review');
   const query = candidatesQuery(conn, now).whereNotIn('id', dryRun ? [] : [...unresolved.keys()]);
-  const rows = (await query.orderBy('scheduled_date').orderBy('id').limit(limit))
-    .map(row => ({ ...row, lat: row.stored_lat, lng: row.stored_lng }));
+  // Filter with the canonical JS premise matcher, including units and ZIP+4.
+  // Page past withheld addresses before applying the work limit, so they
+  // cannot starve later eligible appointments. Reviews load once per batch.
+  const candidates = [];
+  let offset = 0;
+  while (candidates.length < limit) {
+    const batch = await query.clone().orderBy('scheduled_date').orderBy('id').offset(offset).limit(limit);
+    candidates.push(...await review.filterServiceReviewBlocks(batch, conn));
+    if (batch.length < limit) break;
+    offset += batch.length;
+  }
+  const rows = candidates.slice(0, limit).map(row => ({ ...row, lat: row.stored_lat, lng: row.stored_lng }));
   const result = { status: 'dry_run', checked: rows.length, geocoded: 0, unresolved: 0, stale: 0, failed: 0,
     stops: rows.map(row => ({ id: row.id, date: toDateStr(row.scheduled_date), reason: 'missing_service_coordinates' })) };
   if (dryRun) return result;
@@ -104,10 +121,11 @@ async function sweepUngeocodedServices({ limit = 25, now = new Date(), dryRun = 
         continue;
       }
       const address = ADDRESS_COLUMNS.map(column => row[column]).filter(Boolean).join(', ');
-      const { location, permanent } = await geocodeAddressWithStatus(address);
+      const reviewed = await review.reviewedServiceLocation(row, conn);
+      const { location, permanent } = reviewed || await geocodeAddressWithStatus(address);
       if (!location) {
         stop.reason = permanent ? 'service_address_unresolved' : 'geocode_temporarily_unavailable';
-        if (permanent) unresolved.set(row.id, fingerprint(row));
+        if (permanent && !reviewed) unresolved.set(row.id, fingerprint(row));
         result.unresolved += 1;
         continue;
       }

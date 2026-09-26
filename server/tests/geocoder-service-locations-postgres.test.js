@@ -21,10 +21,12 @@ jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jes
 jest.mock('../services/scheduling/quality-after-change', () => ({ refreshScheduleQualityAfterChange: jest.fn(async () => {}) }));
 
 const knex = require('knex');
+const { randomUUID } = require('node:crypto');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
 const { sweepUngeocodedServices } = require('../services/geocoder-service-locations');
+const reviewMigration = require('../models/migrations/20260926000030_customer_geocode_reviews');
 
 const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -40,7 +42,8 @@ const id = suffix => `33000000-0000-4000-8000-${String(suffix).padStart(12, '0')
 
 postgres('service-location geocoder against isolated PostgreSQL', () => {
   let database;
-  const gates = ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'];
+  const routeGates = ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'];
+  const gates = [...routeGates, 'GATE_GEOCODE_REVIEW'];
   const savedGates = Object.fromEntries(gates.map(gate => [gate, process.env[gate]]));
 
   async function insertCustomer(overrides = {}) {
@@ -85,6 +88,33 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
     });
   }
 
+  async function enableReviewGate() {
+    process.env.GATE_GEOCODE_REVIEW = 'true';
+    // Trigger functions cannot live in pg_temp. Copy just the customer fixture
+    // into a rollback-scoped schema, then run the real review migration there.
+    const schema = `service_review_${randomUUID().replaceAll('-', '')}`;
+    await mockConnection.raw('CREATE SCHEMA ??', [schema]);
+    await mockConnection.raw('CREATE TABLE ??.customers (LIKE pg_temp.customers INCLUDING ALL)', [schema]);
+    await mockConnection.raw('INSERT INTO ??.customers SELECT * FROM pg_temp.customers', [schema]);
+    await mockConnection.raw('ALTER TABLE ??.customers ADD PRIMARY KEY (id)', [schema]);
+    await mockConnection.raw('SET LOCAL search_path TO ??, pg_temp, public', [schema]);
+    await reviewMigration.up(mockConnection);
+  }
+
+  async function insertReview(status, overrides = {}) {
+    await mockConnection('customer_geocode_reviews').insert({
+      customer_id: CUSTOMER,
+      address_snapshot: JSON.stringify(['100 Primary Fixture Way', null, 'Bradenton', 'FL', '34205']),
+      status,
+      reason: status === 'verified' ? 'staff_verified' : 'fixture_review',
+      source: status === 'verified' ? 'site_visit' : null,
+      evidence: status === 'verified' ? 'Synthetic fixture evidence' : null,
+      latitude: status === 'verified' ? PIN.lat : null,
+      longitude: status === 'verified' ? PIN.lng : null,
+      ...overrides,
+    });
+  }
+
   beforeAll(() => {
     const url = new URL(connection);
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
@@ -105,7 +135,8 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    gates.forEach(gate => { process.env[gate] = 'true'; });
+    routeGates.forEach(gate => { process.env[gate] = 'true'; });
+    delete process.env.GATE_GEOCODE_REVIEW;
     geocodeAddressWithStatus.mockResolvedValue({ location: PIN, permanent: false });
     mockConnection = await database.transaction();
     for (const table of ['scheduled_services', 'customers', 'audit_log']) {
@@ -363,5 +394,128 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
     expect(await mockConnection('audit_log')).toHaveLength(0);
     expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
     expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
+  });
+
+  test('canonical review blocks are filtered in batches before limit without starving a secondary address', async () => {
+    const blockedPrimary = id(90);
+    const eligibleSecondary = id(91);
+    const reviewedAddress = ['100 Primary Fixture Street', null, 'Bradenton', 'FL', '34205'];
+    await mockConnection('customers').where({ id: CUSTOMER }).update({
+      address_line1: reviewedAddress[0], latitude: null, longitude: null,
+    });
+    await enableReviewGate();
+    await insertReview('needs_pin', {
+      address_snapshot: JSON.stringify(reviewedAddress),
+      reason: 'verification_revoked',
+    });
+    await insertService(blockedPrimary, {
+      service_address_line1: '100 Primary Fixture St',
+      service_address_zip: '34205-6789',
+    });
+    await insertService(eligibleSecondary, { service_address_line1: '291 Secondary Fixture Way' });
+
+    const result = await sweepUngeocodedServices({ limit: 1, now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 1, geocoded: 1, unresolved: 0, stale: 0, failed: 0 });
+    expect(result.stops).toEqual([{ id: eligibleSecondary, date: DAY, reason: 'coordinates_recovered' }]);
+    expect(geocodeAddressWithStatus).toHaveBeenCalledTimes(1);
+    expect(geocodeAddressWithStatus.mock.calls[0][0]).toContain('291 Secondary Fixture Way');
+    expect(await mockConnection('scheduled_services').where({ id: blockedPrimary }).first('lat', 'lng')).toEqual({ lat: null, lng: null });
+    const secondary = await mockConnection('scheduled_services').where({ id: eligibleSecondary }).first('lat', 'lng');
+    expect({ lat: Number(secondary.lat), lng: Number(secondary.lng) }).toEqual(PIN);
+  });
+
+  test('an equivalently spelled verified review pin is reused without a provider lookup', async () => {
+    const serviceId = id(92);
+    const reviewedAddress = ['100 Primary Fixture Street', 'Apartment 4', 'Bradenton', 'FL', '34205'];
+    await mockConnection('customers').where({ id: CUSTOMER }).update({
+      address_line1: reviewedAddress[0], address_line2: reviewedAddress[1], latitude: null, longitude: null,
+    });
+    await enableReviewGate();
+    await insertReview('verified', { address_snapshot: JSON.stringify(reviewedAddress) });
+    await insertService(serviceId, {
+      service_address_line1: '100 Primary Fixture St',
+      service_address_line2: 'Unit 4',
+      service_address_zip: '34205-6789',
+    });
+
+    const result = await sweepUngeocodedServices({ now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 1, geocoded: 1, unresolved: 0, stale: 0, failed: 0 });
+    expect(geocodeAddressWithStatus).not.toHaveBeenCalled();
+    const service = await mockConnection('scheduled_services').where({ id: serviceId }).first('lat', 'lng');
+    expect({ lat: Number(service.lat), lng: Number(service.lng) }).toEqual(PIN);
+    expect(await mockConnection('audit_log').where({ resource_id: serviceId }).first('metadata'))
+      .toMatchObject({ metadata: expect.objectContaining({ source: 'staff_verified_pin' }) });
+  });
+
+  test('a reviewed primary does not block appointments with a different unit or state', async () => {
+    const differentUnit = id(96);
+    const differentState = id(97);
+    const reviewedAddress = ['100 Primary Fixture Street', 'Apartment 4', 'Bradenton', 'FL', '34205'];
+    await mockConnection('customers').where({ id: CUSTOMER }).update({
+      address_line1: reviewedAddress[0], address_line2: reviewedAddress[1], latitude: null, longitude: null,
+    });
+    await enableReviewGate();
+    await insertReview('needs_pin', {
+      address_snapshot: JSON.stringify(reviewedAddress),
+      reason: 'verification_revoked',
+    });
+    await insertService(differentUnit, {
+      service_address_line1: '100 Primary Fixture St',
+      service_address_line2: 'Unit 5',
+    });
+    await insertService(differentState, {
+      service_address_line1: '100 Primary Fixture St',
+      service_address_line2: 'Unit 4',
+      service_address_state: 'GA',
+    });
+
+    const result = await sweepUngeocodedServices({ limit: 2, now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 2, geocoded: 2, unresolved: 0, stale: 0, failed: 0 });
+    expect(result.stops.map(stop => stop.id)).toEqual([differentUnit, differentState]);
+    expect(geocodeAddressWithStatus).toHaveBeenCalledTimes(2);
+    const services = await mockConnection('scheduled_services').whereIn('id', [differentUnit, differentState]).orderBy('id');
+    expect(services.map(service => ({ lat: Number(service.lat), lng: Number(service.lng) }))).toEqual([PIN, PIN]);
+  });
+
+  test.each([
+    ['revoked', 'needs_pin', id(93)],
+    ['withheld outside the service area', 'outside_area', id(94)],
+  ])('a review changed to %s during the provider request prevents the stale pin commit', async (_label, status, serviceId) => {
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ latitude: null, longitude: null });
+    await enableReviewGate();
+    await insertReview('geocoded');
+    await insertService(serviceId, { service_address_line1: '100 Primary Fixture Way' });
+    geocodeAddressWithStatus.mockImplementation(async () => {
+      await mockConnection('customer_geocode_reviews').where({ customer_id: CUSTOMER }).update({
+        status,
+        reason: status === 'needs_pin' ? 'verification_revoked' : 'staff_confirmed_outside_area',
+        updated_at: mockConnection.fn.now(),
+      });
+      return { location: PIN, permanent: false };
+    });
+
+    const result = await sweepUngeocodedServices({ now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 1, geocoded: 0, unresolved: 0, stale: 1, failed: 0 });
+    expect(result.stops).toEqual([{ id: serviceId, date: DAY, reason: 'appointment_changed' }]);
+    expect(geocodeAddressWithStatus).toHaveBeenCalledTimes(1);
+    expect(await mockConnection('scheduled_services').where({ id: serviceId }).first('lat', 'lng')).toEqual({ lat: null, lng: null });
+    expect(await mockConnection('audit_log').where({ resource_id: serviceId })).toHaveLength(0);
+  });
+
+  test('a disabled review gate preserves recovery without requiring the review relation', async () => {
+    const serviceId = id(95);
+    process.env.GATE_GEOCODE_REVIEW = 'false';
+    await insertService(serviceId, { service_address_line1: '295 Gate Off Fixture Way' });
+
+    const result = await sweepUngeocodedServices({ now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 1, geocoded: 1, unresolved: 0, stale: 0, failed: 0 });
+    expect(geocodeAddressWithStatus).toHaveBeenCalledTimes(1);
+    const service = await mockConnection('scheduled_services').where({ id: serviceId }).first('lat', 'lng');
+    expect({ lat: Number(service.lat), lng: Number(service.lng) }).toEqual(PIN);
   });
 });
