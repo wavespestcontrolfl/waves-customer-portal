@@ -235,6 +235,15 @@ describe('billing channel email authority', () => {
     expect(context.error).toMatchObject({ blocked: true, code: 'payer_billed' });
   });
 
+  test('an unreadable invoice remains retryable at the locked provider boundary', async () => {
+    selfPayAtDispatch
+      .mockImplementationOnce(() => async () => ({ ok: true }))
+      .mockImplementationOnce(() => async () => ({ ok: false, code: 'INVOICE_UNREADABLE' }));
+    const { state, dispatch } = await runAuthority({ invoiceId: 'inv-1' });
+    expect(state.boundaryBlock).toMatchObject({ code: 'INVOICE_UNREADABLE', retryable: true });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   test('rechecks invoice ownership while both handoff locks cover provider dispatch', async () => {
     let commsLocked = false;
     let invoiceLocked = false;
