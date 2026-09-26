@@ -95,13 +95,14 @@ function classifyPath(path) {
 // Cloudflare's navigation types (developers.cloudflare.com/web-analytics/
 // data-metrics/dimensions/#navigation-types). A fresh navigation is a link
 // click or form submit, whether the document came from the network, the HTTP
-// cache, the prefetch cache or a prerender; "unknown" is a browser that reports
+// cache, a prefetch (cached or not) or a prerender; "unknown" is a browser that reports
 // no type. Reloads, back/forward, bfcache restores and client-side route
 // changes (soft navigation / routing APIs: in-page jumps on this static site)
 // re-show or re-address a page and are not new page views.
 const COUNTED_NAVIGATION_TYPES = new Set([
   'navigate',
   'navigate-cache',
+  'navigate-prefetch',
   'navigate-prefetch-cache',
   'prerender',
   'unknown',

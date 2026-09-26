@@ -136,12 +136,15 @@ describe('summarize', () => {
       { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'navigate-cache', views: 3 },
       { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'prerender', views: 2 },
       { path: '/pest-control/b/', ...base, navigationType: 'navigate-prefetch-cache', views: 1 },
+      { path: '/pest-control-quote/', ...base, navigationType: 'navigate_prefetch', views: 1 },
       { path: '/contact/', ...base, navigationType: 'Navigate Cache', views: 1 },
     ]);
-    expect(s.totals).toEqual({ blogEntries: 5, blogViews: 6, onwardClicks: 2, onwardRate: 2 / 6 });
+    expect(s.totals).toEqual({ blogEntries: 5, blogViews: 6, onwardClicks: 3, onwardRate: 3 / 6 });
     expect(countsAsPageView('navigate')).toBe(true);
     expect(countsAsPageView('Navigate Prefetch Cache')).toBe(true);
     expect(countsAsPageView('navigate_cache')).toBe(true);
+    expect(countsAsPageView('navigate_prefetch')).toBe(true);
+    expect(countsAsPageView('Navigate Prefetch')).toBe(true);
     expect(countsAsPageView(undefined)).toBe(true);
     expect(countsAsPageView('reload-cache')).toBe(false);
     expect(countsAsPageView('soft-navigation')).toBe(false);
