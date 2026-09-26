@@ -492,7 +492,20 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // is a ratchet: ANY new dynamic mutation in the file (which could carry
     // `payload.status` or `column === 'status'` invisibly to a textual scan)
     // fails until the file is re-audited and the count updated.
-    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 9 };
+    // server/routes/property.js — audited 2026-09-26 (termite annual plan
+    // slice 6a: the new GET /termite-annual-plan route's plain
+    // `db('annual_prepay_terms')` read is the reason this file entered the
+    // TABLE-containing candidate set for the first time). The one "dynamic
+    // mutation" the scanner finds here is a false positive: an UNRELATED,
+    // pre-existing whereRaw's raw SQL alias `AS t(v))` (property_preferences
+    // irrigation-fields merge, ~line 430) textually matches the `t(v)`
+    // dynamic-call shape, and because that match sits inside a template
+    // string the scanner's depth-tracking loses its place and runs on past
+    // the actual statement, sweeping up the next real `.update(` it meets —
+    // `trx('property_preferences').update({...})`, a plain LITERAL-table
+    // write carrying no `status` key (confirmed). Nothing in this file ever
+    // mutates annual_prepay_terms.
+    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 9, 'server/routes/property.js': 1 };
 
     const writes = [];
     const unscannable = [];

@@ -10958,6 +10958,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // Active termite bond(s) (GATE_PORTAL_TERMITE_BOND). Fail-soft: no bond
   // or gate off simply renders no card.
   const [planStatus, setPlanStatus] = useState('loading');
+  // Termite annual plan renewal card (slice 6a, GATE_TERMITE_ANNUAL_PLAN +
+  // GATE_CANCEL_FLOW_V2). Fail-soft: no current term or gate off renders no
+  // card. { id, termEnd, prepayAmount, declined, canDecline } | null.
+  const [termiteAnnualPlan, setTermiteAnnualPlan] = useState(null);
 
   const loadPlan = useCallback(() => {
     setPlanStatus('loading');
@@ -10997,6 +11001,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
+    api.getTermiteAnnualPlan().then(d => setTermiteAnnualPlan(d?.available ? d.term : null)).catch(() => {});
   }, [loadPlan, cancelledAccount]);
 
   const serviceMatches = (svcId, service = {}) => {
@@ -11798,6 +11803,17 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
             </div>
           </section>
 
+          {termiteAnnualPlan && (
+            <TermiteAnnualRenewalCard
+              term={termiteAnnualPlan}
+              card={card}
+              sectionTitle={sectionTitle}
+              primaryButton={primaryButton}
+              secondaryButton={secondaryButton}
+              muted={muted}
+              onDeclined={(update) => setTermiteAnnualPlan((prev) => (prev ? { ...prev, ...update } : prev))}
+            />
+          )}
 
           {tier && tierIdx >= 2 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -11848,6 +11864,103 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
         />
       )}
     </div>
+  );
+}
+
+// Termite annual plan renewal card (My Plan tab, slice 6a). Dark behind
+// GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 (server resolves the gate;
+// this renders only when GET /property/termite-annual-plan answers
+// available:true — see the useEffect that sets termiteAnnualPlan above).
+// Agreement v3: "The customer may decline renewal at any time before the
+// renewal date online through their customer portal ... never only by
+// phone." Coverage through term_end is unaffected either way — the copy
+// says so before AND after confirming, and never signs off (no signature on
+// customer texts/copy rule).
+function TermiteAnnualRenewalCard({
+  term, card, sectionTitle, primaryButton, secondaryButton, muted, onDeclined,
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  if (!term) return null;
+
+  const termEndLabel = term.termEnd ? fmtDate(term.termEnd, { month: 'long', day: 'numeric', year: 'numeric' }) : 'your term end date';
+  const feeLabel = term.prepayAmount != null ? formatPortalMoney(term.prepayAmount) : null;
+
+  const handleDecline = async () => {
+    setSubmitting(true);
+    setError('');
+    try {
+      const result = await api.declineTermiteAnnualPlanRenewal();
+      onDeclined({
+        declined: true,
+        canDecline: false,
+        termEnd: result.termEnd || term.termEnd,
+        prepayAmount: result.prepayAmount != null ? result.prepayAmount : term.prepayAmount,
+      });
+      setConfirming(false);
+    } catch (err) {
+      setError(err?.message || 'Something went wrong. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section data-glass="card" style={{ ...card, padding: 20 }}>
+      <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
+      {term.declined ? (
+        <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+          Your plan will not renew. Coverage continues through {termEndLabel}.
+        </div>
+      ) : (
+        <>
+          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{termEndLabel}</div>
+          <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+            Renewal date{feeLabel ? ` · ${feeLabel} renewal fee` : ''}
+          </div>
+          {term.canDecline && (confirming ? (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                Your plan will not renew. Coverage continues through {termEndLabel}.
+              </div>
+              {error && (
+                <div role="alert" style={{ marginTop: 8, fontSize: 14, color: B.red }}>{error}</div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+                <button
+                  type="button"
+                  data-glass-accent=""
+                  onClick={() => { setConfirming(false); setError(''); }}
+                  disabled={submitting}
+                  style={{ ...secondaryButton, minHeight: 44 }}
+                >
+                  Never mind
+                </button>
+                <button
+                  type="button"
+                  data-glass-accent=""
+                  onClick={handleDecline}
+                  disabled={submitting}
+                  style={{ ...primaryButton, minHeight: 44 }}
+                >
+                  {submitting ? 'Saving…' : 'Confirm'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              data-glass-accent=""
+              onClick={() => setConfirming(true)}
+              style={{ ...secondaryButton, marginTop: 14, minHeight: 44 }}
+            >
+              Don’t renew my plan
+            </button>
+          ))}
+        </>
+      )}
+    </section>
   );
 }
 

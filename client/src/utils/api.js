@@ -781,6 +781,14 @@ export class ApiClient {
     return this.request('/property/termite-bond');
   }
 
+  getTermiteAnnualPlan() {
+    return this.request('/property/termite-annual-plan');
+  }
+
+  declineTermiteAnnualPlanRenewal() {
+    return this.request('/property/termite-annual-plan/decline', { method: 'POST' });
+  }
+
   updatePropertyPreferences(data) {
     return this.request('/property/preferences', {
       method: 'PUT',

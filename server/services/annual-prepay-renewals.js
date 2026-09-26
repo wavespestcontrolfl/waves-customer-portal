@@ -5678,7 +5678,7 @@ async function hasAnnualPrepayRenewal(customerId, termEnd) {
   return !!row;
 }
 
-async function recordDecision({ termId, action, adminUserId = null, notes = null } = {}) {
+async function recordDecision({ termId, action, adminUserId = null, notes = null, conn = db } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const allowed = new Set(['contacted', 'renew', 'cancel', 'switch_plan']);
   if (!allowed.has(action)) throw new Error('invalid annual prepay action');
@@ -5691,7 +5691,7 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
       updated_at: now,
     };
     if (notes) update.renewal_notes = notes;
-    const [term] = await db('annual_prepay_terms')
+    const [term] = await conn('annual_prepay_terms')
       .where({ id: termId })
       .whereIn('status', ACTIVE_STATUSES)
       .whereNull('renewal_decision')
@@ -5708,13 +5708,140 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
     updated_at: now,
   };
   if (notes) update.renewal_notes = notes;
-  const [term] = await db('annual_prepay_terms')
+  const [term] = await conn('annual_prepay_terms')
     .where({ id: termId })
     .whereIn('status', ACTIVE_STATUSES)
     .whereNull('renewal_decision')
     .update(update)
     .returning('*');
   return term || null;
+}
+
+// Slice 6a (termite annual plan, agreement v3 §-decline-online): let the
+// CUSTOMER decline renewal for their own termite annual term from the
+// portal — "The customer may decline renewal at any time before the
+// renewal date online through their customer portal ... never only by
+// phone." Dark behind termiteAnnualPlanSelectionEnabled() — the SAME
+// GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 pair the estimator's plan
+// selection reads (server/config/feature-gates.js: "also requires
+// GATE_CANCEL_FLOW_V2 for online nonrenewal"), so this online-decline path
+// can never go live independently of that ruling.
+//
+// Reuses recordDecision's own semantics (status -> 'cancelled',
+// renewal_decision -> 'cancel') — it does NOT end coverage early.
+// coveredTermsAsOf's decided-lapse branch (status 'cancelled' AND
+// renewal_decision set, ~line 2662) and the disputed-invoice decided-shape
+// branches (~3193, ~3437) already treat a cancel decision as riding out its
+// PAID window through term_end; this is the exact same state an admin's
+// "end at term" cancellation puts a term into (admin-cancellation.js
+// decideTermCancel). Nothing here touches coverage directly.
+//
+// Row lock: the eligible term is SELECT ... FOR UPDATE'd inside our own
+// transaction before recordDecision's own atomic
+// (status IN ACTIVE_STATUSES AND renewal_decision IS NULL) UPDATE runs, so
+// a concurrent decide (staff recording the same decision, or a second
+// portal tab) can't race past the eligibility checks below (customer
+// ownership, term_end, "already decided") that recordDecision itself
+// doesn't know how to make.
+//
+// Idempotent: a repeat call against an already-declined term (status
+// 'cancelled', renewal_decision 'cancel') returns the SAME success shape
+// (alreadyDeclined: true) instead of erroring.
+const CUSTOMER_DECLINE_RENEWAL_NOTE = 'Customer declined renewal online via the customer portal.';
+const CUSTOMER_DECLINE_ACTIVITY_ACTION = 'termite_annual_renewal_declined';
+
+function declineResultFromRow(term, { alreadyDeclined }) {
+  return {
+    ok: true,
+    termId: term.id,
+    termEnd: dateOnly(term.term_end),
+    prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+    alreadyDeclined,
+  };
+}
+
+async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
+  try {
+    const NotificationService = require('./notification-service');
+    const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name').catch(() => null);
+    const name = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null;
+    await NotificationService.notifyAdmin(
+      'estimate',
+      'Termite annual plan — renewal declined online',
+      `${name || 'A customer'} declined renewal for their termite annual plan through the customer portal. Coverage continues through ${formatDateLabel(result.termEnd)} — no action needed unless they reach out.`,
+      {
+        icon: '📋',
+        link: `/admin/customers/${customerId}`,
+        bell: true,
+        dedupeKey: `termite-annual-renewal-decline:${result.termId}`,
+        metadata: { customerId, termId: result.termId, termEnd: result.termEnd, source: 'customer_portal' },
+        trx: conn,
+      },
+    );
+  } catch (bellErr) {
+    logger.error(`[annual-prepay] renewal-decline bell failed for term ${result.termId}: ${bellErr.message}`);
+  }
+}
+
+async function declineTermiteAnnualRenewal({ customerId, termId = null, today = etDateString(), conn = db } = {}) {
+  if (!customerId) return { ok: false, reason: 'missing_customer' };
+  const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+  if (!termiteAnnualPlanSelectionEnabled()) return { ok: false, reason: 'disabled' };
+  if (!(await annualPrepayTableExists())) return { ok: false, reason: 'disabled' };
+
+  const work = async (trx) => {
+    const term = await trx('annual_prepay_terms')
+      .where({ customer_id: customerId })
+      .whereNotNull('annual_plan_version')
+      .modify((q) => { if (termId) q.where({ id: termId }); })
+      .orderBy('term_end', 'asc')
+      .forUpdate()
+      .first('*');
+    if (!term) return { ok: false, reason: termId ? 'not_found' : 'no_term' };
+
+    const termEnd = dateOnly(term.term_end);
+    if (!termEnd || termEnd < today) {
+      return { ok: false, reason: 'term_ended', termId: term.id, termEnd };
+    }
+    if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
+      return declineResultFromRow(term, { alreadyDeclined: true });
+    }
+    if (term.renewal_decision) {
+      return { ok: false, reason: 'already_decided', decision: term.renewal_decision, termId: term.id };
+    }
+    if (!ACTIVE_STATUSES.includes(term.status)) {
+      return { ok: false, reason: 'not_active', status: term.status, termId: term.id };
+    }
+
+    const decided = await recordDecision({
+      termId: term.id, action: 'cancel', notes: CUSTOMER_DECLINE_RENEWAL_NOTE, conn: trx,
+    });
+    if (!decided) {
+      // recordDecision's own guard (status IN ACTIVE_STATUSES AND
+      // renewal_decision IS NULL) didn't match despite our lock — re-read
+      // for the idempotent shape rather than report a false failure.
+      const reread = await trx('annual_prepay_terms').where({ id: term.id }).first('*');
+      if (reread && reread.status === 'cancelled' && reread.renewal_decision === 'cancel') {
+        return declineResultFromRow(reread, { alreadyDeclined: true });
+      }
+      return { ok: false, reason: 'conflict', termId: term.id };
+    }
+
+    await trx('activity_log').insert({
+      customer_id: customerId,
+      action: CUSTOMER_DECLINE_ACTIVITY_ACTION,
+      description: `Declined renewal online through the customer portal. Coverage continues through ${dateOnly(decided.term_end)}.`,
+      metadata: {
+        term_id: decided.id, source: 'customer_portal', decided_at: new Date().toISOString(),
+      },
+    });
+
+    return declineResultFromRow(decided, { alreadyDeclined: false });
+  };
+
+  const result = conn === db ? await db.transaction((trx) => work(trx)) : await work(conn);
+  if (result.ok) await ringTermiteAnnualDeclineBell(result, customerId, conn);
+  return result;
 }
 
 module.exports = {
@@ -5756,6 +5883,7 @@ module.exports = {
   coveredTermsAsOf,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
+  declineTermiteAnnualRenewal,
   // Root exports (not only _private): the annual-prepay-invoice route
   // validates the operator's first-visit time with the SAME normalizer that
   // persists it and the SAME conflict predicate the seeder re-checks with, so

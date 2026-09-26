@@ -608,7 +608,7 @@ router.get('/station-map', async (req, res, next) => {
 // termite_bonds.started_at / renews_at are ET business-calendar DATEs;
 // dateOnlyString handles the pg string/UTC-midnight-Date duality and
 // returns null on anything malformed (never throws — fail-soft).
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 const { activeTermiteBondsForCustomer, TERMITE_BOND_GATE } = require('../services/termite-bonds');
 
 router.get('/termite-bond', async (req, res, next) => {
@@ -624,6 +624,85 @@ router.get('/termite-bond', async (req, res, next) => {
       return res.json({ available: false, reason: 'no_bond', bonds: [] });
     }
     return res.json({ available: true, bonds });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/property/termite-annual-plan — the authenticated customer's own
+// CURRENT termite annual plan term (My Plan tab renewal card): renewal date
+// (term_end), renewal fee (prepay_amount), and whether a decline is already
+// on file. Dark behind termiteAnnualPlanSelectionEnabled() — the SAME
+// GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 pair
+// declineTermiteAnnualRenewal itself re-checks at write time (feature-gates.js:
+// "also requires GATE_CANCEL_FLOW_V2 for online nonrenewal") — gate-off and
+// no-term both answer 200 {available:false}; the client renders nothing.
+// Read-only: no row lock, no write. "Current" mirrors the service's own
+// resolution (annual_plan_version IS NOT NULL, soonest term_end >= today).
+const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
+const { declineTermiteAnnualRenewal } = require('../services/annual-prepay-renewals');
+
+router.get('/termite-annual-plan', async (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    if (!termiteAnnualPlanSelectionEnabled()) {
+      return res.json({ available: false, reason: 'disabled' });
+    }
+    const today = etDateString();
+    const term = await db('annual_prepay_terms')
+      .where({ customer_id: req.customerId })
+      .whereNotNull('annual_plan_version')
+      .where('term_end', '>=', today)
+      .orderBy('term_end', 'asc')
+      .first('id', 'term_end', 'prepay_amount', 'status', 'renewal_decision');
+    if (!term) {
+      return res.json({ available: false, reason: 'no_term' });
+    }
+    const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
+    return res.json({
+      available: true,
+      term: {
+        id: term.id,
+        termEnd: dateOnlyString(term.term_end),
+        prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+        declined,
+        // A conflicting decision (renew/switch_plan) already on file means
+        // the "Don't renew" control has nothing to do — hide it rather than
+        // offer a decline the service will only refuse.
+        canDecline: !term.renewal_decision,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/property/termite-annual-plan/decline — records the customer's
+// own online decision NOT to renew (agreement v3: "may decline renewal at
+// any time before the renewal date online through their customer portal —
+// the same way this agreement was accepted"). Coverage through term_end is
+// untouched — see declineTermiteAnnualRenewal. Idempotent: a repeat call
+// on an already-declined term answers 200 with the same shape.
+const DECLINE_REFUSAL_MESSAGES = {
+  disabled: 'This feature is not available right now.',
+  no_term: 'No termite annual plan was found on your account.',
+  not_found: 'No termite annual plan was found on your account.',
+  term_ended: 'This plan’s renewal window has already passed.',
+  already_decided: 'A renewal decision is already on file for this plan.',
+  not_active: 'This plan is not currently eligible to decline renewal.',
+  conflict: 'Something changed while we were saving this. Please refresh and try again.',
+};
+
+router.post('/termite-annual-plan/decline', async (req, res, next) => {
+  try {
+    const result = await declineTermiteAnnualRenewal({ customerId: req.customerId });
+    if (!result.ok) {
+      const status = (result.reason === 'disabled' || result.reason === 'no_term' || result.reason === 'not_found') ? 404 : 409;
+      const error = DECLINE_REFUSAL_MESSAGES[result.reason] || 'This request could not be completed.';
+      return res.status(status).json({ available: false, error, ...result });
+    }
+    return res.json({ available: true, ...result });
   } catch (err) {
     next(err);
   }
