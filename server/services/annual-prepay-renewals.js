@@ -5831,6 +5831,12 @@ function sendTermNoticeSms({
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'annual_prepay_renewal',
     consentBasis,
+    // A termite notice is a billing-purpose send, which activates explicit
+    // billing-channel fan-out: declare that this notice's own termite email
+    // sender owns the email leg, so an email-selected customer never gets a
+    // second, generic billing email (untracked by acceptance recovery). An
+    // email-only selection returns CHANNEL_EMAIL_ONLY → the email leg sends.
+    ...(termiteRung ? { hasEmailLeg: true } : {}),
     metadata: {
       original_message_type: smsTemplateKey,
       annual_prepay_term_id: term.id,

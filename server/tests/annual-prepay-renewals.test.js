@@ -2479,6 +2479,22 @@ describe('annual prepay renewal helpers', () => {
         .resolves.toMatchObject({ ok: false, code: 'NO_MARKETING_CONSENT' });
     });
 
+    test('the termite notice declares its own email leg, so billing-channel routing never sends a second, generic billing email', async () => {
+      const input = await captureTermiteSmsInput();
+      expect(input.hasEmailLeg).toBe(true);
+      const { dispatchBillingChannels, billingDeliveryCategory } = jest.requireActual('../services/messaging/billing-channel-routing');
+      const category = billingDeliveryCategory(input);
+      const sendLeg = jest.fn(async (leg) => ({ sent: true, deliveryOutcome: 'accepted', channel: leg }));
+      // Email-only selection: the router hands the email back to this
+      // notice's own termite email sender (CHANNEL_EMAIL_ONLY), sending nothing.
+      const emailOnly = await dispatchBillingChannels(input, { [`${category}_channels`]: ['email'] }, sendLeg);
+      expect(emailOnly).toMatchObject({ sent: false, code: 'CHANNEL_EMAIL_ONLY' });
+      // Email + text: only the text leg is dispatched — never a router email.
+      sendLeg.mockClear();
+      await dispatchBillingChannels(input, { [`${category}_channels`]: ['email', 'sms'] }, sendLeg);
+      expect(sendLeg.mock.calls.map((c) => c[0])).not.toContain('email');
+    });
+
     test('a STOP\'d number is still blocked — by the sms_enabled master switch and by the suppression list', async () => {
       const input = await captureTermiteSmsInput();
       await expect(runValidators(input, { ...NO_SEASONAL, sms_enabled: false }))
