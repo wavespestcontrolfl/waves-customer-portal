@@ -4246,17 +4246,27 @@ describe('annual prepay renewal helpers', () => {
   // path until a restart.
   // Codex #4921 r8 P1: a SUCCESSFUL but INCOMPLETE probe (mid rolling
   // deploy — the termite notice migrations not yet run) is not cached either.
-  test('annualPrepayColumns never caches a successful but INCOMPLETE probe (missing termite notice columns); the next call re-probes', async () => {
+  test('annualPrepayColumns caches an INCOMPLETE probe only briefly (hot paths stay cached); after the TTL it re-probes and then caches the complete set for good', async () => {
     const partial = { ...TERMITE_READY_COLS };
     delete partial.notice_30_late_sent_at;
     const partialProbe = query({ columnInfo: partial });
     const completeProbe = query({ columnInfo: TERMITE_READY_COLS });
     setDbQueues({ annual_prepay_terms: [partialProbe, completeProbe] });
-
-    await expect(_private.annualPrepayColumns()).resolves.toBe(partial);
-    await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS); // re-probed
-    await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS); // now cached
-    expect(completeProbe.columnInfo).toHaveBeenCalledTimes(1);
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      await expect(_private.annualPrepayColumns()).resolves.toBe(partial);
+      await expect(_private.annualPrepayColumns()).resolves.toBe(partial); // cached within the TTL
+      expect(partialProbe.columnInfo).toHaveBeenCalledTimes(1);
+      now += 61 * 1000;
+      await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS); // re-probed after TTL
+      now += 24 * 60 * 60 * 1000;
+      await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS); // complete → cached for good
+      expect(completeProbe.columnInfo).toHaveBeenCalledTimes(1);
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   test('annualPrepayColumns never caches a failed or empty probe; the next call re-probes and caches the real columns', async () => {

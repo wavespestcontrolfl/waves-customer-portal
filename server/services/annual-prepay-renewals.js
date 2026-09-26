@@ -124,6 +124,7 @@ async function annualPrepayTableExists() {
 function resetCachesForTests() {
   tableExistsCache = null;
   termColsCache = null;
+  termColsCacheExpiresAt = 0;
   scheduledColsCache = null;
   invoiceColsCache = null;
   cancelDispositionColumnKnown = false;
@@ -160,8 +161,13 @@ async function scheduledServiceColumns() {
 // empty probe now returns {} for THIS call only — every caller already
 // treats a missing column as "skip the column-gated branch" — and the next
 // call probes again.
+// An incomplete (mid-rollout) probe is cached briefly, not forever: every
+// caller of this shared probe keeps its cache on hot paths, and the termite
+// notice columns are re-checked at most once per INCOMPLETE_PROBE_TTL_MS.
+const INCOMPLETE_PROBE_TTL_MS = 60 * 1000;
+let termColsCacheExpiresAt = 0;
 async function annualPrepayColumns(conn = db) {
-  if (conn === db && termColsCache) return termColsCache;
+  if (conn === db && termColsCache && (!termColsCacheExpiresAt || Date.now() < termColsCacheExpiresAt)) return termColsCache;
   let cols = {};
   try {
     cols = (await conn('annual_prepay_terms').columnInfo()) || {};
@@ -172,7 +178,10 @@ async function annualPrepayColumns(conn = db) {
   // Codex #4921 r8 P1: a SUCCESSFUL but INCOMPLETE probe (mid rolling
   // deploy, before the termite notice migrations land) is not cached either
   // — caching it would keep termiteNoticeColumnsReady false until a restart.
-  if (conn === db && termiteNoticeSchemaComplete(cols)) termColsCache = cols;
+  if (conn === db && Object.keys(cols).length) {
+    termColsCache = cols;
+    termColsCacheExpiresAt = termiteNoticeSchemaComplete(cols) ? 0 : Date.now() + INCOMPLETE_PROBE_TTL_MS;
+  }
   return cols;
 }
 
