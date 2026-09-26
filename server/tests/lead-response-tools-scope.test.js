@@ -21,6 +21,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
 jest.mock('../services/lead-auto-reply', () => ({
   claimLeadFirstTouch: async (phone) => ({ claimed: true, phoneDigits: String(phone).slice(-10) }),
   resolveLeadAutoReplyClaim: async () => {},
+  isDeliveredSms: (result) => result?.sent === true && /^(SM|MM)/.test(String(result.providerMessageId || '')),
 }));
 const mockState = {};
 const mockDb = jest.fn(table => {

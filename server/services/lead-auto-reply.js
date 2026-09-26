@@ -223,6 +223,13 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
 // any error (including inside hasPriorLeadAutoReply, which already fails
 // closed to "already sent") reports claimed:false, so the caller never
 // appends the opt-out line or stamps a claim it can't be sure it won.
+// A text actually reached the carrier: sent AND a real Twilio SM/MM sid.
+// Success-shaped sentinels (template disabled, gate, owner silence) report
+// sent:true with a placeholder id and reached nobody.
+function isDeliveredSms(result) {
+  return result?.sent === true && REAL_TWILIO_SID_RE.test(String(result.providerMessageId || ''));
+}
+
 async function claimLeadFirstTouch(phone, customerId, dbc = db) {
   // The messaging layer's own recipient normalizer: '(941) 555-0100' and
   // '+19415550100' reach the same handset, so they must hit the same claim
@@ -251,4 +258,5 @@ module.exports = {
   resolveLeadAutoReplyClaim,
   sendLeadAutoReplyOnce,
   claimLeadFirstTouch,
+  isDeliveredSms,
 };

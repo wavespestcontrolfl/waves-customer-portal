@@ -25,6 +25,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/lead-auto-reply', () => ({
   claimLeadFirstTouch: (...args) => mockClaim(...args),
   resolveLeadAutoReplyClaim: (...args) => mockResolveClaim(...args),
+  isDeliveredSms: (result) => result?.sent === true && /^(SM|MM)/.test(String(result.providerMessageId || '')),
 }));
 jest.mock('../services/pipeline-manager', () => ({ onEvent: (...args) => mockPipeline(...args) }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: (...args) => mockBridge(...args) }));
@@ -105,6 +106,17 @@ test('a phone that already had its one automated text (claim not won) gets NO se
   expect(mockMessage).not.toHaveBeenCalled();
   expect(mockResolveClaim).not.toHaveBeenCalled();
   expect(result).toMatchObject({ sent: false, blocked: true, code: 'FIRST_TOUCH_ALREADY_SENT' });
+});
+
+test('a success-shaped sentinel (template disabled) is NOT a delivered text — not auto_sent, claim settled on the raw result', async () => {
+  mockClaim.mockResolvedValue({ claimed: true, phoneDigits: '9415550100' });
+  const sentinel = { sent: true, providerMessageId: 'template-disabled', auditLogId: 'audit-2' };
+  mockMessage.mockResolvedValue(sentinel);
+
+  const result = await executeLeadTool('send_lead_response', { message: 'Hi there.' }, context);
+
+  expect(mockResolveClaim).toHaveBeenCalledWith('9415550100', sentinel);
+  expect(result).toMatchObject({ sent: false, blocked: true, code: 'NOT_DELIVERED' });
 });
 
 test('a blocked send still settles (releases) the first-touch claim', async () => {

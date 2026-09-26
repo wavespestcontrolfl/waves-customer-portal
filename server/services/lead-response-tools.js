@@ -280,7 +280,7 @@ async function executeLeadTool(toolName, input, context) {
       // (an earlier automated reply, a concurrent run, a repeated call, or a
       // dedup lookup that could not be read — fail closed) means NO send:
       // the lead goes to the owner instead.
-      const { claimLeadFirstTouch, resolveLeadAutoReplyClaim } = require('./lead-auto-reply');
+      const { claimLeadFirstTouch, resolveLeadAutoReplyClaim, isDeliveredSms } = require('./lead-auto-reply');
       const firstTouch = await claimLeadFirstTouch(customer.phone, customer.id);
       if (!firstTouch.claimed) {
         return {
@@ -306,7 +306,7 @@ async function executeLeadTool(toolName, input, context) {
       // Canonical preparation runs without a pinned transaction. The provider
       // invokes this local guard around only the actual SDK request, then
       // releases its locks before global-database audit and bookkeeping.
-      const result = await sendCustomerMessage({
+      const sendResult = await sendCustomerMessage({
         to: customer.phone,
         body: messageBody,
         channel: 'sms',
@@ -335,7 +335,14 @@ async function executeLeadTool(toolName, input, context) {
         return err.providerOutcome;
       });
 
-      await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, result);
+      await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, sendResult);
+      // A success-shaped sentinel (template disabled, gate, owner silence)
+      // reached nobody: record it as a block, so the lead is not marked
+      // contacted, the agent does not report auto_sent, and the standard
+      // reply can still go out (the claim was released just above).
+      const result = sendResult.sent && !isDeliveredSms(sendResult)
+        ? { ...sendResult, sent: false, blocked: true, code: sendResult.code || 'NOT_DELIVERED' }
+        : sendResult;
 
       // No quiet-hours requeue: lead_response_auto_reply is a
       // customer-action entry point (owner ruling 2026-08-29) — the agent
