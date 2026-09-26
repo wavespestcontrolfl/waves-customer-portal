@@ -60,8 +60,12 @@ one. Merge gates are unchanged until then.
 
   ```sh
   ls .env server/.env 2>/dev/null
-  env | grep -E '^(DATABASE_URL|GATE_[A-Z0-9_]+|[A-Z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|AUTH)[A-Z0-9_]*)=' | cut -d= -f1
+  env | grep -E '^(DATABASE_[A-Z_]*|POSTGRES_[A-Z_]*|PG[A-Z]*|GATE_[A-Z0-9_]+|RAILWAY_[A-Z_]*|JWT_SECRET|(STRIPE|TWILIO|SENDGRID|RESEND|ANTHROPIC|OPENAI|GEMINI|GOOGLE|ELEVENLABS|AWS|SENTRY|BOUNCIE|PERPLEXITY)_[A-Z0-9_]*)=' | cut -d= -f1
   ```
+
+  The pattern names the app's own configuration families, so ordinary
+  session variables such as `SSH_AUTH_SOCK` or an agent's own token do not
+  trip it.
 - Only a verified dev/preview cluster, per `docs/development.md` §Dev
   database. Never production.
 - Never a real customer's record (CLAUDE.md rule 13) and never a customer
