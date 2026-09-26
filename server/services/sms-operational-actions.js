@@ -176,10 +176,14 @@ const STATED_TIMING = new RegExp([
 // The other introducers always take their first word ("about tomorrow's
 // visit").
 const TOPIC_STOP = String.raw`(?!${TRAILING_TIMING_START}|${STATED_TIMING.source})`;
-const FROM_START_DATE = String.raw`(?![^,.;!?]*?\b(?:on|onwards?|forward|until|till|through|thru)\b)`;
+// The marker must directly follow the start expression (at most three
+// words in): "the service that happened on Friday" is a source (r46).
+const FROM_START_DATE = String.raw`(?!(?:[^\s,.;!?]+\s+){1,3}(?:on|onwards?|forward|until|till|through|thru)\b)`;
 const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b`
   + String.raw`(?:(?:about|regarding|concerning|re:|in regards? to|with regards? to)\s+|from\s+${FROM_START_DATE})`
-  + String.raw`[^\s,.;!?]+(?:\s+${TOPIC_STOP}[^\s,.;!?]+)*`, 'gi');
+  // A relative clause ("the service that happened on Friday") describes the
+  // topic, so it runs to the clause end, its dates included (r46).
+  + String.raw`[^\s,.;!?]+(?:\s+(?:(?:that|which|who|where)\s[^,.;!?]*|${TOPIC_STOP}[^\s,.;!?]+))*`, 'gi');
 function withoutTopics(quote) {
   return String(quote || '').replace(TOPIC_CLAUSE, ' ');
 }

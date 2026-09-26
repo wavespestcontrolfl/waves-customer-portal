@@ -10,7 +10,7 @@ jest.mock('../utils/pan-scrub', () => {
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
-const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence } = require('../services/sms-operational-extractor');
+const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence, statesClock } = require('../services/sms-operational-extractor');
 const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
@@ -745,6 +745,13 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     },
   );
 
+  test.each(['Please call me at 3:00pm', 'Call at 3:00 p.m.', 'Call at 9:30am', 'Call at 9:30'])(
+    'Codex #4816 r46: a minute clock with or without a meridiem is a stated clock (%s)', (quote) => {
+      expect(statesClock(quote)).toBe(true);
+      const item = { party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, timing_unverified: true, quote };
+      expect(resolveDueDeadline(item, at)).toEqual({ due_at: null, due_basis: null });
+    });
+
   test('Codex #4816 r31: an unresolved clock suppresses the default only for the obligation whose quote states it', () => {
     const item = (quote) => ({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, timing_unverified: true, quote });
     // "Call me at 3 and send the estimate": the flag covers the whole SMS.
@@ -771,7 +778,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     "Please call me about this month's invoice", "Call me about tomorrow's appointment", "Can someone call about Friday's visit?",
     "Call me about next week's service", 'Please call me about my next visit', 'Can you call regarding the next appointment?',
     'Call me about tomorrow and the treatment plan', 'Please send me the report from this morning',
-    "Send the photos from Friday's visit", 'Can you call to discuss the next appointment?', 'Please call, the next visit needs a gate code'])(
+    "Send the photos from Friday's visit", 'Can you call to discuss the next appointment?', 'Please call, the next visit needs a gate code',
+    'Please send me the report from the service that happened on Friday', 'Call me about the treatment that was done on Monday'])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
         .toBe('default_kind');

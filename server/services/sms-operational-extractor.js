@@ -200,7 +200,7 @@ function hasClockRange(body) {
 // A clock the source states: "3pm", "9:30", "noon", or a bare hour after a
 // clock preposition ("tomorrow at 9", "before five"). Shared with the SMS
 // deadline defaults so both read clock timing the same way.
-const CLOCK_TOKEN = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;–-]|$)/gi;
+const CLOCK_TOKEN = /\b(?:\d{1,2}:\d{2}(?:\s*[ap]\.?m\.?)?|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;–-]|$)/gi;
 // A bare hour, digits or spelled, counts only when nothing or a time word
 // follows it: "at one of these numbers" or "at 3 different numbers" is not
 // a clock (Codex #4816 r35, r36).

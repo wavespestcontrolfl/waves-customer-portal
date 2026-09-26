@@ -553,8 +553,21 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
               .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); });
           })
           .first('id');
-        // A scheduled send's queue row is its durable proof (settled below).
-        if (!existing && !scheduledSmsLogId) await db('sms_log').insert(proofRow({ push_notification_id: notificationId }));
+        // The proof must state what was delivered: the stored notification
+        // is the accepted payload. A retry whose body or visit differs from
+        // it (template or appointment changed since) repairs nothing
+        // (Codex #4816 r46). A scheduled send's queue row is its own proof.
+        const delivered = appNotification;
+        const deliveredMeta = typeof delivered.metadata === 'string'
+          ? (() => { try { return JSON.parse(delivered.metadata); } catch { return {}; } })()
+          : (delivered.metadata || {});
+        const samePayload = delivered.body === body
+          && String(deliveredMeta.appointmentId || '') === String(appointmentId || '');
+        if (!existing && !scheduledSmsLogId && samePayload) {
+          await db('sms_log').insert(proofRow({ push_notification_id: notificationId }));
+        } else if (!existing && !samePayload) {
+          logger.warn(`[push-routing] proof repair skipped for notification ${notificationId}: retry payload differs from the delivered notice`);
+        }
       } catch (repairErr) {
         logger.warn(`[push-routing] proof repair failed: ${repairErr.message}`);
       }

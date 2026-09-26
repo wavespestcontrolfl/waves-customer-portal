@@ -974,6 +974,24 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
   });
 
+  test('Codex #4816 r46: a retry whose payload differs from the delivered notice repairs nothing', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-5', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:payload` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    // The template changed since delivery: the proof must not claim text the customer never got.
+    expect(await routing.attemptPushFirst({ ...notice, body: 'Reminder: your invoice is still open.' })).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(0);
+    // The same payload as delivered does repair.
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect((await mockPg('sms_log').where({ from_phone: 'push' })).map((r) => r.message_body)).toEqual(['Your invoice is ready.']);
+  });
+
   test('Codex #4816 r45: another push of the same type near acceptance does not stand in for a missing proof', async () => {
     await device();
     await put({ invoiceChannel: 'push' });
