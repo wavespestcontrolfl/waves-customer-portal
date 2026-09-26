@@ -263,7 +263,9 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
         customer_id: customer.id,
         direction: 'outbound',
         from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-        to_phone: customer.phone,
+        // sms_log.to_phone is NOT NULL; a phone-less hold uses the blank-phone
+        // convention (billing-retry-email.js) and replays via replayWithoutPhone.
+        to_phone: customer.phone || '',
         message_body: body,
         status: 'scheduled',
         scheduled_for: new Date(result.nextAllowedAt),

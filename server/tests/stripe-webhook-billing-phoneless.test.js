@@ -17,7 +17,7 @@
  *    identityTrustLevel asserted explicitly, no billingDeliveryCategory
  *    stamp added to the metadata the caller sees — the pre-existing shape);
  *  - a phone-less HOLD (REPLAY_HOLD_CODES) queues an sms_log row with
- *    requires_registered_dispatch: true and to_phone: null; a phone-bearing
+ *    requires_registered_dispatch: true and a blank to_phone (NOT NULL column); a phone-bearing
  *    hold queues a row WITHOUT that stamp and with the real to_phone,
  *    exactly as before;
  *  - the three call sites (ACH failure, requires_action, setup_intent
@@ -186,7 +186,7 @@ describe('sendBillingSms — held-notice queueing (REPLAY_HOLD_CODES)', () => {
   const heldResult = { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true,
     nextAllowedAt: '2026-09-27T13:00:00.000Z' };
 
-  test('a phone-less hold queues requires_registered_dispatch: true with to_phone null', async () => {
+  test('a phone-less hold queues requires_registered_dispatch: true with a blank (never null) to_phone', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ ...heldResult });
     const result = await sendBillingSms(
       { id: 'cust-1', phone: null, first_name: 'Pat' },
@@ -196,7 +196,7 @@ describe('sendBillingSms — held-notice queueing (REPLAY_HOLD_CODES)', () => {
     expect(result.scheduled).toBe(true);
     expect(mockState.smsLogInserts).toHaveLength(1);
     const row = mockState.smsLogInserts[0];
-    expect(row.to_phone).toBeFalsy();
+    expect(row.to_phone).toBe(''); // sms_log.to_phone is NOT NULL
     expect(row.customer_id).toBe('cust-1');
     const meta = JSON.parse(row.metadata);
     expect(meta.requires_registered_dispatch).toBe(true);
