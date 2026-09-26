@@ -110,11 +110,17 @@ async function recordLegOutcome(entry, channel, result, results) {
 // Each selected method owns a keyed reservation before provider handoff.
 // Completed methods never re-enter a provider; a reused ambiguous reservation
 // is held, while a confirmed failed attempt can claim a retry atomically.
-// offLedgerBalanceCents: debt the ledger does not hold (e.g. late monthly dues
+// The debts a reservation covers: an aggregate reminder (invoiceId null)
+// passes the invoices it quotes as invoiceIds.
+function ledgerInvoiceIds(invoiceId, invoiceIds) {
+  return invoiceIds?.length ? invoiceIds : [invoiceId];
+}
+
+// offLedgerBalanceCents (rail-guard defaults it to 0): debt the ledger does not hold (e.g. late monthly dues
 // on the previsit reminder) that the producer's own policy check counted; the
 // per-leg recheck must count it too or a dues-only reminder reads as no debt.
 async function sendReminderChannels({
-  customerId, invoiceId, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents = 0,
+  customerId, invoiceId, invoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents,
 }) {
   const progress = await reminderProgress(customerId, source, channels);
   const existing = progress.find((event) => event.metadata.notificationEventKey === eventKey);
@@ -137,7 +143,7 @@ async function sendReminderChannels({
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
     const entry = await ContactLedger.recordContact({
-      customerId, channel, purpose, invoiceIds: [invoiceId], source,
+      customerId, channel, purpose, invoiceIds: ledgerInvoiceIds(invoiceId, invoiceIds), source,
       idempotencyKey: `billing-reminder:${digest}:${channel}`,
       metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels,
         ...(waived.size ? { policy_waived_channels: [...waived] } : {}) },
