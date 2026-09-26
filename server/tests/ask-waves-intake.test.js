@@ -298,6 +298,20 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(intakeSafetyClaimSupplement('Puede volver a entrar al portal en dos horas.', '¿Cuándo puedo entrar al portal?')).toBe(false);
   });
 
+  test('a scheduling word elsewhere in the reply does not exempt a re-entry duration', () => {
+    expect(intakeSafetyClaimSupplement('Your technician says you can use the lawn after 30 minutes.', 'Can I let my dog on the grass after treatment?')).toBe(true);
+    expect(intakeSafetyClaimSupplement('Your technician arrives in a 2 hour window.', 'When will the tech arrive for my treatment?')).toBe(false);
+  });
+
+  test('hospital direction keeps the emergency script', () => {
+    const out = scrubUnsafeClaims({
+      reply: 'This product is not safe to ingest. Go to the hospital immediately.',
+      intent: 'question', service_keys: [], ready_for_quote: true, source: 'openai',
+    });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.intent).toBe('emergency');
+  });
+
   test('the reviewed price redirect survives the safety scrub (its "20 seconds" is not a re-entry time)', () => {
     const out = normalizeIntakeResult(
       { reply: 'Pest control is $45 a month and totally safe.', intent: 'quote', service_keys: ['pest'], ready_for_quote: false },

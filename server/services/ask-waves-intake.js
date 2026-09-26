@@ -304,9 +304,27 @@ const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|
 // A visit / scheduling duration ("The visit takes about 45 minutes", "every
 // 21 days") — exempt only when no drying or re-entry wording is present.
 const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|technicians?|tech|inspections?|on[-\s]?site|takes?|took|lasts?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|t[eé]cnicos?|inspecci[oó]n|dura(?:n|r)?|cada|programad\w*)\b/i;
-const DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|re-?occup\w*|occup\w*|re-?ocup\w*|ocupa\w*|keep|kept|stay\w*|wait\w*|avoid\w*|before\s+(?:letting|walking|going|allowing|touching)|return\w*|back\s+in(?:side|doors)?|go(?:ing)?\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\S+\s+(?:out|in|back)|walk\w*|play\w*|touch\w*|contact\w*|access\w*|resume\w*|normal\s+(?:use|activit\w*)|until|rainfast|rain\w*|water(?:ing|ed)?|sec[oa]s?|seca(?:r|rse|do|da)?|volver|regres\w*|entrar|reingres\w*|salir|re-?entrada|esper\w*|evit\w*|mant[eé]n\w*|fuera|lejos|hasta|lluvia|regar|rieg\w*|toc\w*|acceso)\b/i;
+const DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|re-?occup\w*|occup\w*|re-?ocup\w*|ocupa\w*|keep|kept|stay\w*|wait\w*|avoid\w*|before\s+(?:letting|walking|going|allowing|touching)|return\w*|back\s+in(?:side|doors)?|go(?:ing)?\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\S+\s+(?:out|in|back)|walk\w*|play\w*|touch\w*|contact\w*|access\w*|resume\w*|normal\s+(?:use|activit\w*)|us(?:e|ing)\s+(?:the|your)\s+(?:lawn|yard|room|area|pool|patio|deck|house|home|garden|kitchen|space)|until|rainfast|rain\w*|water(?:ing|ed)?|sec[oa]s?|seca(?:r|rse|do|da)?|volver|regres\w*|entrar|reingres\w*|salir|re-?entrada|esper\w*|evit\w*|mant[eé]n\w*|fuera|lejos|hasta|lluvia|regar|rieg\w*|toc\w*|acceso)\b/i;
 
 const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t) };
+
+// A duration is a scheduling duration only when a scheduling word sits right
+// next to it ("the visit takes about 45 minutes", "arrives in a 2 hour
+// window", "every 21 days", "next treatment is in two weeks") — an unrelated
+// "technician" elsewhere in the reply ("Your technician says you can use the
+// lawn after 30 minutes") must not exempt it.
+function everyDurationIsScheduling(text) {
+  const re = new RegExp(DURATION_RE.source, 'gi');
+  let m;
+  let found = false;
+  while ((m = re.exec(text))) {
+    found = true;
+    const before = text.slice(0, m.index).split(/\s+/).filter(Boolean).slice(-6).join(' ');
+    const after = text.slice(m.index + m[0].length).split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+    if (!SCHEDULING_DURATION_RE.test(`${before} ${m[0]} ${after}`)) return false;
+  }
+  return found;
+}
 
 // Explicit re-entry or drying wording makes any duration a timing claim, even
 // with no treatment keyword ("When can we come back inside?" → "You can
@@ -326,7 +344,7 @@ function intakeSafetyClaimSupplement(reply, contextText = '') {
   if (DURATION_RE.test(t) && EXPLICIT_REENTRY_RE.test(conversation)
     && (treatmentContext || !DIGITAL_CONTEXT_RE.test(conversation))) return true;
   if (treatmentContext && DURATION_RE.test(t)
-    && (!SCHEDULING_DURATION_RE.test(t) || DRY_OR_REENTRY_RE.test(conversation))) return true;
+    && (!everyDurationIsScheduling(t) || DRY_OR_REENTRY_RE.test(conversation))) return true;
   if (treatmentContext && safetyClaimIn(t)) return true;
   return sentencesOf(t).some((sentence) => SUBJECTLESS_SAFE_RE.test(sentence)
     || (PRONOUN_LEAD_RE.test(sentence) && safetyClaimIn(sentence)));
@@ -336,7 +354,7 @@ function intakeSafetyClaimSupplement(reply, contextText = '') {
 // guidance (the reviewed emergency script) regardless of the model's intent
 // label — "This product is not safe to ingest; call Poison Control now."
 // must not be replaced with copy that only says to call Waves.
-const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
+const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:(?<!animal\s)hospital|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
 const VET_DIRECTION_RE = /\b(?:vets?|veterinarian|veterinary|animal\s+(?:hospital|poison|emergency|er)|veterinari[oa]s?|cl[ií]nica\s+veterinaria|hospital\s+veterinario)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
