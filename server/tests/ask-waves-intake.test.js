@@ -290,6 +290,33 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
 
+  test('explicit re-entry wording makes a duration a claim without a treatment keyword', () => {
+    expect(intakeSafetyClaimSupplement('You can re-enter after 30 minutes.', 'When can we come back inside?')).toBe(true);
+    expect(intakeSafetyClaimSupplement('We will come back in two weeks for the follow-up.', '')).toBe(false);
+    expect(intakeSafetyClaimSupplement('Puede volver a entrar al portal en dos horas.', '¿Cuándo puedo entrar al portal?')).toBe(false);
+  });
+
+  test('the reviewed price redirect survives the safety scrub (its "20 seconds" is not a re-entry time)', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'Pest control is $45 a month and totally safe.', intent: 'quote', service_keys: ['pest'], ready_for_quote: false },
+      'openai',
+      'How much does pest control cost?',
+    );
+    expect(out.reply).toContain('Get my price');
+    expect(out.ready_for_quote).toBe(true);
+  });
+
+  test('veterinary direction gets reviewed animal-emergency copy, not only the human 911 script', () => {
+    const out = scrubUnsafeClaims({
+      reply: 'Our treatment is not safe for cats; call your veterinarian immediately.',
+      intent: 'question', service_keys: ['pest'], ready_for_quote: true, source: 'openai',
+    });
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('please call 911');
+    expect(out.intent).toBe('emergency');
+    expect(out.ready_for_quote).toBe(false);
+  });
+
   test('a flagged reply with emergency direction keeps emergency guidance and drops the quote CTA', () => {
     const out = scrubUnsafeClaims({
       reply: 'This product is not safe to ingest; call Poison Control now.',

@@ -308,11 +308,22 @@ const DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|re-?occup\w*|occ
 
 const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t) };
 
+// Explicit re-entry wording makes any duration a re-entry claim, even with no
+// treatment keyword ("When can we come back inside?" → "You can re-enter
+// after 30 minutes."). Bare "come back in" is not here — "We'll come back in
+// two weeks" is a follow-up visit.
+const EXPLICIT_REENTRY_RE = /\b(?:re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|(?:come|go|get|let\s+\S+)\s+back\s+(?:inside|indoors|into)|volver\s+a\s+entrar|reingres\w*|re-?entrada|reocup\w*)\b/i;
+
+// "Re-enter the portal / volver a entrar al portal" is a login, not a room.
+const DIGITAL_CONTEXT_RE = /\b(?:portal|account|login|log\s+in|password|website|site|app|página|pagina|cuenta|contraseña|sesi[oó]n|sistema)\b/i;
+
 function intakeSafetyClaimSupplement(reply, contextText = '') {
   const t = String(reply || '');
   if (INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
   const conversation = `${t}\n${contextText || ''}`;
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(conversation);
+  if (DURATION_RE.test(t) && EXPLICIT_REENTRY_RE.test(conversation)
+    && (treatmentContext || !DIGITAL_CONTEXT_RE.test(conversation))) return true;
   if (treatmentContext && DURATION_RE.test(t)
     && (!SCHEDULING_DURATION_RE.test(t) || DRY_OR_REENTRY_RE.test(conversation))) return true;
   if (treatmentContext && safetyClaimIn(t)) return true;
@@ -324,21 +335,44 @@ function intakeSafetyClaimSupplement(reply, contextText = '') {
 // guidance (the reviewed emergency script) regardless of the model's intent
 // label — "This product is not safe to ingest; call Poison Control now."
 // must not be replaced with copy that only says to call Waves.
-const EMERGENCY_DIRECTION_RE = /\b(?:call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|vet|veterinarian|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician|vet|veterinarian)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
+const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
+const VET_DIRECTION_RE = /\b(?:vets?|veterinarian|veterinary|animal\s+(?:hospital|poison|emergency|er)|veterinari[oa]s?|cl[ií]nica\s+veterinaria|hospital\s+veterinario)\b/i;
+const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
 const POISON_CONTROL_LINE = ' If someone swallowed a product, call Poison Control at 1-800-222-1222. / Si alguien ingirió un producto, llame a Control de Envenenamientos al 1-800-222-1222.';
+
+const REVIEWED_REPLIES = new Set([
+  PRICE_REDIRECT_REPLY,
+  EMERGENCY_FALLBACK_RESULT.reply,
+  SUPPORT_FALLBACK_RESULT.reply,
+  FALLBACK_RESULT.reply,
+]);
 
 function scrubUnsafeClaims(result, contextText = '') {
   // The shared reentrySafetyClaimFinding is NOT called here: its worst case
   // blocks the event loop for seconds on ordinary replies (#4905), and this
   // runs on every chat turn. The chokepoint above covers its classes for this
   // surface (blanket safety, EPA approval, fixed drying/re-entry times).
+  // Reviewed replacement copy (the price redirect, the emergency / support /
+  // fallback scripts) is never re-scrubbed — "about 20 seconds" in the price
+  // redirect is not a re-entry time.
+  if (REVIEWED_REPLIES.has(result.reply)) return result;
   if (!intakeSafetyClaimSupplement(result.reply, contextText)) return result;
-  if (result.intent === 'emergency' || EMERGENCY_DIRECTION_RE.test(result.reply)) {
-    // Emergency guidance wins, and the turn stops offering a quote.
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(result.reply);
+  const vet = VET_DIRECTION_RE.test(result.reply);
+  if (result.intent === 'emergency' || human || vet) {
+    // Emergency guidance wins — human and/or veterinary, whichever the model
+    // gave — and the turn stops offering a quote.
+    const parts = [];
+    if (human || (result.intent === 'emergency' && !vet)) {
+      parts.push(EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(result.reply) ? POISON_CONTROL_LINE : ''));
+    }
+    if (vet) {
+      parts.push(`${ANIMAL_EMERGENCY_REPLY.trim()} For an urgent pest problem at your home, call us at ${COMPANY.phone}.`);
+    }
     return {
       ...result,
-      reply: EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(result.reply) ? POISON_CONTROL_LINE : ''),
+      reply: parts.join(' '),
       intent: 'emergency',
       service_keys: [],
       ready_for_quote: false,
