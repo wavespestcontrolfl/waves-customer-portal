@@ -623,7 +623,7 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
         expect(out).toMatchObject({ status: 200 });
         expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
         expect(await settledCovered(f)).toBe('paid');
-        expect((await addonsAlert(f)).body).toMatch(/not already charge/);
+        expect((await addonsAlert(f)).body).toMatch(/collected none/);
       }
     });
 
@@ -688,6 +688,35 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(await settledCovered(f)).toBe('draft');
       expect(await addonsAlert(f)).toBeTruthy();
       expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+    });
+
+    test('a charge added to the invoice after the closeout looked at it is judged on the row actually voided — the office re-bills it (GitHub r8 P1)', async () => {
+      const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)] });
+      await trx('scheduled_service_addons').where({ id: f.addonId }).del();
+      await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE });
+      const InvoiceService = require('../services/invoice');
+      const realSettle = InvoiceService.settleInvoiceAsAnnualPrepayCovered.bind(InvoiceService);
+      // An admin adds a trip charge between the closeout's snapshot and its settle.
+      const settle = jest.spyOn(InvoiceService, 'settleInvoiceAsAnnualPrepayCovered').mockImplementation(async (id, ...rest) => {
+        await trx('invoices').where({ id }).update({ line_items: JSON.stringify([baseLine(f), tripCharge]), subtotal: BASE + 15, total: BASE + 15 });
+        return realSettle(id, ...rest);
+      });
+      const out = await withFailure(() => settle.mockRestore(), () => complete(f, { sendCompletionSms: true }));
+      expect(out).toMatchObject({ status: 200 });
+      expect(await settledCovered(f)).toBe('void');
+      expect((await addonsAlert(f)).body).toMatch(/charged more than the covered visit/);
+      expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+    });
+
+    test('an office add-ons invoice kept after its add-on was repriced to free is still alerted — never kept silently (GitHub r8 P1)', async () => {
+      const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
+      await trx('scheduled_service_addons').where({ id: f.addonId }).update({ base_price: 0, estimated_price: 0 });
+      await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE });
+      const out = await complete(f, { sendCompletionSms: true });
+      expect(out).toMatchObject({ status: 200 });
+      expect(await settledCovered(f)).toBe('draft');
+      expect(out.body?.invoicePaymentActionRequired).not.toBe(true);
+      expect((await addonsAlert(f)).body).toMatch(/as they stand now/);
     });
 
     test('a visit not performed still alerts a voided invoice\'s other charges — they may be owed either way', async () => {
@@ -811,6 +840,19 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect((await trx('invoices').where({ customer_id: f.customerId })).map((i) => i.id)).toEqual([siblingId]);
       expect((await addonsAlert(f)).body).toContain(`TEST-${siblingId.slice(0, 8)} (paid)`);
     });
+  });
+
+  test('a failed completion invoice lookup holds the closeout instead of billing blind beside an invoice it could not see (GitHub r8 P1)', async () => {
+    const f = await coveredVisit();
+    const svc = await trx('scheduled_services').where({ id: f.serviceId }).first();
+    const { reconcileCoveredVisitInvoice } = require('../services/annual-prepay-addon-billing');
+    const out = await reconcileCoveredVisitInvoice({ svc, record: { id: randomUUID(), structured_notes: { annualPrepayAddonBilling: true } }, invoice: null,
+      payUrl: null, alreadyPaid: false, invoiceCreated: false, issuedInvoiceCloseout: null, recapReviewOnly: false, visitPerformed: true,
+      terminalCompletionInvoice: null, packetEffects: null, invoiceLookupFailed: true, quietBackfill: false, serviceDate: null,
+      portalUrl: 'https://portal.invalid', mergeRecordNotesKeys: async () => {} });
+    expect(out.hold).toMatchObject({ code: 'annual_prepay_addons_lookup_failed' });
+    expect(await trx('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+    expect(await addonsAlert(f)).toBeUndefined();
   });
 
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {

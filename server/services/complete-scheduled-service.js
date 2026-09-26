@@ -10728,7 +10728,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const { reconcileCoveredVisitInvoice } = require('../services/annual-prepay-addon-billing');
       const covered = await reconcileCoveredVisitInvoice({
         svc, record, invoice, payUrl, alreadyPaid, invoiceCreated,
-        issuedInvoiceCloseout, recapReviewOnly, visitPerformed, terminalCompletionInvoice, packetEffects,
+        issuedInvoiceCloseout, recapReviewOnly, visitPerformed, terminalCompletionInvoice, packetEffects, invoiceLookupFailed,
         quietBackfill: isBackfillCompletion,
         serviceDate: serviceDateOnly(record?.service_date),
         portalUrl,

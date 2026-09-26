@@ -348,8 +348,7 @@ class CoveredVisitCloseout {
     const { svc } = this;
     const InvoiceService = require('./invoice');
     const office = this.invoice;
-    const lines = classifyCoveredVisitInvoice(office, addons);
-    if (lines.billsOnlyAddons) return { kind: 'kept', invoice: office };
+    if (classifyCoveredVisitInvoice(office, addons).billsOnlyAddons) return { kind: 'kept', invoice: office };
     const settleRes = await InvoiceService.settleInvoiceAsAnnualPrepayCovered(
       office.id, svc.annual_prepay_term_id, { recordedBy: 'system:annual_prepay_completion' },
     );
@@ -363,20 +362,26 @@ class CoveredVisitCloseout {
     if (!['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
       return { kind: 'left', invoice: office }; // payer-billed / in flight: normal handling
     }
+    let voidErr = null;
     try {
       await InvoiceService.voidInvoice(office.id);
-    } catch (voidErr) {
-      // voidInvoice can throw AFTER its void committed (the follow-up steps
-      // past its transaction); only a void that did not land is a failure.
-      const after = await db('invoices').where({ id: office.id }).first('status');
-      if (after?.status !== 'void') throw voidErr;
-      logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: invoice ${office.id} voided, then: ${voidErr.message}`);
+    } catch (err) {
+      voidErr = err;
     }
+    // The row as it was voided: an edit that landed after this closeout's
+    // snapshot (a charge added by hand) is part of what was voided, so its
+    // charges decide the office's follow-up. voidInvoice can throw AFTER its
+    // void committed (the follow-up steps past its transaction); only a void
+    // that did not land is a failure.
+    const after = await db('invoices').where({ id: office.id }).first().catch(() => null);
+    if (voidErr && after?.status !== 'void') throw voidErr;
+    if (voidErr) logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: invoice ${office.id} voided, then: ${voidErr.message}`);
+    const voided = after?.status === 'void' ? after : office;
     this.invoice = null;
     this.invoiceCreated = false;
     this.payUrl = null;
     this.alreadyPaid = true;
-    return { kind: 'voided', invoice: office, otherCharges: lines.otherCharges };
+    return { kind: 'voided', invoice: voided, otherCharges: classifyCoveredVisitInvoice(voided, addons).otherCharges };
   }
 
   // The visit already has invoices. Dark, only the covered base is handled.
@@ -404,9 +409,6 @@ class CoveredVisitCloseout {
       }
     }
     if (!this.live) return;
-    // An office bill for just the add-ons stays owed as the office made it;
-    // the text never says "all paid" over it.
-    if (outcome.kind === 'kept') this.owedUnbilled = true;
     // The history as it stands now: an invoice voided above reads void.
     const listed = history.map((inv) => (outcome.kind === 'voided' && inv.id === outcome.invoice.id ? { ...inv, status: 'void' } : inv));
     // A voided invoice that charged more than the covered visit — voided
@@ -419,9 +421,13 @@ class CoveredVisitCloseout {
     const invoiceIds = listed.map((inv) => inv.id);
     if (voidedCharges) {
       await this.alert(`its invoices (${listing}) include a voided one that charged more than the covered visit; re-bill whatever it charged besides the covered visit that no other invoice covers`, { invoiceIds });
-    } else if (this.billable && addons.owed) {
+    } else if ((this.billable && addons.owed) || outcome.kind === 'kept') {
+      // Owed add-ons beside an existing invoice, or an office bill for just
+      // the add-ons kept as the office made it (its price may have changed
+      // since — even to free): the office checks it; the completion never
+      // collects it.
       const one = listed.length === 1;
-      await this.alert(`the visit already has ${one ? 'invoice' : 'invoices'} ${listing} and the completion collected none; make sure the add-ons are billed and sent, billing whatever ${one ? 'that invoice does' : 'those invoices do'} not already charge`, { invoiceIds });
+      await this.alert(`the visit already has ${one ? 'invoice' : 'invoices'} ${listing} and the completion collected none; check ${one ? 'it' : 'them'} against the add-ons as they stand now — bill what is missing, adjust what changed, and send`, { invoiceIds });
     }
   }
 
@@ -450,6 +456,13 @@ class CoveredVisitCloseout {
     // issued invoice is never touched.
     if (!this.live) {
       if (this.invoice?.id && !this.ctx.issuedInvoiceCloseout) await this.reconcileWithOfficeInvoices([]);
+      return this.outcome();
+    }
+    // The completion's own invoice lookups failed: an invoice may exist that
+    // nothing here can see (a same-estimate sibling, say). Hold — the retry
+    // re-runs the lookups — rather than decide blind.
+    if (this.ctx.invoiceLookupFailed) {
+      this.hold(new Error('the completion\'s invoice lookups failed'), 'invoice lookups');
       return this.outcome();
     }
     if (this.ctx.issuedInvoiceCloseout) {
