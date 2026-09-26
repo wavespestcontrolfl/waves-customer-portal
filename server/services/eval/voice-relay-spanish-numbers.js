@@ -181,10 +181,33 @@ function convertPriceWordRuns(text) {
     if (currencyWord) return `${amount} ${currencyWord}`;
     return amount >= 10 ? `${amount} ` : match;
   });
-  return out.replace(PRICE_VERB_WORD_RUN_RE, (match, lead, run) => {
+  const withVerbs = out.replace(PRICE_VERB_WORD_RUN_RE, (match, lead, run) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount) || amount < 10) return match;
     return `${lead}${amount}${/\s$/.test(run) ? ' ' : ''}`;
+  });
+  return mergeCents(withVerbs);
+}
+
+// Codex pre-push on #4946: a converted figure followed by its cents
+// ("119 dólares con noventa y nueve centavos", "119 con noventa y nueve")
+// is ONE amount — grading only the integer prefix would read $119.99 as
+// the returned $119. Merged atomically into "119.99"; a tail that does not
+// parse as 1–99 cents is left untouched.
+// The cents may already be digits: an earlier pass converts "noventa y
+// nueve" before "por aplicación" on its own, so both forms are accepted.
+const CENTS_SRC = `(?:\\d{1,2}(?!\\d)\\s*|${NUMBER_RUN_RE_SRC})`;
+const CENTS_AFTER_CURRENCY_RE = new RegExp(`\\b(\\d+)\\s*(d[oó]lares?)\\s+con\\s+(${CENTS_SRC})\\s*(?:centavos?)?`, 'gi');
+const CENTS_BARE_RE = new RegExp(`\\b(\\d+)\\s+con\\s+(${CENTS_SRC})(?:\\s*centavos?)?(?=\\s*(?:d[oó]lares?\\b|por\\b|cada\\b|al\\b|[.,;!?]|$))`, 'gi');
+function mergeCents(text) {
+  const cents = (run) => { const t = run.trim(); const c = /^\d{1,2}$/.test(t) ? Number(t) : parseSpanishCardinal(t); return Number.isInteger(c) && c >= 1 && c <= 99 ? String(c).padStart(2, '0') : null; };
+  const a = text.replace(CENTS_AFTER_CURRENCY_RE, (match, whole, currency, run) => {
+    const cc = cents(run);
+    return cc ? `${whole}.${cc} ${currency}${/\s$/.test(match) ? ' ' : ''}` : match;
+  });
+  return a.replace(CENTS_BARE_RE, (match, whole, run) => {
+    const cc = cents(run);
+    return cc ? `${whole}.${cc}${/\s$/.test(match) ? ' ' : ''}` : match;
   });
 }
 

@@ -120,6 +120,24 @@ describe('normalizeSpanishSpokenText — spelled prices in every price context',
   });
 });
 
+// Codex pre-push on #4946: dollars-and-cents is ONE amount — grading only
+// the integer prefix would read $119.99 as the returned $119.
+describe('normalizeSpanishSpokenText — cents merge into one amount', () => {
+  test.each([
+    ['Ciento diecinueve dólares con noventa y nueve centavos por aplicación.', '119.99 dólares por aplicación.'],
+    ['El mejorado cuesta ciento diecinueve con noventa y nueve por aplicación.', 'El mejorado cuesta 119.99 por aplicación.'],
+    ['El mejorado cuesta 119 dólares con 99 centavos por aplicación.', 'El mejorado cuesta 119.99 dólares por aplicación.'],
+  ])('%s -> %s', (input, expected) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(expected);
+  });
+  test.each([
+    'Cuesta 119 dólares por aplicación.',
+    'Cuesta 119 dólares con la aplicación incluida.',
+  ])('leaves a non-cents "con" alone: %s', (input) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(input);
+  });
+});
+
 describe('normalizeSpanishSpokenText — written meridiems', () => {
   test.each([
     ['llega de 1 p. m. a 3 p. m. Gracias.', 'llega de 1 pm a 3 pm Gracias.'],
