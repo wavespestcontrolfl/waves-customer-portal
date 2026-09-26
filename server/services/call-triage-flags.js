@@ -912,8 +912,11 @@ function isPhraseSequence(ns, phraseSets) {
   }
   return reachable[toks.length] === true;
 }
+// A question-marked acknowledgement ("We'll see you Sunday at noon. Okay?")
+// is a tag question asking the caller to confirm, not an acknowledgement
+// (Codex round 29) — it never qualifies, in the committing turn or later.
 function otherSentenceIsBareAcknowledgement(other) {
-  return isPhraseSequence(other.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS]);
+  return !other.interrogative && isPhraseSequence(other.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS]);
 }
 // LATER_TURN_CLOSERS extends the acknowledgement list with the call-ending
 // phrases a routine wrap-up actually uses that a mid-call acknowledgement
@@ -929,7 +932,8 @@ const LATER_TURN_CLOSERS = new Set([
 // replaces every later-turn term list and restatement carve-out rounds
 // 23-27 built, for both speakers alike.
 function laterSentenceRetracts(sentence) {
-  return !isPhraseSequence(sentence.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS, LATER_TURN_CLOSERS]);
+  return sentence.interrogative
+    || !isPhraseSequence(sentence.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS, LATER_TURN_CLOSERS]);
 }
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);

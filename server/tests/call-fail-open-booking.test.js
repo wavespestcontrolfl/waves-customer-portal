@@ -1870,6 +1870,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test.each([
+    ["Agent: We'll see you Sunday at noon. Okay?", null],
+    ["Agent: We'll see you Sunday at noon. Yes?", null],
+    ["Agent: Okay? We'll see you Sunday at noon.", null],
+    ["Agent: We'll see you Sunday at noon.", 'Caller: Okay?'],
+  ])('Codex round-29 regression: a question-marked acknowledgement never qualifies — %s / %s', (agentLine, later) => {
+    const base = TRANSCRIPT.replace(`Agent: ${AGENT_COMMIT_QUOTE}`, agentLine);
+    const transcript = later ? `${base}\n${later}` : base;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
     'Caller: Okay, never mind.',
     'Caller: Okay, thank you, but I have to ask my husband.',
     'Caller: Okay will come in the email.',
