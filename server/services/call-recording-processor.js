@@ -15262,7 +15262,12 @@ const CallRecordingProcessor = {
             // A reprocess of a call whose visit already exists keeps the
             // existing-booking reuse below (codex #4890 r7 P2) — only a
             // not-yet-booked elapsed slot is refused.
-            if (scheduledDate && arrangerSlotElapsed({ authorized: wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
+            // Enforce mode only: that is the only mode where the arranger
+            // ruling authorizes a booking at all (shadow/legacy books on V1's
+            // own verdict), and enforce mode files the
+            // auto_booking_skipped_after_approval card for this skip, so a
+            // refused slot never vanishes silently (pre-push audit P1).
+            if (scheduledDate && arrangerSlotElapsed({ authorized: CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
               && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))) {
               logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} has already passed; skipping schedule + SMS for ${maskSid(callSid)}`);
               appointmentResult = {
