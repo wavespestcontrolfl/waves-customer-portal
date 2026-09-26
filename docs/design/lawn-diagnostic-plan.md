@@ -542,6 +542,7 @@ Tests: `lawn-diagnostic-public.test.js` (whitelisting no-leak, strict validation
 ### v1 still to build
 **Shipped:** the `/tech/*` Lawn Diagnostic UI (`TechLawnDiagnosticPage`, `client/src/App.jsx:711`)
 and the public `/lawn-report/:token` React page (`LawnReportViewPage`, `client/src/App.jsx:686`).
-**Still open:** photo S3 persistence into `lawn_diagnostic_photos` exists only for the public
-funnel (`server/routes/public-lawn-assessment.js`); it is not yet wired for the tech-side flow.
+**Still open:** photo S3 persistence into `lawn_diagnostic_photos` exists for the public
+funnel (`server/routes/public-lawn-assessment.js`) and the authenticated portal photo-ID
+handler (`server/routes/photo-id.js`); it is not yet wired for the tech-side flow.
 v1.5: SMS/email link delivery.
