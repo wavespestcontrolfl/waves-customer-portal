@@ -728,7 +728,7 @@
       "regulated": false,
       "irritant": false
     },
-    "safety_line": "Harmless despite its bright colors. Reliable tells vs. the venomous coral snake: a red, pointed snout, and red bands bordered by black, never yellow.",
+    "safety_line": "Harmless, but it closely copies the venomous coral snake and band colors are easy to misjudge. Treat any red, yellow and black banded snake as venomous and keep your distance.",
     "range": "occasional",
     "active_months": [
       3,
@@ -1201,7 +1201,7 @@
     "urgency": "high",
     "copy": {
       "what_it_means": "A secretive venomous snake best identified by its black snout and the classic 'red touches yellow' band pattern. It's rarely aggressive and mostly stays hidden, but any suspected sighting is worth keeping distance from and having a professional confirm.",
-      "fact": "The old rhyme 'red touches yellow, kill a fellow; red touches black, friend of Jack' is a real, reliable way to tell it apart from its harmless mimic east of the Mississippi."
+      "fact": "The old rhyme 'red touches yellow, kill a fellow' describes Florida coral snakes, but band colors are easy to misjudge in a photo or at a glance. Never use it to decide a snake is safe; keep your distance."
     },
     "tech_notes": "Confirm black snout and red-touches-yellow band order; bites are rare but medically significant, so err toward treating an uncertain report as this species until ruled out.",
     "links": {
