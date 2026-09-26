@@ -703,8 +703,12 @@ function applicatorLicenseCurrent(operator, now) {
   if (!String(operator?.fl_applicator_license || '').trim()) return false;
   // Repo convention (compliance picker): a missing expiry reads as active.
   if (!operator.license_expiry) return true;
-  const expiry = new Date(operator.license_expiry);
-  return Number.isNaN(expiry.getTime()) ? false : expiry >= now;
+  // Calendar dates, compared in ET: the license is valid THROUGH its expiry
+  // day (a UTC-midnight Date compare read the last valid day as expired).
+  const { dateOnlyString } = require('../utils/date-only');
+  const { etDateString } = require('../utils/datetime-et');
+  const expiry = dateOnlyString(operator.license_expiry);
+  return !!expiry && expiry >= etDateString(now);
 }
 
 router.post('/:id/countersign', async (req, res, next) => {

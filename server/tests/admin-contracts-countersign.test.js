@@ -335,3 +335,25 @@ describe('GET /api/admin/contracts/:id/pdf — executed copy incl. countersignat
     });
   });
 });
+
+test('the applicator license is valid THROUGH its expiry day in ET (not expired at UTC midnight)', async () => {
+  jest.useFakeTimers({ now: new Date('2026-12-31T22:00:00Z'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask'] });
+  try {
+    const lastDay = { ...ADMIN, license_expiry: '2026-12-31' };
+    mockRows.technicians = (b) => {
+      const filter = b.filters.find((f) => f && f.id);
+      return filter?.id === ADMIN.id ? lastDay : null;
+    };
+    let served = false;
+    mockRows.customer_contracts = () => {
+      if (!served) { served = true; return BASE_CONTRACT; }
+      return { ...BASE_CONTRACT, countersigned_at: new Date(), countersigner_name: 'Adam Owner' };
+    };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/countersign`, { method: 'POST', headers: adminHdrs, body: JSON.stringify({ name: 'Adam Owner' }) });
+      expect(res.status).toBe(200);
+    });
+  } finally {
+    jest.useRealTimers();
+  }
+});
