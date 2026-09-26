@@ -22,6 +22,7 @@ const normalize = require('../models/migrations/20260926010200_estimate_gone_qui
 // Fixes 010200's anchor bug when the first non-link CTA isn't guaranteed
 // to render (Codex #4918 r2 P2).
 const anchor = require('../models/migrations/20260926010300_estimate_gone_quiet_consultation_offer_anchor');
+const preflight = require('../models/migrations/20260926005000_estimate_gone_quiet_consultation_offer_preflight');
 
 const { primaryCtaAnchorIndex, alreadyHasConsultationLink, NEW_VARIABLE, LINK_LABEL, MIGRATION } = migration._private;
 
@@ -631,6 +632,71 @@ const knexLib = require('knex');
   // 010300 is a no-op — the final owner stays 20260926010200.
   async function upAll(trx) { await migration.up(trx); await reapply.up(trx); await normalize.up(trx); await anchor.up(trx); }
   async function downAll(trx) { await anchor.down(trx); await normalize.down(trx); await reapply.down(trx); await migration.down(trx); }
+
+  // Codex #4918 r10 P2: each chain file commits on its own, so the chain's
+  // abort conditions are checked by 20260926005000 before 010000 publishes.
+  // In this DB the chain already ran, so its knex_migrations row is removed
+  // inside the rolled-back transaction to model a fresh deploy.
+  async function asFreshDeploy(trx) {
+    if (await trx.schema.hasTable('knex_migrations')) {
+      await trx('knex_migrations').where({ name: preflight._private.CHAIN_START }).del();
+    }
+  }
+  async function versionCount(trx, templateId) {
+    return (await trx('email_template_versions').where({ template_id: templateId }).count('* as n').first()).n;
+  }
+
+  test('preflight: the real seed passes, and the full chain then runs as before', async () => {
+    await db.transaction(async (trx) => {
+      await asFreshDeploy(trx);
+      const { template } = await seedTemplate(trx);
+      await preflight.up(trx);
+      await upAll(trx);
+      expect((await activeState(trx, template.id)).hasLink).toBe(true);
+      await trx.rollback();
+    });
+  });
+
+  test('preflight: a custom plaintext body aborts BEFORE 010000 publishes anything', async () => {
+    await db.transaction(async (trx) => {
+      await asFreshDeploy(trx);
+      const { template, version } = await seedTemplate(trx);
+      await trx('email_template_versions').where({ id: version.id }).update({ text_body: 'Hi — custom plain text.' });
+      await expect(preflight.up(trx)).rejects.toThrow(/custom plaintext body/);
+      expect(await versionCount(trx, template.id)).toBe('1');
+      await trx.rollback();
+    });
+  });
+
+  test('preflight: a conditional first button aborts BEFORE 010000 publishes anything', async () => {
+    await db.transaction(async (trx) => {
+      await asFreshDeploy(trx);
+      const { template, version } = await seedTemplate(trx);
+      await trx('email_template_versions').where({ id: version.id }).update({
+        blocks: JSON.stringify([SEED_BLOCKS[0], { type: 'cta', label: 'See your custom quote', url_variable: 'quote_url' }, ...SEED_BLOCKS.slice(1)]),
+      });
+      await expect(preflight.up(trx)).rejects.toThrow(/optional url_variable/);
+      expect(await versionCount(trx, template.id)).toBe('1');
+      await trx.rollback();
+    });
+  });
+
+  test('preflight: once the chain has started in an environment it checks nothing (a later staff edit never blocks a deploy)', async () => {
+    await db.transaction(async (trx) => {
+      const { version } = await seedTemplate(trx);
+      await trx('email_template_versions').where({ id: version.id }).update({ text_body: 'Hi — custom plain text.' });
+      if (!(await trx.schema.hasTable('knex_migrations'))) {
+        await trx.schema.createTable('knex_migrations', (t) => {
+          t.increments('id'); t.string('name'); t.integer('batch'); t.timestamp('migration_time');
+        });
+      }
+      if (!(await trx('knex_migrations').where({ name: preflight._private.CHAIN_START }).first())) {
+        await trx('knex_migrations').insert({ name: preflight._private.CHAIN_START, batch: 1, migration_time: new Date() });
+      }
+      await expect(preflight.up(trx)).resolves.toBeUndefined();
+      await trx.rollback();
+    });
+  });
 
   test('full chain on a normal deploy: one link directly after the button, owned by 20260926010200 (010300 confirms and publishes nothing), one active row', async () => {
     await db.transaction(async (trx) => {

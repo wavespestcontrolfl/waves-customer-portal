@@ -789,6 +789,19 @@ async function processDueBatch(now = new Date()) {
           consultationUrl = '';
           est.customer_email = freshRecipient?.customer_email || null;
         }
+        // Same staleness for the portal-wide email opt-out read above the
+        // probe (Codex #4918 r8→r10 P2): an opt-out landing during it wins.
+        // A read error throws to the loop's catch, which releases the claim
+        // and takes the bounded retry — fail closed, as the first read does.
+        if (est.customer_id) {
+          const freshPrefs = await db('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled');
+          if (freshPrefs?.email_enabled === false) {
+            await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+            claimed = false;
+            await markJob(job.id, 'skipped', 'email-prefs-off');
+            continue;
+          }
+        }
       }
       const firstName = (est.customer_name || '').split(' ')[0] || 'there';
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);

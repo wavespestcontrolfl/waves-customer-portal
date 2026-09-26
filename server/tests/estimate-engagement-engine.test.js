@@ -627,6 +627,21 @@ describe('processDueJobs', () => {
       expect(reconfirmGoneQuietConsultation).not.toHaveBeenCalled();
     });
 
+    test('an email opt-out landing during the probe wins: the claim is released and the job skipped, nothing sent (Codex #4918 r10 P2)', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath({ est: baseEstimate({ customer_id: 'cust-1' }) });
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } });
+      enqueue('notification_prefs', { first: { email_enabled: false } }); // post-probe re-read
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(0);
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
+      const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+      expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped' }));
+    });
+
     test('every other rule\'s payload never gets consultation_url — the builder is never even called for them', async () => {
       enqueueProcessorHappyPath({
         job: pendingJob({ rule_key: 'return_visit_hot' }),
