@@ -55,8 +55,10 @@ const TERMITE_30_LATE_ESCALATION_COLUMN = 'notice_30_late_escalated_at';
 // the renewal date arrived (Codex #4921 r3 finding #2, generalized).
 const TERMITE_NOTICE_MISSED_ESCALATION_COLUMN = 'notice_missed_escalated_at';
 // Confirmed-bell witnesses (Codex #4921 r4 P1) for a rung that is still
-// UNDELIVERED once its own deadline has passed — today > term_end - 45 for
-// the 45-day rung, today > term_end - 30 for the 30-day rung — while the
+// UNDELIVERED on or after its own deadline day — today >= term_end - 45 for
+// the 45-day rung, today >= term_end - 30 for the 30-day rung (Codex #4921
+// r11: the deadline day itself counts, so staff can still deliver by hand
+// that day) — while the
 // daily send retry keeps failing (e.g. SMS and email both down). Deliberately
 // NOT the *_late_escalated_at columns: those mean "the notice DID go out,
 // late"; these mean "the notice has NOT gone out and its on-time window is
@@ -5785,23 +5787,50 @@ function originalEmailAcceptance(result) {
   return acceptanceTimeFrom(result?.sentAt);
 }
 
-function sendTermNoticeSms({
-  customer, body, smsTemplateKey, term, daysOut, extraMetadata,
-}) {
-  return sendCustomerMessage({
-    to: customer.phone,
-    body,
-    channel: 'sms',
-    audience: 'customer',
+// Codex #4921 r11 P1: the termite 45/30-day rungs are the signed v3
+// agreement's REQUIRED renewal notice (renewal date, renewal fee, the
+// auto-charge, how to cancel) — account-operational, not marketing. Purpose
+// 'retention' is marketing-grade (policy.js: requireConsent 'marketing' +
+// seasonal_tips === true), which silently withheld the legally required text
+// from every customer who never opted into seasonal tips. They go out as
+// 'billing' — transactional, no per-purpose opt-out (owner ruling
+// 2026-08-01: account-operational notices, like a receipt) — while STOP
+// (sms_enabled=false), suppression, identity and the send window still
+// apply, and a customer's explicit billing-channel choice still routes the
+// text (the email leg always carries the notice too). The generic 30/15/7
+// annual-prepay reminder (non-termite terms, and a termite term's 15/7) is
+// unchanged: a courtesy renewal reminder, not a contractual notice.
+function termNoticeSmsPolicy(termiteRung, customer) {
+  if (termiteRung) {
+    return {
+      purpose: 'billing',
+      consentBasis: { status: 'transactional_allowed', source: 'termite_annual_plan_agreement_v3' },
+    };
+  }
+  return {
     purpose: 'retention',
-    customerId: customer.id,
-    identityTrustLevel: 'phone_matches_customer',
-    entryPoint: 'annual_prepay_renewal',
     consentBasis: {
       status: 'opted_in',
       source: 'customer_retention_preferences',
       capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
     },
+  };
+}
+
+function sendTermNoticeSms({
+  customer, body, smsTemplateKey, term, daysOut, extraMetadata, termiteRung = false,
+}) {
+  const { purpose, consentBasis } = termNoticeSmsPolicy(termiteRung, customer);
+  return sendCustomerMessage({
+    to: customer.phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose,
+    customerId: customer.id,
+    identityTrustLevel: 'phone_matches_customer',
+    entryPoint: 'annual_prepay_renewal',
+    consentBasis,
     metadata: {
       original_message_type: smsTemplateKey,
       annual_prepay_term_id: term.id,
@@ -6608,7 +6637,7 @@ async function deliverTermNoticeBySms(ctx, addressShort) {
   }
 
   const smsResult = await sendTermNoticeSms({
-    customer, body, smsTemplateKey, term: claimedTerm, daysOut, extraMetadata: termNoticeSmsMetadata(ctx),
+    customer, body, smsTemplateKey, term: claimedTerm, daysOut, extraMetadata: termNoticeSmsMetadata(ctx), termiteRung,
   });
   const fallback = smsEmailFallback(termiteRung, smsResult, claimedTerm.id);
   if (fallback) return deliverTermNoticeByEmail(ctx, fallback.reason, { keepClaim: fallback.keepClaim });
@@ -6950,11 +6979,14 @@ async function stampMissedNoticeEscalation(termId) {
 }
 
 // Codex #4921 r4 P1: every termite term whose 45- or 30-day rung is still
-// undelivered (neither on-time nor late) AFTER that rung's own deadline —
-// term_end < today + N, i.e. fewer than N days left, so no on-time send is
-// possible any more — and whose per-rung undelivered bell has not been
-// confirmed yet. Runs AFTER the day's send attempt, so a rung whose late
-// retry lands today gets only the late bell. term_end > today: from the
+// undelivered (neither on-time nor late) ON OR AFTER that rung's own
+// deadline day — term_end <= today + N, i.e. N or fewer days left — and
+// whose per-rung undelivered bell has not been confirmed yet. Codex #4921
+// r11: the deadline day itself is included (strict `<` only rang the day
+// AFTER, when the notice was already late); ringing then leaves staff the
+// rest of that day to deliver it on time by hand. Runs AFTER the day's send
+// attempt (runTermiteNoticePass order), so a rung delivered that day — on
+// time or late — is recorded first and never belled as undelivered. term_end > today: from the
 // renewal date on, termiteMissedNoticeEscalationCandidates owns the case.
 // An unanchored original term is excluded (provisional term_end — the send
 // path skips it the same way). The daily send retry itself is unaffected.
@@ -6972,12 +7004,12 @@ async function termiteUndeliveredNoticeEscalationCandidates({ today = etDateStri
         this.whereNull('notice_45_sent_at')
           .whereNull(TERMITE_LATE_NOTICE_COLUMN)
           .whereNull(TERMITE_45_UNDELIVERED_ESCALATION_COLUMN)
-          .where('term_end', '<', addDaysYmd(today, TERMITE_EXTRA_NOTICE_DAYS));
+          .where('term_end', '<=', addDaysYmd(today, TERMITE_EXTRA_NOTICE_DAYS));
       }).orWhere(function rung30Undelivered() {
         this.whereNull('notice_30_sent_at')
           .whereNull(TERMITE_30_LATE_NOTICE_COLUMN)
           .whereNull(TERMITE_30_UNDELIVERED_ESCALATION_COLUMN)
-          .where('term_end', '<', addDaysYmd(today, 30));
+          .where('term_end', '<=', addDaysYmd(today, 30));
       });
     })
     .orderBy('term_end', 'asc')
@@ -6990,9 +7022,9 @@ function termiteUndeliveredRungs(term, today) {
   const daysLeft = daysUntil(today, dateOnly(term?.term_end));
   if (daysLeft == null || daysLeft <= 0) return [];
   const rungs = [];
-  if (daysLeft < TERMITE_EXTRA_NOTICE_DAYS && !term.notice_45_sent_at && !term[TERMITE_LATE_NOTICE_COLUMN]
+  if (daysLeft <= TERMITE_EXTRA_NOTICE_DAYS && !term.notice_45_sent_at && !term[TERMITE_LATE_NOTICE_COLUMN]
     && !term[TERMITE_45_UNDELIVERED_ESCALATION_COLUMN]) rungs.push(TERMITE_EXTRA_NOTICE_DAYS);
-  if (daysLeft < 30 && !term.notice_30_sent_at && !term[TERMITE_30_LATE_NOTICE_COLUMN]
+  if (daysLeft <= 30 && !term.notice_30_sent_at && !term[TERMITE_30_LATE_NOTICE_COLUMN]
     && !term[TERMITE_30_UNDELIVERED_ESCALATION_COLUMN]) rungs.push(30);
   return rungs;
 }
@@ -7003,20 +7035,27 @@ function termiteUndeliveredRungs(term, today) {
 // standalone SELECT) and stamped ONLY on a confirmed (non-null) insert, so
 // a failed bell is retried on the next sweep. Literal column names in each
 // write (never a computed key).
+// The undelivered bell's body. On the deadline day itself the notice can
+// still go out on time (Codex #4921 r11), so the copy says so.
+function undeliveredNoticeMessage(term, n) {
+  const consequence = n === TERMITE_EXTRA_NOTICE_DAYS
+    ? ' Delivered on the deadline day it still counts as on time; after that it is recorded as LATE and this renewal will not be auto-charged.'
+    : ' Delivered on the deadline day it still counts as on time; after that it is recorded as late.';
+  const deadline = formatDateLabel(addDaysYmd(dateOnly(term.term_end), -n));
+  return `The ${n}-day termite renewal notice for term ${term.id} (renews ${formatDateLabel(term.term_end)}) has not been confirmed delivered by text or email, and its ${n}-day deadline (${deadline}) is today or has passed. The system keeps retrying daily.${consequence} Check the customer's phone and email on file and contact them directly.`;
+}
+
 async function fileTermiteUndeliveredNoticeException(term, daysOut) {
   const n = Number(daysOut);
   if (n !== TERMITE_EXTRA_NOTICE_DAYS && n !== 30) return false;
   try {
-    const consequence = n === TERMITE_EXTRA_NOTICE_DAYS
-      ? ' If a retry lands now it is recorded as LATE and this renewal will not be auto-charged.'
-      : ' If a retry lands now it is recorded as late.';
     const NotificationService = require('./notification-service');
     const result = await NotificationService.notifyAdmin(
       'alert',
       'Termite annual renewal notice not delivered',
-      `The ${n}-day termite renewal notice for term ${term?.id} (renews ${formatDateLabel(term?.term_end)}) has not been confirmed delivered by text or email, and its ${n}-day deadline has passed. The system keeps retrying daily.${consequence} Check the customer's phone and email on file and contact them directly.`,
+      undeliveredNoticeMessage(term, n),
       {
-        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
+        link: termiteAlertLink(term),
         bell: true,
         dedupeKey: `termite-annual-notice:${term?.id}:${n}:undelivered`,
         metadata: {
@@ -7857,6 +7896,7 @@ module.exports = {
     stampWitnessConflictBelled,
     ownsNoticeClaims,
     ensureTermNoticeLease,
+    termNoticeSmsPolicy,
     recoveryPlan,
     recoveredBeforeEscalation,
     fileTermiteUndeliveredNoticeException,

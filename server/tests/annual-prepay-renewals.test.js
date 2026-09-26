@@ -2437,6 +2437,62 @@ describe('annual prepay renewal helpers', () => {
     );
   });
 
+  // Codex #4921 r11 P1: the termite 45/30 notice is a REQUIRED contractual
+  // notice. Captured from the real sender and run through the REAL policy +
+  // consent + suppression validators (not a mocked sendCustomerMessage
+  // verdict): seasonal_tips=false must not withhold it; STOP still must.
+  describe('termite notice SMS purpose — required notice, not marketing (Codex #4921 r11 P1)', () => {
+    const { resolvePolicy } = jest.requireActual('../services/messaging/policy');
+    const { checkConsentForPurpose } = jest.requireActual('../services/messaging/validators/consent');
+    const { checkSuppression } = jest.requireActual('../services/messaging/validators/suppression');
+    const runValidators = async (input, prefs, suppression = null) => {
+      const policy = resolvePolicy(input.audience, input.purpose);
+      const contactState = {
+        prefs, customer: { id: input.customerId, phone: input.to }, suppression, suppressionLoaded: true,
+      };
+      const consent = await checkConsentForPurpose(input, policy, contactState);
+      if (!consent.ok) return consent;
+      return checkSuppression(input, policy, contactState);
+    };
+    async function captureTermiteSmsInput() {
+      pinTermiteToday();
+      const { term } = termiteNoticeHarness(); // 2027-05-20 → a 45-day termite rung
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+      await AnnualPrepayRenewals.sendCustomerTermNotice(term, 45);
+      return sendCustomerMessage.mock.calls[0][0];
+    }
+    const NO_SEASONAL = { sms_enabled: true, seasonal_tips: false, marketing_offers: false };
+
+    test('the termite rung goes out as the transactional billing purpose, and seasonal_tips=false does NOT withhold it', async () => {
+      const input = await captureTermiteSmsInput();
+      expect(input).toMatchObject({ purpose: 'billing', audience: 'customer', channel: 'sms' });
+      expect(input.consentBasis).toMatchObject({ status: 'transactional_allowed' });
+      expect(resolvePolicy(input.audience, input.purpose).requireConsent).toBe('transactional');
+      await expect(runValidators(input, NO_SEASONAL)).resolves.toEqual({ ok: true });
+      // …and a customer who was never asked (seasonal_tips NULL) gets it too.
+      await expect(runValidators(input, { sms_enabled: true, seasonal_tips: null })).resolves.toEqual({ ok: true });
+      // Regression pin: the old 'retention' purpose was blocked for exactly these customers.
+      await expect(runValidators({ ...input, purpose: 'retention' }, NO_SEASONAL))
+        .resolves.toMatchObject({ ok: false, code: 'PURPOSE_OPTED_OUT' });
+      await expect(runValidators({ ...input, purpose: 'retention' }, { sms_enabled: true, seasonal_tips: null }))
+        .resolves.toMatchObject({ ok: false, code: 'NO_MARKETING_CONSENT' });
+    });
+
+    test('a STOP\'d number is still blocked — by the sms_enabled master switch and by the suppression list', async () => {
+      const input = await captureTermiteSmsInput();
+      await expect(runValidators(input, { ...NO_SEASONAL, sms_enabled: false }))
+        .resolves.toMatchObject({ ok: false, code: 'SMS_OPTED_OUT' });
+      await expect(runValidators(input, NO_SEASONAL, { reason: 'opt_out_keyword', created_at: '2026-09-01' }))
+        .resolves.toMatchObject({ ok: false, code: 'SUPPRESSED_OPT_OUT' });
+    });
+
+    test('the generic 30/15/7 reminder keeps its retention purpose (a courtesy reminder, unchanged)', () => {
+      expect(_private.termNoticeSmsPolicy(false, { updated_at: '2026-01-01' })).toMatchObject({ purpose: 'retention', consentBasis: { status: 'opted_in' } });
+      expect(_private.termNoticeSmsPolicy(true, {})).toMatchObject({ purpose: 'billing' });
+    });
+  });
+
   describe('fileTermiteLateNoticeException — durable escalation (Codex #4921 r2 P1)', () => {
     test('a confirmed admin-bell insert stamps notice_45_late_escalated_at', async () => {
       const term = { id: 'term-late-1', customer_id: 'customer-1', term_end: '2027-05-20' };
@@ -3268,10 +3324,15 @@ describe('annual prepay renewal helpers', () => {
     const plus = (n) => _private.addDaysYmd(TODAY, n);
     const base = { id: 'term-u', customer_id: 'customer-1', annual_plan_version: 'v3' };
 
-    test('termiteUndeliveredRungs: the 45 rung the first day it is under 45 days out and undelivered; the 30 rung under 30; never on/before its deadline, once delivered or already escalated, or at term_end', () => {
-      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(45) }, TODAY)).toEqual([]);
+    // Codex #4921 r11 P1: the deadline day itself counts (45 / 30 days out
+    // exactly) — after that day's failed attempt, staff can still deliver
+    // it on time by hand.
+    test('termiteUndeliveredRungs: each rung from its OWN deadline day (45 / 30 days out, inclusive) while undelivered; never before it, once delivered or already escalated, or at term_end', () => {
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(46) }, TODAY)).toEqual([]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(45) }, TODAY)).toEqual([45]); // the 45's deadline day
       expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(44) }, TODAY)).toEqual([45]);
-      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(30) }, TODAY)).toEqual([45]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(31) }, TODAY)).toEqual([45]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(30) }, TODAY)).toEqual([45, 30]); // the 30's deadline day
       expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29) }, TODAY)).toEqual([45, 30]);
       expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29), notice_45_late_sent_at: new Date() }, TODAY)).toEqual([30]);
       expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29), notice_45_sent_at: new Date() }, TODAY)).toEqual([30]);
@@ -3290,7 +3351,7 @@ describe('annual prepay renewal helpers', () => {
       expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
         'alert',
         'Termite annual renewal notice not delivered',
-        expect.stringContaining('45-day deadline has passed'),
+        expect.stringContaining('45-day deadline'),
         expect.objectContaining({
           bell: true,
           dedupeKey: 'termite-annual-notice:term-u:45:undelivered',

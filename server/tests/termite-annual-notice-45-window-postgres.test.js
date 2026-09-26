@@ -228,7 +228,9 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
   // Codex #4921 r4 P1: a rung still undelivered after its OWN deadline
   // (today > term_end - 45 / term_end - 30) is a candidate for one staff
   // bell per rung — not only once term_end arrives.
-  test('termiteUndeliveredNoticeEscalationCandidates: a termite term the first day a rung is past its deadline and undelivered; never on the deadline day, once delivered/late, once that rung is bell-stamped, at/after term_end, or for an unanchored original', async () => {
+  // Codex #4921 r11 P1: each rung's OWN deadline day (45 / 30 days out
+  // exactly) is included, so a failure on that day rings the same day.
+  test('termiteUndeliveredNoticeEscalationCandidates: a termite term from each rung\'s own deadline day (inclusive) while undelivered; never before it, once delivered/late, once that rung is bell-stamped, at/after term_end, or for an unanchored original', async () => {
     const { db } = fixture;
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -240,7 +242,9 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
       installation_anchored_at: new Date('2025-10-01T12:00:00Z'), ...fields,
     });
     const rows = [
+      term('day46_beforeDeadline', { term_end: plus(46) }),
       term('day45_onDeadline', { term_end: plus(45) }),
+      term('day30_onDeadline30', { term_end: plus(30), notice_45_sent_at: new Date() }),
       term('day44_45undelivered', { term_end: plus(44) }),
       term('day44_45late', { term_end: plus(44), notice_45_late_sent_at: new Date() }),
       term('day44_45alreadyBelled', { term_end: plus(44), notice_45_undelivered_escalated_at: new Date() }),
@@ -265,16 +269,20 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
     expect(candidates.map((row) => ids[row.id]).sort()).toEqual([
       'day29_30undelivered',
       'day29_bothBelled45only',
+      'day30_onDeadline30',
       'day30_onlyRung45',
       'day44_45undelivered',
+      'day45_onDeadline',
       'successor',
     ].sort());
     const rungsByLabel = Object.fromEntries(candidates.map((row) => [ids[row.id], _private.termiteUndeliveredRungs(row, today)]));
     expect(rungsByLabel).toEqual({
       day29_30undelivered: [30],
       day29_bothBelled45only: [30],
-      day30_onlyRung45: [45],
+      day30_onDeadline30: [30], // the 30's own deadline day
+      day30_onlyRung45: [45, 30], // 30 days out: the 45 is late AND the 30's deadline day
       day44_45undelivered: [45],
+      day45_onDeadline: [45], // the 45's own deadline day
       successor: [45, 30],
     });
   });
