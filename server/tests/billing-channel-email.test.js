@@ -149,14 +149,18 @@ describe('billing channel email adapter', () => {
   });
 
   test('returns the authority context error without dispatching', async () => {
+    // Codex r4 P1 on #4843: the authority now marks this specific code
+    // retryable (a channel-selection mismatch can be the mid-dispatch
+    // preference-change race) — the adapter forwards it unchanged.
     mockLoadBillingEmailContext.mockResolvedValue({
       error: {
         sent: false, provider: 'email', providerMessageId: null, deliveryOutcome: 'not_sent',
         blocked: true, code: 'BILLING_EMAIL_NOT_SELECTED', reason: 'Email is not selected for this billing category',
+        retryable: true,
       },
     });
     await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, blocked: true, code: 'BILLING_EMAIL_NOT_SELECTED',
+      sent: false, blocked: true, code: 'BILLING_EMAIL_NOT_SELECTED', retryable: true,
     });
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });

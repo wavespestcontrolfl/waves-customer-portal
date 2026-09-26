@@ -421,7 +421,14 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
   let acceptedResult = null;
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
-    if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
+    // Codex r4 P1 on #4843: reuse the caller's handoff transaction (invoice.js's
+    // send-claim + deposit-settlement lock, threaded through preSendCheck by
+    // send-customer-message.js's dispatchProvider) for this billing-leg
+    // eligibility read instead of opening a second root-pool connection
+    // while that transaction is held (DB_POOL_MAX=2 deadlock risk). Never
+    // applied to a non-billing push — those never carry a billingDeliveryCategory.
+    const eligibilityConn = billingDeliveryCategory && preSendCheck?.handoffTrx ? preSendCheck.handoffTrx : db;
+    if (!(await pushEligibleRuntime(customerId, to, messageType, eligibilityConn, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
     const fresh = await hasFreshPushDevice(customerId);
     let appNotification = null;
     if (explicitPushOnly) {

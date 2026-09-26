@@ -594,6 +594,26 @@ describe('explicit billing channel combinations', () => {
     expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   });
 
+  test('an email-only selection whose provider returns a retryable failure is a schedulable BILLING_LEG_RETRY hold (Codex r4 P1 on #4843)', async () => {
+    // With no other selected leg to mask it, a retryable provider failure
+    // on the only channel must itself become a schedulable hold — the same
+    // normalization that keeps App from hiding a retryable Text (above)
+    // applies with exactly one leg. A one-shot producer (stripe-webhook.js,
+    // billing-cron.js, complete-scheduled-service.js) checks isReplayHold()
+    // against this exact code to persist a retry row.
+    prefs.payment_receipt_channels = ['email'];
+    sendBillingChannelEmail.mockResolvedValue({ sent: false, provider: 'email',
+      deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_FAILURE', error: 'provider unavailable' });
+    const { isReplayHold } = require('../services/messaging/billing-channel-routing');
+    const result = await sendCustomerMessage(input);
+    expect(result).toMatchObject({
+      sent: false, retryable: true, deferred: true, code: 'BILLING_LEG_RETRY', originalCode: 'PROVIDER_FAILURE',
+      nextAllowedAt: expect.any(String),
+      channelResults: { email: { sent: false, code: 'PROVIDER_FAILURE' } },
+    });
+    expect(isReplayHold(result)).toBe(true);
+  });
+
   test('a deferred App leg holds Text until replay, so an accepted text cannot be duplicated', async () => {
     prefs.payment_receipt_channels = ['sms', 'push'];
     Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true });
@@ -615,22 +635,35 @@ describe('explicit billing channel combinations', () => {
   });
 
   test('App acceptance cannot settle a selected Text that still needs retry', async () => {
+    // Codex r4 P1 on #4843: billingDispatchOutcome normalizes ANY retryable
+    // + definitely-not_sent leg outcome into the one schedulable
+    // BILLING_LEG_RETRY code (originalCode preserves the leg's own code, and
+    // each leg's own channelResults entry is untouched) so a one-shot
+    // producer persists a retry off it without needing to special-case
+    // every provider's own retryable code.
     const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
     const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['sms', 'push'] }, async (leg) =>
       leg.metadata.billingDeliveryLeg === 'push'
         ? { sent: true, deliveryOutcome: 'accepted', channel: 'push' }
         : { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'TEXT_PROVIDER_RETRY' });
-    expect(result).toMatchObject({ sent: false, retryable: true, code: 'TEXT_PROVIDER_RETRY',
-      channelResults: { push: { sent: true }, sms: { sent: false } } });
+    expect(result).toMatchObject({
+      sent: false, retryable: true, deferred: true, code: 'BILLING_LEG_RETRY', originalCode: 'TEXT_PROVIDER_RETRY',
+      nextAllowedAt: expect.any(String),
+      channelResults: { push: { sent: true }, sms: { sent: false, code: 'TEXT_PROVIDER_RETRY' } },
+    });
   });
 
   test('an earlier Email failure cannot hide uncertain Text delivery', async () => {
+    // Codex r4 P1: normalizeRetryableHold must NEVER convert an `uncertain`
+    // outcome (delivery unproven) into an automatic replay — the code stays
+    // exactly what the leg returned, unlike a definite not_sent failure.
     const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
     const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['email', 'sms'] }, async (leg) =>
       leg.metadata.billingDeliveryLeg === 'email'
         ? { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_EMAIL_PREPARATION_FAILED' }
         : { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'TEXT_OUTCOME_UNCERTAIN' });
     expect(result).toMatchObject({ sent: false, retryable: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCERTAIN' });
+    expect(result.originalCode).toBeUndefined();
   });
 
   test('App proof cannot settle an Email leg that still needs retry', async () => {
@@ -769,7 +802,11 @@ describe('explicit billing channel combinations', () => {
     // billingDispatchOutcome precedence: an unfinished/refused Text
     // outranks an earlier acceptance so the caller retries it (Codex r1 P1
     // on #4843 — the retryable BILLING_PREFERENCES_CHANGED/CHANNEL_NOT_SELECTED
-    // refusals must not be masked by Email already having gone out).
+    // refusals must not be masked by Email already having gone out). Codex
+    // r4 P1: the chosen Text outcome is itself normalized to the one
+    // schedulable BILLING_LEG_RETRY code (originalCode keeps CHANNEL_NOT_SELECTED)
+    // so a one-shot producer persists a retry off it; the per-leg
+    // channelResults entry keeps its own original code.
     const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
     const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['email', 'sms'] }, async (leg) =>
       leg.metadata.billingDeliveryLeg === 'sms'
@@ -777,7 +814,8 @@ describe('explicit billing channel combinations', () => {
           reason: 'Recipient has not selected this billing delivery channel', retryable: true }
         : { sent: true, deliveryOutcome: 'accepted', channel: 'email' });
     expect(result).toMatchObject({
-      sent: false, retryable: true, code: 'CHANNEL_NOT_SELECTED',
+      sent: false, retryable: true, deferred: true, code: 'BILLING_LEG_RETRY', originalCode: 'CHANNEL_NOT_SELECTED',
+      nextAllowedAt: expect.any(String),
       channelResults: { email: { sent: true }, sms: { sent: false, code: 'CHANNEL_NOT_SELECTED' } },
     });
   });

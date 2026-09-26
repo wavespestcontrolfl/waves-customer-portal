@@ -79,7 +79,12 @@ describe('processMonthlyBilling — billing_mode guard', () => {
   // billing-channel-routing.js instead of a copy-pasted code list — an
   // Email-only -> Text-only race on a deduped payment event must persist a
   // retry too, not just the send-window/App-transport holds.
-  test.each(['PUSH_IN_FLIGHT', 'QUIET_HOURS_HOLD', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY', 'BILLING_PREFERENCES_CHANGED'])('a %s failure notice keeps a durable retry and the attempt identity', async (code) => {
+  // BILLING_LEG_RETRY (Codex r4 P1 on #4843): the normalized shape
+  // billingDispatchOutcome now stamps on ANY retryable + definitely
+  // not_sent leg outcome (a retryable provider failure, a locked-recheck
+  // channel mismatch) that doesn't already carry a recognized hold code —
+  // this producer must persist a retry for it exactly like the others.
+  test.each(['PUSH_IN_FLIGHT', 'QUIET_HOURS_HOLD', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY', 'BILLING_PREFERENCES_CHANGED', 'BILLING_LEG_RETRY'])('a %s failure notice keeps a durable retry and the attempt identity', async (code) => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-MM', billing_mode: 'monthly_membership' }];
     StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('declined'), {
       paymentRecord: { id: 'attempt-1', amount: 55.3 },
