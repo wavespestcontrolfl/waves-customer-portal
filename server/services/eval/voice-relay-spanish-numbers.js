@@ -176,7 +176,12 @@ function convertPriceWordRuns(text) {
  */
 function normalizeSpanishSpokenText(text) {
   if (typeof text !== 'string' || !text) return text;
-  let out = convertHourMinutePhrases(text);
+  // "a. m."/"p. m." (the written Spanish form, with a space) first: the
+  // sentence splitter breaks on ". ", which would otherwise cut a spoken
+  // time in half before any time check sees it. Same rewrite as
+  // voice-relay-spoken-language.js's normalizeTimeAbbreviations.
+  let out = text.replace(/\b([ap])\.\s*m\./gi, '$1m');
+  out = convertHourMinutePhrases(out);
   out = convertDigitStrings(out);
   out = convertPriceWordRuns(out);
   return out;

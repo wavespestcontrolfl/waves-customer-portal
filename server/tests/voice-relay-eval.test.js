@@ -4288,8 +4288,28 @@ describe('voice relay eval — named spoken checks', () => {
     ['Le mando el link por email.', 'pass'],
     ['Vale, gracias.', 'pass'], ['Dale, nos vemos.', 'pass'], ['De acuerdo.', 'pass'],
     ['Su cita está confirmada, thank you.', 'fail'],
+    // PR #4946 review: spellings that are ALSO everyday Spanish are not
+    // English evidence ("has", "come", "simple", "complete", "decide",
+    // "note", and "am" as in "9 am") — correct Spanish must pass...
+    ['¿Ya has recibido el mensaje?', 'pass'], ['La termita come madera.', 'pass'],
+    ['Es un proceso simple.', 'pass'], ['Si usted decide, le llamamos hoy.', 'pass'],
+    ['Le pido que complete el formulario.', 'pass'], ['Para que note la diferencia.', 'pass'],
+    ['El técnico llega a las 9 am.', 'pass'],
+    // ...while English contractions are English ("Don't worry.", curly "It’s").
+    ["Don't worry.", 'fail'], ['It’s fine.', 'fail'], ["That's all.", 'fail'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
+  });
+
+  // PR #4946 review: a word the CALLER said capitalized (their own name,
+  // street or brand) is neutral even as Sandy's first word — "Will, su cita…"
+  // for a caller named Will — while the same word the caller never said as a
+  // name is still English evidence.
+  test('only_language es: a name the caller gave is neutral, even sentence-initial', () => {
+    const caller = { text: 'Hola, me llamo Will Carter y vivo en Venice.', from: '+19415550100' };
+    expect(run('only_language', 'es', 'Will, su visita queda pendiente.', caller).status).toBe('pass');
+    expect(run('only_language', 'es', 'Will, su visita queda pendiente.').status).toBe('fail');
+    expect(run('only_language', 'es', 'Will do.', { text: 'Hola, soy Rosa.', from: '+19415550100' }).status).toBe('fail');
   });
 
   test.each([
@@ -4542,6 +4562,16 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: paraphrase2 })).toBe('pass');
     // Codex round-4 P1: the matcher was just "1 nearby 3," so an unrelated
     // "1 or 3" satisfied it without ever stating the window as a range.
+    // PR #4946 review: every natural written form of the window counts — a
+    // dash range with or without a part of day, and a bare "1 to 3" — while
+    // a counted "1 to 3 treatments" is a quantity, not the window.
+    for (const text of ['Your technician arrives today between 1-3 PM.', 'Your window today is 1–3 pm.', 'The window today is 1 to 3.']) {
+      const ok = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text }] }));
+      expect(ok.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
+      expect(replay._internals.scenarioStatus({ checks: ok })).toBe('pass');
+    }
+    const countedRange = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'I can offer 1 to 3 treatments.' }] }));
+    expect(countedRange.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
     const unrelatedNumbers = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'There are 1 or 3 options for rescheduling later.' }] }));
     expect(unrelatedNumbers.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: unrelatedNumbers })).toBe('fail');
@@ -4993,6 +5023,29 @@ describe('voice relay eval — named spoken checks', () => {
       expect(invented.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
       expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
     }
+    // PR #4946 review: the required window needs time context, and every
+    // natural written form of it counts — "p. m." with a space (split by the
+    // sentence splitter unless normalized first), a part of day on the first
+    // endpoint, and an article before a digit hour.
+    for (const text of [
+      'El técnico llega hoy de 1 p. m. a 3 p. m. Gracias por esperar.',
+      'El técnico llega hoy de la 1 de la tarde a las 3 de la tarde.',
+      'El técnico llega hoy entre la 1 y las 3.',
+      'El técnico llega hoy de una a tres por la tarde.',
+    ]) {
+      const ok = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect(replay._internals.scenarioStatus({ checks: ok })).toBe('pass');
+    }
+    for (const text of ['El técnico llega hoy de una a tres.', 'El técnico llega hoy entre una y tres.']) {
+      const bareRange = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect(replay._internals.scenarioStatus({ checks: bareRange })).toBe('pass');
+    }
+    for (const text of ['Tengo una y tres opciones.', 'Tengo entre una y tres opciones para usted.', 'Tarda de una a tres semanas.']) {
+      const noWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect(noWindow.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
+    }
+    const inventedPm = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy a las 5 p. m.' }] }));
+    expect(inventedPm.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     const windowPlusDuration = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde; la visita dura entre dos y veinte minutos.' }] }));
     expect(windowPlusDuration.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: windowPlusDuration })).toBe('pass');

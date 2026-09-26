@@ -88,6 +88,15 @@ describe('normalizeSpanishSpokenText — hour + minute phrases -> digital time',
   });
 });
 
+describe('normalizeSpanishSpokenText — written meridiems', () => {
+  test.each([
+    ['llega de 1 p. m. a 3 p. m. Gracias.', 'llega de 1 pm a 3 pm Gracias.'],
+    ['a las 9 a.m.', 'a las 9 am'],
+  ])('%s -> %s', (input, expected) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(expected);
+  });
+});
+
 describe('normalizeSpanishSpokenText — spoken phone digit strings', () => {
   test.each([
     ['Nueve, cuatro, uno, cinco, cinco, cinco, cero, dos, cuatro, seis.', '9, 4, 1, 5, 5, 5, 0, 2, 4, 6.'],

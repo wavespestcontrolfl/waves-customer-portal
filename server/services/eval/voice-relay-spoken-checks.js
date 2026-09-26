@@ -227,7 +227,10 @@ const HOUR = `(?:1[0-2]|0?[1-9]|${HOUR_WORDS})`;
 const HOUR_WORDS_ES = 'una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce';
 // A part of day after an hour, EN ("3 PM", "3 o'clock", "3 in the afternoon")
 // and ES ("3 de la tarde").
-const MERIDIEM = '(?:(?:a\\.?m\\.?|p\\.?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|de la (?:mañana|tarde|noche))(?![a-z]))';
+// "a. m."/"p. m." with a space is the standard written Spanish form; the
+// space is only allowed after a dot, so a bare "a m" ("a mí") never reads
+// as a meridiem. The lookahead is accent-aware for the same reason.
+const MERIDIEM = '(?:(?:a(?:\\.\\s?)?m\\.?|p(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|(?:de|por) la (?:mañana|tarde|noche))(?![a-záéíóúñü]))';
 const RANGE = '(?:to|and|-|\\u2013|until|till|through|thru|a|y|hasta)';
 // An hour-looking number that is a count or a code, not a time.
 const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times?|things?|people|percent|%|points?|visits?|treatments?|applications?|services?|technicians?|techs?|team members?|calls?|attempts?|tries|try|stops?|steps?|more|other|last|final|extra|additional|quick|go\\b|glance|place|stage|level|address|numbers?|reasons?|questions?|rooms?|bedrooms?|bathrooms?|units?|pets?|[\\d:/-])';
@@ -256,10 +259,11 @@ const HOUR_WORD_MAP_ES = HOUR_WORDS_ES.split('|');
 const HOUR_ARTICLE_ES = Object.freeze({ 1: 'la una', 2: 'las dos', 3: 'las tres', 4: 'las cuatro', 5: 'las cinco', 6: 'las seis', 7: 'las siete', 8: 'las ocho', 9: 'las nueve', 10: 'las diez', 11: 'las once', 12: 'las doce' });
 // A window's hours are 24-hour in the fixture (13 is 1 PM) and spoken as 12-hour.
 const twelveHour = (h) => Number(h) % 12 || 12;
-const hourAlt = (h) => `(?:${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]}|${HOUR_ARTICLE_ES[twelveHour(h)]}|${HOUR_WORD_MAP_ES[twelveHour(h) - 1]})`;
+// Spanish also puts the article before a digit hour ("de la 1 a las 3").
+const hourAlt = (h) => `(?:(?:las?\\s+)?${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]}|${HOUR_ARTICLE_ES[twelveHour(h)]}|${HOUR_WORD_MAP_ES[twelveHour(h) - 1]})`;
 const meridiemOfHour = (h) => (Number(h) < 12 ? 'am' : 'pm');
 // The part of day a spoken meridiem names; "o'clock" names none.
-const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a\.?m|morning|mañana/.test(t) ? 'am' : /^p\.?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
+const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a(?:\.\s?)?m|morning|mañana/.test(t) ? 'am' : /^p(?:\.\s?)?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
 
 // A range endpoint hour for the "between X and Y" shape below only: digits,
 // an English hour word, or a bare Spanish hour word ("dos", "cuatro") — the
@@ -2307,8 +2311,8 @@ const ENGLISH_EVIDENCE_WORDS = [
   'the', 'you', 'your', 'yours', 'we', 'our', 'ours', 'us', 'they', 'them', 'their', 'theirs',
   'she', 'her', 'hers', 'him', 'his', 'it', 'its', 'i', 'my', 'mine', 'this', 'these', 'those',
   'who', 'whom', 'whose', 'which', 'what', 'when', 'where', 'why', 'how',
-  'is', 'are', 'am', 'was', 'were', 'be', 'been', 'being',
-  'have', 'has', 'had', 'having', 'do', 'does', 'did', 'done', 'doing',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'had', 'having', 'do', 'does', 'did', 'done', 'doing',
   'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must',
   'and', 'or', 'but', 'so', 'if', 'because', 'although', 'though', 'while', 'than', 'then',
   'to', 'of', 'for', 'with', 'without', 'from', 'into', 'onto', 'about', 'over', 'under',
@@ -2320,7 +2324,7 @@ const ENGLISH_EVIDENCE_WORDS = [
   'right', 'correct', 'wrong', 'best', 'better', 'worst', 'worse', 'more', 'most', 'less',
   'least', 'yes', 'great', 'good', 'perfect', 'sounds', 'alright', 'absolutely', 'certainly',
   'understood', 'gotcha', 'anytime', 'hello', 'goodbye', 'bye',
-  'get', 'got', 'give', 'gave', 'given', 'make', 'made', 'go', 'going', 'went', 'gone', 'come',
+  'get', 'got', 'give', 'gave', 'given', 'make', 'made', 'go', 'going', 'went', 'gone',
   'coming', 'came', 'see', 'saw', 'seen', 'know', 'knew', 'known', 'think', 'thought', 'say',
   'said', 'tell', 'told', 'ask', 'asked', 'want', 'wanted', 'need', 'needed', 'needs', 'help',
   'helped', 'call', 'calls', 'called', 'calling', 'send', 'sent', 'check', 'checked', 'look',
@@ -2328,23 +2332,34 @@ const ENGLISH_EVIDENCE_WORDS = [
   'leave', 'left', 'start', 'started', 'stop', 'stopped', 'try', 'tried', 'trying', 'work',
   'worked', 'working', 'show', 'showed', 'follow', 'followed', 'open', 'opened', 'close',
   'closed', 'move', 'moved', 'stay', 'stayed', 'arrive', 'arrived', 'finish', 'finished',
-  'complete', 'completed', 'begin', 'began', 'continue', 'continued', 'remember', 'remembered',
-  'forget', 'forgot', 'understand', 'realize', 'realized', 'decide', 'decided', 'choose',
+  'completed', 'begin', 'began', 'continue', 'continued', 'remember', 'remembered',
+  'forget', 'forgot', 'understand', 'realize', 'realized', 'decided', 'choose',
   'chose', 'chosen', 'agree', 'agreed', 'accept', 'accepted', 'allow', 'allowed', 'write',
   'wrote', 'written', 'read', 'listen', 'listening', 'hear', 'heard', 'speak', 'spoke',
   'spoken', 'talk', 'talked', 'wait', 'waited', 'waiting', 'happen', 'happened',
   'someone', 'anyone', 'everyone', 'everybody', 'nobody', 'somebody', 'something', 'anything',
   'everything', 'nothing', 'person', 'people', 'thing', 'things', 'way', 'ways', 'reason',
   'question', 'answer', 'problem', 'issue', 'matter', 'part', 'side', 'end', 'happy', 'glad',
-  'ready', 'busy', 'late', 'early', 'quick', 'easy', 'hard', 'difficult', 'simple', 'short',
+  'ready', 'busy', 'early', 'quick', 'easy', 'hard', 'difficult', 'short',
   'long', 'new', 'old', 'young', 'small', 'big', 'large', 'little', 'much', 'many', 'few',
   'several', 'enough', 'all', 'any', 'some', 'one', 'first', 'last', 'next', 'team', 'member',
   'office', 'follow', 'text', 'sorry', 'number', 'address', 'know', 'sure',
   'schedule', 'scheduled', 'service', 'technician', 'visit', 'estimate', 'quote', 'price',
   'account', 'phone', 'name', 'pleasure', 'appointment', 'appointments', 'confirm', 'confirmed',
-  'confirms', 'book', 'books', 'booked', 'submit', 'submitted', 'note', 'noted', 'save', 'saved',
+  'confirms', 'book', 'books', 'booked', 'submit', 'submitted', 'noted', 'save', 'saved',
   'cancel', 'cancelled', 'canceled', 'update', 'updated', 'pending', 'available', 'unavailable',
+  // Contractions ("Don't worry.", "It's done.") and short replies.
+  "don't", "can't", "won't", "it's", "i'm", "i'll", "i've", "i'd", "you're", "you'll", "you've",
+  "you'd", "we're", "we'll", "we've", "we'd", "they're", "they'll", "they've", "that's",
+  "there's", "here's", "what's", "let's", "isn't", "aren't", "wasn't", "weren't", "didn't",
+  "doesn't", "haven't", "hasn't", "hadn't", "couldn't", "wouldn't", "shouldn't",
+  'worry', 'worries', 'yeah', 'yep', 'nope', 'hi',
 ];
+// Removed on purpose (PR #4946 review): these spellings are also everyday
+// Spanish, so listing them failed correct Spanish — "has" ("¿ya has
+// recibido…?"), "come" ("la termita come madera"), "simple", "complete"
+// ("que complete el formulario"), "decide" ("si decide…"), "late", "note"
+// ("para que note…"), and "am" (the meridiem in "9 am").
 const ENGLISH_EVIDENCE_RE = new RegExp(`^(?:${ENGLISH_EVIDENCE_WORDS.join('|')}|[a-z]{2,}ing)$`, 'i');
 /**
  * A CAPITALIZED token that is NOT the sentence's first word reads as a
@@ -2355,17 +2370,38 @@ const ENGLISH_EVIDENCE_RE = new RegExp(`^(?:${ENGLISH_EVIDENCE_WORDS.join('|')}|
  * there too ("Done.", "Saved.") — exempting it would reopen the gap this
  * check exists to close.
  */
-function hasEnglishEvidence(sentence) {
+function hasEnglishEvidence(sentence, callerProperNouns = new Set()) {
   let seenFirst = false;
   for (const m of sentence.matchAll(WORD_RE)) {
-    const w = m[0];
+    const w = m[0].replace(/\u2019/g, "'");
     const isFirst = !seenFirst;
     seenFirst = true;
     if (/^[A-ZÁÉÍÓÚÑ]/.test(w) && !isFirst) continue;
+    // A word the caller said capitalized is their name, street or brand —
+    // neutral even as Sandy's first word ("Will, su cita…").
+    if (callerProperNouns.has(w.toLowerCase())) continue;
     if (NEUTRAL_WORDS_RE.test(w)) continue;
     if (ENGLISH_EVIDENCE_RE.test(w)) return true;
   }
   return false;
+}
+
+// Capitalized words the caller spoke that are not their sentence's first
+// word — names, streets, brands — as lowercase keys.
+function callerProperNounsOf(record) {
+  const out = new Set();
+  for (const e of (record && record.events) || []) {
+    if (e.kind !== 'caller' || typeof e.text !== 'string') continue;
+    for (const sentence of e.text.split(SENTENCE_SPLIT_RE)) {
+      let seenFirst = false;
+      for (const m of sentence.matchAll(WORD_RE)) {
+        const w = m[0];
+        if (seenFirst && /^[A-ZÁÉÍÓÚÑ]/.test(w)) out.add(w.toLowerCase());
+        seenFirst = true;
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -2386,10 +2422,11 @@ function hasEnglishEvidence(sentence) {
 function only_language(value, record, { spoken }) {
   const other = value === 'es' ? 'en' : 'es';
   const label = other === 'en' ? 'English' : 'Spanish';
+  const callerProperNouns = value === 'es' ? callerProperNounsOf(record) : null;
   for (const text of spoken) {
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
       if (value === 'es') {
-        if (hasEnglishEvidence(sentence)) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
+        if (hasEnglishEvidence(sentence, callerProperNouns)) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
         continue;
       }
       const right = count(LANGUAGE_WORDS[value], sentence);

@@ -1087,7 +1087,10 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "\\b(?:between\\s+|from\\s+)?(?:1|one)(?::00)?\\s*(?:pm|p\\.\\s?m\\.)?\\s+(?:and|to)\\s+(?:3|three)(?::00)?\\b"
+      "\\b(?:between|from)\\s+(?:1|one)(?::00)?\\s*(?:(?:p(?:\\.\\s?)?m\\.?|in\\s+the\\s+afternoon|this\\s+afternoon))?\\s*(?:and|to|until|till|through|-|\u2013|\u2014)\\s*(?:3|three)(?::00)?\\b",
+      "\\b(?:1|one)(?::00)?\\s*(?:(?:p(?:\\.\\s?)?m\\.?|in\\s+the\\s+afternoon|this\\s+afternoon))?\\s*(?:and|to|until|till|through|-|\u2013|\u2014)\\s*(?:3|three)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|in\\s+the\\s+afternoon|this\\s+afternoon)",
+      "\\b(?:1|one)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|in\\s+the\\s+afternoon|this\\s+afternoon)\\s*(?:and|to|until|till|through|-|\u2013|\u2014)\\s*(?:3|three)(?::00)?\\b",
+      "\\b(?:1|one)(?::00)?\\s*(?:to|until|till|through|-|\u2013|\u2014)\\s*(?:3|three)(?::00)?\\b(?!\\s*(?:of\\b|options?|treatments?|visits?|applications?|services?|times?|days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?|people|persons?|rooms?|bedrooms?|bathrooms?|units?|pets?|dogs?|cats?|technicians?|techs?|calls?|attempts?|steps?|stops?|things?|questions?|percent|%|dollars?))"
      ],
      "severity": "critical"
     },
@@ -2283,7 +2286,12 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "\\b(?:de\\s+|entre\\s+)?(?:la\\s+)?(?:una|1)(?::00)?\\s+(?:a|y)\\s+(?:las\\s+)?(?:tres|3)(?::00)?\\b"
+      "\\b(?:de|entre|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde))?\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde)",
+      "\\b(?:de|entre|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde)\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\b",
+      "\\b(?:de|entre|desde)\\s+la\\s+(?:una|1)(?::00)?\\s+(?:a|y|hasta)\\s+las\\s+(?:tres|3)(?::00)?\\b",
+      "\\b(?:de|entre|desde)\\s+(?:la\\s+)?1:00\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?3:00\\b",
+      "\\b(?:de|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:a|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\b(?!\\s*(?:de\\s+(?:ellos|ellas|las|los)\\b|opciones?|tratamientos?|visitas?|aplicaciones?|servicios?|veces|d[i\u00ed]as?|semanas?|meses?|a[\u00f1n]os?|horas?|minutos?|personas?|habitaciones?|cuartos?|dormitorios?|ba[\u00f1n]os?|mascotas?|perros?|gatos?|t[e\u00e9]cnicos?|llamadas?|intentos?|pasos?|paradas?|cosas?|preguntas?|por\\s*ciento|%|d[o\u00f3]lares?))",
+      "\\bentre\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s+y\\s+(?:las\\s+)?(?:tres|3)(?::00)?\\b(?!\\s*(?:de\\s+(?:ellos|ellas|las|los)\\b|opciones?|tratamientos?|visitas?|aplicaciones?|servicios?|veces|d[i\u00ed]as?|semanas?|meses?|a[\u00f1n]os?|horas?|minutos?|personas?|habitaciones?|cuartos?|dormitorios?|ba[\u00f1n]os?|mascotas?|perros?|gatos?|t[e\u00e9]cnicos?|llamadas?|intentos?|pasos?|paradas?|cosas?|preguntas?|por\\s*ciento|%|d[o\u00f3]lares?))"
      ],
      "severity": "critical"
     },
