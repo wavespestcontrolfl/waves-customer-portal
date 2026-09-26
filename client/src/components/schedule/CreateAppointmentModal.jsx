@@ -2677,18 +2677,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!t || t.key !== trappingStatusKey || t.status !== 'ready' || !t.hasJob || t.grandfathered) return;
     const target = Number(t.additionalCheckPrice);
     if (!(target > 0)) return;
-    setServices((arr) => {
-      let changed = false;
-      const next = arr.map((s) => {
-        if ((s?.service_key ?? s?.serviceKey) !== 'rodent_trap_check_additional') return s;
-        if (trapCheckPriceSyncedRef.current.has(s.lineId)) return s;
-        trapCheckPriceSyncedRef.current.add(s.lineId);
-        if (Number(s.price) === target) return s;
-        changed = true;
-        return { ...s, price: String(target) };
-      });
-      return changed ? next : arr;
-    });
+    // Bookkeeping stays outside the state updater (StrictMode replays
+    // updaters): pick the unsynced lines from the committed state, mark
+    // them, then apply a pure, idempotent price update by lineId.
+    const pending = services
+      .filter((s) => (s?.service_key ?? s?.serviceKey) === 'rodent_trap_check_additional'
+        && s.lineId && !trapCheckPriceSyncedRef.current.has(s.lineId))
+      .map((s) => s.lineId);
+    if (!pending.length) return;
+    pending.forEach((id) => trapCheckPriceSyncedRef.current.add(id));
+    const ids = new Set(pending);
+    setServices((arr) => arr.map((s) => (
+      ids.has(s.lineId) && Number(s.price) !== target ? { ...s, price: String(target) } : s
+    )));
   }, [trappingStatus, trappingStatusKey, services]);
 
   const trappingHint = (svc) => {
