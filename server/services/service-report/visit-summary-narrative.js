@@ -61,7 +61,7 @@ function cleanText(value) {
 const APPOINTMENT_DATE = '(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?';
 const APPOINTMENT_TIME = '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)';
 const APPOINTMENT_WINDOW = `\\d{1,2}(?::\\d{2})?(?:\\s*(?:a\\.?m\\.?|p\\.?m\\.?))?\\s*(?:–|—|-|to)\\s*${APPOINTMENT_TIME}`;
-const APPOINTMENT_LEAD = '(?:(?:your\\s+)?(?:next|upcoming)\\s+(?:visit|appointment)\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on)|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
+const APPOINTMENT_LEAD = '(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment)\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on)|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
 const RECAP_APPOINTMENT_RE = new RegExp(
   `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME})?(?:,?\\s+(?:and|then)\\s+(\\S))?`,
   'gi',
@@ -77,16 +77,19 @@ function recapWithoutStaleAppointment(recap, nextVisit) {
   const text = cleanText(recap);
   if (!text || !nextVisit) return text;
   const stripped = text.replace(RECAP_APPOINTMENT_RE, (appointment, aftercareInitial, offset, source) => {
+    const prefix = source.slice(0, offset).trimEnd();
+    const removedLeadingConnector = /^\s*,?\s*and\b/i.test(appointment);
+    // Embedded discussion is outside the writer's appointment grammar. Keep
+    // the entire sentence instead of removing a fragment of its meaning.
+    if (prefix && !/[.!?]$/.test(prefix) && !removedLeadingConnector) return appointment;
     // When aftercare shares this clause, start its sentence at the removal
     // site. A leading-only cleanup misses appointments later in the recap.
     if (aftercareInitial) {
-      const prefix = source.slice(0, offset).trimEnd();
       return `${prefix && !/[.!?]$/.test(prefix) ? '. ' : ''}${aftercareInitial.toUpperCase()}`;
     }
     // In "work, and [appointment]. More work", the final dot can also be the
     // dot in "p.m." and is therefore part of the removed match. Restore only
     // that clear sentence boundary; other surrounding prose stays verbatim.
-    const removedLeadingConnector = /^\s*,?\s*and\b/i.test(appointment);
     const consumedTerminalDot = /\.\s*$/.test(appointment);
     const remainder = source.slice(offset + appointment.length);
     const followedBySentence = !remainder.trim() || /^\s+[A-Z]/.test(remainder);
@@ -99,7 +102,7 @@ function recapWithoutStaleAppointment(recap, nextVisit) {
     .replace(/([.!?])\s*[.!?]+/g, '$1')
     .replace(/\s+([,.;!?])/g, '$1')
     .replace(/,\s*(?=[.;!?])/g, '')
-    .replace(/^[-–—]\s*Waves\s*$/i, '');
+    .replace(/\s*[-–—]\s*Waves\s*$/i, '');
   return normalized && normalized !== text
     ? normalized.charAt(0).toUpperCase() + normalized.slice(1)
     : normalized;

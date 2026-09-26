@@ -168,14 +168,22 @@ test.each([
 
 test.each([
   ['Your next visit is scheduled for Oct 2. Keep pets off treated surfaces until dry.', 'Keep pets off treated surfaces until dry.'],
+  ['The next visit is scheduled for Oct 2. Keep pets off treated surfaces until dry.', 'Keep pets off treated surfaces until dry.'],
+  ['We treated the perimeter. Your next visit is scheduled for Oct 2. - Waves', 'We treated the perimeter.'],
   ['We sealed a 1.5-foot gap, and your next appointment is booked for Sep 24 at 1 p.m.', 'We sealed a 1.5-foot gap.'],
 ])('appointment removal preserves sentence boundaries: %s', (recap, expected) => {
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(expected);
 });
 
+test('embedded appointment discussion remains intact outside the supported writer grammar', () => {
+  const recap = 'We discussed whether the next visit is scheduled for Oct 2 and agreed to confirm with the office.';
+  expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(recap);
+});
+
 test.each([
   'Your next visit is scheduled for Oct 2 at 1 p.m.',
   sanitizeRecap('Your next visit is scheduled for Oct 2 at 1 p.m.'),
+  sanitizeRecap('Your next visit is scheduled for Oct 2.'),
 ])('appointment-only recap retains the authoritative appointment without calling a provider: %s', async (recap) => {
   const callModel = jest.fn();
   const out = await applyVisitSummaryNarrative(input({
