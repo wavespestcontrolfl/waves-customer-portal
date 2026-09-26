@@ -1296,6 +1296,81 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toBe(minutes(6).getTime());
   });
 
+  test('Codex #4816 r28: deferred rows move behind untried rows on the event page', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const seed = await mockPg('call_commitments').first();
+    const { id: _id, created_at: _c, updated_at: _u, ...template } = seed;
+    await mockPg('call_commitments').insert(Array.from({ length: 29 }, (_, i) => ({ ...template, commitment_key: `${seed.commitment_key}:${i}`,
+      evidence: JSON.stringify(seed.evidence), sms_context: JSON.stringify(seed.sms_context) })));
+    await mockPg('call_commitments').update({ due_at: null });
+    const ids = await mockPg('call_commitments').orderBy('id').pluck('id');
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    // Every revalidation is refused: each attempted row is deferred.
+    const verify = jest.fn(async () => ({ verdict: 'fulfilled', record_type: 'visit', record_id: visit.id,
+      quote: 'en route', evidence_hash: 'stale', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+      return verify.mock.calls.map(([r]) => r.id);
+    };
+    const first = await tick(now);
+    expect(first).toEqual(ids.slice(0, 25));
+    // The five never-tried rows come first on the next tick; the deferred
+    // ones stay eligible behind them.
+    const second = await tick(new Date(now.getTime() + 1000));
+    expect(second.slice(0, 5)).toEqual(ids.slice(25));
+    expect((await mockPg('call_commitments').where({ id: ids[0] }).first()).sms_context.event_seen_at).toBeUndefined();
+  });
+
+  test('Codex #4816 r28: an ownership change resets the event watermark', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      property_id: null, quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+      return verify.mock.calls.map(([r]) => r.id);
+    };
+    const visitFor = async (customerId, propertyId, at) => {
+      const [v] = await mockPg('scheduled_services').insert({ customer_id: customerId, property_id: propertyId, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(at), window_start: '09:00:00', status: 'en_route', created_at: new Date(message.created_at.getTime() - 86400000), updated_at: at,
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: v.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: at });
+    };
+    // The other customer's visit event lands at minute 5, before the old
+    // owner's watermark (minute 20) — invisible until ownership moves.
+    const other = { id: randomUUID() };
+    await mockPg('customers').insert({ id: other.id, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550104', address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [otherProperty] = await mockPg('customer_properties').insert({ customer_id: other.id, address_line1: '300 Example Lane',
+      city: 'Sarasota', zip: '34236', active: true }).returning('id');
+    await visitFor(other.id, otherProperty.id, minutes(5));
+    await visitFor(message.customer_id, context.properties[0].id, minutes(20));
+    expect(await tick(minutes(40))).toEqual([target]);
+    expect(await tick(minutes(41))).toEqual([]);
+    await mockPg('sms_log').where({ id: message.id }).update({ customer_id: other.id });
+    expect(await tick(minutes(42))).toEqual([target]);
+  });
+
   test('Codex #4816 r21: a failed evidence query leaves the visit event pending for the next tick', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',

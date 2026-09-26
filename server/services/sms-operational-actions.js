@@ -330,7 +330,7 @@ const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 // the source text; 'default_kind' when this per-kind/basis table filled one
 // in instead; null when the kind has no default and nothing was stated
 // (legacy behavior — refreshSmsCommitments' null-due branch still applies).
-function resolveDueDeadline(item, messageCreatedAt, messageBody = '') {
+function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
   // Defaults are Waves' own service windows. A customer-owned promise ("I'll
   // send photos") keeps the legacy undated behavior; a 48h stamp would show
@@ -340,10 +340,13 @@ function resolveDueDeadline(item, messageCreatedAt, messageBody = '') {
   // extractor could not resolve to a clock instant: leave it undated rather
   // than manufacture a per-kind deadline that contradicts what was said
   // (Codex #4816 r1). The row still closes on evidence; it never bells.
-  // The whole source text, not just the model's quote: a shortened quote
-  // ("call me" from "Can you call me tomorrow?") must not hide the timing
-  // (Codex #4816 r22).
-  if (item.due_text || item.timing_unverified || STATED_TIMING.test(`${item.quote || ''} ${messageBody || ''}`)) return { due_at: null, due_basis: null };
+  // The grounded quote only, never the rest of the message (Codex #4816 r28
+  // reversing r22): an undated row never bells, so timing borrowed from an
+  // unrelated sentence ("The treatment on 2026-08-01 failed; please call
+  // me") would silently drop a real follow-up, while timing a shortened
+  // quote omits only makes the default bell early. A missed bell is the
+  // worse failure.
+  if (item.due_text || item.timing_unverified || STATED_TIMING.test(item.quote || '')) return { due_at: null, due_basis: null };
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
@@ -396,7 +399,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       : null;
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
-      const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at, message.message_body);
+      const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at);
       return {
         sms_log_id: message.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
         description: item.description, channel: 'sms', due_at: dueAt,
@@ -630,7 +633,11 @@ const RETRY_AFTER_SQL = "(cc.sms_context->'fulfillment_check'->>'retry_after')::
 // promise's queue row predates the delivery that actually made it (Codex
 // #4816 r27).
 const SOURCE_AT = "COALESCE((cc.sms_context->>'source_at')::timestamptz, s.created_at)";
-const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, ${SOURCE_AT}))`;
+// The watermark was read against one customer's visits: after a merge or
+// merge undo moves the source SMS, it no longer applies (Codex #4816 r28).
+const EVENT_SEEN_AT = `CASE WHEN cc.sms_context->>'event_seen_customer_id' = s.customer_id::text
+  THEN (cc.sms_context->>'event_seen_at')::timestamptz END`;
+const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE(${EVENT_SEEN_AT}, ${SOURCE_AT}))`;
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
 const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
@@ -784,15 +791,17 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
     .where((q) => q.whereRaw(`${RETRY_AFTER_SQL} IS NULL OR ${RETRY_AFTER_SQL} <= ?`, [now])
       .orWhereRaw(`${UNSEEN_VISIT_ACTIVITY} > ${RETRY_AFTER_SQL} - make_interval(secs => ?)`, [...tickBound, PROVIDER_RETRY_MS / 1000]))
-    .orderByRaw("(cc.sms_context->>'event_seen_at')::timestamptz ASC NULLS FIRST, cc.id").limit(PAGE)
-    .select('cc.*', conn.raw(`LEAST(${UNSEEN_VISIT_ACTIVITY}, ?::timestamptz)::text AS event_seen_through`,
+    // A deferred row keeps its event but moves behind rows not yet tried, so
+    // repeated deferrals cannot hold the page prefix (Codex #4816 r28).
+    .orderByRaw(`GREATEST(${EVENT_SEEN_AT}, (cc.sms_context->>'event_attempted_at')::timestamptz) ASC NULLS FIRST, cc.id`).limit(PAGE)
+    .select('cc.*', 's.customer_id as event_customer_id', conn.raw(`LEAST(${UNSEEN_VISIT_ACTIVITY}, ?::timestamptz)::text AS event_seen_through`,
       [...tickBound, new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
-  const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at }) => [id, at]));
+  const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at, event_customer_id: customerId }) => [id, { at, customerId }]));
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
     await page('sms_operations.future_cursor', (q) => q.where('cc.due_at', '>', now)),
   ];
-  const rows = [...new Map([...eventRows.map(({ event_seen_through: _at, ...row }) => row), ...pages.flatMap((p) => p.rows)]
+  const rows = [...new Map([...eventRows.map(({ event_seen_through: _at, event_customer_id: _customer, ...row }) => row), ...pages.flatMap((p) => p.rows)]
     .map((row) => [row.id, row])).values()];
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { ...counts, skipped: 'gate_off' };
@@ -804,10 +813,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     if (result.closed) counts.fulfilled += 1;
     // Stamped only after the row is handled: an error above, or a deferred
     // close, leaves its event pending for the next tick.
-    if (seenThrough.has(row.id) && result.outcome !== 'deferred') {
-      await conn('call_commitments').where({ id: row.id }).update({
-        sms_context: conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_seen_at}', to_jsonb(?::text))", [seenThrough.get(row.id)]),
-      });
+    if (seenThrough.has(row.id)) {
+      const { at, customerId } = seenThrough.get(row.id);
+      await conn('call_commitments').where({ id: row.id }).update({ sms_context: result.outcome === 'deferred'
+        ? conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_attempted_at}', to_jsonb(?::text))", [now.toISOString()])
+        : conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('event_seen_at', ?::text, 'event_seen_customer_id', ?::text)", [at, customerId]) });
     }
   }
   for (const { cursorKey, rows: pageRows } of pages) {

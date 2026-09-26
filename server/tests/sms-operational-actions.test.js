@@ -733,11 +733,15 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     },
   );
 
-  test('Codex #4816 r22: timing elsewhere in the source text counts even when the quote is shortened', () => {
-    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote: 'call me' },
-      at, 'Can you call me tomorrow?')).toEqual({ due_at: null, due_basis: null });
-    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote: 'call me' },
-      at, 'Can you call me?').due_basis).toBe('default_kind');
+  test('Codex #4816 r28 (reverses r22): only the obligation\'s own quote can suppress the default deadline', () => {
+    const item = (quote) => ({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote });
+    // Timing in the quote itself: undated.
+    expect(resolveDueDeadline(item('please call me tomorrow'), at)).toEqual({ due_at: null, due_basis: null });
+    // An unrelated date elsewhere in the message ("The treatment on
+    // 2026-08-01 failed; please call me") must not drop the follow-up bell:
+    // resolveDueDeadline no longer reads the message body at all.
+    expect(resolveDueDeadline(item('please call me'), at, 'The treatment on 2026-08-01 failed; please call me').due_basis)
+      .toBe('default_kind');
   });
 
   test.each(['Please call me back', 'Can you send the estimate?', 'Call me back ASAP', 'Are you still coming?',
