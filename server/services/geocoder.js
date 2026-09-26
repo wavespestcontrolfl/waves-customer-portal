@@ -200,7 +200,7 @@ async function ensureCustomerGeocoded(customerId) {
  * the primary-property coord mirror share one transaction (repo convention
  * for every re-geocode path). A bulk caller may pass a Set through
  * scheduleQualityCustomerIds to collect successful coordinate commits and
- * refresh route quality once after its whole geocode batch settles.
+ * coalesce route-quality refreshes after those commits.
  */
 async function regeocodeCustomerAddressGuarded(customerId, { scheduleQualityCustomerIds = null } = {}) {
   const c = await db('customers').where({ id: customerId }).first();

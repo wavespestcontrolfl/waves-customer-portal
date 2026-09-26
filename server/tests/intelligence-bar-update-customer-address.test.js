@@ -71,9 +71,12 @@ const baseRow = {
 };
 
 beforeEach(() => {
+  jest.useFakeTimers({ doNotFake: ['setImmediate'] });
   jest.clearAllMocks();
   db.transaction.mockImplementation(async (cb) => cb(db));
 });
+
+afterEach(() => { jest.clearAllTimers(); jest.useRealTimers(); });
 
 test('an address change syncs the primary property atomically and re-geocodes', async () => {
   db.__qb.first
@@ -191,11 +194,12 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
   expect(customerProperties.syncPrimaryCoordsFromCustomer).not.toHaveBeenCalled();
   await new Promise(setImmediate);
+  await jest.advanceTimersByTimeAsync(1000);
   expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
   expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: ['cust-a', 'cust-b'] });
 });
 
-test('bulk address geocodes stay detached and refresh route quality once after all settle', async () => {
+test('bulk address geocodes stay detached and coalesce successes within one second', async () => {
   const rowA = { ...baseRow, id: 'cust-a' };
   const rowB = { ...baseRow, id: 'cust-b' };
   db.__qb.first
@@ -228,8 +232,40 @@ test('bulk address geocodes stay detached and refresh route quality once after a
   expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
   resolveB();
   await new Promise(setImmediate);
+  await jest.advanceTimersByTimeAsync(1000);
   expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
   expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: ['cust-a', 'cust-b'] });
+});
+
+test('a stalled geocode cannot block committed siblings and its late success gets a new refresh', async () => {
+  const rowA = { ...baseRow, id: 'cust-a' };
+  const rowB = { ...baseRow, id: 'cust-b' };
+  db.__qb.first.mockResolvedValueOnce(rowA).mockResolvedValueOnce(rowA)
+    .mockResolvedValueOnce(rowB).mockResolvedValueOnce(rowB);
+  let resolveB;
+  const pendingB = new Promise(resolve => { resolveB = resolve; });
+  geocoder.regeocodeCustomerAddressGuarded
+    .mockImplementationOnce(async (customerId, { scheduleQualityCustomerIds }) => {
+      scheduleQualityCustomerIds.add(customerId);
+      return { lat: 27.1, lng: -82.4 };
+    })
+    .mockImplementationOnce((customerId, { scheduleQualityCustomerIds }) => pendingB.then(() => {
+      scheduleQualityCustomerIds.add(customerId);
+      return { lat: 27.1, lng: -82.4 };
+    }));
+
+  await expect(executeTool('bulk_update_customers', {
+    customer_ids: ['cust-a', 'cust-b'], updates: { city: 'Parrish' },
+  })).resolves.toMatchObject({ success: true, updated_count: 2 });
+  await jest.advanceTimersByTimeAsync(1000);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenNthCalledWith(1, { customerIds: ['cust-a'] });
+
+  resolveB();
+  await new Promise(setImmediate);
+  await jest.advanceTimersByTimeAsync(1000);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(2);
+  expect(refreshScheduleQualityAfterChange).toHaveBeenNthCalledWith(2, { customerIds: ['cust-b'] });
 });
 
 test('a later bulk row failure still flushes route quality for an earlier successful geocode', async () => {
@@ -258,6 +294,7 @@ test('a later bulk row failure still flushes route quality for an earlier succes
 
   resolveA();
   await new Promise(setImmediate);
+  await jest.advanceTimersByTimeAsync(1000);
   expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
   expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: ['cust-a'] });
 });
