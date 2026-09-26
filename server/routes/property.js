@@ -660,7 +660,9 @@ router.get('/termite-bond', async (req, res, next) => {
 // uses) before it is ever shown as covered (codex pre-push P1).
 const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm } = require('../services/annual-prepay-renewals');
+const {
+  declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm, termPropertyLabelsForCustomer,
+} = require('../services/annual-prepay-renewals');
 
 router.get('/termite-annual-plan', async (req, res, next) => {
   res.set('Cache-Control', 'private, no-store');
@@ -699,10 +701,22 @@ router.get('/termite-annual-plan', async (req, res, next) => {
     if (!applicableRows.length) {
       return res.json({ available: false, reason: 'no_term' });
     }
+    // Pre-push audit P1: a multi-property account's cards were otherwise
+    // indistinguishable — each term names its property (source estimate's
+    // property -> estimate address -> the customer's own address), scoped
+    // to req.customerId at every join. Fail-soft: a label lookup failure
+    // only drops the labels, never the renewal card itself.
+    let propertyLabels = new Map();
+    try {
+      propertyLabels = await termPropertyLabelsForCustomer(req.customerId, applicableRows.map((term) => term.id), db);
+    } catch (labelErr) {
+      logger.warn(`[property] termite annual plan property labels failed for customer ${req.customerId}: ${labelErr.message}`);
+    }
     const terms = applicableRows.map((term) => {
       const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
       return {
         id: term.id,
+        propertyLabel: propertyLabels.get(term.id) || null,
         termEnd: dateOnlyString(term.term_end),
         prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
         declined,

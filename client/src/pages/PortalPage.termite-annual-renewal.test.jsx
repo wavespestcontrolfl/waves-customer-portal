@@ -94,6 +94,52 @@ describe('termite annual plan renewal card', () => {
     expect(screen.getAllByRole('button', { name: 'Don’t renew my plan' })).toHaveLength(1);
   });
 
+  // Pre-push audit P1: a multi-property account's cards were identical —
+  // each card names its property, and the decline confirmation names the
+  // property being declined.
+  it('names each card\'s property and asks "Don’t renew the plan at <address>?" in the confirm step', async () => {
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [
+        {
+          id: 'term-a', propertyLabel: '12 Palm Ave, Bradenton, FL 34202', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true,
+        },
+        {
+          id: 'term-b', propertyLabel: '400 Gulf Dr, Unit 3, Holmes Beach, FL 34217', termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: true,
+        },
+      ],
+    });
+    render(<MyPlanTab customer={customer} />);
+    expect(await screen.findByText('12 Palm Ave, Bradenton, FL 34202')).toBeInTheDocument();
+    expect(screen.getByText('400 Gulf Dr, Unit 3, Holmes Beach, FL 34217')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Don’t renew my plan' })[1]);
+    expect(screen.getByText('Don’t renew the plan at 400 Gulf Dr, Unit 3, Holmes Beach, FL 34217?')).toBeInTheDocument();
+    expect(screen.queryByText('Don’t renew the plan at 12 Palm Ave, Bradenton, FL 34202?')).not.toBeInTheDocument();
+  });
+
+  it('keeps the property label on a declined card', async () => {
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [{
+        id: 'term-1', propertyLabel: '12 Palm Ave, Bradenton, FL 34202', termEnd: '2027-05-20', prepayAmount: 450, declined: true, canDecline: false,
+      }],
+    });
+    render(<MyPlanTab customer={customer} />);
+    expect(await screen.findByText('12 Palm Ave, Bradenton, FL 34202')).toBeInTheDocument();
+    expect(screen.getByText(/Your plan will not renew\. Coverage continues through May 20, 2027\./)).toBeInTheDocument();
+  });
+
+  it('with no property label, the confirm step asks "Don’t renew your plan?"', async () => {
+    api.getTermiteAnnualPlan.mockResolvedValue({
+      available: true,
+      terms: [{ id: 'term-1', propertyLabel: null, termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }],
+    });
+    render(<MyPlanTab customer={customer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Don’t renew my plan' }));
+    expect(screen.getByText('Don’t renew your plan?')).toBeInTheDocument();
+  });
+
   it('hides the decline control once a conflicting decision (renew) is already on file', async () => {
     api.getTermiteAnnualPlan.mockResolvedValue({
       available: true,

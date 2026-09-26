@@ -51,7 +51,20 @@ async function createScratchDb() {
     sent_at timestamptz,
     sms_sent_at timestamptz,
     email_sent_at timestamptz,
+    paid_at timestamptz,
+    stripe_payment_intent_id text,
+    stripe_charge_id text,
     created_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  // Read by the candidate scans' paid-decided-lapse EXISTS (the real
+  // coveredTermsAsOf refund check): a full refund of the prepay invoice's
+  // payment un-covers a declined term.
+  await db.raw(`CREATE TABLE payments (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    status text,
+    refund_status text,
+    stripe_payment_intent_id text,
+    stripe_charge_id text
   )`);
   // The countersign reminder only reminds what the Requests queue can show
   // (non-archived customers).
@@ -190,7 +203,18 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
-    jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay, refreshTermSnapshot }));
+    // Only the window edit is stubbed: the paid-coverage test for a
+    // decided-lapse term (coveredTermsAsOf / isPaidDecidedLapseTerm) runs
+    // for real against this schema, the same one billing uses.
+    jest.doMock('../services/annual-prepay-renewals', () => {
+      const actual = jest.requireActual('../services/annual-prepay-renewals');
+      return {
+        coveredTermsAsOf: actual.coveredTermsAsOf,
+        isPaidDecidedLapseTerm: actual.isPaidDecidedLapseTerm,
+        createTermForAnnualPrepay,
+        refreshTermSnapshot,
+      };
+    });
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return {
       sweep: (opts = {}) => reconcileTermiteAnnualActivations({ conn: db, ...opts }),
@@ -431,6 +455,88 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     expect((await sweep()).handoffScanned).toBe(0);
   });
 
+  // Codex pre-push P1: the decided-lapse shape is status-only — a decline
+  // followed by a full refund (or a disputed invoice) still reads
+  // 'cancelled' + 'cancel', but billing no longer covers that year. Such a
+  // term must never get an install-scheduling bell nor be anchored, and it
+  // must not even be a scan candidate (so it can't hold a `limit` slot).
+  test.each([
+    ['a full refund of the prepay payment', async (db) => {
+      await db('invoices').where({ id: ids.invoiceId }).update({ stripe_payment_intent_id: 'pi_declined_then_refunded' });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: 'pi_declined_then_refunded' });
+    }],
+    ['a disputed prepay invoice', async (db) => {
+      await db('invoices').where({ id: ids.invoiceId }).update({ status: 'overdue', paid_at: null });
+    }],
+  ])('decline then %s: no install-handoff bell, no anchor — sweep and direct anchor both refuse', async (_label, unPay) => {
+    const { sweep, notifyAdmin, createTermForAnnualPrepay, refreshTermSnapshot, db } = load();
+    await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+    await addVisit(db, { scheduled_date: '2026-10-14' });
+    await unPay(db);
+
+    const counts = await sweep();
+
+    expect(Object.keys(counts).filter((key) => key.endsWith('ScanError'))).toEqual([]);
+    expect(counts).toMatchObject({
+      anchorScanned: 0, anchored: 0, anchorFailed: 0, handoffScanned: 0, handedOff: 0, handoffFailed: 0,
+    });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+    expect(refreshTermSnapshot).not.toHaveBeenCalled();
+    const estimate = await db('estimates').where({ id: ids.estimateId }).first('annual_plan_install_handoff_at');
+    expect(estimate.annual_plan_install_handoff_at).toBeNull();
+
+    // The direct anchor (under its lock) refuses the same term too.
+    const { anchorTermToInstallation } = require('../services/termite-annual-activation');
+    expect(await anchorTermToInstallation({ termId: ids.termId, conn: db })).toEqual({ skipped: 'not_original_term' });
+    const term = await readTerm(db);
+    expect(term.installation_anchored_at).toBeNull();
+    expect(term.installation_anchor_visit_id).toBeNull();
+    expect(term.status).toBe('cancelled');
+    expect(term.renewal_decision).toBe('cancel');
+  });
+
+  test('a still-PAID decline sitting next to an un-paid (refunded) decline: only the paid one is scanned, bell rung and anchored', async () => {
+    const { sweep, db } = load({});
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+    await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+    // A second, OLDER plan (activated first, so it sorts ahead under
+    // limit 1) whose decline was followed by a full refund.
+    const otherCustomer = randomUUID();
+    const [otherEstimate] = await db('estimates').insert({
+      customer_id: otherCustomer,
+      annual_plan_activation_status: 'activated',
+      annual_plan_activated_at: new Date('2026-09-01T16:00:00Z'),
+      annual_plan_install_handoff_at: null,
+    }).returning('*');
+    const [otherInvoice] = await db('invoices').insert({ customer_id: otherCustomer, status: 'paid', stripe_payment_intent_id: 'pi_other_refunded' }).returning('*');
+    await db('payments').insert({ status: 'refunded', stripe_payment_intent_id: 'pi_other_refunded' });
+    const [otherTerm] = await db('annual_prepay_terms').insert({
+      customer_id: otherCustomer,
+      source_estimate_id: otherEstimate.id,
+      prepay_invoice_id: otherInvoice.id,
+      term_start: '2026-09-01',
+      term_end: '2027-09-01',
+      status: 'cancelled',
+      renewal_decision: 'cancel',
+      created_at: new Date('2026-09-01T16:00:00Z'),
+    }).returning('*');
+    await db('scheduled_services').insert({
+      customer_id: otherCustomer, source_estimate_id: otherEstimate.id, status: 'completed', service_type: 'Termite Bait Station Installation', scheduled_date: '2026-10-01',
+    });
+
+    const handoffOnly = await sweep({ limit: 1 });
+    expect(handoffOnly).toMatchObject({ handoffScanned: 1, handedOff: 1 });
+    expect((await db('estimates').where({ id: ids.estimateId }).first()).annual_plan_install_handoff_at).toBeInstanceOf(Date);
+    expect((await db('estimates').where({ id: otherEstimate.id }).first()).annual_plan_install_handoff_at).toBeNull();
+
+    const install = await addVisit(db, { scheduled_date: '2026-10-14' });
+    expect(await sweep({ limit: 1 })).toMatchObject({ anchorScanned: 1, anchored: 1 });
+    expect((await readTerm(db)).installation_anchor_visit_id).toBe(install.id);
+    expect((await db('annual_prepay_terms').where({ id: otherTerm.id }).first()).installation_anchored_at).toBeNull();
+  });
+
   test('install handoff: an installation staff already booked on the estimate is the handoff — stamped, no bell', async () => {
     const { sweep, notifyAdmin, db } = load();
     await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
@@ -585,7 +691,15 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
-    jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay: jest.fn(), refreshTermSnapshot: jest.fn() }));
+    jest.doMock('../services/annual-prepay-renewals', () => {
+      const actual = jest.requireActual('../services/annual-prepay-renewals');
+      return {
+        coveredTermsAsOf: actual.coveredTermsAsOf,
+        isPaidDecidedLapseTerm: actual.isPaidDecidedLapseTerm,
+        createTermForAnnualPrepay: jest.fn(),
+        refreshTermSnapshot: jest.fn(),
+      };
+    });
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return { sweep: (opts = {}) => reconcileTermiteAnnualActivations({ conn: db, ...opts }), notifyAdmin, db };
   }

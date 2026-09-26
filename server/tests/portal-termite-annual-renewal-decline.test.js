@@ -40,7 +40,12 @@ const mockDeclineTermiteAnnualRenewal = jest.fn();
 // covered — defaults to true so tests that don't care about refund/dispute
 // exclusion (declined-and-still-covered) need no per-test setup.
 const mockIsPaidDecidedLapseTerm = jest.fn().mockResolvedValue(true);
+// Pre-push audit P1: per-term property label (ownership-scoped lookup — its
+// SQL runs for real in termite-annual-plan-property-label-postgres.test.js).
+// Defaults to no labels.
+const mockTermPropertyLabels = jest.fn().mockResolvedValue(new Map());
 jest.mock('../services/annual-prepay-renewals', () => ({
+  termPropertyLabelsForCustomer: (...args) => mockTermPropertyLabels(...args),
   declineTermiteAnnualRenewal: (...args) => mockDeclineTermiteAnnualRenewal(...args),
   // The REAL shared eligibility rule — GET's canDecline must match the write.
   termiteDeclineBlockedReason: (...args) => jest.requireActual('../services/annual-prepay-renewals').termiteDeclineBlockedReason(...args),
@@ -92,14 +97,28 @@ async function invoke(handler, { customerId = 'cust-1', body = {} } = {}) {
 const getHandler = () => routeHandler(propertyRouter, 'get', '/termite-annual-plan');
 const postHandler = () => routeHandler(propertyRouter, 'post', '/termite-annual-plan/decline');
 
+// Pre-push audit P2: the fixtures use fixed term_end dates (2027-05-20,
+// 2027-08-01) and canDecline compares them against the ET "today" — pin the
+// clock (Date only) so the suite never starts failing once those dates pass.
+const PINNED_NOW = new Date('2026-09-26T16:00:00Z');
+
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.useFakeTimers({
+    now: PINNED_NOW,
+    doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+  });
   mockIsPaidDecidedLapseTerm.mockResolvedValue(true);
+  mockTermPropertyLabels.mockResolvedValue(new Map());
   state.rows = [];
   state.fail = false;
   state.whereArgs = [];
   process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
+});
+
+afterEach(() => {
+  jest.useRealTimers();
 });
 
 afterAll(() => {
@@ -140,7 +159,7 @@ describe('GET /api/property/termite-annual-plan', () => {
     const { body } = await invoke(getHandler());
     expect(body).toEqual({
       available: true,
-      terms: [{ id: 'term-1', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }],
+      terms: [{ id: 'term-1', propertyLabel: null, termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }],
     });
   });
 
@@ -162,10 +181,60 @@ describe('GET /api/property/termite-annual-plan', () => {
     expect(body).toEqual({
       available: true,
       terms: [
-        { id: 'term-a', termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true },
-        { id: 'term-b', termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: false },
+        { id: 'term-a', propertyLabel: null, termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true },
+        { id: 'term-b', propertyLabel: null, termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: false },
       ],
     });
+  });
+
+  // Pre-push audit P1: a multi-property account's cards must be told apart —
+  // each term carries its own property label, looked up for req.customerId
+  // (never a body-supplied identity) over exactly the terms being returned.
+  test('each term carries its own ownership-scoped property label', async () => {
+    state.rows = [
+      {
+        id: 'term-a', term_end: '2027-05-20', prepay_amount: '450.00', status: 'active', renewal_decision: null,
+        annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+      },
+      {
+        id: 'term-b', term_end: '2027-08-01', prepay_amount: '600.00', status: 'active', renewal_decision: null,
+        annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+      },
+    ];
+    mockTermPropertyLabels.mockResolvedValue(new Map([
+      ['term-a', '12 Palm Ave, Bradenton, FL 34202'],
+      ['term-b', '400 Gulf Dr, Unit 3, Holmes Beach, FL 34217'],
+    ]));
+    const { body } = await invoke(getHandler(), { customerId: 'cust-1' });
+    expect(mockTermPropertyLabels).toHaveBeenCalledWith('cust-1', ['term-a', 'term-b'], db);
+    expect(body.terms.map((term) => [term.id, term.propertyLabel])).toEqual([
+      ['term-a', '12 Palm Ave, Bradenton, FL 34202'],
+      ['term-b', '400 Gulf Dr, Unit 3, Holmes Beach, FL 34217'],
+    ]);
+  });
+
+  test('a refunded decided-lapse term is never passed to the label lookup', async () => {
+    state.rows = [
+      { id: 'term-refunded', term_end: '2027-05-20', prepay_amount: '450.00', status: 'cancelled', renewal_decision: 'cancel' },
+      {
+        id: 'term-b', term_end: '2027-08-01', prepay_amount: '600.00', status: 'active', renewal_decision: null,
+        annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+      },
+    ];
+    mockIsPaidDecidedLapseTerm.mockResolvedValue(false);
+    await invoke(getHandler());
+    expect(mockTermPropertyLabels).toHaveBeenCalledWith('cust-1', ['term-b'], db);
+  });
+
+  test('a label lookup failure only drops the labels — the cards still render', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'active', renewal_decision: null,
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+    }];
+    mockTermPropertyLabels.mockRejectedValue(new Error('labels down'));
+    const { statusCode, body } = await invoke(getHandler());
+    expect(statusCode).toBe(200);
+    expect(body.terms).toEqual([{ id: 'term-1', propertyLabel: null, termEnd: '2027-05-20', prepayAmount: 450, declined: false, canDecline: true }]);
   });
 
   test('an already-declined term reports declined:true and canDecline:false', async () => {
@@ -202,7 +271,7 @@ describe('GET /api/property/termite-annual-plan', () => {
     mockIsPaidDecidedLapseTerm.mockResolvedValue(false);
     const { body } = await invoke(getHandler());
     expect(body.available).toBe(true);
-    expect(body.terms).toEqual([{ id: 'term-b', termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: true }]);
+    expect(body.terms).toEqual([{ id: 'term-b', propertyLabel: null, termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: true }]);
   });
 
   test('an unpaid (payment_pending) plan never offers the decline control', async () => {

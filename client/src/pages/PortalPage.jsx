@@ -10964,7 +10964,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // P1: never silently hidden, distinct from "nothing to show"). A
   // multi-property account can carry more than one overlapping term, so
   // this is an array — one card per term, each with its own decline
-  // control: [{ id, termEnd, prepayAmount, declined, canDecline }].
+  // control: [{ id, propertyLabel, termEnd, prepayAmount, declined,
+  // canDecline }] — propertyLabel (server-resolved, ownership-scoped) tells
+  // one property's card from another's.
   const [termiteAnnualPlans, setTermiteAnnualPlans] = useState([]);
   const [termiteAnnualPlanStatus, setTermiteAnnualPlanStatus] = useState('loading');
   const loadTermiteAnnualPlan = useCallback(() => {
@@ -11919,6 +11921,9 @@ function TermiteAnnualRenewalCard({
 
   const termEndLabel = term.termEnd ? fmtDate(term.termEnd, { month: 'long', day: 'numeric', year: 'numeric' }) : 'your term end date';
   const feeLabel = term.prepayAmount != null ? formatPortalMoney(term.prepayAmount) : null;
+  // Which property this plan covers (pre-push audit P1: a multi-property
+  // account's cards were otherwise identical). Absent label = single card.
+  const propertyLabel = typeof term.propertyLabel === 'string' && term.propertyLabel.trim() ? term.propertyLabel.trim() : null;
 
   const handleDecline = async () => {
     setSubmitting(true);
@@ -11942,6 +11947,9 @@ function TermiteAnnualRenewalCard({
   return (
     <section data-glass="card" style={{ ...card, padding: 20 }}>
       <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
+      {propertyLabel && (
+        <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>{propertyLabel}</div>
+      )}
       {term.declined ? (
         <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
           Your plan will not renew. Coverage continues through {termEndLabel}.
@@ -11954,7 +11962,10 @@ function TermiteAnnualRenewalCard({
           </div>
           {term.canDecline && (confirming ? (
             <div style={{ marginTop: 14 }}>
-              <div style={{ fontSize: 14, color: muted, lineHeight: 1.45 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.glassNavy, lineHeight: 1.45 }}>
+                {propertyLabel ? `Don’t renew the plan at ${propertyLabel}?` : 'Don’t renew your plan?'}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
                 Your plan will not renew. Coverage continues through {termEndLabel}.
               </div>
               {error && (

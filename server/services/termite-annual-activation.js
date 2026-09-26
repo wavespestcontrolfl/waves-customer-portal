@@ -812,18 +812,41 @@ const ANCHORABLE_TERM_STATUSES = ['payment_pending', 'active'];
 // An anchorable term is either:
 //   - undecided and paid/live (renewal_decision IS NULL, status IN
 //     ANCHORABLE_TERM_STATUSES) — the ordinary case, or
-//   - the decided-lapse shape above.
+//   - the decided-lapse shape above, PROVIDED it is still actually paid.
 // A void/refund 'cancelled' row (renewal_decision IS NULL) is neither shape
 // and is never anchored — its coverage never happened.
-function isAnchorableTermState(term) {
+//
+// Codex pre-push P1: the decided-lapse shape is STATUS-only — a decline
+// followed by a refund or a disputed invoice still reads 'cancelled' +
+// 'cancel', but billing (coveredTermsAsOf) has already revoked its
+// coverage. isPaidDecidedLapseTerm (the SAME live-coverage test billing
+// uses) is the deciding vote for that shape, so a refunded/disputed
+// decline is never anchored and never gets an install-scheduling handoff.
+async function isAnchorableTermState(term, conn = db) {
   if (term?.renewed_from_term_id) return false;
-  if (term?.status === 'cancelled' && term?.renewal_decision === 'cancel') return true;
+  if (term?.status === 'cancelled' && term?.renewal_decision === 'cancel') {
+    const { isPaidDecidedLapseTerm } = require('./annual-prepay-renewals');
+    return isPaidDecidedLapseTerm(term, conn);
+  }
   return !term?.renewal_decision && ANCHORABLE_TERM_STATUSES.includes(term?.status);
 }
 
-function whereAnchorableTermState(builder, alias) {
+// SQL-level companion to isAnchorableTermState, for the two candidate
+// scans below (anchorInstalledTerms, retryInstallHandoffs). The decided-
+// lapse branch is NOT status-only: it carries the SAME paid/not-refunded/
+// not-disputed test isPaidDecidedLapseTerm runs (coveredTermsAsOf scoped to
+// this term's id, correlated as an EXISTS), so a refunded/disputed decline
+// is never even a candidate — it can't take a slot in the scan's `limit`
+// and starve paid rows behind it, and it never gets an install handoff
+// bell or an anchor attempt. Undecided active/payment_pending terms are
+// unchanged (status-only, as before).
+function whereAnchorableTermState(builder, alias, conn) {
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
   return builder.where(function anchorableTermState() {
-    this.where(`${alias}.status`, 'cancelled').andWhere(`${alias}.renewal_decision`, 'cancel')
+    this.where(function paidDecidedLapse() {
+      this.where(`${alias}.status`, 'cancelled').andWhere(`${alias}.renewal_decision`, 'cancel')
+        .whereExists(coveredTermsAsOf(conn).whereRaw('t.id = ??', [`${alias}.id`]).select(conn.raw('1')));
+    })
       .orWhere(function undecidedAndLive() {
         this.whereNull(`${alias}.renewal_decision`).whereIn(`${alias}.status`, ANCHORABLE_TERM_STATUSES);
       });
@@ -914,7 +937,7 @@ async function anchorTermToInstallation({ termId, conn = db }) {
     await lockAndAssertNoAnnualPrepayOverlap(trx, peek.customer_id, null, true, '');
     const term = await trx('annual_prepay_terms').where({ id: termId }).forUpdate().first();
     if (!term || term.installation_anchored_at) return { skipped: 'already_anchored' };
-    if (!isAnchorableTermState(term)) {
+    if (!(await isAnchorableTermState(term, trx))) {
       return { skipped: 'not_original_term' };
     }
     if (await trx('annual_prepay_terms').where({ renewed_from_term_id: term.id }).first('id')) return { skipped: 'renewed' };
@@ -985,7 +1008,7 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
       .where('e.annual_plan_activation_status', 'activated')
       .whereNull('apt.installation_anchored_at')
       .whereNull('apt.renewed_from_term_id')
-      .modify((qb) => whereAnchorableTermState(qb, 'apt'))
+      .modify((qb) => whereAnchorableTermState(qb, 'apt', conn))
       .whereExists(function completedInstallation() {
         whereInstallationVisitForPlan(
           this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
@@ -1048,7 +1071,9 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
 // cancelled term none either — but a term the customer declined to RENEW
 // before installation (decided lapse) is still a paid coverage year that
 // needs its installation, so it stays eligible (same anchorable-state rule
-// as anchoring). Oldest activation first, never-stamped activation times
+// as anchoring) — only while that year is still PAID: a decline followed by
+// a refund or dispute is excluded in SQL (whereAnchorableTermState), so it
+// never gets a scheduling bell. Oldest activation first, never-stamped activation times
 // ahead of all, bounded.
 async function retryInstallHandoffs({ conn, limit, counts }) {
   try {
@@ -1058,7 +1083,7 @@ async function retryInstallHandoffs({ conn, limit, counts }) {
       .whereNull('e.annual_plan_install_handoff_at')
       .whereNull('apt.renewed_from_term_id')
       .whereNull('apt.installation_anchored_at')
-      .modify((qb) => whereAnchorableTermState(qb, 'apt'))
+      .modify((qb) => whereAnchorableTermState(qb, 'apt', conn))
       .orderBy('e.annual_plan_activated_at', 'asc', 'first')
       .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice')
       .limit(limit);

@@ -2705,6 +2705,54 @@ async function isPaidDecidedLapseTerm(term, conn = db) {
   return !!row;
 }
 
+// Pre-push audit P1 (slice 6a): a customer with several termite annual
+// terms (one per property) needs each portal renewal card — and its decline
+// confirmation — to name WHICH property it covers. Returns Map(termId ->
+// label) for the given terms, OWNERSHIP-SCOPED to customerId at every hop:
+// the term itself, its source estimate (e.customer_id), and the estimate's
+// linked property (cp.customer_id) must all belong to that customer, so a
+// mislinked estimate/property can never leak another account's address.
+// Fallback chain per term: the source estimate's linked customer_properties
+// row (estimates.property_id) -> the estimate's free-text address snapshot
+// (estimates.address — what was quoted) -> the customer's own address.
+// A term with none of those gets no entry (the caller shows no label).
+function formatStructuredAddress(line1, line2, city, state, zip) {
+  const street = [line1, line2].map((v) => (v == null ? '' : String(v).trim())).filter(Boolean).join(', ');
+  if (!street) return null;
+  const stateZip = [state, zip].map((v) => (v == null ? '' : String(v).trim())).filter(Boolean).join(' ');
+  return [street, city == null ? '' : String(city).trim(), stateZip].filter(Boolean).join(', ');
+}
+
+async function termPropertyLabelsForCustomer(customerId, termIds, conn = db) {
+  const ids = [...new Set((termIds || []).filter(Boolean))];
+  const labels = new Map();
+  if (!customerId || !ids.length) return labels;
+  const rows = await conn('annual_prepay_terms as t')
+    .leftJoin('estimates as e', function ownEstimate() {
+      this.on('e.id', '=', 't.source_estimate_id').andOn('e.customer_id', '=', 't.customer_id');
+    })
+    .leftJoin('customer_properties as cp', function ownProperty() {
+      this.on('cp.id', '=', 'e.property_id').andOn('cp.customer_id', '=', 't.customer_id');
+    })
+    .leftJoin('customers as c', 'c.id', 't.customer_id')
+    .where('t.customer_id', customerId)
+    .whereIn('t.id', ids)
+    .select(
+      't.id as term_id',
+      'cp.address_line1 as cp_line1', 'cp.address_line2 as cp_line2', 'cp.city as cp_city', 'cp.state as cp_state', 'cp.zip as cp_zip',
+      'e.address as estimate_address',
+      'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.state as c_state', 'c.zip as c_zip',
+    );
+  for (const row of rows) {
+    const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
+    const label = formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip)
+      || estimateAddress
+      || formatStructuredAddress(row.c_line1, row.c_line2, row.c_city, row.c_state, row.c_zip);
+    if (label) labels.set(row.term_id, label);
+  }
+  return labels;
+}
+
 // Fail-closed coverage test for completion billing. An annual-prepay-stamped
 // visit is COVERED when its explicit stamp (prepaid_method === annual_prepay_invoice)
 // is backed by a term whose paid coverage is STILL LIVE on the visit date
@@ -5934,6 +5982,9 @@ module.exports = {
   // refunded or disputed invoice can never leave display and billing
   // disagreeing about whether the term is actually covered.
   isPaidDecidedLapseTerm,
+  // The portal renewal card's per-term property label (property.js GET
+  // /termite-annual-plan) — ownership-scoped, see its definition.
+  termPropertyLabelsForCustomer,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   // Public: the one-step-prepay booking preflight (admin-schedule) matches the
