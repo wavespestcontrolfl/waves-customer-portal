@@ -802,7 +802,7 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, ret
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {retakeBanner && (
         <div data-glass="soft" role="status" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {retakeBanner.ask && <div style={{ fontSize: 15, fontWeight: 700, color: SHELL.text, lineHeight: 1.4 }}>{retakeBanner.ask}</div>}
+          {retakeBanner.ask && <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text, lineHeight: 1.4 }}>{retakeBanner.ask}</div>}
           {photos.length >= PHOTO_LIMIT && (
             <div style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.4 }}>
               You're at the 3-photo limit — remove one below to add this one.
