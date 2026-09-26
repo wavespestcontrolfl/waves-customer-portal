@@ -36,3 +36,18 @@ test.each([
   expect(directCoordinationApplies({ messageType: 'manual' })).toBe(true);
   expect(directCoordinationApplies({ messageType: 'internal_alert' })).toBe(false);
 });
+
+test('a phone-free explicit App leg skips the phone-keyed reservation; a phoned leg keeps it', () => {
+  // Codex pre-push P1 on #4843: every explicit billing App leg carries
+  // to:null, and an SMS-thread reservation needs a phone. With coordination
+  // active it must not refuse the App leg, and it must still cover any leg
+  // that has a phone or is not an explicit App delivery.
+  mockGate.enabled = true;
+  const appLeg = { audience: 'customer', channel: 'push', to: null, metadata: { billingDeliveryLeg: 'push' } };
+  expect(canonicalCoordinationApplies(appLeg)).toBe(false);
+  expect(canonicalCoordinationApplies({ ...appLeg, to: '+19415550101' })).toBe(true);
+  expect(canonicalCoordinationApplies({ audience: 'customer', channel: 'push', to: null })).toBe(true);
+  expect(directCoordinationApplies({ messageType: 'invoice', to: null, explicitPushOnly: true })).toBe(false);
+  expect(directCoordinationApplies({ messageType: 'invoice', to: '+19415550101', explicitPushOnly: true })).toBe(true);
+  expect(directCoordinationApplies({ messageType: 'invoice', to: null })).toBe(true);
+});

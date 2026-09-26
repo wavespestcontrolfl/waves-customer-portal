@@ -342,7 +342,26 @@ follow". The
 already-accepted retry returns the same shape while the agreement is
 unsigned, and `invoiceKind: 'annual_prepay_activation_pending'` with
 `nextStep: 'activation_pending'` once it is signed but the plan has not
-finished activating (the signing link is burned by then). Signing the
+finished activating (the signing link is burned by then). If the customer
+never signs, the daily reconcile sweep closes the offer out automatically
+`ANNUAL_SIGNATURE_ABANDON_DAYS` (45) days after the park (measured from
+`annual_plan_deferred_invoice.parkedAt`, falling back to `accepted_at`):
+`estimates.annual_plan_activation_status` becomes `'signature_expired'`,
+every unsigned v3 annual agreement for that estimate is cancelled (share
+link burned) so it can never be signed into activation, and a single staff
+bell rings — nothing is billed or booked either way. A concurrent signature
+always wins the race (the estimate row is locked the same way activation
+locks it, and a signed contract already on file blocks the close-out). Any
+retry of that estimate — the already-accepted rebuild above, or a stray
+re-run of `convertEstimate` (webhook replay, an operator re-triggering
+acceptance) — reports `invoiceKind: 'annual_prepay_signature_expired'` with
+`nextStep: 'offer_closed'`, never `'sign_agreement'`: the signing window is
+closed and re-parking the SAME estimate is not offered as a path (re-quote
+with a new estimate instead). A signing link that lapses before that 45-day
+close rings its own one-time staff nudge (dedup'd per contract and its
+current expiry, so a staff resend that later lapses again re-rings once) —
+purely informational; it changes nothing about the estimate or agreement.
+Signing the
 annual agreement at `/api/contracts/:token/sign` activates the plan after
 the sign transaction commits (`termite-annual-activation.js`, retried by the
 daily reconcile sweep): it bills exactly the frozen price, charges the
@@ -2000,7 +2019,29 @@ reschedule search: model-backed parseWhen clamped on BOTH ends to the
 booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
 the lane-eligibility gates, and the $0/is_callback commit contract as
-security-critical).
+security-critical). Ranking (owner ruling 2026-09-24, GATE_RESERVICE_RANK_AFTER_NEW,
+nested inside GATE_RESERVICE_SELF_SERVE): this route's browse/search/commit-
+revalidation calls opt `buildBookingAvailability` into `rankProfile:'reservice'`.
+With the gate live, a dedicated pure builder (`curateReserviceStrip`, never
+the shared funnel's curator) assembles the suggested strip (top-level
+`slots`, at most 3 — the picker only ever shows 3) and each day's
+`is_best_fit` flag: packed (non-empty-day) candidates fill seats first,
+ranked by an adjusted score that favors a tightly packed placement (lower
+idle/detour) over one that opens a hole; an empty-tech-day candidate only
+fills a seat still open once every packed date is exhausted — it can never
+displace one — because an empty day is exactly the room a new customer at
+an unproven address needs, so it is never the default re-service
+recommendation. A latency guard still guarantees the strip includes the
+best-adjusted slot starting within 5 business days when one is feasible (no
+re-service SLA is enforced anywhere in code; this is a ranking guard only).
+Neither the strip nor `is_best_fit` ever mutates a candidate's underlying
+rank or score — both are computed fresh from each candidate's adjusted
+score. The FULL per-day slot list (`days[].slots`) is never filtered or
+reordered by this — every feasible slot the engine found is still there,
+and the commit-time single-day revalidation still accepts exactly what that
+list offers. Gate off (default): buildBookingAvailability ignores the
+profile and this route's payload is byte-for-byte identical to before this
+gate existed.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner
