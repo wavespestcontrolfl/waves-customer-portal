@@ -5,6 +5,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { isTrackTokenLive } = require('./track-token-expiry');
 const { getPrimaryContact, getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { currency } = require('./email-template');
@@ -182,16 +183,16 @@ async function sendTemplate({
   // suppressionGroupKey below is TRANSACTIONAL_GROUP, which bypasses
   // SendGrid-side suppression groups by design). A lookup failure is treated
   // the same as opted-out: it must not read as "no opt-out" on a DB blip.
-  // A billing notice (billingCategory set) is exempt from the switch:
-  // payment emails cannot be turned off (owner ruling 2026-09-26). It still
-  // follows the customer's billing channel choice, re-read here at hand-off
-  // so a Text/App-only change after the caller resolved the recipient wins.
+  // A billing notice (billingCategory set) never reads the switch: payment
+  // emails cannot be turned off (owner ruling 2026-09-26). Its billing
+  // channel choice and recipient are rechecked at the provider handoff
+  // below instead.
   let emailOptedOut = false;
-  let billingEmailNotSelected = false;
   try {
-    const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
-    emailOptedOut = !billingCategory && !!prefs && prefs.email_enabled === false;
-    billingEmailNotSelected = !!billingCategory && billingChannelAllowed(prefs || {}, billingCategory, 'email') === false;
+    const prefs = billingCategory
+      ? null
+      : await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
+    emailOptedOut = !!prefs && prefs.email_enabled === false;
   } catch (err) {
     // A lookup FAILURE is not the same fact as a genuine opt-out, and the
     // two must not collapse to the same {skipped:true} shape: several
@@ -225,17 +226,6 @@ async function sendTemplate({
     });
     return { ok: false, skipped: true, reason: 'email_opted_out' };
   }
-  if (billingEmailNotSelected) {
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'skipped',
-      failureReason: 'billing_email_not_selected',
-      metadata,
-    });
-    return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
-  }
 
   const targetCustomer = String(customerId || '') === String(recipientCustomer.id)
     ? recipientCustomer
@@ -250,6 +240,31 @@ async function sendTemplate({
     property_label: targetCustomer ? propertyLabel(targetCustomer) : '',
     ...payload,
   };
+
+  // A billing notice goes to the billing recipient. Its channel choice and
+  // that recipient are rechecked at the provider handoff, under the
+  // customer-comms lock the preferences writer takes (the late-payment and
+  // bank-verification emails do the same), so a Text/App-only switch or a
+  // new billing address saved after the caller resolved the recipient wins.
+  let billingHandoffRefusal = null;
+  const withProviderHandoff = billingCategory
+    ? async (dispatch) => withCustomerCommsLock(db, recipientCustomer.id, async (trx) => {
+      const freshPrefs = await trx('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
+      if (billingChannelAllowed(freshPrefs || {}, billingCategory, 'email') === false) {
+        billingHandoffRefusal = 'billing_email_not_selected';
+        return { ok: false };
+      }
+      const freshCustomer = await trx('customers').where({ id: recipientCustomer.id }).first();
+      const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
+        .filter((entry) => isEmailLike(entry.email));
+      if (cleanEmail(freshRecipient?.email) !== cleanEmail(contact.email)) {
+        billingHandoffRefusal = 'billing_recipient_changed';
+        return { ok: false };
+      }
+      await dispatch(trx);
+      return { ok: true };
+    })
+    : null;
 
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
@@ -266,7 +281,27 @@ async function sendTemplate({
         ...categories,
       ],
       suppressionGroupKey: TRANSACTIONAL_GROUP,
+      ...(withProviderHandoff ? { withProviderHandoff } : {}),
     });
+
+    // A billing send the handoff stopped before dispatch. A deselected
+    // Email is final, like the resolver's own refusal. A changed billing
+    // address, or a recheck that could not run, leaves the email owed: a
+    // retryable no-send, and the aborted attempt stays resendable under the
+    // same idempotency key.
+    if (billingCategory && result.aborted) {
+      const reason = billingHandoffRefusal || 'billing_email_recheck_failed';
+      const final = reason === 'billing_email_not_selected';
+      await logLifecycleEmailAttempt({
+        customerId: recipientCustomer.id,
+        templateKey,
+        eventType,
+        status: final ? 'skipped' : 'failed',
+        failureReason: reason,
+        metadata,
+      });
+      return final ? { ok: false, skipped: true, reason } : { ok: false, sent: false, transient: true, reason };
+    }
 
     if (result.deduped) {
       return {
@@ -546,6 +581,7 @@ async function sendCancellationReceived({
 // choice the SMS leg's consent check honors; no selection at all keeps the
 // email. Unreadable prefs fail closed as a retryable no-send: the choice
 // cannot be checked, and the billing recipient cannot be resolved either.
+// sendTemplate rechecks both at the provider handoff.
 // The SMS leg's prefs are enforced inside send-customer-message —
 // this is the email leg's equivalent, shared with the sweep so hasEmailLeg
 // is only declared when the email can actually send.

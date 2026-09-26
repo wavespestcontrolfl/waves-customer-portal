@@ -17,9 +17,14 @@ jest.mock('../services/email-template-library', () => ({
   })),
 }));
 jest.mock('../services/request-app-notifications', () => ({ send: jest.fn(async () => ({})) }));
+// The lock's transaction reads through the same table-queue db mock.
+jest.mock('../utils/customer-comms-lock', () => ({
+  withCustomerCommsLock: jest.fn(async (database, _customerId, fn) => fn(database)),
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const AccountMembershipEmail = require('../services/account-membership-email');
 
 function chain({ result = [], first } = {}) {
@@ -131,23 +136,40 @@ describe('account-membership-email distinguishes a transient prefs failure from 
 // notice sent through this family's sendTemplate ignores the portal-wide
 // email switch that still silences membership.* / account.* mail above.
 // Where billing goes stays the customer's choice: an explicit billing channel
-// selection without Email means no pre-visit balance email.
+// selection without Email means no pre-visit balance email, and the choice
+// and the billing recipient are rechecked at the provider handoff.
 describe('billing notices ignore the portal-wide email switch', () => {
-  beforeEach(() => { jest.clearAllMocks(); });
+  let dispatched;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    dispatched = false;
+    // The library runs the caller's handoff the way runProviderHandoff does:
+    // dispatch inside it sends; a refusal or a throw before dispatch aborts
+    // the queued attempt.
+    EmailTemplates.sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
+      try {
+        await withProviderHandoff(async () => { dispatched = true; });
+      } catch { /* a throw before dispatch aborts */ }
+      return dispatched
+        ? { sent: true, message: { provider_message_id: 'sg-123', status: 'sent', sent_at: '2026-09-22T12:00:00.000Z' } }
+        : { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+    });
+  });
 
   // First notification_prefs read = the recipient resolver, second = the
-  // hand-off re-read inside sendTemplate. An Error stands in for a failed read.
+  // locked re-read at the provider handoff. Third customers read = the
+  // handoff's fresh recipient. An Error stands in for a failed read.
   const prefsRead = (prefs) => {
     if (!(prefs instanceof Error)) return chain({ first: prefs });
     const q = chain();
     q.first = jest.fn(async () => { throw prefs; });
     return q;
   };
-  function previsitDb(prefs, sendPrefs = prefs) {
+  function previsitDb(prefs, handoffPrefs = prefs, handoffCustomer = customer()) {
     const queues = {
-      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: handoffCustomer })],
       customer_interactions: [chain(), chain(), chain()],
-      notification_prefs: [prefsRead(prefs), prefsRead(sendPrefs)],
+      notification_prefs: [prefsRead(prefs), prefsRead(handoffPrefs)],
     };
     db.mockImplementation((table) => {
       const q = queues[table];
@@ -173,8 +195,9 @@ describe('billing notices ignore the portal-wide email switch', () => {
     const result = await sendPrevisit();
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'billing.previsit_balance' }));
-    expect(result).not.toMatchObject({ skipped: true });
-    expect(result.reason).not.toBe('email_opted_out');
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(dispatched).toBe(true);
+    expect(result).toMatchObject({ ok: true, messageId: 'sg-123' });
   });
 
   test.each([
@@ -200,20 +223,29 @@ describe('billing notices ignore the portal-wide email switch', () => {
     expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
   });
 
-  test('a Text-only change after the recipient was resolved stops the email at hand-off', async () => {
+  test('a Text-only change saved after the recipient was resolved stops the email at the provider handoff', async () => {
     previsitDb(
       { customer_id: 'cust-1', billing_channels: ['email', 'sms'] },
       { customer_id: 'cust-1', billing_channels: ['sms'] },
     );
     const result = await sendPrevisit();
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(dispatched).toBe(false);
     expect(result).toEqual({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
   });
 
-  test('an unreadable choice at hand-off fails closed as a retryable no-send', async () => {
+  test('a billing address saved after the recipient was resolved stops the email at the handoff, retryably', async () => {
+    const prefs = { customer_id: 'cust-1', billing_channels: ['email', 'sms'] };
+    previsitDb(prefs, prefs, customer({ email: 'new-billing@example.com' }));
+    const result = await sendPrevisit();
+    expect(dispatched).toBe(false);
+    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' });
+  });
+
+  test('an unreadable choice at the handoff fails closed as a retryable no-send', async () => {
     previsitDb({ customer_id: 'cust-1', billing_channels: ['email'] }, new Error('db down'));
     const result = await sendPrevisit();
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
+    expect(dispatched).toBe(false);
+    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'billing_email_recheck_failed' });
   });
 });

@@ -108,14 +108,19 @@ function previsitBalanceReminderEligible({
 }
 
 // scheduled_date is a DATE column that arrives as a JS Date or a
-// 'YYYY-MM-DD' string depending on the driver — either way the customer
-// copy must render a friendly date ('July 28, 2026'), never an ISO string
-// or a GMT timestamp (Codex r9). Noon-Z anchor keeps the calendar day
-// stable in ET; anything unparseable passes through untouched.
-function friendlyVisitDate(value) {
-  const dateStr = value instanceof Date
+// 'YYYY-MM-DD' string depending on the driver.
+function visitDateKey(value) {
+  return value instanceof Date
     ? value.toISOString().slice(0, 10)
     : String(value || '').slice(0, 10);
+}
+
+// Either shape, the customer copy must render a friendly date ('July 28,
+// 2026'), never an ISO string or a GMT timestamp (Codex r9). Noon-Z anchor
+// keeps the calendar day stable in ET; anything unparseable passes through
+// untouched.
+function friendlyVisitDate(value) {
+  const dateStr = visitDateKey(value);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return String(value || '');
   return new Date(`${dateStr}T12:00:00Z`).toLocaleDateString('en-US', {
     month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
@@ -334,14 +339,64 @@ async function runSweep({ now = new Date() } = {}) {
       // gate ONLY when it can actually send — otherwise an email-preferring
       // customer's SMS is suppressed in favor of an email that never
       // leaves, and the released claim retries daily forever.
-      let emailLegAvailable = false;
+      let emailResolution = { recipient: null };
       try {
         const AccountMembershipEmail = require('./account-membership-email');
-        emailLegAvailable = !!(await AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient(visit.customer_id)).recipient;
-      } catch { emailLegAvailable = false; }
+        emailResolution = await AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient(visit.customer_id);
+      } catch (resolveErr) {
+        logger.warn(`[previsit-balance] email recipient lookup failed for visit ${visit.id}: ${resolveErr.message}`);
+        emailResolution = { recipient: null, transient: true };
+      }
+      const emailLegAvailable = !!emailResolution.recipient;
 
+      // Email first, text last: the billing fan-out's own order
+      // (billing-channel-routing.js dispatchBillingChannels). The email is
+      // keyed to this visit, so a later sweep day can resend it without a
+      // duplicate, but an accepted text cannot be taken back. When the email
+      // leg fails in a way worth retrying (an unreadable billing choice, a
+      // hand-off recheck that could not run or found a new billing address,
+      // a thrown leg), the text is held too and the claim released. Sending the text alone would keep the
+      // claim and strand the email the customer chose. The hold needs a
+      // later sweep day to retry on: on the visit's last one (the day
+      // before it) the text goes out alone rather than nothing at all.
+      const laterSweepDay = visitDateKey(visit.scheduled_date) > windowStartDate;
+      let emailDelivered = false;
+      let emailRetry = emailPolicyPermitted && emailResolution.transient === true;
+      if (emailLegAvailable && emailPolicyPermitted) try {
+        // RECORD-THEN-SEND, same discipline as the SMS leg: ledger insert
+        // failure throws into this catch and the email is skipped.
+        const emailLedger = await ContactLedger.recordContact({
+          customerId: visit.customer_id,
+          channel: 'email',
+          purpose: 'balance_reminder',
+          invoiceIds: fresh.map((inv) => inv.id),
+          source: 'previsit_balance_reminder',
+          metadata: { scheduled_service_id: visit.id, amount },
+        });
+        const AccountMembershipEmail = require('./account-membership-email');
+        const emailResult = await AccountMembershipEmail.sendPrevisitBalanceReminder({
+          customerId: visit.customer_id,
+          amount: `$${amount.toFixed(2)}`,
+          serviceType: visit.service_type || 'service',
+          visitDate: friendlyVisitDate(visit.scheduled_date),
+          billingUrl: BILLING_PORTAL_URL,
+          idempotencyKey: `${EMAIL_TEMPLATE_KEY}:${visit.id}`,
+        });
+        emailDelivered = emailResult?.ok === true;
+        if (!emailDelivered) {
+          emailRetry = emailResult?.transient === true;
+          await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+        }
+      } catch (emailErr) {
+        logger.warn(`[previsit-balance] email failed for visit ${visit.id}: ${emailErr.message}`);
+        emailRetry = true;
+      }
+
+      // For an email-preferring customer the text is suppressed by the
+      // channel gate and the email above is the reminder.
+      const holdForEmail = emailRetry && laterSweepDay;
       let smsDelivered = false;
-      if (smsPolicyPermitted) try {
+      if (smsPolicyPermitted && !holdForEmail) try {
         const body = await renderSmsTemplate(TEMPLATE_KEY, {
           first_name: visit.first_name || 'there',
           amount: amount.toFixed(2),
@@ -369,7 +424,7 @@ async function runSweep({ now = new Date() } = {}) {
           purpose: 'billing',
           customerId: visit.customer_id,
           entryPoint: 'previsit_balance_reminder',
-          // This flow HAS an email sidecar (below), so the billing-channel
+          // This flow HAS an email sidecar (above), so the billing-channel
           // preference gate applies: an email-preferring customer gets the
           // email only, never both (Codex r4) — but only when the email leg
           // is genuinely available under the billing prefs (Codex r10) AND
@@ -385,43 +440,11 @@ async function runSweep({ now = new Date() } = {}) {
         logger.warn(`[previsit-balance] SMS failed for visit ${visit.id}: ${smsErr.message}`);
       }
 
-      // Email rides the same eligibility. For an email-preferring customer
-      // the SMS above is suppressed by the channel gate and THIS is the
-      // reminder. Skipped silently when the billing prefs/recipient
-      // resolution said no (the sender re-checks internally too).
-      let emailDelivered = false;
-      if (emailLegAvailable && emailPolicyPermitted) try {
-        // RECORD-THEN-SEND, same discipline as the SMS leg: ledger insert
-        // failure throws into this catch and the email is skipped.
-        const emailLedger = await ContactLedger.recordContact({
-          customerId: visit.customer_id,
-          channel: 'email',
-          purpose: 'balance_reminder',
-          invoiceIds: fresh.map((inv) => inv.id),
-          source: 'previsit_balance_reminder',
-          metadata: { scheduled_service_id: visit.id, amount },
-        });
-        const AccountMembershipEmail = require('./account-membership-email');
-        const emailResult = await AccountMembershipEmail.sendPrevisitBalanceReminder({
-          customerId: visit.customer_id,
-          amount: `$${amount.toFixed(2)}`,
-          serviceType: visit.service_type || 'service',
-          visitDate: friendlyVisitDate(visit.scheduled_date),
-          billingUrl: BILLING_PORTAL_URL,
-          idempotencyKey: `${EMAIL_TEMPLATE_KEY}:${visit.id}`,
-        });
-        emailDelivered = emailResult?.ok === true;
-        if (!emailDelivered) {
-          await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
-        }
-      } catch (emailErr) {
-        logger.warn(`[previsit-balance] email failed for visit ${visit.id}: ${emailErr.message}`);
-      }
-
       // Keep the claim when EITHER leg landed (an email-only customer's
       // suppressed SMS must not release it — retries would re-email daily);
-      // release only when BOTH legs failed so a later sweep day can retry.
-      if (!smsDelivered && !emailDelivered) {
+      // release it when both legs failed, or the text is held for the
+      // email's retry, so a later sweep day can send them.
+      if (holdForEmail || (!smsDelivered && !emailDelivered)) {
         await db('scheduled_services')
           .where({ id: visit.id })
           .update({ balance_reminder_sent_at: null })

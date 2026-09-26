@@ -93,16 +93,18 @@ const OVERDUE_INVOICE = {
   last_reminder_at: null, followup_last_touch_at: null,
 };
 
-// { claimChain } so tests can assert the claim was or wasn't attempted.
-function armOneVisit() {
+// { claimChain, releaseChain } so tests can assert the claim was or wasn't
+// attempted, and released (a later sweep day retries) or kept.
+function armOneVisit(visit = VISIT) {
   const claimChain = chain({ result: 1 });
+  const releaseChain = chain({ result: 1 });
   setDbQueues({
     sms_templates: [chain({ first: { is_active: true } })],
-    scheduled_services: [chain({ result: [VISIT] }), claimChain],
+    scheduled_services: [chain({ result: [visit] }), claimChain, releaseChain],
     invoices: [chain({ result: [OVERDUE_INVOICE] })],
     activity_log: [chain({ result: [] })],
   });
-  return { claimChain };
+  return { claimChain, releaseChain };
 }
 
 function permitChannels(permitted) {
@@ -162,22 +164,81 @@ test('sms denied + email allowed ⇒ email only, its own ledger row recorded bef
 });
 
 test('an unavailable ledger on the email leg skips that email (record-then-send), and the claim releases when no leg lands', async () => {
-  armOneVisit();
+  const { releaseChain } = armOneVisit();
   permitChannels({ sms: false, email: true });
   ContactLedger.recordContact.mockRejectedValueOnce(new Error('ledger down'));
-  // The failed-visit release re-queries scheduled_services once more.
-  const releaseChain = chain({ result: 1 });
-  const originalImpl = db.getMockImplementation();
-  db.mockImplementation((table) => {
-    if (table === 'scheduled_services') {
-      try { return originalImpl(table); } catch { return releaseChain; }
-    }
-    return originalImpl(table);
-  });
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 0, skipped: 1 });
   expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
   expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+});
+
+// Email first, text last (the billing fan-out's order): the email is keyed
+// to the visit and can be resent without a duplicate, an accepted text
+// cannot. A retryable email failure holds the text and releases the claim
+// while a later sweep day can retry both; it never sends the text alone and
+// keeps a claim that strands the email the customer chose.
+test('both legs permitted ⇒ the email goes before the text, and the claim is kept', async () => {
+  const { releaseChain } = armOneVisit();
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 1, skipped: 0 });
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder.mock.invocationCallOrder[0])
+    .toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ hasEmailLeg: true }));
+  expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['email', 'sms']);
+  expect(releaseChain.update).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['a retryable no-send', () => AccountMembershipEmail.sendPrevisitBalanceReminder
+    .mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' })],
+  ['a thrown email leg', () => AccountMembershipEmail.sendPrevisitBalanceReminder
+    .mockRejectedValueOnce(new Error('connection terminated'))],
+  ['an unreadable billing choice', () => AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient
+    .mockResolvedValueOnce({ recipient: null, reason: 'prefs_unavailable', transient: true })],
+])('%s on the email leg holds the text and releases the claim for a later sweep day', async (_label, arm) => {
+  const { releaseChain } = armOneVisit();
+  arm();
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 0, skipped: 1 });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+});
+
+test('on the visit\'s last sweep day a retryable email failure lets the text go alone', async () => {
+  // Swept on Aug 14, a visit on Aug 15 is at the start of the window: no
+  // later sweep day will see it again.
+  const { releaseChain } = armOneVisit({ ...VISIT, scheduled_date: '2026-08-15' });
+  AccountMembershipEmail.sendPrevisitBalanceReminder
+    .mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 1, skipped: 0 });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(releaseChain.update).not.toHaveBeenCalled();
+});
+
+test('a final email refusal still sends the text and keeps the claim', async () => {
+  const { releaseChain } = armOneVisit();
+  AccountMembershipEmail.sendPrevisitBalanceReminder
+    .mockResolvedValueOnce({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 1, skipped: 0 });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+    expect.anything(), { reason: 'billing_email_not_selected' },
+  );
+  expect(releaseChain.update).not.toHaveBeenCalled();
+});
+
+test('an unreadable billing choice holds nothing when the email channel is policy-denied', async () => {
+  const { releaseChain } = armOneVisit();
+  permitChannels({ sms: true, email: false });
+  AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient
+    .mockResolvedValueOnce({ recipient: null, reason: 'prefs_unavailable', transient: true });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 1, skipped: 0 });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ hasEmailLeg: false }));
+  expect(releaseChain.update).not.toHaveBeenCalled();
 });
 
 test('dues-only visit (monthly membership, no overdue invoices) supplies offLedgerBalanceCents to the policy consult', async () => {
