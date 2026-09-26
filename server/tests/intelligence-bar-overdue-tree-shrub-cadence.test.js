@@ -19,7 +19,10 @@ jest.mock('../models/db', () => {
     }
     builder.select = (...args) => { state.selectArgs = args; return builder; };
     builder.orderByRaw = (sql) => { state.orderBy = String(sql); return builder; };
-    builder.havingRaw = (sql, bindings) => { state.having = [String(sql), bindings]; return builder; };
+    builder.whereRaw = (sql, bindings) => { state.cutoff = [String(sql), bindings]; return builder; };
+    // Postgres rejects HAVING without GROUP BY over plain columns; the
+    // cutoff must stay a WHERE.
+    builder.havingRaw = () => { throw new Error('HAVING without GROUP BY: Postgres rejects this query'); };
     builder.limit = (n) => { limitN = n; return builder; };
     builder.offset = (n) => { offsetN = n; state.pages = (state.pages || 0) + 1; return builder; };
     builder.then = (resolve, reject) => Promise.resolve(
@@ -296,18 +299,18 @@ test('the SQL prefilter admits a customer due exactly at the shortest supported 
   // prefilter keeps every row the per-customer cadence check can mark
   // overdue: 16:00Z on Sept 25 is Sept 25 ET; one day before is Sept 24 — inclusive.
   db.__state.rows = [];
-  db.__state.having = null;
+  db.__state.cutoff = null;
   await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 0 });
-  expect(db.__state.having[0]).toMatch(/\) <= \?$/);
-  expect(db.__state.having[1][1]).toBe('2026-09-24');
+  expect(db.__state.cutoff[0]).toMatch(/\) <= \?$/);
+  expect(db.__state.cutoff[1][1]).toBe('2026-09-24');
   // 21:00 ET on Sept 25 (Sept 26 UTC): still Sept 25 on the Eastern calendar.
   jest.setSystemTime(new Date('2026-09-26T01:00:00Z'));
   await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 3 });
-  expect(db.__state.having[1][1]).toBe('2026-09-21');
+  expect(db.__state.cutoff[1][1]).toBe('2026-09-21');
   // Other categories keep their own cadence as the prefilter.
   jest.setSystemTime(NOW);
   await executeTool('find_overdue_customers', { service_category: 'pest', overdue_days: 0 });
-  expect(db.__state.having[1][1]).toBe('2026-06-27');
+  expect(db.__state.cutoff[1][1]).toBe('2026-06-27');
 });
 
 test('a weekly T&S plan is reported at its own cadence, not held back to 42 days (codex r30)', async () => {

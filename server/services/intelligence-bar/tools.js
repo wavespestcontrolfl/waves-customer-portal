@@ -688,7 +688,10 @@ async function findOverdueCustomers(input) {
           .whereRaw('service_records.customer_id = customers.id')
           .whereRaw('service_type ~* ?', [patterns[cat]]);
       })
-      .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) <= ?", [patterns[cat], cutoffEt])
+      // A WHERE, not a HAVING: the query has no GROUP BY, and Postgres
+      // rejects HAVING over plain columns ("customers.id must appear in the
+      // GROUP BY clause"), which failed this tool for every category.
+      .whereRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) <= ?", [patterns[cat], cutoffEt])
       // customers.id breaks last-service-date ties so the paged read below
       // sees each row exactly once (codex r21 on #4786).
       .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC, customers.id ASC", [patterns[cat]]);
