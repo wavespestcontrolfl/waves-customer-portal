@@ -2454,6 +2454,91 @@ describe('annual prepay renewal helpers', () => {
     expect(markNoticeQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_15_sent_at: expect.any(Date) }));
   });
 
+  // Real bug found while verifying this slice: formatCurrencyLabel's
+  // Number(amount || 0) fallback rendered a live "$0.00" renewal-fee SMS for
+  // a termite term with no prepay_amount recorded (confirmed via a probe
+  // before the fix: renderSmsTemplate was called with renewal_fee: '$0.00'
+  // and the SMS actually sent). Fixed by failing closed the same way the
+  // cancel-flow-off branch does: skip the rung + admin bell, never a
+  // fabricated dollar amount.
+  test('a termite annual-plan term with a NULL prepay_amount skips the rung and rings an admin bell instead of sending a fabricated "$0.00" renewal fee', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: 'v3',
+      prepay_amount: null,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [query({ returning: [{ ...term, last_scheduled_service_id: null, last_scheduled_service_date: null }] })],
+      notifications: [query({ first: undefined })], // dedupe probe: no open alert yet
+    });
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+    NotificationService.notifyAdmin.mockClear();
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({
+      sent: false,
+      reason: 'missing_prepay_amount',
+    });
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      expect.stringMatching(/no renewal fee on file/i),
+      expect.stringContaining('term-1'),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'missing_prepay_amount', days_out: 45, annual_prepay_term_id: 'term-1' }) }),
+    );
+  });
+
+  test('a termite annual-plan term with prepay_amount 0 (a genuine zero-fee term, distinct from NULL) still renders "$0.00" and sends — only a missing amount fails closed', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: 'v3',
+      prepay_amount: 0,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    const refreshedTerm = { ...term, status: 'active', last_scheduled_service_id: null, last_scheduled_service_date: null };
+    const claimQuery = query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] });
+    const markNoticeQuery = query();
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [
+        query({ returning: [refreshedTerm] }),
+        claimQuery,
+        markNoticeQuery,
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '123 Bayshore Rd', city: 'Bradenton', phone: '+19415550100' } }),
+      ],
+      customer_interactions: [query()],
+    });
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+    renderSmsTemplate.mockResolvedValue('rendered termite sms');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true });
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'termite_annual_renewal_notice',
+      expect.objectContaining({ renewal_fee: '$0.00' }),
+      expect.anything(),
+    );
+  });
+
   // ---- termite annual plan: coverage waits for the installation (codex #4819 r6 P1)
 
   const TERMITE_COVERAGE_COLUMNS = {

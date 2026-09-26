@@ -426,3 +426,101 @@ describe('app intro tracker destination', () => {
     }));
   });
 });
+
+describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, slice 5)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('the 45-day and 30-day rungs for the SAME term/renewal date use DIFFERENT idempotency keys (daysOut is embedded)', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
+    });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 30,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+
+    const keys = EmailTemplates.sendTemplate.mock.calls.map((call) => call[0].idempotencyKey);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toEqual(keys[1]);
+    expect(keys[0]).toContain(':45:');
+    expect(keys[1]).toContain(':30:');
+  });
+
+  test('the SAME rung called twice for the same term/renewal date produces the SAME idempotency key (dedupe-stable)', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
+    });
+
+    const send = () => AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+    await send();
+    await send();
+
+    const keys = EmailTemplates.sendTemplate.mock.calls.map((call) => call[0].idempotencyKey);
+    expect(keys[0]).toEqual(keys[1]);
+  });
+
+  test('renders a NULL prepay_amount/renewalFee as an EMPTY payload value (never "$0.00") — the caller\'s required_variables check is what fails it closed', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: null,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ renewal_fee: '' }),
+    }));
+  });
+
+  test('a null lastInspectionDate omits the last-inspection sentence entirely (empty string, not a rendered fragment)', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+      lastInspectionDate: null,
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ last_inspection_sentence: '' }),
+    }));
+  });
+});
