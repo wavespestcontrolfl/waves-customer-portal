@@ -1722,7 +1722,13 @@ export default function ScheduleFlowPage({ flow }) {
           // ranked `availability.slots` GET does, over the searched window,
           // so hiding it here was throwing away the whole point of the
           // profile for the one search a customer is most likely to run.
-          rankedSlots={(aiFiltered && flow !== 'reservice') ? null : data?.availability?.slots}
+          // Keyed on `availability.rank_profile` (stamped by
+          // reservice-public.js's reserviceAvailabilityPayload ONLY while
+          // the gate is actually live — never on flow==='reservice' alone),
+          // so the kill switch genuinely restores the old post-search UI
+          // instead of leaving this exception permanently on for the route
+          // (pre-push audit r3 P1 on #4926).
+          rankedSlots={(aiFiltered && data?.availability?.rank_profile !== 'reservice') ? null : data?.availability?.slots}
           selectedDate={selectedDay?.date || null}
           onSelectDay={(date) => {
             setSelectedDate(date);

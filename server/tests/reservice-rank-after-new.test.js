@@ -28,6 +28,7 @@ const {
   buildBookingAvailability,
   curateSlots,
   reserviceAdjustedScore,
+  reserviceCandidateOutranks,
   reserviceRankIsActive,
   reserviceStopsThatDay,
   curateReserviceStrip,
@@ -235,6 +236,49 @@ describe('reserviceStopsThatDay (pure) — occupancy-only empty-day signal (#492
       { technician_id: 'tech-A', hold: false },
     ]]]);
     expect(reserviceStopsThatDay(occupiedByDate, '2026-10-01', 1, 'tech-A')).toBe(1);
+  });
+});
+
+describe('reserviceCandidateOutranks (pure) — categorical packed-over-empty dedupe (pre-push audit r3 P2 on #4926)', () => {
+  function cand({ score = 5, stopsThatDay = 0, idleMinutes = 0 } = {}) {
+    return { score, stops_that_day: stopsThatDay, idle_minutes: idleMinutes };
+  }
+
+  // The core bug: a packed candidate's raw score can be bad enough to push
+  // its ADJUSTED score (no empty-day penalty) past an empty candidate's
+  // adjusted score (raw + 240) — a pure numeric compare would then wrongly
+  // let the empty candidate win. Categorical preference must not cross that
+  // boundary either direction.
+  test('a packed candidate outranks an empty one even when its raw/adjusted score numerically CROSSES the 240-minute penalty', () => {
+    const packedBadScore = cand({ score: 300, stopsThatDay: 2 }); // adjusted 300
+    const emptyGreatScore = cand({ score: 1, stopsThatDay: 0 }); // adjusted 241 — numerically BETTER
+    expect(reserviceCandidateOutranks(packedBadScore, emptyGreatScore)).toBe(true);
+  });
+
+  test('an empty candidate never outranks a packed one, however good its score', () => {
+    const packedOkScore = cand({ score: 5, stopsThatDay: 2 }); // adjusted 5
+    const emptyAmazingScore = cand({ score: 0, stopsThatDay: 0 }); // adjusted 240 — still numerically "better"
+    expect(reserviceCandidateOutranks(emptyAmazingScore, packedOkScore)).toBe(false);
+  });
+
+  test('within the same category (both packed), the lower adjusted score wins', () => {
+    const better = cand({ score: 5, stopsThatDay: 2 });
+    const worse = cand({ score: 10, stopsThatDay: 2 });
+    expect(reserviceCandidateOutranks(better, worse)).toBe(true);
+    expect(reserviceCandidateOutranks(worse, better)).toBe(false);
+  });
+
+  test('within the same category (both empty), the lower adjusted score wins', () => {
+    const better = cand({ score: 1, stopsThatDay: 0 });
+    const worse = cand({ score: 10, stopsThatDay: 0 });
+    expect(reserviceCandidateOutranks(better, worse)).toBe(true);
+    expect(reserviceCandidateOutranks(worse, better)).toBe(false);
+  });
+
+  test('an exact tie within the same category: existing keeps it (candidate does not outrank)', () => {
+    const a = cand({ score: 5, stopsThatDay: 2 });
+    const b = cand({ score: 5, stopsThatDay: 2 });
+    expect(reserviceCandidateOutranks(a, b)).toBe(false);
   });
 });
 
@@ -557,5 +601,25 @@ describe('buildBookingAvailability — rankProfile: reservice (end to end)', () 
     const techB = capacitySlot(date, { score: 1, technicianId: 'tech-B', rank: 2 });
     const result = await withGate('true', () => build([techA, techB], { rankProfile: 'reservice' }));
     expect(result.slots.map((s) => s.technician_id)).toEqual(['tech-A']);
+  });
+
+  // Pre-push audit r3 P2: the dedupe used to compare raw ADJUSTED SCORES
+  // across the category boundary, so a packed technician with a bad enough
+  // detour could numerically lose the dedupe to an empty technician with a
+  // great one — even though "packed beats empty" is supposed to be
+  // categorical. Construct exactly that crossing: packed tech's raw score
+  // (300) pushes its adjusted score (still 300, no penalty) PAST the empty
+  // tech's adjusted score (1 + 240 = 241).
+  test('competing technicians: a packed tech-day wins the dedupe over an empty one even when the packed candidate\'s adjusted score numerically crosses the 240-minute empty-day penalty', async () => {
+    const date = dayOffset(10);
+    loadPackingAnchors.mockResolvedValue([packedAnchor(date, 'tech-packed')]);
+    const packedBadDetour = capacitySlot(date, { score: 300, technicianId: 'tech-packed' }); // adjusted 300
+    const emptyGreatDetour = capacitySlot(date, { score: 1, technicianId: 'tech-empty', rank: 2 }); // adjusted 241
+    // Order both ways — categorical preference must not depend on find-time's
+    // own result ordering (whichever claims the shared key first/second).
+    const packedFirst = await withGate('true', () => build([packedBadDetour, emptyGreatDetour], { rankProfile: 'reservice' }));
+    const emptyFirst = await withGate('true', () => build([emptyGreatDetour, packedBadDetour], { rankProfile: 'reservice' }));
+    expect(packedFirst.slots.map((s) => s.technician_id)).toEqual(['tech-packed']);
+    expect(emptyFirst.slots.map((s) => s.technician_id)).toEqual(['tech-packed']);
   });
 });

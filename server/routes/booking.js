@@ -322,6 +322,24 @@ function reserviceAdjustedScore(candidate) {
   return base + emptyDayPenalty + idlePenalty;
 }
 
+// Whether `candidate` should displace `existing` for the SAME (date,start)
+// key in the re-service profile's per-start technician dedupe (claimSlot).
+// A packed (non-empty-day) candidate wins CATEGORICALLY over an empty-day
+// one — never by comparing raw adjusted-score numbers across the category
+// boundary, which the 240-minute empty-day penalty is large but finite:
+// a packed candidate with a bad enough detour (e.g. 300+ minutes) could
+// otherwise numerically outscore an empty-day candidate with a great one
+// (241), letting the empty day win the dedupe despite the categorical rule
+// (pre-push audit r3 P2 on #4926). Adjusted score only breaks ties WITHIN
+// the same category. Existing wins an exact tie (first claim keeps it),
+// matching claimSlot's own pre-existing convention.
+function reserviceCandidateOutranks(candidate, existing) {
+  const candidateEmpty = (candidate.stops_that_day || 0) === 0;
+  const existingEmpty = (existing.stops_that_day || 0) === 0;
+  if (candidateEmpty !== existingEmpty) return existingEmpty;
+  return reserviceAdjustedScore(candidate) < reserviceAdjustedScore(existing);
+}
+
 // Whether the re-service rank profile actually applies (the gate AND the
 // caller's opt-in). A plain function so every top-level call site is a
 // single non-branching assignment — keeps the branch itself out of
@@ -477,7 +495,17 @@ function applyReserviceProfile({ rankProfile, candidates, today, totalFeasible }
     logger.info(`[booking] availability rank_profile=${rankProfile} active=${active} total_feasible=${totalFeasible} before=${JSON.stringify(diagnostics.before)} after=${JSON.stringify(diagnostics.after)}`);
   }
 
-  return { slots, bestFitByDate: bestFitSigByDate, diagnostics };
+  // Spread straight into buildBookingAvailability's return value ({} when
+  // inactive) — the client (ScheduleFlowPage.jsx) keys its "keep the ranked
+  // strip after an AI search" exception on this flag rather than on
+  // flow==='reservice', so the kill switch (GATE_RESERVICE_RANK_AFTER_NEW
+  // off) restores the old UI even on the reservice route (pre-push audit
+  // r3 P1 on #4926). Building it here (a plain object, no branch in
+  // buildBookingAvailability itself) keeps that function's own complexity
+  // at origin/main parity.
+  const rankProfileFields = active ? { rank_profile: 'reservice' } : {};
+
+  return { slots, bestFitByDate: bestFitSigByDate, diagnostics, rankProfileFields };
 }
 
 function fallbackZoneCenter(city) {
@@ -1506,7 +1534,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const keepsFirstClaim = (existing) => Boolean(existing) && !reserviceRankActive;
   const claimSlot = (key, candidate) => {
     const existing = candidateMap.get(key);
-    if (existing && reserviceAdjustedScore(existing) <= reserviceAdjustedScore(candidate)) return;
+    if (existing && !reserviceCandidateOutranks(candidate, existing)) return;
     candidateMap.set(key, candidate);
   };
 
@@ -1663,7 +1691,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   }
   const candidates = [...candidateMap.values()].sort(compareRankedSlots);
   const totalFeasible = result.total_feasible || 0;
-  const { slots: curatedSlots, bestFitByDate } = applyReserviceProfile({
+  const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible,
   });
 
@@ -1740,6 +1768,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     days,
     nearby: days.some(d => d.nearby),
     total_feasible: totalFeasible,
+    ...rankProfileFields,
   };
 }
 
@@ -6186,6 +6215,7 @@ module.exports._internals = {
   compareRankedSlots,
   curateSlots,
   reserviceAdjustedScore,
+  reserviceCandidateOutranks,
   reserviceRankIsActive,
   reserviceStopsThatDay,
   isReserviceNearbySlot,

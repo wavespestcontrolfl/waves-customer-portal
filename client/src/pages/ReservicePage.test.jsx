@@ -249,9 +249,14 @@ it('loads the remaining service when the selected lane becomes unavailable', asy
 // over the searched window, so hiding it here threw away the whole point of
 // GATE_RESERVICE_RANK_AFTER_NEW for the one interaction (a targeted search)
 // a re-service customer is most likely to use. Re-service keeps the strip
-// visible after a search; every other flow's existing behavior is untouched
-// (the conditional only changes for flow==='reservice').
-it('keeps the ranked "best times" strip visible after an AI search (re-service only, #4926)', async () => {
+// visible after a search; every other flow's existing behavior is untouched.
+// Pre-push audit r3 P1 on #4926: this is keyed on availability.rank_profile
+// (stamped by reservice-public.js's reserviceAvailabilityPayload ONLY while
+// GATE_RESERVICE_RANK_AFTER_NEW is actually live), not on flow==='reservice'
+// alone — otherwise the kill switch could never restore the old post-search
+// UI on this route. Two tests: the flag present (gate on) keeps the strip
+// up; the flag absent (gate off) hides it exactly like every other flow.
+it('keeps the ranked "best times" strip visible after an AI search when the server marks the response rank_profile:\'reservice\' (gate on, #4926)', async () => {
   const rankedDay = {
     date: '2026-07-14', fullDate: 'Tuesday, July 14', nearby: true,
     slots: [{
@@ -263,6 +268,7 @@ it('keeps the ranked "best times" strip visible after an AI search (re-service o
     slots: [{ date: '2026-07-14', start_time: '14:00', rank: 1 }],
     days: [rankedDay],
     nearby: true, rangeFrom: '2026-07-11', rangeTo: '2026-07-24',
+    rank_profile: 'reservice',
   };
   stubFetch({ findSlots: jsonResponse({ availability: searchedAvailability, summary: 'Tuesday afternoon' }) });
   renderPage();
@@ -271,6 +277,30 @@ it('keeps the ranked "best times" strip visible after an AI search (re-service o
   fireEvent.click(screen.getByRole('button', { name: 'Search' }));
   await screen.findByText('Tuesday afternoon');
   expect(screen.getByText('Our best times for you')).toBeInTheDocument();
+});
+
+it('hides the ranked "best times" strip after an AI search when the response carries NO rank_profile flag (gate off — the kill switch restores the old UI, #4926)', async () => {
+  const rankedDay = {
+    date: '2026-07-14', fullDate: 'Tuesday, July 14', nearby: true,
+    slots: [{
+      start_time: '14:00', end_time: '14:45', start_label: '2:00 PM', end_label: '2:45 PM',
+      technician_id: 'tech-1', is_best_fit: true, nearby: true,
+    }],
+  };
+  // Byte-identical to the gate-off shape (reserviceAvailabilityPayload omits
+  // rank_profile entirely) — no `rank_profile` key at all here.
+  const searchedAvailability = {
+    slots: [{ date: '2026-07-14', start_time: '14:00', rank: 1 }],
+    days: [rankedDay],
+    nearby: true, rangeFrom: '2026-07-11', rangeTo: '2026-07-24',
+  };
+  stubFetch({ findSlots: jsonResponse({ availability: searchedAvailability, summary: 'Tuesday afternoon' }) });
+  renderPage();
+  await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ });
+  fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'Tuesday' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  await screen.findByText('Tuesday afternoon');
+  expect(screen.queryByText('Our best times for you')).not.toBeInTheDocument();
 });
 
 // Pre-push audit P1 on #4926: PickerBestTimes' rankOf() used to prefer

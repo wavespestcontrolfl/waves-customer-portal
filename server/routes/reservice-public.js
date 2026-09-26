@@ -28,7 +28,13 @@
  *   bookings get first pick of open time), the suggested strip and each
  *   day's is_best_fit badge rank packed slots against existing stops ahead
  *   of empty-day slots, with a 5-business-day latency guard; the offered
- *   slot set itself (days[].slots) never changes. Gate off: byte-identical.
+ *   slot set itself (days[].slots) never changes. Gate off: byte-identical
+ *   (see reserviceAvailabilityPayload below — every availability object on
+ *   this route carries `rank_profile: 'reservice'` ONLY while the gate is
+ *   actually live, omitted entirely when it's off, so the client's own
+ *   "keep the ranked strip after a search" behavior keys off that flag
+ *   rather than the route, and the kill switch genuinely restores the old
+ *   UI).
  *
  * POST /:token/find-slots — Waves AI date/time search. Same parser the
  *   reschedule page uses (parseWhen), clamped to the booking window on both
@@ -216,6 +222,26 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
   });
 }
 
+// The one shape every availability response on this route sends — GET,
+// find-slots, and both SLOT_TAKEN refreshes. `rank_profile` (buildBookingAvailability
+// -> applyReserviceProfile's rankProfileFields) rides along ONLY when
+// GATE_RESERVICE_RANK_AFTER_NEW was actually live for this build; omitted
+// entirely when it's off, so a gate flip restores a byte-identical payload.
+// The client (ScheduleFlowPage.jsx) keys its "keep the ranked strip visible
+// after an AI search" exception on this flag rather than on the route/flow
+// name, so the kill switch actually restores the old UI (pre-push audit r3
+// P1 on #4926).
+function reserviceAvailabilityPayload(availability, range) {
+  return {
+    slots: availability.slots,
+    days: availability.days,
+    nearby: availability.nearby,
+    rangeFrom: range.rangeFrom,
+    rangeTo: range.rangeTo,
+    ...(availability.rank_profile ? { rank_profile: availability.rank_profile } : {}),
+  };
+}
+
 // Lane state for the payload: which lanes the customer holds, and per lane
 // whether an open callback already blocks it (with the tie-in reschedule
 // link). Returns { lanes: [...payload rows], bookableLanes: ['pest',...] }.
@@ -286,15 +312,7 @@ router.get('/:token', async (req, res, next) => {
 
     return res.json({
       ...base,
-      availability: availability
-        ? {
-          slots: availability.slots,
-          days: availability.days,
-          nearby: availability.nearby,
-          rangeFrom: range.rangeFrom,
-          rangeTo: range.rangeTo,
-        }
-        : null,
+      availability: availability ? reserviceAvailabilityPayload(availability, range) : null,
     });
   } catch (err) {
     next(err);
@@ -362,13 +380,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
       understood: when.understood,
       window: { date_from: when.dateFrom, date_to: when.dateTo },
       time_of_day: when.timeOfDay,
-      availability: {
-        slots: availability.slots,
-        days: availability.days,
-        nearby: availability.nearby,
-        rangeFrom: range.rangeFrom,
-        rangeTo: range.rangeTo,
-      },
+      availability: reserviceAvailabilityPayload(availability, range),
     });
   } catch (err) {
     next(err);
@@ -451,9 +463,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       return res.status(409).json({
         error: 'That time is no longer open. Here are the latest available times.',
         code: 'SLOT_TAKEN',
-        availability: refreshed
-          ? { slots: refreshed.slots, days: refreshed.days, nearby: refreshed.nearby, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo }
-          : null,
+        availability: refreshed ? reserviceAvailabilityPayload(refreshed, range) : null,
       });
     }
 
@@ -509,9 +519,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         return res.status(409).json({
           error: result.error,
           code: 'SLOT_TAKEN',
-          availability: refreshed
-            ? { slots: refreshed.slots, days: refreshed.days, nearby: refreshed.nearby, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo }
-            : null,
+          availability: refreshed ? reserviceAvailabilityPayload(refreshed, range) : null,
         });
       }
       return res.status(result.status || 500).json({ error: result.error });
