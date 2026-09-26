@@ -486,6 +486,33 @@ describe('processDueJobs', () => {
       expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith(expect.objectContaining({ acceptActive: false }));
     });
 
+    // Same wiring (`acceptActive: !estimateOffCustomerSurface(est)`), pinned
+    // against the OTHER two off-surface branches the real, un-mocked
+    // estimate-claim-sql.js checks — not just the linkage-invalidated one
+    // above — so a regression narrowing the negation to a single branch is
+    // caught here, not just in estimate-claim-sql's own suite.
+    test.each([
+      ['a county-roll-unverified address', { addressUnverified: true }],
+      ['a reprice pending on the estimator engine', { estimatorEngine: { invalidation_pending_at: new Date(NOW.getTime() - H).toISOString() } }],
+    ])('an off-surface estimate (%s) also passes acceptActive: false', async (_label, dataOverrides) => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      const estimate_data = JSON.stringify(dataOverrides);
+      enqueueProcessorHappyPath({ est: baseEstimate({ estimate_data }) });
+
+      await Engine.processDueJobs(NOW);
+
+      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith(expect.objectContaining({ acceptActive: false }));
+    });
+
+    test('an on-surface estimate (no off-surface markers) passes acceptActive: true', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath({ est: baseEstimate({ estimate_data: JSON.stringify({ lead_id: 'lead-1', lead_linkage: 'sid' }) }) });
+
+      await Engine.processDueJobs(NOW);
+
+      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith(expect.objectContaining({ acceptActive: true }));
+    });
+
     test('a blank builder result still sends the email with consultation_url === "" (gate off / ineligible / build error)', async () => {
       buildGoneQuietConsultationUrl.mockResolvedValue('');
       enqueueProcessorHappyPath();

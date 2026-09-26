@@ -97,6 +97,22 @@ describe('buildGoneQuietConsultationUrl — hidden cases', () => {
     mockShortWrap.mockResolvedValue(null);
     expect(await buildGoneQuietConsultationUrl(baseArgs())).toBe('');
   });
+
+  test('recipientEmail missing entirely → "" — recipientIsLead still gets called with it, never skipped/assumed true', async () => {
+    mockRecipientIsLead.mockReturnValue(false); // real recipientIsLead(undefined, lead) is false — mirrored here
+    expect(await buildGoneQuietConsultationUrl(baseArgs({ recipientEmail: undefined }))).toBe('');
+    expect(mockRecipientIsLead).toHaveBeenCalledWith(undefined, LEAD);
+    expect(mockConsultationUrlForLead).not.toHaveBeenCalled();
+    expect(mockShortWrap).not.toHaveBeenCalled();
+  });
+
+  test('the gate is read fresh on every call — a mid-run flip (no re-require) changes the very next result', async () => {
+    mockEstimateEmailConsultationOfferLive.mockReturnValue(true);
+    expect(await buildGoneQuietConsultationUrl(baseArgs())).toBe('https://portal.wavespestcontrol.com/l/abc123');
+    mockEstimateEmailConsultationOfferLive.mockReturnValue(false);
+    expect(await buildGoneQuietConsultationUrl(baseArgs())).toBe('');
+    expect(mockEstimateConsultationLead).toHaveBeenCalledTimes(1); // not called on the second, gate-off call
+  });
 });
 
 describe('buildGoneQuietConsultationUrl — happy path', () => {
@@ -117,5 +133,15 @@ describe('buildGoneQuietConsultationUrl — happy path', () => {
     const days = (expiresAt.getTime() - Date.now()) / 86400000;
     expect(days).toBeGreaterThan(13.9);
     expect(days).toBeLessThanOrEqual(14);
+  });
+
+  test('the long bearer URL never appears in the returned value — only the short-wrapped one', async () => {
+    const longUrl = 'https://portal.wavespestcontrol.com/inspection/long-token-with-secret-bearer';
+    mockConsultationUrlForLead.mockReturnValue(longUrl);
+    const result = await buildGoneQuietConsultationUrl(baseArgs());
+    expect(result).toBe('https://portal.wavespestcontrol.com/l/abc123');
+    expect(result).not.toBe(longUrl);
+    expect(result).not.toContain('long-token-with-secret-bearer');
+    expect(result).not.toContain('/inspection/');
   });
 });

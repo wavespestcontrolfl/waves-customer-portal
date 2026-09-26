@@ -129,6 +129,135 @@ describe('render QA — the real EmailTemplateLibrary renderer', () => {
   });
 });
 
+// The two describes above render a hand-built, minimal stand-in version
+// (paragraph / primary cta / link / signature). This describe instead pulls
+// the ACTUAL current template definition — 20260715200000's seed as amended
+// by 20260723300000 (report-video module) and 20260724100000 (round 2: van
+// photo removed from gone_quiet, report tour already present) — so a real
+// structural change to the template (an extra 'cta'-typed block landing
+// ahead of "Take another look", e.g. inside a future why-Waves or FAQ
+// module) would break this test rather than only the migration's own
+// synthetic fixture. 20260724100000._TEMPLATES is the up-to-date export
+// (it transforms 20260723300000's export, which transforms the seed's).
+describe('render QA — the REAL estimate.engage_gone_quiet seeded content', () => {
+  const round2 = require('../models/migrations/20260724100000_engage_email_round2');
+  const REAL_TEMPLATE_DEF = round2._TEMPLATES.find((t) => t.key === 'estimate.engage_gone_quiet');
+  if (!REAL_TEMPLATE_DEF) {
+    throw new Error('estimate.engage_gone_quiet missing from the round2 seed export — template key renamed?');
+  }
+
+  // Mirrors templateRow()'s allowed_variables formula in the seed migration
+  // (SHARED_VARIABLES + CATEGORY_VARIABLES + this template's own required +
+  // optional) — the union every real seeded template actually gets.
+  const SHARED_VARIABLES = ['first_name', 'customer_portal_url', 'company_phone', 'company_email'];
+  const CATEGORY_VARIABLES = [
+    'service_label', 'category_headline', 'category_hook', 'category_benefit', 'category_question',
+    'category_included', 'category_process',
+    'faq_start', 'faq_terms', 'faq_between_visits', 'faq_price',
+  ];
+  const realAllowed = [...new Set([
+    ...SHARED_VARIABLES, ...CATEGORY_VARIABLES,
+    ...(REAL_TEMPLATE_DEF.required || []), ...(REAL_TEMPLATE_DEF.optional || []),
+  ])];
+
+  const REAL_TEMPLATE = {
+    id: 'tmpl-gone-quiet-real',
+    template_key: REAL_TEMPLATE_DEF.key,
+    name: REAL_TEMPLATE_DEF.name,
+    mode: 'service',
+    send_stream: 'service_operational',
+    allowed_variables: realAllowed,
+    required_variables: REAL_TEMPLATE_DEF.required || [],
+  };
+
+  const BASE_PAYLOAD = {
+    first_name: 'Taylor',
+    service_label: 'pest control',
+    estimate_url: 'https://portal.wavespestcontrol.com/estimate/tok',
+    category_question: 'Wondering about pets and kids? Reply and ask.',
+    category_benefit: 'No long-term contract, unlimited free callbacks.',
+    category_included: 'Exterior and interior pest protection on a recurring schedule.',
+    // category_headline/hook/process, faq_*, and report_video_* are all
+    // optional/truth-scoped — left blank so their blocks/rows drop, same as
+    // a real send for a category missing that content.
+  };
+
+  function realVersion(blocks) {
+    return {
+      id: 'ver-gone-quiet-real',
+      subject: REAL_TEMPLATE_DEF.subject,
+      preview_text: REAL_TEMPLATE_DEF.preview,
+      text_body: null,
+      blocks,
+    };
+  }
+
+  // The migration's own logic applied by hand to the REAL blocks (mirrors
+  // exports.up's splice, without the DB round-trip).
+  function withConsultationBlock(blocks) {
+    const anchor = primaryCtaAnchorIndex(blocks);
+    const next = [...blocks];
+    next.splice(anchor + 1, 0, { type: 'cta', variant: 'link', label: LINK_LABEL, url_variable: NEW_VARIABLE });
+    return next;
+  }
+
+  test('the real template has exactly one cta ahead of the consultation-link anchor: "Take another look", never the secondary safety chip', () => {
+    const ctaBlocks = REAL_TEMPLATE_DEF.blocks.filter((b) => b.type === 'cta');
+    expect(ctaBlocks).toHaveLength(2);
+    expect(ctaBlocks[0].label).toBe('Take another look');
+    expect(primaryCtaAnchorIndex(REAL_TEMPLATE_DEF.blocks)).toBe(
+      REAL_TEMPLATE_DEF.blocks.findIndex((b) => b.type === 'cta'),
+    );
+  });
+
+  test('a blank consultation_url renders BYTE-IDENTICAL html/text to rendering the pre-migration real blocks', () => {
+    const preMigration = EmailTemplates.renderTemplate({
+      template: REAL_TEMPLATE,
+      version: realVersion(REAL_TEMPLATE_DEF.blocks),
+      payload: BASE_PAYLOAD,
+    });
+    const postMigrationBlank = EmailTemplates.renderTemplate({
+      template: { ...REAL_TEMPLATE, allowed_variables: [...realAllowed, NEW_VARIABLE] },
+      version: realVersion(withConsultationBlock(REAL_TEMPLATE_DEF.blocks)),
+      payload: { ...BASE_PAYLOAD, consultation_url: '' },
+    });
+    expect(postMigrationBlank.validation.ok).toBe(true);
+    expect(postMigrationBlank.html).toBe(preMigration.html);
+    expect(postMigrationBlank.text).toBe(preMigration.text);
+  });
+
+  test('a real consultation URL renders the link exactly once, directly after "Take another look", in both html and text — href unchanged by safeUrl for https', () => {
+    const url = 'https://portal.wavespestcontrol.com/l/real-short-code';
+    const rendered = EmailTemplates.renderTemplate({
+      template: { ...REAL_TEMPLATE, allowed_variables: [...realAllowed, NEW_VARIABLE] },
+      version: realVersion(withConsultationBlock(REAL_TEMPLATE_DEF.blocks)),
+      payload: { ...BASE_PAYLOAD, consultation_url: url },
+    });
+
+    expect(rendered.validation.ok).toBe(true);
+
+    // Exactly once in each body.
+    expect(rendered.html.split(url)).toHaveLength(2);
+    expect(rendered.text.split(url)).toHaveLength(2);
+
+    // href is the raw https URL, unmangled by safeUrl/escapeHtml (no query
+    // chars needing escaping in a short code, so this also pins that
+    // safeUrl's allowlist does not rewrite an ordinary https URL).
+    expect(rendered.html).toContain(`href="${url}"`);
+    expect(rendered.text).toContain(`${LINK_LABEL}: ${url}`);
+
+    // Directly after the primary CTA button, ahead of the secondary safety
+    // chip: in the html, "Take another look" appears, then the consultation
+    // link's paragraph, then the safety-chip button — in that order.
+    const takeAnotherLookIdx = rendered.html.indexOf('Take another look');
+    const consultationIdx = rendered.html.indexOf(url);
+    const safetyChipIdx = rendered.html.indexOf('products &amp; safety');
+    expect(takeAnotherLookIdx).toBeGreaterThan(-1);
+    expect(consultationIdx).toBeGreaterThan(takeAnotherLookIdx);
+    expect(safetyChipIdx).toBeGreaterThan(consultationIdx);
+  });
+});
+
 // Runs with the existing CI PostgreSQL pass; never a production connection.
 // Same schema-per-run convention as app-onboarding-postgres.test.js.
 const SKIP = !process.env.DATABASE_URL;
@@ -284,6 +413,53 @@ const knexLib = require('knex');
       expect(afterUp.active_version_id).toBe(version.id); // no new version published
       expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first())
         .toEqual({ n: '1' });
+
+      await trx.rollback();
+    });
+  });
+
+  test('the template row does not exist in this environment — a clean no-op, nothing written', async () => {
+    await db.transaction(async (trx) => {
+      // No email_templates row for estimate.engage_gone_quiet at all (a
+      // fresh/partial environment where the 20260715200000 seed never ran).
+      await expect(migration.up(trx)).resolves.toBeUndefined();
+      expect(await trx('email_templates').count('* as n').first()).toEqual({ n: '0' });
+      expect(await trx('email_template_versions').count('* as n').first()).toEqual({ n: '0' });
+      expect(await trx('audit_log').count('* as n').first()).toEqual({ n: '0' });
+      await trx.rollback();
+    });
+  });
+
+  test('an active version with NO cta block throws (fail loud) and writes NOTHING', async () => {
+    await db.transaction(async (trx) => {
+      const blocksWithoutCta = [
+        { type: 'paragraph', content: 'Hi {{first_name}}, just checking in on your {{service_label}} estimate.' },
+        { type: 'signature', content: '— The Waves Team' },
+      ];
+      const [template] = await trx('email_templates').insert({
+        template_key: 'estimate.engage_gone_quiet', status: 'active', from_email: 'contact@wavespestcontrol.com',
+        send_stream: 'service_operational',
+        allowed_variables: JSON.stringify(['first_name', 'service_label']),
+        optional_variables: JSON.stringify([]), required_variables: JSON.stringify(['first_name', 'service_label']),
+      }).returning('*');
+      const [version] = await trx('email_template_versions').insert({
+        template_id: template.id, version_number: 1, status: 'active',
+        subject: 'Any questions about your Waves estimate?', preview_text: 'Reply and ask — real answers in minutes.',
+        blocks: JSON.stringify(blocksWithoutCta), validation_snapshot: JSON.stringify({ staff_reviewed: true }),
+      }).returning('*');
+      await trx('email_templates').where({ id: template.id }).update({ active_version_id: version.id });
+
+      await expect(migration.up(trx)).rejects.toThrow(/no primary CTA block found/);
+
+      // Nothing changed: same active version, no new version row, template
+      // row's own fields untouched, no audit event recorded.
+      const afterThrow = await trx('email_templates').where({ id: template.id }).first();
+      expect(afterThrow.active_version_id).toBe(version.id);
+      expect(afterThrow.allowed_variables).toEqual(['first_name', 'service_label']);
+      expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first())
+        .toEqual({ n: '1' });
+      expect(await trx('audit_log').where({ resource_id: template.id }).count('* as n').first())
+        .toEqual({ n: '0' });
 
       await trx.rollback();
     });
