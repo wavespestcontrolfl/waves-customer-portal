@@ -217,6 +217,28 @@ describe('CustomersPageV2 workflow state', () => {
     await waitFor(() => expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('2'));
   });
 
+  it.each(['/admin/customers', '/admin/customers?customer360=workspace'])('refreshes the directory after a workspace address review at %s', async (entry) => {
+    let customerReads = 0;
+    const reviewedAddress = '25 Reviewed Ave, Naples FL 34102';
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      customerReads += 1;
+      return response({
+        ...list,
+        customers: [{ ...list.customers[0], address: customerReads > 1 ? reviewedAddress : list.customers[0].address }],
+      });
+    }));
+
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Save profile address' }));
+    await waitFor(() => expect(customerReads).toBe(2));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    expect(await screen.findByText(reviewedAddress)).toBeInTheDocument();
+    expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('1');
+  });
+
   it('refreshes the displayed customer list after a queue resolution', async () => {
     let customerReads = 0;
     const addresses = ['10 Palm Ave, Unit 4, Naples FL 34102', '25 Reviewed Ave, Naples FL 34102'];

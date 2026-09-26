@@ -62,47 +62,69 @@ function addressText(customer) {
   ].filter(Boolean).join(", ");
 }
 
+function reviewStatus(review) {
+  const status = review?.status || "pending";
+  const reviewedOutsideArea = status === "outside_area" && Boolean(review?.reviewed_at);
+  return {
+    status,
+    label: reviewedOutsideArea ? "Confirmed outside service area" : STATUS_LABELS[status] || "Needs review",
+    help: reviewedOutsideArea
+      ? "Staff confirmed this primary service address is outside the service area."
+      : reviewHelp(review),
+  };
+}
+
+function ReviewEvidence({ review }) {
+  if (review?.status !== "verified" || !(review.source || review.reviewed_at || review.evidence)) return null;
+  return (
+    <div className="mt-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-2.5 text-14 text-ink-secondary">
+      <div>
+        Verified by {SOURCE_LABELS[review.source] || "staff review"}
+        {review.reviewed_at ? ` on ${formatETDateTime(review.reviewed_at, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
+      </div>
+      {review.evidence && <div className="mt-1 text-zinc-900">{review.evidence}</div>}
+    </div>
+  );
+}
+
+function ReviewSummary({ record, onSelectCustomer }) {
+  const { status, label, help } = reviewStatus(record.review);
+  return (
+    <>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          {onSelectCustomer ? (
+            <button type="button" className="p-0 border-0 bg-transparent text-left text-14 font-medium text-zinc-900 hover:underline cursor-pointer u-focus-ring" onClick={() => onSelectCustomer(record.customer.id)}>{customerName(record.customer)}</button>
+          ) : <div className="text-14 font-medium text-zinc-900">Primary service location</div>}
+          <div className="text-14 text-ink-secondary break-words">{addressText(record.customer) || "No complete address on file"}</div>
+        </div>
+        <Badge tone={status === "outside_area" ? "alert" : "neutral"}>{label}</Badge>
+      </div>
+      <div className="mt-1 text-14 text-ink-secondary">{help}</div>
+      <ReviewEvidence review={record.review} />
+      {record.next_visit_date && <div className="mt-1 text-14 text-ink-tertiary">Next visit: {formatETDateOnly(record.next_visit_date, { month: "short", day: "numeric", year: "numeric" })}</div>}
+    </>
+  );
+}
+
+function ReviewActions({ record, disabled, saving, onEdit, onResolve }) {
+  const retryAvailable = record.review?.status === "provider_unavailable" && !hasCompletePin(record.customer);
+  return (
+    <div className="flex flex-wrap gap-2 mt-2">
+      <Button variant="secondary" disabled={disabled} onClick={onEdit}>Review location</Button>
+      {retryAvailable && <Button variant="secondary" disabled={disabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "retry" })}>Retry saved address</Button>}
+      {canRevokePin(record) && <Button variant="secondary" disabled={disabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "revoke" })}>Revoke verification</Button>}
+    </div>
+  );
+}
+
 function ReviewRecord({ record, active, actionsDisabled, saving, error, conflicted, unavailable, onAcknowledgeConflict, onEdit, onResolve, onSelectCustomer }) {
-  const status = record.review?.status || "pending";
-  const reviewedOutsideArea = status === "outside_area" && Boolean(record.review?.reviewed_at);
-  const statusLabel = reviewedOutsideArea ? "Confirmed outside service area" : STATUS_LABELS[status] || "Needs review";
-  const statusHelp = reviewedOutsideArea
-    ? "Staff confirmed this primary service address is outside the service area."
-    : reviewHelp(record.review);
-  const showVerifiedEvidence = status === "verified"
-    && Boolean(record.review?.source || record.review?.reviewed_at || record.review?.evidence);
-  const retryAvailable = status === "provider_unavailable" && !hasCompletePin(record.customer);
   return (
     <div className="py-3 border-t border-hairline border-zinc-200 first:border-t-0">
       {!unavailable && (
         <>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              {onSelectCustomer ? (
-                <button type="button" className="p-0 border-0 bg-transparent text-left text-14 font-medium text-zinc-900 hover:underline cursor-pointer u-focus-ring" onClick={() => onSelectCustomer(record.customer.id)}>{customerName(record.customer)}</button>
-              ) : <div className="text-14 font-medium text-zinc-900">Primary service location</div>}
-              <div className="text-14 text-ink-secondary break-words">{addressText(record.customer) || "No complete address on file"}</div>
-            </div>
-            <Badge tone={status === "outside_area" ? "alert" : "neutral"}>{statusLabel}</Badge>
-          </div>
-          <div className="mt-1 text-14 text-ink-secondary">{statusHelp}</div>
-          {showVerifiedEvidence && (
-            <div className="mt-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-2.5 text-14 text-ink-secondary">
-              <div>
-                Verified by {SOURCE_LABELS[record.review.source] || "staff review"}
-                {record.review.reviewed_at ? ` on ${formatETDateTime(record.review.reviewed_at, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
-              </div>
-              {record.review.evidence && <div className="mt-1 text-zinc-900">{record.review.evidence}</div>}
-            </div>
-          )}
-          {record.next_visit_date && <div className="mt-1 text-14 text-ink-tertiary">Next visit: {formatETDateOnly(record.next_visit_date, { month: "short", day: "numeric", year: "numeric" })}</div>}
-          {!active && (
-            <div className="flex flex-wrap gap-2 mt-2">
-              <Button variant="secondary" disabled={actionsDisabled} onClick={onEdit}>Review location</Button>
-              {retryAvailable && <Button variant="secondary" disabled={actionsDisabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "retry" })}>Retry saved address</Button>}
-              {canRevokePin(record) && <Button variant="secondary" disabled={actionsDisabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "revoke" })}>Revoke verification</Button>}
-            </div>
-          )}
+          <ReviewSummary record={record} onSelectCustomer={onSelectCustomer} />
+          {!active && <ReviewActions record={record} disabled={actionsDisabled} saving={saving} onEdit={onEdit} onResolve={onResolve} />}
         </>
       )}
       {active && !unavailable && (
@@ -115,9 +137,18 @@ function ReviewRecord({ record, active, actionsDisabled, saving, error, conflict
   );
 }
 
-export default function CustomerGeocodeReviewPanel({ customerId = null, onSelectCustomer, onResolved, refreshToken = 0 }) {
+function loadedReviewRecords(payload, customerId, previousRecords, editingId) {
+  const records = customerId && payload?.customer ? [payload] : payload?.records || [];
+  return {
+    records,
+    total: payload?.total ?? records.length,
+    previousRecord: editingId ? previousRecords.find((record) => record.customer.id === editingId) : null,
+    refreshedRecord: editingId ? records.find((record) => record.customer.id === editingId) : null,
+  };
+}
+
+function useGeocodeReview({ customerId, onResolved, refreshToken }) {
   const [state, setState] = useState({ enabled: null, records: [], total: 0 });
-  const [open, setOpen] = useState(false);
   const [offset, setOffset] = useState(0);
   const [activeId, setActiveId] = useState(null);
   const [conflictId, setConflictId] = useState(null);
@@ -134,6 +165,31 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
   const activeIdRef = useRef(activeId);
   recordsRef.current = state.records;
   activeIdRef.current = activeId;
+
+  const acceptLoad = useCallback((payload, { preserveDraft, editingId }) => {
+    const { records, total, previousRecord, refreshedRecord } = loadedReviewRecords(payload, customerId, recordsRef.current, editingId);
+    if (payload?.enabled !== true) {
+      setState({ enabled: false, records: [], total: 0 });
+      setLoadError("");
+      setError("");
+      return false;
+    }
+    if (previousRecord && !refreshedRecord) {
+      setLoadError("The current saved review is unavailable. Your entries are preserved, but saving is paused until it can be loaded. Refresh to try again.");
+      return false;
+    }
+    if (!customerId && offset > 0 && offset >= total) {
+      setOffset(total > 0 ? Math.floor((total - 1) / PAGE_SIZE) * PAGE_SIZE : 0);
+      return true;
+    }
+    setState({ enabled: true, records, total });
+    setLoadError("");
+    if (previousRecord && refreshedRecord && previousRecord.revision !== refreshedRecord.revision) {
+      setConflictId(editingId);
+      setError("This review changed elsewhere. Your entries are preserved, but saving is paused until you review the latest address and pin.");
+    } else if (!preserveDraft) setError("");
+    return true;
+  }, [customerId, offset]);
 
   const load = useCallback(async ({ preserveDraft = false } = {}) => {
     const scope = scopeRef.current;
@@ -152,35 +208,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
         : `/admin/customer-geocodes?limit=${PAGE_SIZE}&offset=${offset}`;
       const payload = await adminFetch(path, { signal: controller.signal });
       if (request !== requestRef.current || !current()) return;
-      const records = customerId && payload?.customer ? [payload] : payload?.records || [];
-      const total = payload?.total ?? records.length;
-      const previousRecord = editingId
-        ? recordsRef.current.find((record) => record.customer.id === editingId)
-        : null;
-      const refreshedRecord = editingId
-        ? records.find((record) => record.customer.id === editingId)
-        : null;
-      if (payload?.enabled !== true) {
-        setState({ enabled: false, records: [], total: 0 });
-        setLoadError("");
-        setError("");
-        return false;
-      }
-      if (previousRecord && !refreshedRecord) {
-        setLoadError("The current saved review is unavailable. Your entries are preserved, but saving is paused until it can be loaded. Refresh to try again.");
-        return false;
-      }
-      if (!customerId && offset > 0 && offset >= total) {
-        setOffset(total > 0 ? Math.floor((total - 1) / PAGE_SIZE) * PAGE_SIZE : 0);
-        return true;
-      }
-      setState({ enabled: true, records, total });
-      setLoadError("");
-      if (previousRecord && refreshedRecord && previousRecord.revision !== refreshedRecord.revision) {
-        setConflictId(editingId);
-        setError("This review changed elsewhere. Your entries are preserved, but saving is paused until you review the latest address and pin.");
-      } else if (!preserveDraft) setError("");
-      return true;
+      return acceptLoad(payload, { preserveDraft, editingId });
     } catch (loadFailure) {
       if (loadFailure.name === "AbortError" || request !== requestRef.current || !current()) return;
       if (loadFailure.status === 404) {
@@ -197,7 +225,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
         setDetailLoading(false);
       }
     }
-  }, [customerId, offset, refreshToken]);
+  }, [customerId, offset, acceptLoad]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -227,7 +255,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
   useEffect(() => {
     void load();
     return () => abortRef.current?.abort();
-  }, [load]);
+  }, [load, refreshToken]);
 
   const resolve = async (record, body) => {
     if (saveAbortRef.current) return;
@@ -277,8 +305,16 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
     }
   };
 
-  if (state.enabled === false) return null;
-  if (state.enabled === null && !loadError && !error) return null;
+  const acknowledgeConflict = () => { setConflictId(null); setError(""); };
+  const editRecord = (customerId) => {
+    setActiveId((id) => id === customerId ? null : customerId);
+    acknowledgeConflict();
+  };
+  return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, load, resolve, acknowledgeConflict, editRecord };
+}
+
+function ReviewContents({ customerId, onSelectCustomer, model }) {
+  const { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, load, resolve, acknowledgeConflict, editRecord } = model;
   const recordsUnavailable = detailLoading || Boolean(loadError);
   const visibleRecords = recordsUnavailable
     ? state.records.filter((record) => record.customer.id === activeId)
@@ -286,6 +322,52 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
   const panelError = loadError || (!activeId ? error : "");
   const showEmpty = !detailLoading && !loadError && !error && state.records.length === 0;
   const showPagination = !detailLoading && !loadError && !customerId && state.total > PAGE_SIZE;
+  return (
+    <CardBody className="pt-0">
+      {panelError && (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div role="alert" className="text-14 text-alert-fg">{panelError}</div>
+          <Button variant="secondary" onClick={async () => {
+            await load({ preserveDraft: Boolean(activeId) });
+          }}>Refresh</Button>
+        </div>
+      )}
+      {detailLoading && <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">Loading address review…</div>}
+      {showEmpty ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">No addresses need review.</div> : visibleRecords.map((record) => (
+        <ReviewRecord
+          key={record.customer.id}
+          record={record}
+          active={activeId === record.customer.id}
+          actionsDisabled={Boolean(savingId) || Boolean(activeId && activeId !== record.customer.id)}
+          saving={savingId === record.customer.id}
+          error={activeId === record.customer.id ? error : ""}
+          conflicted={conflictId === record.customer.id}
+          unavailable={recordsUnavailable}
+          onAcknowledgeConflict={acknowledgeConflict}
+          onEdit={() => editRecord(record.customer.id)}
+          onResolve={(body) => resolve(record, body)}
+          onSelectCustomer={onSelectCustomer}
+        />
+      ))}
+      {showPagination && (
+        <div className="pt-3 border-t border-hairline border-zinc-200 flex flex-wrap items-center justify-between gap-2 text-14 text-ink-secondary">
+          <span>Showing {offset + 1}–{Math.min(offset + state.records.length, state.total)} of {state.total}</span>
+          <div className="flex gap-2">
+            <Button variant="secondary" disabled={offset === 0 || Boolean(savingId)} onClick={() => setOffset((value) => Math.max(0, value - PAGE_SIZE))}>Previous</Button>
+            <Button variant="secondary" disabled={offset + PAGE_SIZE >= state.total || Boolean(savingId)} onClick={() => setOffset((value) => value + PAGE_SIZE)}>Next</Button>
+          </div>
+        </div>
+      )}
+    </CardBody>
+  );
+}
+
+export default function CustomerGeocodeReviewPanel({ customerId = null, onSelectCustomer, onResolved, refreshToken = 0 }) {
+  const [open, setOpen] = useState(false);
+  const model = useGeocodeReview({ customerId, onResolved, refreshToken });
+  const { state, loadError, error } = model;
+  if (state.enabled === false) return null;
+  if (state.enabled === null && !loadError && !error) return null;
   return (
     <UiSurface density="comfortable" className={cn("mb-3", customerId && "mt-3")}>
     <Card>
@@ -298,44 +380,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
         <span className="flex items-center gap-2 text-14 font-medium text-zinc-900"><MapPin size={16} />{customerId ? "Primary service location review" : "Address review queue"}</span>
         <span className="flex items-center gap-2 text-14 text-ink-secondary">{!customerId && state.total > 0 ? state.total : ""}<ChevronDown size={16} className={cn("transition-transform", open && "rotate-180")} /></span>
       </button>
-      {open && (
-        <CardBody className="pt-0">
-          {panelError && (
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <div role="alert" className="text-14 text-alert-fg">{panelError}</div>
-              <Button variant="secondary" onClick={async () => {
-                await load({ preserveDraft: Boolean(activeId) });
-              }}>Refresh</Button>
-            </div>
-          )}
-          {detailLoading && <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">Loading address review…</div>}
-          {showEmpty ? <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">No addresses need review.</div> : visibleRecords.map((record) => (
-            <ReviewRecord
-              key={record.customer.id}
-              record={record}
-              active={activeId === record.customer.id}
-              actionsDisabled={Boolean(savingId) || Boolean(activeId && activeId !== record.customer.id)}
-              saving={savingId === record.customer.id}
-              error={activeId === record.customer.id ? error : ""}
-              conflicted={conflictId === record.customer.id}
-              unavailable={recordsUnavailable}
-              onAcknowledgeConflict={() => { setConflictId(null); setError(""); }}
-              onEdit={() => { setActiveId((id) => id === record.customer.id ? null : record.customer.id); setConflictId(null); setError(""); }}
-              onResolve={(body) => resolve(record, body)}
-              onSelectCustomer={onSelectCustomer}
-            />
-          ))}
-          {showPagination && (
-            <div className="pt-3 border-t border-hairline border-zinc-200 flex flex-wrap items-center justify-between gap-2 text-14 text-ink-secondary">
-              <span>Showing {offset + 1}–{Math.min(offset + state.records.length, state.total)} of {state.total}</span>
-              <div className="flex gap-2">
-                <Button variant="secondary" disabled={offset === 0 || Boolean(savingId)} onClick={() => setOffset((value) => Math.max(0, value - PAGE_SIZE))}>Previous</Button>
-                <Button variant="secondary" disabled={offset + PAGE_SIZE >= state.total || Boolean(savingId)} onClick={() => setOffset((value) => value + PAGE_SIZE)}>Next</Button>
-              </div>
-            </div>
-          )}
-        </CardBody>
-      )}
+      {open && <ReviewContents customerId={customerId} onSelectCustomer={onSelectCustomer} model={model} />}
     </Card>
     </UiSurface>
   );
