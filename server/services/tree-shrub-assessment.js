@@ -18,6 +18,7 @@
  */
 
 const crypto = require('crypto');
+const Ajv = require('ajv');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
@@ -64,6 +65,16 @@ const TREE_SHRUB_REVIEW_DECISION_KEYS = {
   disease_leaf_spot: 'diseaseLeafSpot',
   water_heat_mechanical_stress: 'waterHeatStress',
 };
+const validateReviewDecisions = new Ajv().compile({
+  type: 'array', maxItems: 5,
+  items: {
+    type: 'object', required: ['key', 'action'],
+    properties: {
+      key: { enum: Object.keys(TREE_SHRUB_REVIEW_DECISION_KEYS) },
+      action: { enum: ['monitor', 'confirmed', 'hidden', 'edit'] },
+    },
+  },
+});
 
 // Validate the signed preview contract used by Generate. The HMAC proves only
 // that these photo-model scores and observations came from this server's
@@ -71,33 +82,26 @@ const TREE_SHRUB_REVIEW_DECISION_KEYS = {
 // signal into a technician-confirmed pest, disease, deficiency, or diagnosis.
 function validateTreeShrubReviewForReport(review, { serviceId } = {}) {
   const invalid = (reason) => ({ ok: false, reason });
-  if (!review || typeof review !== 'object' || Array.isArray(review)) return invalid('review_shape');
+  if (Object.prototype.toString.call(review) !== '[object Object]') return invalid('review_shape');
   if (review.confirmed !== true) return invalid('review_not_confirmed');
   if (!serviceId) return invalid('service_id_missing');
 
   const scoredCount = review.scoredCount;
   const photoCount = review.photoCount;
-  if (scoredCount !== photoCount || !Number.isInteger(photoCount)
-    || photoCount < 1 || photoCount > 5) return invalid('photo_count_mismatch');
-  if (!/^[a-f0-9]{64}$/.test(String(review.photosHash || ''))) return invalid('photos_hash_invalid');
-  if (!/^[a-f0-9]{64}$/.test(String(review.signature || ''))) return invalid('signature_invalid');
+  if (scoredCount !== photoCount || ![1, 2, 3, 4, 5].includes(photoCount)) return invalid('photo_count_mismatch');
+  if (!/^[a-f0-9]{64}$/.test(String(review.photosHash))) return invalid('photos_hash_invalid');
+  if (!/^[a-f0-9]{64}$/.test(String(review.signature))) return invalid('signature_invalid');
   if (typeof review.observations !== 'string') return invalid('observations_invalid');
 
   const scores = review.scores;
-  if (!scores || typeof scores !== 'object' || Array.isArray(scores)) return invalid('scores_invalid');
+  if (Object.prototype.toString.call(scores) !== '[object Object]') return invalid('scores_invalid');
   if (Object.keys(scores).sort().join('|') !== TREE_SHRUB_REVIEW_SCORE_KEYSET) return invalid('score_keys_invalid');
   if (!TREE_SHRUB_REVIEW_SCORE_KEYS.every((key) => (
     Number.isFinite(scores[key]) && scores[key] >= 0 && scores[key] <= 100
   ))) return invalid('score_values_invalid');
 
   const decisions = review.decisions;
-  const allowedActions = new Set(['monitor', 'confirmed', 'hidden', 'edit']);
-  if (!Array.isArray(decisions) || decisions.length > 5
-    || decisions.some((decision) => (
-      !decision || typeof decision !== 'object' || Array.isArray(decision)
-        || !Object.prototype.hasOwnProperty.call(TREE_SHRUB_REVIEW_DECISION_KEYS, decision.key)
-        || !allowedActions.has(decision.action)
-    ))
+  if (!validateReviewDecisions(decisions)
     || new Set(decisions.map((decision) => decision.key)).size !== decisions.length) {
     return invalid('decisions_invalid');
   }

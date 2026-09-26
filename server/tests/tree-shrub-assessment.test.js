@@ -247,6 +247,7 @@ describe('validateTreeShrubReviewForReport — Generate grounding contract', () 
     ['extra unsigned score key', (review) => ({ ...review, scores: { ...review.scores, diagnosis: 100 } }), 'score_keys_invalid'],
     ['wrong service signature', (review) => ({ ...review, signature: treeShrubReviewSignature(review.scores, 2, 'other-service', review.photosHash, review.observations) }), 'signature_mismatch'],
     ['unknown decision', (review) => ({ ...review, decisions: [{ key: 'diagnosis', action: 'confirmed' }] }), 'decisions_invalid'],
+    ['non-scalar decision key', (review) => ({ ...review, decisions: [{ key: ['pest_activity'], action: 'confirmed' }] }), 'decisions_invalid'],
   ])('rejects %s with a retry-safe reason', (_label, mutate, reason) => {
     const result = validateTreeShrubReviewForReport(mutate(makeReview()), { serviceId: 'svc1' });
     expect(result).toEqual({ ok: false, reason });
