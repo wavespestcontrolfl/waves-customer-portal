@@ -1423,6 +1423,42 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(await tick(minutes(42))).toEqual([target]);
   });
 
+  test('Codex #4816 r34: a failed visit query defers an in-window row that has only a message witness', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null, property_id: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const [target] = await mockPg('call_commitments').pluck('id');
+    expect((await mockPg('call_commitments').first()).due_basis).toBe('default_kind');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    // An admissible call (a message witness: waits for the deadline) and a
+    // visit event older than the commit grace, so a stamp would stick.
+    await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+      transcription: 'Returned your call', created_at: minutes(2) });
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(1)), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(1),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: minutes(1) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const parkFuture = () => mockPg('system_settings').insert({ key: 'sms_operations.future_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    // Tick 1: the loader's visit query fails, so no event witness is seen and
+    // the call must wait for the deadline — the row is deferred, not stamped.
+    const failingConn = new Proxy(mockPg, { apply: (_t, _this, [table, ...rest]) => (
+      table === 'scheduled_services' ? mockPg('scheduled_services_unavailable') : mockPg(table, ...rest)) });
+    await parkFuture();
+    await refreshSmsCommitments({ conn: failingConn, verify, now: minutes(20) });
+    expect(verify).not.toHaveBeenCalled();
+    expect((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).toBeUndefined();
+    // Tick 2: the query recovers and the event page still brings the row.
+    await parkFuture();
+    await refreshSmsCommitments({ conn: mockPg, verify, now: minutes(21) });
+    expect(verify.mock.calls.map(([r, , opts]) => [r.id, opts.eventOnly])).toEqual([[target, true]]);
+  });
+
   test('Codex #4816 r21: a failed evidence query leaves the visit event pending for the next tick', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',

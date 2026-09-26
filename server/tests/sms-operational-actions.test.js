@@ -921,6 +921,26 @@ describe('fulfillment proof', () => {
       .toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
   });
 
+  test('Codex #4816 r34: progress recorded before a later cancellation still answers "still coming?" or a callback', () => {
+    const ask = (kind, sms_context = {}) => ({ kind, description: 'You still coming?',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z', ...sms_context } });
+    const progressedThenCancelled = { id: 'visit-c', ref: 'visit:visit-c', type: 'visit', status: 'cancelled', property_id: 'home',
+      created_at: '2040-03-01T15:00:00Z', progressed_at: '2040-03-10T16:00:00Z', cancelled_at: '2040-03-10T18:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-10 at 09:00:00; status cancelled; en route/on site/completed after the request; cancelled after the request' };
+    // Unscoped: the progress stamp answers; the cancellation never does.
+    expect(admissibleWitness(progressedThenCancelled, ask('other'))).toBe(true);
+    expect(admissibleWitness(progressedThenCancelled, ask('callback'))).toBe(true);
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: 'visit:visit-c', quote: 'en route' },
+      { records: [progressedThenCancelled], failures: [] }, ask('other'));
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', matched_at: new Date('2040-03-10T16:00:00Z') });
+    // No progress: an unscoped ask or a callback has no witness in a cancellation.
+    const cancelledOnly = { ...progressedThenCancelled, progressed_at: null };
+    expect(admissibleWitness(cancelledOnly, ask('other'))).toBe(false);
+    expect(admissibleWitness(cancelledOnly, ask('callback'))).toBe(false);
+    // Scoped cancel ask: the cancellation answers; the earliest qualifying stamp is the witness time.
+    expect(admissibleWitness(cancelledOnly, ask('other', { property_id: 'home' }))).toBe(true);
+  });
+
   test('Codex #4816 r14–r27: a cancellation answers only a cancel ask whose property was resolved', () => {
     const ask = (sms_context) => ({ kind: 'other', description: 'Please cancel Thursday\'s appointment',
       sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z', ...sms_context } });

@@ -140,6 +140,11 @@ const STATED_TIMING = new RegExp([
   String.raw`\b\d{4}-\d{2}-\d{2}\b`,
 ].join('|'), 'i');
 
+// Outcomes a visit-only fact may reach without anyone needing to act: the
+// duration verdict itself and the scope/authority guards that can run before
+// it. Safety reviews (REVIEW_ON_NEGATION) are deliberately absent.
+const VISIT_ONLY_SILENCED_OUTCOMES = ['temporary_instruction', 'property_ambiguous', 'contact_authority', 'conflicting_facts', 'mixed_topics'];
+
 // A negated or uncertain report does not establish an active system or a
 // pet on site (next-stop alerts treat any pet_details as a pet). Keep these
 // as review exceptions before the shared write, whatever the model labelled.
@@ -434,15 +439,17 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // It still rides in `analysis.facts` and counts toward
     // `unverified_count` on a bell some OTHER real exception raises.
     // - Keyed on the extractor's label (the schema's only temporary value),
-    //   not on which guard caught the fact first: a visit-only fact is never
-    //   written, so property ambiguity, contact authority, a duplicate or
-    //   mixed topics add nothing for staff to decide (Codex #4816 r29/r32).
+    //   whichever SCOPE guard caught the fact first: a visit-only fact is
+    //   never written, so property ambiguity, contact authority, a duplicate
+    //   or mixed topics add nothing for staff to decide (Codex #4816
+    //   r29/r32). An allowlist, so a safety review (a negated or uncertain
+    //   pet/irrigation report) or any future outcome still rings (r34).
     // - 'uncertain' is the extractor asking for review, so it rings (r10).
     // - A durable fact held back only by temporary wording rings: every fact
     //   quotes the whole message, so the wording cannot be tied to it ("I'm
     //   away tomorrow. My lockbox code is 1234") (r26/r27).
     const settled = ['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'];
-    const temporaryFacts = facts.filter((f) => !settled.includes(f.outcome) && f.duration === 'visit_only');
+    const temporaryFacts = facts.filter((f) => f.duration === 'visit_only' && VISIT_ONLY_SILENCED_OUTCOMES.includes(f.outcome));
     const exceptions = facts.filter((f) => !settled.includes(f.outcome) && !temporaryFacts.includes(f));
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
@@ -703,16 +710,18 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   // is only a snapshot; never let its former owner strand the obligation.
   const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
+  // An outcome reached while a source query failed outright (truncation is
+  // persistent, so it does not count) is retried: the missing source may hold
+  // the event that selected the row (Codex #4816 r21/r26/r34).
+  const incomplete = evidence.failures.some((f) => !f.endsWith('_truncated'));
+  const settle = (outcome) => (incomplete ? 'deferred' : outcome);
   const deadlinePassed = row.due_at != null && new Date(row.due_at) <= now;
   // No deadline to enforce yet (none stated, or the window is still open)
   // and nothing on file even looks like an answer: skip the model call
   // entirely rather than spend it on an obligation with no chance of a
   // grounded verdict, and leave the row open and silent.
   if (!deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
-    // A source query that failed outright may hold the witness: retry it
-    // next tick (Codex #4816 r21). Truncation is persistent, so it counts as
-    // handled rather than pinning the row on the event page.
-    return { outcome: evidence.failures.some((f) => !f.endsWith('_truncated')) ? 'deferred' : 'no_witness' };
+    return { outcome: settle('no_witness') };
   }
   // R1 (owner ruling 2026-09-24): inside an open window only an event may
   // act. An admissible visit record (field progress, a move, a
@@ -725,7 +734,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   const inWindow = row.due_at != null && !deadlinePassed;
   const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
     && admissibleWitness(record, current, evidence.records));
-  if (!eventWitness && inWindow) return { outcome: 'not_due' };
+  if (!eventWitness && inWindow) return { outcome: settle('not_due') };
   const verdict = await verify(current, evidence, { now, eventOnly: inWindow });
   let closed = false;
   // Only a verdict this transaction actually persisted counts as handled.
@@ -771,10 +780,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   // A provider or schema failure is persisted with retry_after, but no model
   // judged the event: keep it pending (verify reuses the stored failure until
   // retry_after, so this costs no extra provider calls).
-  // A failed (not truncated) evidence source is transient too: the verdict
-  // was reached without it, so the event stays pending (Codex #4816 r26).
-  const transientFailure = evidence.failures.some((f) => !f.endsWith('_truncated'));
-  return { outcome: persisted && !verdict.retry_after && !transientFailure ? 'verified' : 'deferred', verdict, closed };
+  return { outcome: persisted && !verdict.retry_after ? settle('verified') : 'deferred', verdict, closed };
 }
 
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {

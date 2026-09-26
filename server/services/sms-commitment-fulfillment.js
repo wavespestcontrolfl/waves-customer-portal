@@ -28,7 +28,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // 7: inside an open window only an event record grounds a verdict (#4816 r17).
 // 8: the unscoped cancel ask's sole property is fixed at request time (#4816 r20).
 // 9: an unscoped cancel ask is never answered by a cancellation (#4816 r27).
-const FULFILLMENT_POLICY = 9;
+// 10: visit witnesses for other/callback judged on recorded stamps (#4816 r34).
+const FULFILLMENT_POLICY = 10;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -69,8 +70,11 @@ const SMS_TYPES = {
 // cancellation after the text is `other` evidence too — for the model only:
 // it answers "please cancel", never "are you still coming" (Codex #4816 r7).
 const PROGRESS_STATUSES = ['en_route', 'on_site', 'completed'];
+// A visit that progressed and was cancelled afterwards still carries that
+// progress (progressed_at), so `cancelled` is a possible current status for
+// both kinds; visitWitnessAt decides which recorded stamp may answer.
 const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'],
-  technician_follow_up: ['completed'], other: [...PROGRESS_STATUSES, 'cancelled'], callback: PROGRESS_STATUSES };
+  technician_follow_up: ['completed'], other: [...PROGRESS_STATUSES, 'cancelled'], callback: [...PROGRESS_STATUSES, 'cancelled'] };
 
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
@@ -209,11 +213,14 @@ function visitWitnessAt(record, commitment) {
   // was merely created or (re)booked after the request — that proves a new
   // appointment exists, not that anyone showed up or acted on it.
   if (['other', 'callback'].includes(commitment.kind)) {
-    // A cancelled visit's witness time is its cancellation (a cancel ask);
-    // anything else needs field progress.
-    const stamp = commitment.kind === 'other' && record.status === 'cancelled' ? record.cancelled_at : record.progressed_at;
-    const at = stamp && new Date(stamp);
-    return at && !Number.isNaN(at.getTime()) && at > after ? at : null;
+    // Judged on the recorded stamps, not the current status (Codex #4816
+    // r34): field progress answers either kind even if the visit was
+    // cancelled afterwards; a cancellation answers only an `other` ask scoped
+    // to that visit's property (r14–r27). The earliest qualifying stamp wins.
+    const cancellation = commitment.kind === 'other' && !!commitment.sms_context?.property_id ? record.cancelled_at : null;
+    const times = [record.progressed_at, cancellation].filter(Boolean).map((v) => new Date(v))
+      .filter((v) => !Number.isNaN(v.getTime()) && v > after);
+    return times.length ? new Date(Math.min(...times.map((v) => v.getTime()))) : null;
   }
   const activity = commitment.kind === 'technician_follow_up' ? record.completed_at : record.created_at;
   // Progress alone does not prove a new booking. For scheduling requests,
@@ -246,8 +253,9 @@ function scopedToProperty(record, commitment) {
     // that leaves the asked-about visit booked when it lands at the wrong
     // property, and nothing records which properties the customer had when
     // the text arrived, so no later snapshot can vouch that there was only
-    // one (Codex #4816 r14–r27). An unscoped cancel ask bells at its deadline.
-    return !(commitment.kind === 'other' && record.status === 'cancelled');
+    // one (Codex #4816 r14–r27). visitWitnessAt enforces that on the stamp:
+    // an unscoped ask never takes cancelled_at, only progressed_at.
+    return true;
   }
   return !!propertyId && witnessProperty === propertyId;
 }

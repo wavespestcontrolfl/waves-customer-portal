@@ -959,6 +959,18 @@ postgres('SMS operations on PostgreSQL', () => {
     },
   );
 
+  test('Codex #4816 r34: a visit_only pet report caught by the negation safety review still rings the review bell', async () => {
+    message.message_body = "Not sure whether the cat will be out for tomorrow's visit";
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    const pet = { field: 'pet_details', value: message.message_body, quote: message.message_body, duration: 'visit_only',
+      property_id: context.properties[0].id };
+    await recordMessageOperations(mockPg, message, { ...result, facts: [pet] }, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('pet_needs_review');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
+  });
+
   test('Codex #4816 r10: an uncertain-duration fact is not known-temporary — it still rings the review bell', async () => {
     await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'uncertain' }] }, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
