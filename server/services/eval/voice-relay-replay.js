@@ -268,15 +268,19 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
 ).required());
 // One scripted turn: the caller's words, optionally preceded by a barge-in
 // over the last agent utterance — `true` (cut at the halfway word),
-// `{ words: n }` or `{ heard: '…' }` (exactly the forms injectInterrupt
-// reads). Exact keys only: a misspelled `interupt` would otherwise be
-// ignored and grade a barge-in scenario that never barged in.
+// `{ words: n }`, `{ heard: '…' }` or `{ through: '<regex>' }` (exactly the
+// forms injectInterrupt reads). Exact keys only: a misspelled `interupt`
+// would otherwise be ignored and grade a barge-in scenario that never
+// barged in.
 const TURN_SCHEMA = Joi.object({
   caller: Joi.string().pattern(/\S/).required(),
   interrupt: Joi.alternatives().try(
     Joi.boolean(),
     Joi.object({ words: Joi.number().integer().min(1) }).length(1),
     Joi.object({ heard: Joi.string().pattern(/\S/) }).length(1),
+    Joi.object({
+      through: Joi.string().pattern(/\S/).custom((v, helpers) => (compileRegex(v) ? v : helpers.message('interrupt.through must be a valid regex'))),
+    }).length(1),
   ),
 });
 
@@ -1253,7 +1257,9 @@ function applyResumeFixture(convo, scenario, record) {
 
 /**
  * A barge-in over the last agent utterance: `true` cuts it at the halfway
- * word, `{ words: n }` after n words, `{ heard: '…' }` at an exact prefix.
+ * word, `{ words: n }` after n words, `{ heard: '…' }` at an exact prefix,
+ * `{ through: '<regex>' }` right after the word where the first match ends
+ * (the halfway word when nothing matches).
  */
 function injectInterrupt(convo, record, spec) {
   const last = [...record.events].reverse().find((e) => e.kind === 'agent' && !e.system);
@@ -1270,6 +1276,16 @@ function injectInterrupt(convo, record, spec) {
     if (!norm(heard) || !norm(last.text).startsWith(norm(heard))) {
       throw Object.assign(new Error(`interrupt "heard" is not a prefix of the agent utterance it cuts: ${JSON.stringify(clip(heard, 80))} vs ${JSON.stringify(clip(last.text, 80))}`), { code: 'EVAL_INTERRUPT_MISMATCH' });
     }
+  } else if (spec && typeof spec === 'object' && typeof spec.through === 'string') {
+    // "Barge in while the price is being read": the cut lands inside the
+    // first figure however much the model said before it, so where the
+    // halfway word happens to fall never decides whether the scenario ran.
+    const text = String(last.text);
+    const re = compileRegex(spec.through);
+    const m = re && re.exec(text);
+    const tokens = [...text.matchAll(/\S+/g)];
+    const n = m ? tokens.filter((tok) => tok.index < m.index + Math.max(1, m[0].length)).length : Math.max(1, Math.floor(words.length / 2));
+    heard = tokens.slice(0, n).map((tok) => tok[0]).join(' ');
   } else {
     const n = spec && typeof spec === 'object' && Number.isInteger(spec.words) ? spec.words : Math.max(1, Math.floor(words.length / 2));
     heard = words.slice(0, n).join(' ');
