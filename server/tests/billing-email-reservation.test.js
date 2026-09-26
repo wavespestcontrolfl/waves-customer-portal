@@ -86,3 +86,23 @@ test.each([
 ])('accepted evidence excludes provider identity and phase alone', (message, expected) => {
   expect(Reservation.hasAcceptedEvidence(message)).toBe(expected);
 });
+
+test('a repaired terminal refusal is reflected in the rows the current pass loaded', async () => {
+  const row = { id: 'email-ledger-1', channel: 'email',
+    metadata: JSON.stringify({ notificationEventKey: context.notificationEventKey }) };
+  const refused = { id: 'message-1', status: 'blocked', provider_retry_exhausted_at: new Date(),
+    error_message: `${Reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}Suppressed: bounce` };
+  const database = jest.fn(() => ({ whereIn: jest.fn(async () => [refused]) }));
+  const repaired = await Reservation.repairAcceptedBillingEmailReservations([row], database);
+  expect(repaired.size).toBe(0); // never counted as delivered
+  expect(row.metadata).toMatchObject({ send_failed: true, resolved: true, resolution: 'email_terminal_refusal' });
+});
+
+test('an unwritten refusal repair leaves the loaded row pending', async () => {
+  ContactLedger.markSendFailed.mockResolvedValueOnce(false);
+  const row = { id: 'email-ledger-1', channel: 'email', metadata: { notificationEventKey: context.notificationEventKey } };
+  const refused = { id: 'message-1', status: 'blocked', provider_retry_exhausted_at: new Date(),
+    error_message: `${Reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}Suppressed: bounce` };
+  await Reservation.repairAcceptedBillingEmailReservations([row], jest.fn(() => ({ whereIn: jest.fn(async () => [refused]) })));
+  expect(row.metadata.resolved).toBeUndefined();
+});

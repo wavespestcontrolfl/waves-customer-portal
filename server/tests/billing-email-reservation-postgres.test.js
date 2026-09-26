@@ -257,7 +257,10 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     const first = await require('../services/billing-reminder-delivery')
       .reminderProgress(customerId, 'late_payment_checker', ['email']);
     expect(first.find((event) => event.metadata.notificationEventKey === acceptedEvent).complete).toBe(true);
-    expect(first.find((event) => event.metadata.notificationEventKey === terminalEvent).complete).toBe(false);
+    // The repaired terminal refusal settles the leg in the SAME pass (Codex r1
+    // P2 on #4976): a pending read here would let this pass reuse the
+    // reservation for another send.
+    expect(first.find((event) => event.metadata.notificationEventKey === terminalEvent).complete).toBe(true);
     const second = await require('../services/billing-reminder-delivery')
       .reminderProgress(customerId, 'late_payment_checker', ['email']);
     expect(second.find((event) => event.metadata.notificationEventKey === terminalEvent).complete).toBe(true);

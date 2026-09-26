@@ -7,6 +7,7 @@ const { dispatchUnderBillingEmailAuthority } = require('../services/billing-chan
 const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
 const {
   isBillingEmailProviderReplay,
+  readStoredBillingReplayContext,
   runBillingEmailProviderReplayHandoff,
 } = require('../services/billing-email-provider-replay');
 
@@ -48,6 +49,12 @@ test('recognizes only the two canonical billing templates', () => {
   expect(isBillingEmailProviderReplay(message({ template_key: 'invoice.sent' }))).toBe(false);
 });
 
+test('delegates stored row validation to the canonical context reader', () => {
+  const stored = message();
+  expect(readStoredBillingReplayContext(stored)).toBe(context);
+  expect(EmailTemplateLibrary.readStoredBillingReplayContext).toHaveBeenCalledWith(stored);
+});
+
 test('runs eligibility and provider dispatch on the held authority database', async () => {
   const heldDatabase = jest.fn();
   const order = [];
@@ -63,10 +70,8 @@ test('runs eligibility and provider dispatch on the held authority database', as
     options.state.providerAccepted = true;
   });
 
-  const stored = message();
-  await expect(runBillingEmailProviderReplayHandoff(stored, dispatch))
+  await expect(runBillingEmailProviderReplayHandoff(message(), dispatch))
     .resolves.toEqual({ handled: true, allowed: true });
-  expect(EmailTemplateLibrary.readStoredBillingReplayContext).toHaveBeenCalledWith(stored);
   expect(billingEmailReplayEligible).toHaveBeenCalledWith(context, heldDatabase);
   expect(dispatch).toHaveBeenCalledWith(heldDatabase);
   expect(order).toEqual(['eligibility', 'dispatch']);
