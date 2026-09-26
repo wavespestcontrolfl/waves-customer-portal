@@ -97,6 +97,10 @@ function sendSessionEvents(sessionId, events, deadline) {
 // for the owner counts even if the alert to the owner then failed, and a
 // send converted into a queued draft counts as the reply.
 const MAX_TOOL_CALLS = 20;
+const READ_ONLY_TOOLS = new Set([
+  'get_lead_details', 'triage_lead', 'get_customer_context',
+  'check_existing_estimates', 'check_next_availability', 'get_pest_context',
+]);
 const replyDecided = (result) => result?.sent === true || result?.queued === true;
 const SIDE_EFFECTS = {
   send_lead_response: { key: 'reply', done: replyDecided },
@@ -132,10 +136,11 @@ function frameText(data) {
 async function runLeadToolCall({ toolName, toolInput, toolContext, deadline, criticalFailures, alreadyDone }) {
   const { sessionId } = toolContext;
   remainingMs(sessionId, deadline); // no tool starts after the deadline
-  // A read may be abandoned at the deadline; a side effect already in flight
-  // (the lead text, the owner draft, the estimate flag, the saved report) is
-  // awaited to completion so the run never returns while it may still land.
-  const bounded = (promise) => (SIDE_EFFECTS[toolName] ? promise : withinDeadline(promise, sessionId, deadline));
+  // Only a known read may be abandoned at the deadline. Every other tool —
+  // the lead text, the owner draft, pipeline / estimate / report writes, and
+  // any tool added later — is awaited to completion, so the run never
+  // returns while a write may still land.
+  const bounded = (promise) => (READ_ONLY_TOOLS.has(toolName) ? withinDeadline(promise, sessionId, deadline) : promise);
   logger.info(`[lead-agent] Tool: ${toolName}`);
 
   let toolResult;

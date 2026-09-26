@@ -410,10 +410,10 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(recorded()).toMatchObject({ failure: null });
   });
 
-  it('a lead text still in flight at the deadline is awaited, not abandoned — the run returns only after it lands', async () => {
+  it.each(['send_lead_response', 'update_lead_pipeline'])('a %s write still in flight at the deadline is awaited, not abandoned — the run returns only after it lands', async (writeTool) => {
     process.env.LEAD_AGENT_TIMEOUT_MS = '50';
     let sendLanded = false;
-    mockExecuteLeadTool.mockImplementation((name) => (name === 'send_lead_response'
+    mockExecuteLeadTool.mockImplementation((name) => (name === writeTool
       ? new Promise((resolve) => setTimeout(() => { sendLanded = true; resolve({ sent: true }); }, 120))
       : Promise.resolve({ ok: true })));
     let landedWhenRecorded = null;
@@ -422,7 +422,7 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
       if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
       if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
       const enc = new TextEncoder();
-      const chunks = [enc.encode(`event: agent.custom_tool_use\ndata: ${JSON.stringify({ id: 'tool-1', name: 'send_lead_response', input: { message: 'Hi' } })}\n\n`)];
+      const chunks = [enc.encode(`event: agent.custom_tool_use\ndata: ${JSON.stringify({ id: 'tool-1', name: writeTool, input: { message: 'Hi' } })}\n\n`)];
       // Like a real fetch body, the open stream rejects once its signal aborts.
       const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
       const aborted = () => (opts.signal.aborted
