@@ -25,7 +25,7 @@ const adminSchedule = require('../routes/admin-schedule');
 const gates = require('../config/feature-gates');
 const {
   runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, assignPlanTerms, countTermVisits,
-  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows,
+  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor,
   COUNTING_SOURCE_STATUSES,
 } = require('../services/recurring-series-cancel-reseed');
 
@@ -258,6 +258,32 @@ describe('term / count math (pure)', () => {
     ], today)).toBe(2);
   });
 
+  test('reseedAnchorFloor: the latest slot-holding plan row or the cancelled row itself — legacy children count, boosters/callbacks/other cancels do not (pre-push audit P1s)', () => {
+    const rows = [
+      { id: 'root', status: 'completed', scheduled_date: '2026-07-10', is_recurring: true, recurring_parent_id: null },
+      { id: 'oct', status: 'pending', scheduled_date: '2026-10-10', is_recurring: true, recurring_parent_id: 'root' },
+      { id: 'jan', status: 'pending', scheduled_date: '2027-01-10', is_recurring: true, recurring_parent_id: 'root' },
+      { id: 'apr', status: 'cancelled', scheduled_date: '2027-04-10', is_recurring: true, recurring_parent_id: 'root' },
+    ];
+    // cancelling the tail: the anchor is the cancelled April, so the add lands on July
+    expect(reseedAnchorFloor(rows, 'apr')).toEqual({ scheduled_date: '2027-04-10' });
+    // cancelling a middle visit while April is live: April anchors
+    const midCancel = rows.map((r) => (r.id === 'apr' ? { ...r, status: 'pending' } : r.id === 'oct' ? { ...r, status: 'cancelled' } : r));
+    expect(reseedAnchorFloor(midCancel, 'oct')).toEqual({ scheduled_date: '2027-04-10' });
+    // an unrelated older cancel never anchors
+    expect(reseedAnchorFloor(rows, 'oct')).toEqual({ scheduled_date: '2027-01-10' });
+    // a legacy null-flagged child moved off its slot anchors by its cadence position
+    const legacy = [
+      rows[0],
+      { id: 'mid', status: 'cancelled', scheduled_date: '2026-10-10', is_recurring: null, recurring_parent_id: 'root' },
+      { id: 'tail', status: 'pending', scheduled_date: '2027-02-02', is_recurring: null, recurring_parent_id: 'root', date_exception: true, date_exception_cadence_date: '2027-01-10' },
+      { id: 'boost', status: 'pending', scheduled_date: '2027-06-01', is_recurring: false, recurring_parent_id: 'root' },
+      { id: 'cb', status: 'pending', scheduled_date: '2027-06-02', is_recurring: true, is_callback: true, recurring_parent_id: 'root' },
+    ];
+    expect(reseedAnchorFloor(legacy, 'mid')).toEqual({ scheduled_date: '2027-01-10' });
+    expect(reseedAnchorFloor([], 'x')).toBeNull();
+  });
+
   test('a moved exception keeps its cadence position: ordered (and termed) by its cadence date, not the appointment date (Codex #4814 r2)', () => {
     const moved = child({ id: 'moved', scheduled_date: '2027-07-20', status: 'pending', date_exception: true, date_exception_cadence_date: '2026-10-11' });
     expect(planPositionDate(moved)).toBe('2026-10-11');
@@ -431,7 +457,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const comms = body.indexOf('const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);');
     const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols })');
     const term = body.indexOf('await reseedTermShortfall(trx, { parent, parentId, cancelled, cols })');
-    const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, cancelled })');
+    const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor })');
     expect(addFn()).toMatch(/reconcileRecurringSeriesVisitCount\(trx, \{/);
     expect(lock).toBeGreaterThan(-1);
     expect(comms).toBeGreaterThan(lock);
@@ -496,7 +522,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(t).toMatch(/const ongoing = parent\.recurring_ongoing === true;/);
     // the cap counts the same plan-row population (Codex r7)
     expect(t).toMatch(/const upcomingPlanCount = countUpcomingPlanRows\(seriesRows, todayET\);/);
-    expect(t).toMatch(/return \{ window, counting, expected, upcomingPlanCount \};/);
+    expect(t).toMatch(/return \{ window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor\(seriesRows, cancelled\.id\) \};/);
     const add = addFn();
     expect(add).toMatch(/if \(upcomingPlanCount >= MAX_SERIES_VISIT_COUNT\) return \{ skipped: 'at_max_visit_count' \};/);
     expect(add.indexOf('upcomingPlanCount >= MAX_SERIES_VISIT_COUNT')).toBeLessThan(add.indexOf('reconcileRecurringSeriesVisitCount(trx'));
@@ -522,8 +548,8 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const body = addFn();
     expect(body).toMatch(/extendByOne: true,/);
     // the cancelled row is the extend anchor's cadence floor (pre-push audit P1: cancelling the LAST visit re-booked its date)
-    expect(body).toMatch(/cadenceFloorRow: cancelled,/);
-    expect(lockedBody()).toMatch(/addOneReseedVisit\(trx, \{ parent, parentId, cols, upcomingPlanCount: term\.upcomingPlanCount, cancelled \}\)/);
+    expect(body).toMatch(/cadenceFloorRow: anchorFloor,/);
+    expect(lockedBody()).toMatch(/addOneReseedVisit\(trx, \{ parent, parentId, cols, upcomingPlanCount: term\.upcomingPlanCount, anchorFloor: term\.anchorFloor \}\)/);
     expect(body).not.toMatch(/targetCount:|baselineCount:/);
     expect(body).toMatch(/claimToken: null/);
     expect(body).toMatch(/if \(e\?\.statusCode === 409\) return \{ skipped: 'extension_unbillable', code: e\.code \|\| null \};/);

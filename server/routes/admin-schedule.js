@@ -18300,7 +18300,7 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
 // reads plan rows only (no boosters) by the same position.
 async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {} }) {
   const {
-    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows,
+    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor,
   } = require('../services/recurring-series-cancel-reseed');
   const expected = plannedVisitsPerYearForSeries(parent);
   if (!expected) return { skipped: 'no_planned_count' };
@@ -18349,7 +18349,7 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
   // a single-moved root keeps its cadence date) rides on the stamp for
   // humans; membership itself is by slot.
   const window = termWindowAtIndex(planPositionDate(parent), termIndex) || { index: termIndex, start: null, end: null };
-  return { window, counting, expected, upcomingPlanCount };
+  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id) };
 }
 
 // Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
@@ -18424,7 +18424,7 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // population (Codex r8 P1): 24 live rows of which some are callbacks /
 // included follow-ups would clamp live + 1 back to 24 and add nothing. The
 // cap is enforced here, on the plan-row population, instead.
-async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, cancelled }) {
+async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, anchorFloor }) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
   const reconcileParent = normalizedWindow
@@ -18437,8 +18437,9 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
     const result = await reconcileRecurringSeriesVisitCount(trx, {
       parentId, parent: reconcileParent, cols,
       extendByOne: true,
-      // Append past a cancelled TAIL, never onto the date just cancelled.
-      cadenceFloorRow: cancelled,
+      // Append past a cancelled TAIL (never onto the date just cancelled) and
+      // past legacy null-flagged children — see reseedAnchorFloor.
+      cadenceFloorRow: anchorFloor,
       actorId: null,
       // Extend-only by construction (target = live + 1): the trim branch,
       // the only consumer of the claim token, is unreachable.
@@ -18491,7 +18492,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, cancelled });
+  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {

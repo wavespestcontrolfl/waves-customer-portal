@@ -223,6 +223,25 @@ function countUpcomingPlanRows(rows, todayStr) {
   return (rows || []).filter((row) => isUpcomingPlanRow(row, todayStr)).length;
 }
 
+// The reseed's extend anchor (pre-push audit P1s): the latest plan row by
+// plan position among the rows still occupying their slot PLUS the
+// cancelled row itself — so a cancelled TAIL is appended past, never
+// re-booked, and legacy null-flagged children (which the shared
+// latestLiveSeriesVisit reader, is_recurring = true only, cannot see) still
+// anchor the plan. Returned as a cadence-position row for the reconciler's
+// cadenceFloorRow.
+function reseedAnchorFloor(rows, cancelledId) {
+  let best = null;
+  for (const row of rows || []) {
+    if (!isPlanSeriesRow(row)) continue;
+    const isCancelled = String(row.id) === String(cancelledId);
+    if (!isCancelled && ['cancelled', 'rescheduled'].includes(String(row.status))) continue;
+    const pos = planPositionDate(row);
+    if (pos && (!best || pos > best)) best = pos;
+  }
+  return best ? { scheduled_date: best } : null;
+}
+
 // `serviceId` for the single-visit surfaces; `serviceIds` for the bulk
 // cancel, which hands over the whole batch so the writer can group by
 // series and treat several cancels of one plan as the plan reduction it is.
@@ -260,6 +279,7 @@ module.exports = {
   isCountingSourceStatus,
   cancelEpisodeSourceStatus,
   planPositionDate,
+  reseedAnchorFloor,
   hasUpcomingPlanRow,
   countUpcomingPlanRows,
   NON_COUNTING_STATUSES,
