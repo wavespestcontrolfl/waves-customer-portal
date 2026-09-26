@@ -246,9 +246,8 @@ function requestCancelPlanMeta(row) {
 // have pulled every visit while the term's disposition was never written
 // (a failure, or a process exit, before recordCancelDisposition). The
 // annual-prepay end-at-term upkeep neither stamps nor recreates visits for
-// the customer until the run is repaired or resolved. The disposition is
-// read the way resolvePrepay derives it (blank + effective date 'now' =
-// end_now_refund).
+// the customer until the run is repaired or resolved. A blank disposition is
+// derived by resolvePrepay's own rule (prepayDispositionForEffectiveDate).
 async function hasOpenEndNowCancellation(customerId, conn = db) {
   const rows = await conn('service_requests')
     .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new' })
@@ -256,8 +255,7 @@ async function hasOpenEndNowCancellation(customerId, conn = db) {
   return (rows || []).some((row) => {
     const meta = requestCancelPlanMeta(row);
     if (!meta || (Array.isArray(meta.scope) && meta.scope.length)) return false;
-    const disposition = meta.prepayDisposition
-      || ((meta.effectiveDate || 'now') === 'end_of_coverage' ? 'end_at_term' : 'end_now_refund');
+    const disposition = meta.prepayDisposition || prepayDispositionForEffectiveDate(meta.effectiveDate || 'now');
     return disposition === 'end_now_refund';
   });
 }
@@ -603,6 +601,14 @@ function scopeErrorToHttp(scopeError) {
     'The services that would stay cannot be priced from the ledger. Cancel the whole plan, or repair the plan-rate ledger first.');
 }
 
+// The one rule tying a whole-account cancel's effective date to its prepay
+// disposition: end of paid coverage keeps the term to term_end, anything
+// else ends it now with a refund. resolvePrepay derives a blank disposition
+// with it, and hasOpenEndNowCancellation reads an accepted run's the same way.
+function prepayDispositionForEffectiveDate(effectiveDate) {
+  return effectiveDate === 'end_of_coverage' ? 'end_at_term' : 'end_now_refund';
+}
+
 // Prepay options apply to whole-account cancels only (a scoped cancel leaves
 // the term alone). Derives the disposition from the effective date when the
 // caller left it blank, and refuses a contradictory pair.
@@ -614,7 +620,7 @@ function resolvePrepay(input, term, wholeAccount) {
     }
     return { effectiveDate: 'now', prepayDisposition: null, keepThrough: null };
   }
-  const derived = input.effectiveDate === 'end_of_coverage' ? 'end_at_term' : 'end_now_refund';
+  const derived = prepayDispositionForEffectiveDate(input.effectiveDate);
   const disposition = input.prepayDisposition || derived;
   if (disposition !== derived) {
     throw new CancelPlanError(400, 'prepay_disposition_mismatch',
