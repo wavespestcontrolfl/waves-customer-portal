@@ -91,6 +91,7 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
       last7: '7 days ending yesterday (ET)',
       baseline: '30 days ending yesterday (ET)',
       current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
+      cohort: 'customers who joined before the 7- / 30-day window began, counted as still active if they are active today (ET) (e.g. retention)',
     });
 
     const byMetric = Object.fromEntries(result.kpis.map((k) => [k.metric, k]));
@@ -163,7 +164,7 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
     });
   });
 
-  describe('window classification (rolling vs current)', () => {
+  describe('window classification (rolling vs current vs cohort)', () => {
     it("ar_days is 'current' — last30 is null even though the underlying value differs by period", async () => {
       // ar.days has no period filter in computeCoreKpis at all (it's a live
       // snapshot over ALL currently-unpaid invoices), but this mock still
@@ -188,6 +189,19 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
       expect(resp.window).toBe('rolling');
       expect(resp.last7).toBe(64);
       expect(resp.last30).toBe(55);
+    });
+
+    it("retention_pct is 'cohort' — both values kept, and kpiWindow never words it as ending yesterday", async () => {
+      mockComputeCoreKpis.mockImplementation(async (period) => (
+        period === 'last_7' ? kpiSet({ retention: 97 }) : kpiSet({ retention: 95 })
+      ));
+      const result = await executeBITool('get_operations_snapshot', {});
+      const ret = result.kpis.find((k) => k.metric === 'retention_pct');
+      expect(ret.window).toBe('cohort');
+      expect(ret.last7).toBe(97);
+      expect(ret.last30).toBe(95);
+      expect(result.kpiWindow.cohort).toMatch(/active today/);
+      expect(result.kpiWindow.cohort).not.toMatch(/ending yesterday/);
     });
   });
 

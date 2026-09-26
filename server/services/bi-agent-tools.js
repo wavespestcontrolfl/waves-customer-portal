@@ -53,10 +53,11 @@ const SNAPSHOT_GETTERS_BY_METRIC = new Map(SNAPSHOT_METRICS);
 // number.) Every other metric's underlying query DOES filter on `start`
 // (scheduled_date/service_date/first_contact_at/issueDateET/member_since —
 // see routes/admin-dashboard.js computeCoreKpis), so they get a real rolling
-// last7-vs-last30 comparison, including retention_pct, whose cohort is bounded
-// by `CONVERSION_DATE_SQL < start` even though it reads as a point-in-time
-// "still live" check. A 'current' metric is reported once, "as of today", with
-// no fabricated 30-day baseline.
+// last7-vs-last30 comparison. retention_pct is its own 'cohort' window: the
+// cohort is bounded by `CONVERSION_DATE_SQL < start`, but "still active" is
+// read from customer state TODAY, so range.to never closes it and it must not
+// be worded as ending yesterday (Codex P1, bi-agent-tools.js:69). A 'current'
+// metric is reported once, "as of today", with no fabricated 30-day baseline.
 const OPERATIONS_KPI_WINDOW = {
   completion_rate: 'rolling',
   callback_rate: 'rolling',
@@ -66,7 +67,7 @@ const OPERATIONS_KPI_WINDOW = {
   revenue_per_man_hour: 'rolling',
   gross_margin: 'rolling',
   ar_days: 'current',
-  retention_pct: 'rolling',
+  retention_pct: 'cohort',
   collection_rate: 'rolling',
 };
 
@@ -360,6 +361,7 @@ async function executeBITool(toolName, input) {
           last7: '7 days ending yesterday (ET)',
           baseline: '30 days ending yesterday (ET)',
           current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
+          cohort: 'customers who joined before the 7- / 30-day window began, counted as still active if they are active today (ET) (e.g. retention)',
         },
       };
     }
