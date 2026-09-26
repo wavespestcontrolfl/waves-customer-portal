@@ -65,6 +65,8 @@ describe('custom action credential screening', () => {
     'Gate code is 2-4-6-8ml',
     'Gate PIN AB24 68oz',
     'rear gate AB24-68',
+    'rear gate A2B4-68',
+    'rear gate A2B4-6C8D',
     'rear gate A24-68',
     'rear gate 24-68A',
     'Opened rear gate with #AB24–68C*',
