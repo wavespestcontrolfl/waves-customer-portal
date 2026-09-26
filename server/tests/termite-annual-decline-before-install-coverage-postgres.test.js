@@ -90,6 +90,18 @@ async function createScratchDb() {
   // (no rollback happened), so it must exist even though this suite never
   // populates it.
   await db.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, scheduled_service_id uuid)');
+  // ADMIN-BUG-R18 (#4970): the end-at-term lapse upkeep checks for an open
+  // end-now Cancel plan acceptance before stamping a decided lapse's visits.
+  await db.raw(`CREATE TABLE service_requests (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid,
+    category text,
+    source text,
+    status text,
+    metadata jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
   await db.raw(`CREATE TABLE scheduled_services (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
@@ -126,6 +138,7 @@ async function createScratchDb() {
     term_end date NOT NULL,
     status text NOT NULL,
     renewal_decision text,
+    cancel_disposition text,
     renewed_from_term_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
@@ -204,6 +217,9 @@ describeOrSkip('a decided-lapse termite term (declined before install) gets real
       term_end: addYear(signedOn),
       status: 'cancelled',
       renewal_decision: 'cancel',
+      // What recordDecision('cancel') records for a renewal-time lapse
+      // (ADMIN-BUG-R18) — the upkeep that keeps its paid visits keys on it.
+      cancel_disposition: 'end_at_term',
       created_at: new Date(`${signedOn}T16:00:00Z`),
     }).returning('*');
     // The installation itself (completed TODAY) — becomes the anchor and,

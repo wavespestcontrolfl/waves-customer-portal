@@ -586,7 +586,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   // otherwise derive the historical default from what the bell references.
   link = link
     || (estimateId
-      ? '/admin/estimates'
+      ? `/admin/estimates?estimateId=${estimateId}`
       : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications'));
   const metadata = {
     callSid,

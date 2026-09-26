@@ -75,6 +75,18 @@ async function createScratchDb() {
     stripe_charge_id text
   )`);
   await db.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, scheduled_service_id uuid)');
+  // ADMIN-BUG-R18 (#4970): the end-at-term lapse upkeep checks for an open
+  // end-now Cancel plan acceptance before stamping a decided lapse's visits.
+  await db.raw(`CREATE TABLE service_requests (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid,
+    category text,
+    source text,
+    status text,
+    metadata jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
   await db.raw(`CREATE TABLE activity_log (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
@@ -119,6 +131,7 @@ async function createScratchDb() {
     term_end date NOT NULL,
     status text NOT NULL,
     renewal_decision text,
+    cancel_disposition text,
     renewal_decision_at timestamptz,
     renewal_decision_by uuid,
     renewal_notes text,
@@ -196,6 +209,8 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
       term_end: addMonths(termStart, 12),
       status,
       renewal_decision: renewalDecision,
+      // What recordDecision('cancel') records for a renewal-time lapse.
+      cancel_disposition: renewalDecision === 'cancel' ? 'end_at_term' : null,
       annual_plan_version: 'v3',
       installation_anchored_at: new Date(`${termStart}T16:00:00Z`),
       installation_anchor_visit_id: installVisit.id,
@@ -229,7 +244,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
 
     const declined = await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
     expect(declined).toEqual(expect.objectContaining({ ok: true, alreadyDeclined: false }));
-    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first()).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first()).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }));
 
     const replacement = await rescheduleCoveredVisit(db, fx);
     await Renewals.refreshActiveTermsForCustomer(fx.customerId, db);
@@ -279,7 +294,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
 
     expect(result).toEqual(expect.objectContaining({ ok: true, alreadyDeclined: false }));
     const term = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
-    expect(term).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(term).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }));
     expect(term.renewal_decision_at).toBeInstanceOf(Date);
     const activity = await db('activity_log').where({ customer_id: fx.customerId }).first();
     expect(activity.metadata).toEqual(expect.objectContaining({ superseded_decision: 'renew' }));

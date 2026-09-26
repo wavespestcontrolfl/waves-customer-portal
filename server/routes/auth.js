@@ -199,7 +199,7 @@ function dateOnlyForApi(value) {
   return String(value).slice(0, 10);
 }
 
-const { isPaidDecidedLapseTerm, coverageAwaitsInstallation } = require('../services/annual-prepay-renewals');
+const { isPaidDecidedLapseTerm, coverageAwaitsInstallation, whereTermCurrentOrAwaitingInstallation } = require('../services/annual-prepay-renewals');
 
 async function annualPrepayForCustomer(customerId) {
   if (!customerId) return null;
@@ -231,13 +231,8 @@ async function annualPrepayForCustomer(customerId) {
         .orWhere(function decidedLapse() {
           this.where('apt.status', 'cancelled').andWhere('apt.renewal_decision', 'cancel')
             // Codex r3 P1: a term still awaiting its installation has only a
-            // provisional term_end — never a cutoff.
-            .andWhere(function stillCovering() {
-              this.where('apt.term_end', '>=', today)
-                .orWhere(function awaitingInstallation() {
-                  this.whereNotNull('apt.annual_plan_version').whereNull('apt.renewed_from_term_id').whereNull('apt.installation_anchored_at');
-                });
-            });
+            // provisional term_end — never a cutoff (the shared portal rule).
+            .andWhere((current) => whereTermCurrentOrAwaitingInstallation(current, today, 'apt'));
         });
     })
     .orderByRaw(`

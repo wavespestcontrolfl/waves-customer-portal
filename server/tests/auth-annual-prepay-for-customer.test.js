@@ -23,6 +23,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   isPaidDecidedLapseTerm: (...args) => mockIsPaidDecidedLapseTerm(...args),
   // The REAL provisional-term rule (pure) — /me must agree with billing.
   coverageAwaitsInstallation: (...args) => jest.requireActual('../services/annual-prepay-renewals').coverageAwaitsInstallation(...args),
+  whereTermCurrentOrAwaitingInstallation: (...args) => jest.requireActual('../services/annual-prepay-renewals').whereTermCurrentOrAwaitingInstallation(...args),
 }));
 
 const db = require('../models/db');

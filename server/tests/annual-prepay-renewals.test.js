@@ -2067,6 +2067,8 @@ describe('annual prepay renewal helpers', () => {
       whereNull: jest.fn().mockReturnThis(),
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'term-1', status: 'cancelled', renewal_decision: 'cancel' }]),
+      // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
+      columnInfo: jest.fn().mockResolvedValue({}),
     };
     db.mockReturnValue(chain);
 
@@ -2292,6 +2294,30 @@ describe('annual prepay renewal helpers', () => {
 // GATE_CANCEL_FLOW_V2), read at call time via the real feature-gates module
 // (not mocked) — flip both env vars per test instead.
 describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', () => {
+  // recordDecision / supersedeRenewWithCustomerCancel probe
+  // annual_prepay_terms.cancel_disposition (ADMIN-BUG-R18, #4970) through a
+  // bare db('annual_prepay_terms').columnInfo(). The probe answers "column
+  // present" without consuming a queued query, so every queued chain below
+  // still lines up with the statement it models.
+  const setDeclineQueues = (queues) => {
+    const queued = setDbQueues(queues);
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table !== 'annual_prepay_terms') return impl(table);
+      let real = null;
+      const resolve = () => real || (real = impl(table));
+      return new Proxy({}, {
+        get(_target, prop) {
+          if (prop === 'columnInfo') return async () => ({ cancel_disposition: {} });
+          const target = resolve();
+          const value = target[prop];
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    });
+    return queued;
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -2315,7 +2341,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const termUpdateQuery = query({ returning: [decidedRow] });
     const termQueue = [termSelectQuery, termUpdateQuery];
     const activityInsert = query();
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: termQueue,
       activity_log: [activityInsert],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2335,6 +2361,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     // through term_end, so coverage is not touched by this call.
     expect(termUpdateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'cancelled', renewal_decision: 'cancel',
+      // ADMIN-BUG-R18: the one end-at-term upkeep keeps this paid year's
+      // visits stamped through term_end — keyed on this disposition.
+      cancel_disposition: 'end_at_term',
     }));
     // Codex r2 P2: a portal decline never touches renewal_notes — staff's
     // own notes on the term survive; the activity_log row is the record.
@@ -2371,7 +2400,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const termQueue = [query({ first: termRow }), query({ returning: [decidedRow] })];
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: termQueue,
       activity_log: [query()],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2391,7 +2420,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'active', renewal_decision: null, term_end: '2026-09-26', prepay_amount: '450.00',
     };
-    setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
+    setDeclineQueues({ annual_prepay_terms: [query({ first: termRow })] });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
       customerId: 'cust-1', today: '2026-09-26',
@@ -2406,7 +2435,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       status: 'cancelled', renewal_decision: 'cancel', term_end: '2027-05-20', prepay_amount: '450.00',
     };
     const paidCheck = query({ first: { id: 'term-1' } });
-    setDbQueues({
+    setDeclineQueues({
       // Only ONE query on annual_prepay_terms — the idempotent branch
       // returns before recordDecision runs a second write.
       annual_prepay_terms: [query({ first: decidedRow })],
@@ -2433,7 +2462,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'cancelled', renewal_decision: 'cancel', term_end: '2027-05-20', prepay_amount: '450.00',
     };
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: [query({ first: decidedRow })],
       'annual_prepay_terms as t': [query({ first: null })],
     });
@@ -2455,7 +2484,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       status: 'active', renewal_decision: null, term_end: '2026-01-01', prepay_amount: '450.00',
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
       activity_log: [query()],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2479,7 +2508,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const activityInsert = query();
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
       activity_log: [activityInsert],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2504,7 +2533,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const activityInsert = query();
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
       activity_log: [activityInsert],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2522,7 +2551,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'active', renewal_decision: null, term_end: '2026-01-01', prepay_amount: '450.00',
     };
-    setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
+    setDeclineQueues({ annual_prepay_terms: [query({ first: termRow })] });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
       customerId: 'cust-1', today: '2026-09-26',
@@ -2533,7 +2562,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
 
   test('refuses a term id that does not belong to this customer (scoped by customer_id)', async () => {
     const termQuery = query({ first: null });
-    setDbQueues({ annual_prepay_terms: [termQuery] });
+    setDeclineQueues({ annual_prepay_terms: [termQuery] });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
       customerId: 'cust-1', termId: 'term-someone-else', today: '2026-09-26',
@@ -2546,7 +2575,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
 
   test('never matches a non-termite prepay term (annual_plan_version IS NULL filter)', async () => {
     const termQuery = query({ first: null });
-    setDbQueues({ annual_prepay_terms: [termQuery] });
+    setDeclineQueues({ annual_prepay_terms: [termQuery] });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
       customerId: 'cust-1', today: '2026-09-26',
@@ -2561,7 +2590,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'switch_plan', renewal_decision: 'switch_plan', term_end: '2027-05-20', prepay_amount: '450.00',
     };
-    setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
+    setDeclineQueues({ annual_prepay_terms: [query({ first: termRow })] });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
       customerId: 'cust-1', today: '2026-09-26',
@@ -2578,7 +2607,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
     };
     const successorProbe = query({ first: { id: 'term-2' } });
-    setDbQueues({ annual_prepay_terms: [query({ first: termRow }), successorProbe] });
+    setDeclineQueues({ annual_prepay_terms: [query({ first: termRow }), successorProbe] });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
       customerId: 'cust-1', termId: 'term-1', today: '2026-09-26',
@@ -2597,7 +2626,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const supersede = query({ returning: [decidedRow] });
     const activityInsert = query();
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: [query({ first: termRow }), query({ first: null }), supersede, query({ first: null })],
       'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
       activity_log: [activityInsert],
@@ -2613,7 +2642,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     });
     expect(supersede.where).toHaveBeenCalledWith({ id: 'term-1', status: 'renewed', renewal_decision: 'renew' });
     expect(supersede.whereNotExists).toHaveBeenCalledWith(expect.any(Function));
-    expect(supersede.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(supersede.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }));
     expect(activityInsert.insert.mock.calls[0][0].metadata).toEqual(expect.objectContaining({ superseded_decision: 'renew' }));
     const NotificationService = require('../services/notification-service');
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('replacing the renewal staff had recorded');
@@ -2624,7 +2653,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
       status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
     };
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: [query({ first: termRow }), query({ first: null })],
       'annual_prepay_terms as t': [query({ first: null })],
     });
@@ -2650,7 +2679,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const freshDecline = (termRow, otherPlan = null) => {
       const decided = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
       markerInsert = query();
-      setDbQueues({
+      setDeclineQueues({
         annual_prepay_terms: [query({ first: termRow }), query({ returning: [decided] }), query({ first: decided }), query({ first: otherPlan })],
         activity_log: [query(), query({ first: { id: 'decline-row' } }), query({ first: null }), markerInsert],
         'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
@@ -2677,7 +2706,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     });
 
     test('an idempotent replay raises nothing', async () => {
-      setDbQueues({
+      setDeclineQueues({
         annual_prepay_terms: [query({ first: { ...anchored, status: 'cancelled', renewal_decision: 'cancel' } })],
         'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2704,7 +2733,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
 
     test('a caller-supplied transaction (not yet committed) never raises the durable task — reported so the caller raises it after commit', async () => {
       const callerTrx = Object.assign((...args) => db(...args), { isTransaction: true });
-      setDbQueues({
+      setDeclineQueues({
         annual_prepay_terms: [query({ first: anchored }), query({ returning: [{ ...anchored, status: 'cancelled', renewal_decision: 'cancel' }] })],
         activity_log: [query()],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2739,7 +2768,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
-    setDbQueues({
+    setDeclineQueues({
       annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
       activity_log: [query()],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -2752,7 +2781,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
 
   test('gate off with NO termite annual term: still not available (disabled)', async () => {
     delete process.env.GATE_CANCEL_FLOW_V2;
-    setDbQueues({ annual_prepay_terms: [query({ first: null })] });
+    setDeclineQueues({ annual_prepay_terms: [query({ first: null })] });
 
     const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
 
