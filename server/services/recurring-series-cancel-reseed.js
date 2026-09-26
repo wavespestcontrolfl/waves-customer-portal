@@ -61,7 +61,12 @@ function cancelEpisodeSourceStatus(transitionsNewestFirst) {
     if (String(row.to_status) !== 'cancelled') break;
     entering = row;
   }
-  return entering ? { fromStatus: entering.from_status } : undefined;
+  // episodeKey identifies THIS cancellation episode (its entering audit
+  // row), so a decision recorded against it — the batch plan-reduction
+  // decline — never outlives a later un-cancel + re-cancel.
+  if (!entering) return undefined;
+  const key = entering.id != null ? entering.id : entering.transitioned_at;
+  return { fromStatus: entering.from_status, episodeKey: key == null ? null : String(key instanceof Date ? key.toISOString() : key) };
 }
 
 // Booster months are deliberately non-recurring rows hanging off a

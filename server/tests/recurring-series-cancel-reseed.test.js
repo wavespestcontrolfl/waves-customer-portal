@@ -236,16 +236,20 @@ describe('term / count math (pure)', () => {
   test('cancelEpisodeSourceStatus: the newest unbroken run of cancelled rows is the episode; its entering row decides (Codex r7)', () => {
     const t = (from, to) => ({ from_status: from, to_status: to });
     // plain cancel
-    expect(cancelEpisodeSourceStatus([t('confirmed', 'cancelled')])).toEqual({ fromStatus: 'confirmed' });
+    expect(cancelEpisodeSourceStatus([t('confirmed', 'cancelled')])).toMatchObject({ fromStatus: 'confirmed' });
     // dispatch same-status retry on top of the real cancel
-    expect(cancelEpisodeSourceStatus([t('cancelled', 'cancelled'), t('pending', 'cancelled'), t(null, 'pending')])).toEqual({ fromStatus: 'pending' });
+    expect(cancelEpisodeSourceStatus([t('cancelled', 'cancelled'), t('pending', 'cancelled'), t(null, 'pending')])).toMatchObject({ fromStatus: 'pending' });
     // an OLDER counting cancel compensated back to live, then a placeholder cancelled: only the new episode counts
-    expect(cancelEpisodeSourceStatus([t('rescheduled', 'cancelled'), t('cancelled', 'pending'), t('confirmed', 'cancelled')])).toEqual({ fromStatus: 'rescheduled' });
+    expect(cancelEpisodeSourceStatus([t('rescheduled', 'cancelled'), t('cancelled', 'pending'), t('confirmed', 'cancelled')])).toMatchObject({ fromStatus: 'rescheduled' });
     // legacy NULL source
-    expect(cancelEpisodeSourceStatus([t(null, 'cancelled')])).toEqual({ fromStatus: null });
+    expect(cancelEpisodeSourceStatus([t(null, 'cancelled')])).toMatchObject({ fromStatus: null });
     // no current episode: newest row is not a cancel, or no history at all
     expect(cancelEpisodeSourceStatus([t('cancelled', 'pending'), t('confirmed', 'cancelled')])).toBeUndefined();
     expect(cancelEpisodeSourceStatus([])).toBeUndefined();
+    // the episode key is the ENTERING row's id (else its timestamp): a batch decline recorded against it never outlives a re-cancel
+    expect(cancelEpisodeSourceStatus([{ id: 9, ...t('cancelled', 'cancelled') }, { id: 7, ...t('pending', 'cancelled') }]).episodeKey).toBe('7');
+    expect(cancelEpisodeSourceStatus([{ transitioned_at: new Date('2026-09-25T10:00:00Z'), ...t('pending', 'cancelled') }]).episodeKey).toBe('2026-09-25T10:00:00.000Z');
+    expect(cancelEpisodeSourceStatus([t('pending', 'cancelled')]).episodeKey).toBeNull();
     expect(cancelEpisodeSourceStatus(undefined)).toBeUndefined();
     // the cap's population is the plan rows
     const today = '2026-09-25';
@@ -439,7 +443,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(noRecord).toBeGreaterThan(history);
     expect(nonCounting).toBeGreaterThan(noRecord);
     // the CURRENT cancellation episode decides (Codex r7): full history, newest first, episode helper
-    expect(c).toMatch(/\.where\(\{ job_id: cancelledServiceId \}\)[\s\S]*?\.orderBy\('transitioned_at', 'desc'\)[\s\S]*?\.select\('from_status', 'to_status'\)/);
+    expect(c).toMatch(/\.where\(\{ job_id: cancelledServiceId \}\)[\s\S]*?\.orderBy\('transitioned_at', 'desc'\)[\s\S]*?\.select\('id', 'from_status', 'to_status', 'transitioned_at'\)/);
     expect(c).toMatch(/const episode = cancelEpisodeSourceStatus\(transitions\);/);
     expect(c).toMatch(/isCountingSourceStatus\(episode\.fromStatus\)/);
     expect(c).not.toMatch(/to_status: 'cancelled'/);
@@ -455,7 +459,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const body = lockedBody();
     const lock = body.indexOf('acquireRecurringSeriesMaintenanceLock(trx, parentId)');
     const comms = body.indexOf('const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);');
-    const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols })');
+    const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, episodeKey: fresh.episodeKey })');
     const term = body.indexOf('await reseedTermShortfall(trx, { parent, parentId, cancelled, cols })');
     const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor })');
     expect(addFn()).toMatch(/reconcileRecurringSeriesVisitCount\(trx, \{/);
@@ -592,14 +596,16 @@ describe('cancel surfaces wire the hook (source guards)', () => {
   test('batch writer: only audited counting→cancelled transitions take part; 2+ of one plan = plan reduction, never a refill; per-root isolation', () => {
     const b = batchFn();
     // a job qualifies when its CURRENT cancellation episode left a counting status (Codex r7)
-    expect(b).toMatch(/\.whereIn\('job_id', ids\)[\s\S]*?\.select\('job_id', 'from_status', 'to_status'\)/);
-    expect(b).toMatch(/const episode = cancelEpisodeSourceStatus\(history\);\s*if \(episode && isCountingSourceStatus\(episode\.fromStatus\)\) countingCancel\.add\(key\);/);
+    expect(b).toMatch(/\.whereIn\('job_id', ids\)[\s\S]*?\.select\('id', 'job_id', 'from_status', 'to_status', 'transitioned_at'\)/);
+    expect(b).toMatch(/const episode = cancelEpisodeSourceStatus\(history\);\s*if \(episode && isCountingSourceStatus\(episode\.fromStatus\)\) countingCancel\.set\(key, episode\.episodeKey\);/);
     expect(b).toMatch(/if \(!countingCancel\.has\(String\(row\.id\)\)\) continue;/);
     expect(b).not.toMatch(/\.where\('to_status', 'cancelled'\)/);
     expect(b).toMatch(/if \(!isPlanSeriesRow\(row\)\) continue;/);
-    expect(b).toMatch(/\.select\('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\)/);
+    expect(b).toMatch(/\.select\('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\)/);
     expect(b).not.toMatch(/row\.is_recurring !== true/);
     expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?skipped: 'batch_series_cancel'/);
+    // the decline is PERSISTED per visit + episode before moving on (pre-push audit P1)
+    expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?await recordBatchReseedDecline\(conn, \{ rootId, cancelledIds, source, customerById, countingCancel \}\);\s*continue;/);
     expect(b).toMatch(/try \{\s*results\.push\(await reseedRecurringSeriesAfterCancel\([\s\S]*?\} catch \(e\) \{[\s\S]*?results\.push\(\{ added: \[\], skipped: 'error', parentId: rootId, error: e\.message \}\);/);
   });
 });

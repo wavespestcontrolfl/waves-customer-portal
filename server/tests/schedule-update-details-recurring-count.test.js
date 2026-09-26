@@ -525,7 +525,7 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     expect(capped.target).toBe(MAX_SERIES_VISIT_COUNT + 1);
   });
 
-  test('cadenceFloorRow: a cancelled TAIL visit later than the latest live one moves the anchor past it — never re-books the cancelled date', async () => {
+  test('cadenceFloorRow: the reseed plan-tail anchor moves the extend past a cancelled TAIL visit — never re-books the cancelled date', async () => {
     // Without a floor the extend lands on some date D; a cancelled row sitting on D must push it one cadence further.
     const plain = scenario({ upcoming: 2 });
     await reconcile(plain.conn, plain.parent, undefined, { extendByOne: true, claimToken: null, actorId: null });
@@ -537,13 +537,13 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     });
     expect(floored.inserted).toHaveLength(1);
     expect(floored.inserted[0].scheduled_date > D).toBe(true);
-    // an earlier floor than the latest live visit changes nothing
-    const early = scenario({ upcoming: 2 });
-    await reconcile(early.conn, early.parent, undefined, {
+    // the floor is authoritative: a plan-position anchor (e.g. the due date of a visit auto-dispatch moved) is used as-is
+    const due = scenario({ upcoming: 2 });
+    await reconcile(due.conn, due.parent, undefined, {
       extendByOne: true, claimToken: null, actorId: null,
-      cadenceFloorRow: { id: 556, status: 'cancelled', scheduled_date: daysOut(-60) },
+      cadenceFloorRow: { scheduled_date: floored.inserted[0].scheduled_date },
     });
-    expect(early.inserted[0].scheduled_date).toBe(D);
+    expect(due.inserted[0].scheduled_date > floored.inserted[0].scheduled_date).toBe(true);
   });
 
   test('an unchanged count writes nothing at all', async () => {

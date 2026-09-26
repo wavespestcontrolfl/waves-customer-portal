@@ -145,9 +145,12 @@ function scenario(over = {}) {
     }
     if (table === 'recurring_plan_alerts') return op === 'await' ? s.decisions : null;
     if (table === 'activity_log') {
-      if (op === 'first') return s.stamp;
+      if (op === 'first') {
+        const byAction = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && c[1].action);
+        return byAction?.[1].action === 'recurring_cancel_reseed_declined' ? (s.declined || null) : s.stamp;
+      }
       if (op === 'await') return s.stamps || [];
-      if (op === 'insert') { inserted.push({ __table: 'activity_log', ...data }); return [1]; }
+      if (op === 'insert') { for (const row of [].concat(data)) inserted.push({ __table: 'activity_log', ...row }); return [1]; }
     }
     if (table === 'customers') return op === 'first' ? s.customer : null;
     return null;
@@ -204,6 +207,11 @@ describe('reseedRefusal — every refusal actually executes', () => {
     const { handler } = scenario(over);
     const trx = makeConn(handler, connOpts);
     expect(await reseedRefusal(trx, { parent: PARENT, parentId: PARENT.id, cancelledServiceId: CANCELLED.id, cols: COLS })).toBe(reason);
+  });
+
+  test('batch_series_cancel: a decline recorded against THIS cancellation episode refuses a later single-id replay (pre-push audit P1)', async () => {
+    const { handler } = scenario({ declined: { id: 'decl-1' } });
+    expect(await reseedRefusal(makeConn(handler), { parent: PARENT, parentId: PARENT.id, cancelledServiceId: CANCELLED.id, cols: COLS, episodeKey: '7' })).toBe('batch_series_cancel');
   });
 
   test('the prepay try-lock is the annual-prepay namespace keyed on the customer, taken on the trx', async () => {
@@ -405,6 +413,28 @@ describe('the writing wrapper and the batch', () => {
     expect(out.skippedRoots).toEqual([]);
     expect(out.results).toHaveLength(1);
     expect(out.results[0].skipped).toBe('series_stopped');
+  });
+
+  test('2+ counting cancels of one plan: no reseed, and the decline is persisted per visit with its episode key', async () => {
+    const { handler, inserted } = scenario({
+      transitions: [{ id: 71, job_id: 22, from_status: 'confirmed' }, { id: 72, job_id: 24, from_status: 'pending' }],
+    });
+    const conn = makeConn((q) => {
+      if (q.table === 'scheduled_services' && q.op === 'await') {
+        return [{ id: 22, customer_id: 5, is_recurring: true, recurring_parent_id: 10 }, { id: 24, customer_id: 5, is_recurring: true, recurring_parent_id: 10 }];
+      }
+      return handler(q);
+    });
+    const out = await reseedRecurringSeriesAfterCancelBatch(conn, [22, 24], { source: 'test' });
+    expect(out.results).toEqual([]);
+    expect(out.skippedRoots).toEqual([{ rootId: '10', cancelledIds: ['22', '24'], skipped: 'batch_series_cancel' }]);
+    const declines = inserted.filter((row) => row.__table === 'activity_log');
+    expect(declines).toHaveLength(2);
+    const metas = declines.map((row) => ({ action: row.action, customer_id: row.customer_id, ...JSON.parse(row.metadata) }));
+    expect(metas).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'recurring_cancel_reseed_declined', customer_id: 5, cancelled_service_id: '22', episode_key: '71', recurring_parent_id: '10' }),
+      expect.objectContaining({ action: 'recurring_cancel_reseed_declined', customer_id: 5, cancelled_service_id: '24', episode_key: '72' }),
+    ]));
   });
 
   test('RESEED_STALE_READ_ATTEMPTS is a small positive bound', () => {

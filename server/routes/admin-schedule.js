@@ -16722,11 +16722,11 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // broader is_recurring population, and the reseed enforces it on the plan
   // rows (callbacks / included follow-ups excluded) before calling.
   extendByOne = false,
-  // Post-cancel reseed only: the cancelled row, as a cadence FLOOR for the
-  // extend anchor. latestLiveSeriesVisit skips cancelled rows, so cancelling
-  // a plan's LAST visit would anchor on the one before it and re-book the
-  // very date just cancelled; anchoring on whichever of the two sits later
-  // in cadence appends past the cancelled tail instead.
+  // Post-cancel reseed only: the AUTHORITATIVE extend anchor, replacing
+  // latestLiveSeriesVisit (reseedAnchorFloor — the plan tail by plan
+  // position, cancelled tail and legacy null-flagged children included, the
+  // auto-dispatch due date honoured). Not compared against the broader
+  // reader: its raw scheduled_date would let a dispatch shift win.
   cadenceFloorRow = null,
 }) {
   const live = await liveUpcomingSeriesVisits(trx, parentId);
@@ -16825,9 +16825,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     ? !!prefNoWeekends
     : await customerPrefersNoWeekends(trx, parent.customer_id));
   const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
-  const latestLive = await latestLiveSeriesVisit(trx, parentId);
-  const cadencePos = (row) => dateOnly((row?.date_exception && row?.date_exception_cadence_date) ? row.date_exception_cadence_date : row?.scheduled_date) || '';
-  const latest = cadenceFloorRow && cadencePos(cadenceFloorRow) > cadencePos(latestLive) ? cadenceFloorRow : latestLive;
+  const latest = cadenceFloorRow || await latestLiveSeriesVisit(trx, parentId);
   const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
   const seen = await loadActiveSeriesDates(trx, parentId);
   seen.add(baseDateStr);
@@ -18252,18 +18250,18 @@ async function readReseedCandidate(trx, cancelledServiceId) {
   const transitions = await trx('job_status_history')
     .where({ job_id: cancelledServiceId })
     .orderBy('transitioned_at', 'desc')
-    .select('from_status', 'to_status');
+    .select('id', 'from_status', 'to_status', 'transitioned_at');
   const episode = cancelEpisodeSourceStatus(transitions);
   if (!episode) return { skipped: 'no_transition_record' };
   if (!isCountingSourceStatus(episode.fromStatus)) return { skipped: 'non_counting_transition', fromStatus: episode.fromStatus };
-  return { cancelled };
+  return { cancelled, episodeKey: episode.episodeKey };
 }
 
 // Step 2 — every reason NOT to add a visit, evaluated under the per-parent
 // lock in the top-up's order: stopped-plan ledger, the idempotency stamp,
 // customer eligibility (customers row FOR UPDATE), the annual-prepay
 // TRY-lock, then the series rules. Returns the skip reason or null.
-async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }) {
+async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, episodeKey = null }) {
   const stopped = await readStoppedRecurringRoots(trx, [parent.customer_id]);
   if (stopped.has(parentId)) return 'series_stopped';
   // Idempotent per cancelled visit (fallback auditor P1): the added visit
@@ -18276,6 +18274,18 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
     .whereRaw("metadata->>'cancelled_service_id' = ?", [String(cancelledServiceId)])
     .first('id');
   if (alreadyReseeded) return 'already_reseeded';
+  // A bulk cancel that took 2+ visits of this plan in one action declined
+  // the reseed as a plan reduction, and recorded it against this
+  // cancellation episode (pre-push audit P1): a later same-status replay of
+  // ONE of those ids (Intelligence Bar / dispatch) must not undo that.
+  if (episodeKey) {
+    const declined = await trx('activity_log')
+      .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed_declined' })
+      .whereRaw("metadata->>'cancelled_service_id' = ?", [String(cancelledServiceId)])
+      .whereRaw("metadata->>'episode_key' = ?", [String(episodeKey)])
+      .first('id');
+    if (declined) return 'batch_series_cancel';
+  }
   const customer = await trx('customers').where({ id: parent.customer_id })
     .forUpdate()
     .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
@@ -18487,7 +18497,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   if (parent.is_recurring !== true || !parent.recurring_pattern) return { added: [], skipped: 'not_recurring' };
   if (String(parent.customer_id) !== String(cancelled.customer_id)) return { added: [], skipped: 'owner_mismatch' };
 
-  const refusal = await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols });
+  const refusal = await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, episodeKey: fresh.episodeKey });
   if (refusal) return { added: [], skipped: refusal };
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
@@ -18557,12 +18567,33 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
 // more of the same plan in one bulk cancel is the operator shortening or
 // ending that plan (fallback auditor P1 on def6002a84) — never something to
 // refill. Each single reseed opens its own transaction (the writer above).
+// Persist the batch's plan-reduction decision per cancelled visit, keyed on
+// its cancellation episode (pre-push audit P1) — reseedRefusal reads it, so
+// a later single-id replay cannot add a visit back to the shortened plan.
+// Best-effort like the rest of the post-commit bridge: a failed write is
+// logged, never thrown into the committed cancel.
+async function recordBatchReseedDecline(conn, { rootId, cancelledIds, source, customerById, countingCancel }) {
+  try {
+    await conn('activity_log').insert(cancelledIds.map((id) => ({
+      customer_id: customerById.get(id),
+      action: 'recurring_cancel_reseed_declined',
+      description: `${cancelledIds.length} visits of one recurring plan cancelled together — plan reduction, no visit added back`,
+      metadata: JSON.stringify({
+        cancelled_service_id: id, recurring_parent_id: rootId, episode_key: countingCancel.get(id) || null,
+        reason: 'batch_series_cancel', source, batch_ids: cancelledIds,
+      }),
+    })));
+  } catch (e) {
+    logger.error(`[recurring-cancel-reseed] could not record the batch decline for parent=${rootId}: ${e.message}`);
+  }
+}
+
 async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source = 'cancel' } = {}) {
   const { isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
   if (!ids.length) return { results: [], skippedRoots: [] };
   const rows = await conn('scheduled_services').whereIn('id', ids)
-    .select('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+    .select('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
   // Only cancels whose CURRENT episode removed a counting visit take part in
   // the per-plan count (Codex r2 / r4 / r7 P1s): a 'rescheduled' placeholder
   // cancelled beside one real visit must not read as a plan reduction, a
@@ -18572,18 +18603,19 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
   const transitions = await conn('job_status_history')
     .whereIn('job_id', ids)
     .orderBy('transitioned_at', 'desc')
-    .select('job_id', 'from_status', 'to_status');
+    .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at');
   const byJob = new Map();
   for (const t of transitions) {
     const key = String(t.job_id);
     if (!byJob.has(key)) byJob.set(key, []);
     byJob.get(key).push(t);
   }
-  const countingCancel = new Set();
+  const countingCancel = new Map(); // id → episodeKey
   for (const [key, history] of byJob) {
     const episode = cancelEpisodeSourceStatus(history);
-    if (episode && isCountingSourceStatus(episode.fromStatus)) countingCancel.add(key);
+    if (episode && isCountingSourceStatus(episode.fromStatus)) countingCancel.set(key, episode.episodeKey);
   }
+  const customerById = new Map(rows.map((row) => [String(row.id), row.customer_id]));
   const byRoot = new Map();
   for (const row of rows) {
     // Plan rows only: explicit recurring, or a legacy null-flagged child of
@@ -18600,6 +18632,7 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
     if (cancelledIds.length > 1) {
       skippedRoots.push({ rootId, cancelledIds, skipped: 'batch_series_cancel' });
       logger.info(`[recurring-cancel-reseed] ${cancelledIds.length} visits of parent=${rootId} cancelled in one batch (${source}) — plan reduction, no reseed`);
+      await recordBatchReseedDecline(conn, { rootId, cancelledIds, source, customerById, countingCancel });
       continue;
     }
     // Per-root isolation (fallback auditor P1 on 9ab2099da1): each reseed is
