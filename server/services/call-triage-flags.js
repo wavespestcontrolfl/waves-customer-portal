@@ -1633,18 +1633,22 @@ const RANGE_RE = new RegExp(
 // (mod 24h — covers an overnight range like "11 PM and 1 AM" too) wins; a
 // tie, or the second bound stating no resolvable period/word of its own
 // either, falls back to the same business-hours inference parseSpokenSlot
-// already applies to a bare hour elsewhere.
-function secondBoundClock24(word, hour, period) {
-  if (word) return word === 'noon' ? 12 : 0;
+// already applies to a bare hour elsewhere. Works in MINUTES-of-day, not
+// bare hours (codex #4919 review round P1): "between 8 and 8:30 pm"
+// dropped the second bound's :30 and compared 8pm-as-hour to 8pm-as-hour —
+// an exact tie that fell through to the (wrong) business-hours 8 AM guess,
+// when the two half-hour-apart bounds unambiguously fix the first at PM.
+function secondBoundClock24(word, hour, minute, period) {
+  if (word) return word === 'noon' ? 12 * 60 : 0;
   if (!period) return null;
-  return (Number(hour) % 12) + (period === 'pm' ? 12 : 0);
+  return (Number(hour) % 12) * 60 + (period === 'pm' ? 12 * 60 : 0) + (Number(minute) || 0);
 }
-function resolveRangeStartPeriod(hour1, endClock24) {
-  if (endClock24 == null) return null;
-  const h1 = Number(hour1) % 12;
-  const durationVia = (startClock24) => (((endClock24 - startClock24) % 24) + 24) % 24;
+function resolveRangeStartPeriod(hour1, endMinutesOfDay) {
+  if (endMinutesOfDay == null) return null;
+  const h1 = (Number(hour1) % 12) * 60;
+  const durationVia = (startMinutesOfDay) => (((endMinutesOfDay - startMinutesOfDay) % 1440) + 1440) % 1440;
   const durAm = durationVia(h1);
-  const durPm = durationVia(h1 + 12);
+  const durPm = durationVia(h1 + 12 * 60);
   if (durAm === 0 || durPm === 0 || durAm === durPm) return null;
   return durAm < durPm ? 'am' : 'pm';
 }
@@ -1661,13 +1665,14 @@ function collapseRangeToFirstBound(ns) {
     const hour = betweenBranch ? g.b1h : g.c1h;
     const minute = betweenBranch ? g.b1mm : g.c1mm;
     const explicitPeriod = betweenBranch ? g.b1p : g.c1p;
-    const endClock24 = secondBoundClock24(
+    const endMinutesOfDay = secondBoundClock24(
       betweenBranch ? g.b2w : g.c2w,
       betweenBranch ? g.b2h : g.c2h,
+      betweenBranch ? g.b2mm : g.c2mm,
       betweenBranch ? g.b2p : g.c2p,
     );
     const period = explicitPeriod
-      || resolveRangeStartPeriod(hour, endClock24)
+      || resolveRangeStartPeriod(hour, endMinutesOfDay)
       || inferPeriodFromBusinessHours(Number(hour));
     if (!period) return ns;
     replacement = minute ? `${hour} ${minute} ${period}` : `${hour} ${period}`;

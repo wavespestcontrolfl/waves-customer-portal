@@ -2267,6 +2267,12 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     // business-hours-inferred opposite one.
     ['We will be there Sunday between 8 and 10 pm.', '2026-08-02T20:00:00-04:00', true],
     ['We will be there Sunday between 8 and 10 pm.', '2026-08-02T08:00:00-04:00', false],
+    // codex #4919 review round P1 (:1640): the same-hour case — the second
+    // bound's MINUTES must count in the duration comparison, or "8 and
+    // 8:30 pm" (only 30 minutes apart) reads as an exact tie (8pm-as-8pm)
+    // and falls through to the wrong business-hours-inferred 8 AM.
+    ['We will be there Sunday between 8 and 8:30 pm.', '2026-08-02T20:00:00-04:00', true],
+    ['We will be there Sunday between 8 and 8:30 pm.', '2026-08-02T08:00:00-04:00', false],
     // An overnight range ("11 PM to 1 AM") is the same forward-progression
     // logic wrapping past midnight.
     ['We will be there Sunday between 11 and 1 am.', '2026-08-02T23:00:00-04:00', true],
