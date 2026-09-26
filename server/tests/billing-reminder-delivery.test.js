@@ -80,6 +80,22 @@ describe('billing reminder per-channel delivery progress', () => {
     purpose: 'balance_reminder', eventKey, channels, metadata: { tier: 'gentle' }, send,
   });
 
+  test.each(['SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OPT_OUT'])('an all-channel %s Email refusal resolves the leg terminally', async (code) => {
+    const result = await deliver(['email'], jest.fn(async () => ({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code, reason: 'Recipient is suppressed',
+    })));
+    expect(result.complete).toBe(true);
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(),
+      expect.objectContaining({ resolved: true, resolution: 'email_terminal_refusal' }));
+  });
+
+  test('an unreadable suppression store keeps the Email leg retryable', async () => {
+    const result = await deliver(['email'], jest.fn(async () => ({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'SUPPRESSION_LOOKUP_FAILED', retryable: true,
+    })));
+    expect(result.complete).toBe(false);
+  });
+
   test('each leg is sent with its own reservation', async () => {
     const send = jest.fn().mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 

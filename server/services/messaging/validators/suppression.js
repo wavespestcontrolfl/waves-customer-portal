@@ -10,8 +10,9 @@
  * gracefully — load_suppression_state catches a missing-table error and
  * returns null, and validators interpret null as "no suppression record".
  *
- * Suppression is HARD: an entry here blocks every purpose, every audience,
- * every channel, until the entry is explicitly cleared. The only escape
+ * Consent suppression is HARD across purposes, audiences, and channels.
+ * non_mobile is an SMS-capability fact and does not suppress Email or App.
+ * A consent entry blocks until explicitly cleared. The only escape
  * hatch is a START keyword on the inbound channel, which is handled by
  * the twilio-webhook STOP/START flow and clears the suppression record.
  */
@@ -76,6 +77,7 @@ async function checkSuppression(input, _policy, contactState) {
     };
   }
   if (suppression.reason === 'non_mobile') {
+    if (input.channel === 'email' || input.channel === 'push') return { ok: true };
     return {
       ok: false,
       code: 'SUPPRESSED_NON_MOBILE',

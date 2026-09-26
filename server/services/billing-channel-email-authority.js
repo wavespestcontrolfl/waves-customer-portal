@@ -151,29 +151,18 @@ async function preSendBlock(preSendCheck, database) {
   );
 }
 
-// Facts about the phone line itself (the number belongs to someone else, or
-// can't take texts) say nothing about the customer's Email and never block it.
-const PHONE_ONLY_SUPPRESSIONS = new Set(['SUPPRESSED_WRONG_NUMBER', 'SUPPRESSED_NON_MOBILE']);
-
-// phone: already locked by verifyAndDispatch (lockCustomerPhone).
-async function suppressionBlock(trx, recipientEmail, category, phone) {
+async function suppressionBlock(trx, recipientEmail, category, customer) {
   await lockCustomerEmail(trx, recipientEmail);
   const suppressionInput = {
-    channel: 'email', to: phone,
+    channel: 'email', to: clean(customer?.phone) || null,
     metadata: { billingDeliveryLeg: true },
   };
   const suppressionState = await loadSuppressionState(suppressionInput, {}, trx);
   if (!suppressionInput.to) suppressionState.suppressionLoaded = true;
   const messagingSuppression = await checkSuppression(suppressionInput, null, suppressionState);
-  if (!messagingSuppression.ok && !PHONE_ONLY_SUPPRESSIONS.has(messagingSuppression.code)) {
-    // A person-level suppression (opt-out, manual DNC, unknown reason) is a
-    // hard stop for billing Email too: surfaced as EMAIL_SUPPRESSED so the
-    // reminder rail resolves the leg terminally instead of re-claiming it.
-    // An unreadable store stays its own retryable code.
-    if (messagingSuppression.retryable === true) {
-      return blocked(messagingSuppression.code, messagingSuppression.reason, { retryable: true });
-    }
-    return blocked('EMAIL_SUPPRESSED', `Suppressed: ${messagingSuppression.reason}`);
+  if (!messagingSuppression.ok) {
+    return blocked(messagingSuppression.code, messagingSuppression.reason,
+      { retryable: messagingSuppression.retryable === true });
   }
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(billingEmailTemplateKey(category), trx);
   if (!loaded?.template) {
@@ -192,27 +181,14 @@ async function suppressionBlock(trx, recipientEmail, category, phone) {
   return blocked('EMAIL_SUPPRESSED', `Suppressed: ${detail || 'active suppression'}`);
 }
 
-// The customer's phone STOP/START lock (the namespace recordSuppression
-// takes) is acquired BEFORE the customer/preference row locks, matching the
-// SMS order customer-comms -> phone -> rows, and held for the rest of this
-// transaction (which spans the provider dispatch) so an opt-out or manual DNC
-// recorded mid-handoff waits instead of slipping past the suppression read.
-async function lockCustomerPhone(trx, customerId) {
-  const row = await trx('customers').where({ id: customerId }).first('phone');
-  const phone = toE164(clean(row?.phone)) || null;
-  if (phone) await lockSmsPhone(trx, phone);
-  return phone;
-}
-
-async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendCheck, dispatch, state }) {
-  const lockedPhone = await lockCustomerPhone(trx, input.customerId);
+async function verifyAndDispatch({ input, trx, invoice, phone, recipientEmail, preSendCheck, dispatch, state }) {
   const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
   if (fresh.error) state.boundaryBlock = fresh.error;
-  else if ((toE164(clean(fresh.customer?.phone)) || null) !== lockedPhone) {
-    // The phone changed between the lock and the row lock: retry under the
-    // new phone's lock rather than check suppression for an unlocked number.
-    state.boundaryBlock = blocked('BILLING_PHONE_CHANGED', 'Customer phone changed before delivery', { retryable: true });
-  } else if (fresh.recipientEmail !== recipientEmail) {
+  else if (toE164(clean(fresh.customer.phone)) !== phone) {
+    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
+      'Billing contact changed before delivery', { retryable: true });
+  }
+  else if (fresh.recipientEmail !== recipientEmail) {
     state.boundaryBlock = blocked(
       'EMAIL_RECIPIENT_CHANGED',
       'Billing email recipient changed before delivery',
@@ -220,7 +196,7 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
     );
   } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (!state.boundaryBlock) {
-    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, lockedPhone);
+    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer);
   }
   if (state.boundaryBlock) return { ok: false };
 
@@ -232,14 +208,19 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
 
 async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, preSendCheck, dispatch, state }) {
   try {
-    const verifiedDispatch = (trx, invoice) => verifyAndDispatch({
-      input, trx, invoice, recipientEmail, preSendCheck, dispatch, state,
-    });
-    const outcome = await withCustomerCommsLock(db, input.customerId, (trx) => (
-      input.invoiceId
+    const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
+      // Suppression writers take phone before recipient rows. Resolve it
+      // without a row lock, then verify it again under the customer lock.
+      const customer = await trx('customers').where({ id: input.customerId }).first('phone');
+      const phone = toE164(clean(customer?.phone));
+      if (phone) await lockSmsPhone(trx, phone);
+      const verifiedDispatch = (database, invoice) => verifyAndDispatch({
+        input, trx: database, invoice, phone, recipientEmail, preSendCheck, dispatch, state,
+      });
+      return input.invoiceId
         ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)
-        : verifiedDispatch(trx, null)
-    ));
+        : verifiedDispatch(trx, null);
+    });
     if (!outcome && input.invoiceId) {
       state.boundaryBlock = blocked('INVOICE_CUSTOMER_MISMATCH', 'Invoice does not belong to this customer');
       return { ok: false };
@@ -248,7 +229,9 @@ async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, preSe
   } catch (err) {
     if (state.providerAccepted) return { ok: true };
     if (state.handoffStarted) throw err;
-    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED', err.message, { retryable: true });
+    // Query errors can contain recipient bindings; callers persist this reason.
+    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
+      'Billing email authority could not be verified', { retryable: true });
     return { ok: false };
   }
 }

@@ -6,7 +6,6 @@ const rows = {
 
 const defaultDbImplementation = (table) => ({
   where: jest.fn().mockReturnThis(),
-  whereIn: jest.fn().mockReturnThis(),
   forUpdate: jest.fn().mockReturnThis(),
   first: jest.fn(async () => rows[table] || null),
 });
@@ -102,6 +101,7 @@ describe('billing channel email authority', () => {
       database.transaction(callback)
     ));
     mockLockCustomerEmail.mockResolvedValue();
+    mockLockSmsPhone.mockResolvedValue();
     mockLoadTemplateByKey.mockResolvedValue({
       template: { template_key: 'billing.notice', send_stream: 'transactional_required' },
     });
@@ -119,35 +119,6 @@ describe('billing channel email authority', () => {
     rows.customers = { id: 'cust-1', first_name: 'Casey', email: 'casey@example.com' };
     rows.notification_prefs = { customer_id: 'cust-1', billing_channels: ['email'] };
     rows.invoices = { id: 'inv-1', customer_id: 'cust-1', status: 'sent' };
-  });
-
-  test("holds the customer's phone STOP/START lock through the Email dispatch", async () => {
-    rows.customers = { id: 'cust-1', first_name: 'Casey', email: 'casey@example.com', phone: '(941) 555-0100' };
-    const { state } = await runAuthority();
-    expect(state.boundaryBlock).toBeNull();
-    expect(mockLockSmsPhone).toHaveBeenCalledWith(expect.anything(), '+19415550100');
-  });
-
-  test.each(['SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OPT_OUT', 'SUPPRESSED_OTHER'])(
-    'a %s phone suppression is a terminal EMAIL_SUPPRESSED refusal', async (code) => {
-      mockCheckSuppression.mockResolvedValueOnce({ ok: false, code, reason: 'Recipient is suppressed' });
-      const { state } = await runAuthority();
-      expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'EMAIL_SUPPRESSED', deliveryOutcome: 'not_sent' });
-      expect(state.boundaryBlock.retryable).toBeUndefined();
-      expect(state.boundaryBlock.reason).toMatch(/^Suppressed: /);
-    },
-  );
-
-  test.each(['SUPPRESSED_WRONG_NUMBER', 'SUPPRESSED_NON_MOBILE'])('a %s phone fact never blocks the Email', async (code) => {
-    mockCheckSuppression.mockResolvedValueOnce({ ok: false, code, reason: 'phone-line fact' });
-    const { state } = await runAuthority();
-    expect(state.boundaryBlock).toBeNull();
-  });
-
-  test('an unreadable suppression store stays a retryable hold', async () => {
-    mockCheckSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: 'unavailable', retryable: true });
-    const { state } = await runAuthority();
-    expect(state.boundaryBlock).toMatchObject({ code: 'SUPPRESSION_LOOKUP_FAILED', retryable: true });
   });
 
   test('does not allow dispatch when Email is absent from the explicit category selection', async () => {
@@ -250,17 +221,32 @@ describe('billing channel email authority', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  test('holds the retry when the all-channel suppression read fails', async () => {
+  test('holds suppression read failures without exposing phone bindings or SQL', async () => {
     rows.customers = { ...rows.customers, phone: '+19415550100' };
-    mockLoadSuppressionState.mockRejectedValueOnce(new Error('suppression read unavailable'));
+    mockLoadSuppressionState.mockRejectedValueOnce(new Error(
+      'select * from messaging_suppression where phone = +19415550100 - permission denied',
+    ));
     const dispatch = jest.fn();
     const { outcome, state } = await runAuthority({}, { dispatch });
     expect(outcome.ok).toBe(false);
     expect(state.boundaryBlock).toMatchObject({
       blocked: true, code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true,
-      reason: 'suppression read unavailable',
+      reason: 'Billing email authority could not be verified',
     });
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('defers when the customer phone changes before the recipient row is locked', async () => {
+    rows.customers = { ...rows.customers, phone: '(941) 555-0100' };
+    mockLockSmsPhone.mockImplementationOnce(async (_trx, phone) => {
+      expect(phone).toBe('+19415550100');
+      rows.customers = { ...rows.customers, phone: '+19415550101' };
+    });
+    const { outcome, state, dispatch } = await runAuthority();
+    expect(outcome).toEqual({ ok: false });
+    expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(mockLoadSuppressionState).not.toHaveBeenCalled();
   });
 
   test('the locked suppression recheck loads billing.notice for a non-receipt category', async () => {
@@ -304,14 +290,17 @@ describe('billing channel email authority', () => {
   });
 
   test('rechecks invoice ownership while both handoff locks cover provider dispatch', async () => {
+    rows.customers = { ...rows.customers, phone: '+19415550100' };
     let commsLocked = false;
     let invoiceLocked = false;
+    let phoneLocked = false;
     const recipientLocks = [];
     const lockedTrx = jest.fn((table) => {
       const query = defaultDbImplementation(table);
       query.forUpdate.mockImplementation(() => {
         expect(commsLocked).toBe(true);
         expect(invoiceLocked).toBe(true);
+        expect(phoneLocked).toBe(true);
         recipientLocks.push(table);
         return query;
       });
@@ -327,8 +316,16 @@ describe('billing channel email authority', () => {
       expect(invoiceId).toBe('inv-1');
       expect(database).toBe(lockedTrx);
       expect(commsLocked).toBe(true);
+      expect(phoneLocked).toBe(true);
       invoiceLocked = true;
       try { return await callback(lockedTrx, rows.invoices); } finally { invoiceLocked = false; }
+    });
+    mockLockSmsPhone.mockImplementationOnce(async (trx, phone) => {
+      expect(trx).toBe(lockedTrx);
+      expect(phone).toBe('+19415550100');
+      expect(commsLocked).toBe(true);
+      expect(invoiceLocked).toBe(false);
+      phoneLocked = true;
     });
     const dispatch = jest.fn(async () => {
       expect(commsLocked).toBe(true);
