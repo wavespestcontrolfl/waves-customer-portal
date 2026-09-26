@@ -125,6 +125,10 @@ function scanPost({ body: raw, url }) {
     results[id] = { ok: !!r.ok, reason: r.reason || null };
     if (!r.ok) gaps.push(id);
   }
+  // A table added for the comparison gap immediately makes how_to_choose
+  // applicable — and a weight-0 miss would not stop that refresh from
+  // closing the row. Plan both together (Codex P2, 2026-09-26).
+  if (gaps.includes('comparison') && !gaps.includes('how_to_choose')) gaps.push('how_to_choose');
   return { gaps, results, frontmatter, title: draft.title };
 }
 
@@ -186,6 +190,12 @@ async function loadBlogCorpus({ planner = require('./internal-link-planner') } =
   return [];
 }
 
+function indexableHubPost(post) {
+  const link = require('./internal-link-planner')._internals;
+  if (!link.eligibleLinkSource(post)) return false;
+  return !link.sourceCanonicalMismatch(splitPost(post.body).frontmatter, post.url);
+}
+
 /**
  * Scan the corpus and shape rows. Pure given the corpus. Posts are ordered
  * worst-first (most gaps), then by url for a stable batch order, and
@@ -196,6 +206,11 @@ function planRows(corpus, { now = new Date(), perDay = DEFAULT_PER_DAY, minGaps 
   for (const post of corpus) {
     // Blog collection only (the loaders may return services/locations too).
     if (!post?.url || !/(?:^|\/)src\/content\/blog\//.test(String(post.file || ''))) continue;
+    // Indexable hub pages only: noindex, spoke-rendered, off-hub-canonical
+    // and canonical-mismatch posts would burn paced slots on refreshes that
+    // cannot improve the indexed corpus (Codex P2, 2026-09-26). Same checks
+    // the internal-link planner applies to this loader's output.
+    if (!indexableHubPost(post)) continue;
     const scan = scanPost(post);
     if (scan.gaps.length < minGaps) continue;
     scanned.push({ post, scan });

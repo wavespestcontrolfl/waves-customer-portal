@@ -1224,9 +1224,10 @@ function checkCitabilityComparison(draft, brief) {
 const HOW_TO_CHOOSE_HEADING_RE = /\b(?:how to (?:choose|pick|decide)|choosing (?:between|the right|a|your)|which (?:one|option|approach|method|plan|treatment|service)[^\n]{0,40}\b(?:right|fits?|for you|for your)|what to (?:weigh|look for|consider)|decision (?:guide|checklist)|fits your situation)\b/i;
 
 const HOW_TO_CHOOSE_MIN_CRITERIA = 3;
+const HOW_TO_CHOOSE_MAX_CRITERIA = 5;
 
-// The contract is an H2 carrying 3–5 bulleted criteria (Codex P2,
-// 2026-09-26): an H3, or an H2 over plain prose, is not the extractable
+// The contract is an H2 carrying 3–5 bulleted criteria (Codex P2s,
+// 2026-09-26 — both bounds): an H3, or an H2 over plain prose, is not the extractable
 // structure the nudge measures. Criteria = list items before the next H1/H2.
 function howToChooseSectionCriteria(body) {
   const lines = String(body || '').split(/\r?\n/);
@@ -1250,6 +1251,7 @@ function checkCitabilityHowToChoose(draft, brief) {
   const criteria = howToChooseSectionCriteria(body);
   if (criteria < 0) return { ok: false, reason: 'no_how_to_choose_section' };
   if (criteria < HOW_TO_CHOOSE_MIN_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_need_${HOW_TO_CHOOSE_MIN_CRITERIA}+` };
+  if (criteria > HOW_TO_CHOOSE_MAX_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_max_${HOW_TO_CHOOSE_MAX_CRITERIA}` };
   return { ok: true };
 }
 

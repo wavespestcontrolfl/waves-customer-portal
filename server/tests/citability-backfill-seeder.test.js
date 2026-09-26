@@ -64,8 +64,9 @@ function corpus() {
 describe('scanPost — same four heuristics as the quality gate', () => {
   test('a poor post reports every applicable gap; a good one reports none', () => {
     const poor = seeder.scanPost({ url: '/termite/bait-vs-liquid/', body: POOR });
-    expect(poor.gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison']);
-    // how_to_choose is n/a without a table on a non-choice post_type — never a gap.
+    // how_to_choose is n/a to the gate before a table exists, but is planned
+    // with the comparison gap — the table the refresh adds makes it apply (Codex P2).
+    expect(poor.gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
     expect(poor.results.how_to_choose).toEqual({ ok: true, reason: 'no_comparison_to_choose_from' });
     const good = seeder.scanPost({ url: '/termite/bait-vs-liquid-good/', body: GOOD });
     expect(good.gaps).toEqual([]);
@@ -94,9 +95,9 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
     expect(row.city).toBeNull();
     expect(row.service).toBe('termite');
     expect(row.page_url).toBe('/termite/bait-vs-liquid/');
-    expect(row.score).toBe(BASE_SCORE + 3);
+    expect(row.score).toBe(BASE_SCORE + 4);
     expect(row.score).toBeGreaterThan(75);
-    expect(row.signal_metadata.citability_gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison']);
+    expect(row.signal_metadata.citability_gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
     expect(row.signal_metadata.source).toBe('citability-backfill-seeder');
     expect(row.dedupe_key).toBe(dedupeKeyFor('/termite/bait-vs-liquid/'));
     expect(row.available_at).toBeNull();
@@ -117,12 +118,23 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
   });
   test('planRows: blog collection only, minGaps filter, worst-first, perDay pacing, limit', () => {
     const rows = seeder.planRows(corpus(), { now, perDay: 1, minGaps: 2 });
-    // services/ file excluded; GOOD post has no gaps; POOR (3 gaps) sorts before mud-daubers (2).
+    // services/ file excluded; GOOD post has no gaps; POOR (4 gaps) sorts before mud-daubers (2).
     expect(rows.map((r) => r.page_url)).toEqual(['/termite/bait-vs-liquid/', '/pest-control/mud-daubers/']);
     expect(rows[0].available_at).toBeNull();
     expect(rows[1].available_at.toISOString()).toBe('2026-09-26T04:00:00.000Z');
     expect(seeder.planRows(corpus(), { now, minGaps: 3 }).map((r) => r.page_url)).toEqual(['/termite/bait-vs-liquid/']);
     expect(seeder.planRows(corpus(), { now, minGaps: 1, limit: 1 })).toHaveLength(1);
+  });
+  test('planRows skips non-indexable posts: noindex, spoke-rendered, off-hub or mismatched canonical (Codex P2)', () => {
+    const variant = (url, extra) => ({ file: `src/content/blog/termite${url}.mdx`, url: `/termite${url}/`, body: FM(extra) + POOR.slice(FM().length) });
+    const posts = [
+      variant('/noindex', 'robots: "noindex"\n'),
+      variant('/spoke', 'domains:\n  - "some-spoke-domain.com"\n'),
+      variant('/offhub', 'canonical: "https://some-spoke-domain.com/x/"\n'),
+      variant('/mismatch', 'canonical: "/termite/other-post/"\n'),
+      variant('/ok', ''),
+    ];
+    expect(seeder.planRows(posts, { now, minGaps: 1 }).map((r) => r.page_url)).toEqual(['/termite/ok/']);
   });
 });
 

@@ -1461,6 +1461,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(h3).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
     const prose = checkCitabilityHowToChoose({ body: `${table}## How to choose\nPick what fits.\n## FAQ\n- a\n- b\n- c` });
     expect(prose).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+    const six = checkCitabilityHowToChoose({ body: `${table}## How to choose\n${bullets}\n- If G → H\n- If I → J\n- If K → L` });
+    expect(six).toEqual({ ok: false, reason: 'how_to_choose_has_6_criteria_max_5' });
     // H3 subsections inside the H2 stay part of it.
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n### Signs\n${bullets}` }).ok).toBe(true);
   });

@@ -1027,3 +1027,16 @@ describe('_composeBrief listicle_family provenance rides gsc_signal (Codex r5 on
     expect(brief.gsc_signal.family_variants[0].impressions).toBe(48);
   });
 });
+
+describe('_gatherSignals — citability backfill skips the customer cluster (Codex P2, 2026-09-26)', () => {
+  test('a null-query backfill never borrows the service top cluster; other buckets still match', async () => {
+    const builder = new ContentBriefBuilder();
+    builder._matchCustomerCluster = jest.fn().mockResolvedValue({ topic: 'unrelated', service: 'termite' });
+    const backfill = await builder._gatherSignals({ bucket: 'citability_backfill', query: null, service: null, city: null }, { skipSerp: true });
+    expect(builder._matchCustomerCluster).not.toHaveBeenCalled();
+    expect(backfill.customer_signal).toBeNull();
+    const decay = await builder._gatherSignals({ bucket: 'decay_refresh', query: null, service: null, city: null }, { skipSerp: true });
+    expect(builder._matchCustomerCluster).toHaveBeenCalledTimes(1);
+    expect(decay.customer_signal).toEqual({ topic: 'unrelated', service: 'termite' });
+  });
+});

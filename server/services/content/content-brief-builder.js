@@ -517,11 +517,16 @@ class ContentBriefBuilder {
     }
 
     // Customer-insight cluster — match topic-ish keywords against
-    // the opportunity's query / service / city.
-    out.customer_signal = await this._matchCustomerCluster(opportunity).catch((err) => {
-      logger.warn(`[brief-builder] customer cluster lookup failed: ${err.message}`);
-      return null;
-    });
+    // the opportunity's query / service / city. Skipped for citability
+    // backfills: their query is null, so the matcher would fall back to the
+    // service's top cluster and hand an unrelated customer question to a
+    // targeted edit (Codex P2, 2026-09-26).
+    if (opportunity.bucket !== 'citability_backfill') {
+      out.customer_signal = await this._matchCustomerCluster(opportunity).catch((err) => {
+        logger.warn(`[brief-builder] customer cluster lookup failed: ${err.message}`);
+        return null;
+      });
+    }
 
     // Conversion feedback for this (city, service).
     if (opportunity.service || opportunity.city) {
