@@ -360,7 +360,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
             'billing',
             'Opt-out needs manual action',
             'A customer pressed 9 to stop automated billing calls, but the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
-            { link: `/admin/customers/${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
+            { link: `/admin/customers?customerId=${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
           );
         } catch (cardErr) {
           logger.error(`[collections-vestibule] opt-out fallback card failed: ${cardErr.message}`);
@@ -395,7 +395,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
           'billing',
           'Callback requested on billing follow-up call',
           'A customer pressed 0 on an automated billing follow-up call outside office hours. Please call them back.',
-          { link: `/admin/customers/${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
+          { link: `/admin/customers?customerId=${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
         );
       } catch (err) {
         logger.error(`[collections-vestibule] callback card failed: ${err.message}`);
@@ -532,7 +532,7 @@ router.post('/collections-transfer-complete', async (req, res) => {
             'billing',
             'Missed transfer on billing follow-up call',
             'A customer asked to be connected during a billing follow-up call but the office line did not answer. Please call them back.',
-            { link: `/admin/customers/${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
+            { link: `/admin/customers?customerId=${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
           );
         } catch (err) {
           logger.error(`[collections-transfer-complete] callback card failed: ${err.message}`);
