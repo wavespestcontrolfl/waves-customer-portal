@@ -1,0 +1,326 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "chinch-bug",
+    "common_name": "Southern Chinch Bug",
+    "aliases": [
+      "chinch bug",
+      "chinch",
+      "chinch bugs",
+      "blissus insularis"
+    ],
+    "scientific_name": "Blissus insularis",
+    "rank": "species",
+    "group": "true-bugs",
+    "subgroup": "chinch-big-eyed",
+    "site_category": "Lawn",
+    "traits": [
+      "Yellowing patches that start in the sunniest, driest spots and spread outward",
+      "Damage looks like drought stress but doesn't green up after watering",
+      "Adults about 3-4 mm (under 1/5 inch), black body, white wings with a small dark spot on the margin",
+      "Part the grass at the patch edge — tiny black bugs with white wing marks"
+    ],
+    "look_alikes": [
+      {
+        "slug": "big-eyed-bug",
+        "difference": "Chinch bugs are black with a small dark wing-margin spot and kill turf; big-eyed bugs have noticeably large eyes and are a beneficial predator, not a pest.",
+        "next_photo": "The closest possible photo of the insect on a blade of grass, next to a coin.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "The #1 killer of St. Augustine lawns in Florida. The tell: drought stress recovers with water, chinch damage doesn't. They kill outward from the first patch, so the earlier it's caught the better the lawn's chances; extensive dead patches may need resodding rather than just treatment.",
+      "fact": "The #1 killer of St. Augustine lawns in Florida. The tell: drought stress recovers with water, chinch damage doesn't.",
+      "blurb": "Southern chinch bugs kill St. Augustine grass in expanding yellow-to-brown patches, usually starting in the sunniest, driest spots."
+    },
+    "tech_notes": "Float test at patch margin (not center) — insert a topless can, fill with water 5 min, bugs float up. Distinguish drought stress first; treat margins outward per label.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN383"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/chinch-bug/",
+      "guides": []
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "spittlebug",
+    "common_name": "Twolined Spittlebug",
+    "aliases": [
+      "spittlebug",
+      "spittlebugs",
+      "two lined spittlebug"
+    ],
+    "scientific_name": "Prosapia bicincta",
+    "rank": "species",
+    "group": "true-bugs",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "traits": [
+      "White foam blobs on grass stems — the nymphs' bubble shelters",
+      "Adults 6-12 mm, dark brown to black with two reddish-orange lines across the wings",
+      "Grass develops purple, red, or white streaking, then yellows and browns",
+      "Nymphs inside the foam are pale yellow-green, wingless, and much smaller than the adults"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chinch-bug",
+        "difference": "Spittlebugs leave white foam and leaf streaking; chinch bugs cause drought-like patches with tiny black bugs at the soil line, no foam.",
+        "next_photo": "A close-up of the grass blades showing foam (or streaking) versus bare patches.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler",
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "peak_months": [
+      7,
+      8
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "The \"spit\" is a bubble tent the nymph builds around itself for moisture and protection while it feeds. Light foam here and there is cosmetic; widespread streaking plus browning across the lawn is worth treating.",
+      "fact": "The \"spit\" is a bubble tent the nymph builds around itself for moisture and protection.",
+      "blurb": "Light foam is cosmetic; widespread stripes-and-foam plus browning is treatable."
+    },
+    "tech_notes": "Confirm foam nymphs + adult two-line pattern. Second generation (Jul-Aug) causes most turf damage; treat per label if streaking spreads.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1369"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/spittlebug/",
+      "guides": []
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "stink-bug",
+    "common_name": "Stink Bug",
+    "aliases": [
+      "stink bug",
+      "stink bugs",
+      "shield bug",
+      "shield bugs"
+    ],
+    "scientific_name": "Pentatomidae",
+    "rank": "family",
+    "group": "true-bugs",
+    "subgroup": "stink-leaf-footed",
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Shield-shaped body, roughly 12-13 mm, green or brown depending on species",
+      "Found year-round on vegetable and ornamental plants, especially tomatoes and beans",
+      "Releases a defensive odor from thorax glands when crushed or handled",
+      "Occasionally wanders indoors around doors and windows"
+    ],
+    "look_alikes": [
+      {
+        "slug": "leaf-footed-bug",
+        "difference": "Stink bugs have a plain shield outline; leaf-footed bugs have a flattened, leaf-like flare on the hind legs.",
+        "next_photo": "A close-up from above of the hind legs and overall body outline, next to a coin.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lights-windows",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "In Southwest Florida, stink bugs are year-round garden feeders on tomatoes and other plants, not the cold-weather wall-sitters seen up north. They occasionally wander indoors around doors and windows; sealing gaps helps, and heavy vegetable damage is worth a look.",
+      "fact": "The smell is a defense chemical from glands on the thorax — vacuuming rather than squishing avoids it.",
+      "blurb": "Southwest Florida's stink bugs are year-round garden feeders on tomatoes and other vegetables, not the cold-weather wall-sitters found up north. Sealing door and window gaps helps keep wandering ones outside."
+    },
+    "tech_notes": "SWFL pentatomids (southern green stink bug, brown stink bug) are year-round plant/fruit feeders — distinguish from the northern brown marmorated stink bug's cold-weather wall-aggregation behavior, which isn't established here. Exclusion (weatherstripping, screens) for occasional indoor wanderers; garden-side treatment per label if vegetable damage is heavy.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN142"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/stink-bug/",
+      "guides": []
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]
