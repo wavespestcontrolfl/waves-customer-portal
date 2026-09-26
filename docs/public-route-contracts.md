@@ -1430,7 +1430,11 @@ staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
 `leads.estimate_id` names this estimate (the link the admin estimate tool
 writes) and/or a stamped `estimate_data.lead_id` with a STRONG `lead_linkage`
 (`sid` or `stamp`); two pointing leads, or a pointer and a stamp that
-disagree, offer nothing; the linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
+disagree, offer nothing; the linked lead is still the estimate's contact
+(`leadMatchesEstimateContact`, `lead-estimate-link.js` — the same customer
+when both are linked to one, otherwise a matching phone or email; the
+pointer is editable on its own, so a lead that no longer matches offers
+nothing); the linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
 customer is linked — that customer live and still on the lead's phone) and
 `leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
 probe (`inspection-public.js` `_internals.computeConsultationSlotsForLead`,
