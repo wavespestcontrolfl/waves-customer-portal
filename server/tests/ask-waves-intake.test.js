@@ -1721,3 +1721,23 @@ describe('public-quote resolveEntryChannel allowlist', () => {
     expect(resolveEntryChannel(undefined)).toBe('quote_wizard');
   });
 });
+
+// #4905 guard: the intake chokepoint runs synchronously on every public chat
+// turn, so its worst case must stay far from event-loop-blocking territory.
+// Inputs are sized to the real caps (12 history turns × 600 chars, a
+// 2000-char message, a 600-char reply) with repetitive adversarial shapes.
+describe('intake chokepoint worst-case latency (#4905)', () => {
+  const { normalizeIntakeResult: normalize, looksLikeEmergency: emergency } = _internals;
+  const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray '];
+  test.each(shapes)('stays well under budget for repeated %j', (unit) => {
+    const fill = (n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+    const msg = fill(2000);
+    const ctx = [...Array(12).fill(fill(600)), msg].join('\n');
+    normalize({ reply: 'warm', intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', 'warm', 'warm');
+    const started = process.hrtime.bigint();
+    normalize({ reply: fill(600), intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
+    emergency(ctx);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    expect(ms).toBeLessThan(250);
+  });
+});
