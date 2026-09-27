@@ -1393,7 +1393,12 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'Data from Mote Marine Laboratory shows red tide peaks in fall.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'The Texas A&M University Extension notes fire ants mound after rain.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'According to Waves Pest Control, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to WAVES PEST CONTROL, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Industry Research, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Pest Professionals, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Experts, ants are common.' }).ok).toBe(false);
     // Our own service name is not an authority; a county program or district is.
     expect(checkCitabilityNamedSources({ body: '## Mosquito Control in Venice\nWe treat yards monthly.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'The Manatee County Mosquito Control District reports aerial spray dates.' }).ok).toBe(true);

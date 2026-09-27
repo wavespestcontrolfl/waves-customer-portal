@@ -825,20 +825,34 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     }
   });
 
-  test('a paused citability PR marked superseded while the lane was off cannot merge after re-enable', async () => {
+  test('a citability refresh superseded by an ordinary edit is closed, branch-retired, and leaves the poll set', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({
+    const updates = setupDb({
       pending: [makeRun({ action_type: 'refresh_existing_page' })],
       queue: [{
         id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
         bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
       }],
     });
-    gh.getPr.mockResolvedValue(openPr());
+    const open = openPr();
+    const closed = { ...open, state: 'closed' };
+    // Initial read + locked pre-close recheck, then every retirement
+    // verification sees the same closed head.
+    gh.getPr.mockResolvedValueOnce(open).mockResolvedValueOnce(open).mockResolvedValue(closed);
 
     const result = await poller.pollPending();
 
-    expect(result.results[0]).toMatchObject({ pending: true, reason: 'citability_backfill_superseded' });
+    expect(result.results[0]).toMatchObject({ skipped: true, retired: true, reason: 'citability_backfill_superseded' });
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
     expect(pagesPoll.latestDeploymentForBranch).not.toHaveBeenCalled();
     expect(gh.mergePr).not.toHaveBeenCalled();
   });

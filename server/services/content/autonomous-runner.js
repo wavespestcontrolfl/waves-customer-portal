@@ -2128,9 +2128,20 @@ class AutonomousRunner {
       }
       // Persist on the opportunity row so the snapshots survive even if the
       // run insert later fails. Best-effort.
-      await db('opportunity_queue')
-        .where('id', opp.id)
-        .update({
+      // Snapshotting can take up to 90 seconds. A stale worker must not
+      // overwrite the replacement claim's evidence after that wait: fence
+      // the write to the exact claim that started this snapshot attempt.
+      if (!run?.queue_claimed_at) {
+        logger.warn(`[autonomous-runner] intercept snapshots discarded for ${opp.id}: claim timestamp unavailable`);
+        return;
+      }
+      let ownership = db('opportunity_queue')
+        .where({ id: opp.id, status: 'claimed' })
+        .where('claimed_at', run.queue_claimed_at);
+      ownership = run.queue_claim_id == null
+        ? ownership.whereNull('claim_id')
+        : ownership.where('claim_id', run.queue_claim_id);
+      const updated = await ownership.update({
           // Merge only the snapshot fields into the current row; the claimed
           // opportunity object may predate concurrent queue metadata writes.
           signal_metadata: db.raw("COALESCE(signal_metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
@@ -2139,6 +2150,10 @@ class AutonomousRunner {
           })]),
           updated_at: new Date(),
         });
+      if (!updated) {
+        logger.warn(`[autonomous-runner] intercept snapshots discarded for ${opp.id}: queue claim changed during capture`);
+        return;
+      }
       logger.info(`[autonomous-runner] intercept snapshots captured for ${opp.id}: ${result?.ok || 0}/${result?.attempted || 0}`);
     } catch (err) {
       logger.warn(`[autonomous-runner] intercept source snapshot failed (non-blocking): ${err.message}`);
@@ -3241,7 +3256,12 @@ class AutonomousRunner {
     // Operator-intercept posts must capture the publish-day Wayband/source
     // snapshot BEFORE publishing (same as the autonomous path) so competitor
     // claims stay verifiable. Fail-soft inside the helper.
-    try { await this._snapshotInterceptSources(opp, draft, run); }
+    try {
+      await this._snapshotInterceptSources(opp, draft, {
+        ...run,
+        queue_claimed_at: approvalClaimedAt,
+      });
+    }
     catch (err) { logger.warn(`[autonomous-runner] named-competitor source snapshot failed (non-blocking): ${err.message}`); }
 
     let patch;

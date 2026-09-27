@@ -1177,11 +1177,26 @@ function renderedCitabilityBody(body) {
 // source must start with a capital; our own company never counts as the
 // authority behind a claim.
 const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
-const OWN_COMPANY_RE = /^Waves\b/;
+const OWN_COMPANY_RE = /^Waves\b/i;
+// Capitalization is not evidence that a source is specific. These generic
+// labels are common LLM attribution filler and must not satisfy the named-
+// source contract even when every word starts with a capital letter.
+const GENERIC_SOURCE_WORDS = new Set([
+  'and', 'authorities', 'authority', 'control', 'experts', 'expert', 'for', 'industry',
+  'local', 'of', 'officials', 'official', 'pest', 'professionals', 'professional',
+  'research', 'researchers', 'researcher', 'scientists', 'scientist', 'specialists',
+  'specialist', 'studies', 'study', 'the',
+]);
+
+function genericAttributedSource(source) {
+  const words = String(source || '').toLowerCase().match(/[a-z]+/g) || [];
+  return words.length > 0 && words.every((word) => GENERIC_SOURCE_WORDS.has(word));
+}
 
 function hasAttributedSource(body) {
   for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
-    if (!OWN_COMPANY_RE.test(m[1])) return true;
+    const source = m[1].trim();
+    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)) return true;
   }
   return false;
 }

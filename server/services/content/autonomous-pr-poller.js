@@ -1837,6 +1837,99 @@ async function verifyClosedPrRetirement(run, pr, gh) {
   return updated ? { retired: true, pr: current } : null;
 }
 
+// An ordinary page edit permanently owns the route once it supersedes a
+// citability backfill. Retire the older refresh PR immediately, including
+// its branch and remediation state, then atomically retire the parked queue
+// row and run. The page-edit advisory lock is the same lock used by the
+// producer and refresh merge path, so a supersession and this close cannot
+// cross at the write boundary.
+async function retireSupersededCitabilityPr(run, pr, gh) {
+  const queue = require('./opportunity-queue')._internals;
+  const pendingReason = pendingSkipReasonForRun(run);
+  let current = null;
+  let queueRow = null;
+  const state = await db.transaction(async (trx) => {
+    await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    queueRow = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate()
+      .first('id', 'status', 'skip_reason', 'claim_id', 'bucket', 'signal_metadata');
+    if (!queueRow || !sameQueueClaim(queueRow, run)
+      || queueRow.bucket !== 'citability_backfill' || !queue.pageEditSuperseded(queueRow)
+      || queueRow.status !== 'pending_review' || queueRow.skip_reason !== pendingReason) return 'queue_moved';
+    current = await gh.getPr(pr.number);
+    if (!current) return 'pr_unreadable';
+    if (current.merged || current.merged_at) return 'merged';
+    if (current.head?.sha !== pr.head?.sha) return 'head_moved';
+    if (current.state === 'open') await gh.closePr(pr.number);
+    else if (current.state !== 'closed') return 'state_changed';
+    return 'closed';
+  });
+
+  if (state === 'merged') {
+    return finalizeMerged(run, pr.number, {
+      autoMerged: false,
+      mergeSha: current.merge_commit_sha || null,
+      mergedAt: current.merged_at || null,
+    });
+  }
+  if (state !== 'closed') return { pending: true, transient: true, reason: `citability_retirement_${state}` };
+
+  // Re-read after close: a concurrent merge wins, while an incomplete close
+  // or branch deletion stays in the pending set and converges next tick.
+  const closed = await gh.getPr(pr.number);
+  if (closed?.merged || closed?.merged_at) {
+    return finalizeMerged(run, pr.number, {
+      autoMerged: false,
+      mergeSha: closed.merge_commit_sha || null,
+      mergedAt: closed.merged_at || null,
+    });
+  }
+  if (!closed || closed.state !== 'closed' || closed.head?.sha !== pr.head?.sha) {
+    return { pending: true, transient: true, reason: 'citability_retirement_close_pending' };
+  }
+  const verified = await verifyClosedPrRetirement(run, { ...closed, number: pr.number }, gh);
+  if (!verified?.retired) return { pending: true, transient: true, reason: verified?.reason || 'citability_branch_retirement_pending' };
+  if (!await stampTerminal(pr.number, 'closed', run)) {
+    return { pending: true, transient: true, reason: 'citability_terminal_stamp_pending' };
+  }
+
+  try {
+    await db.transaction(async (trx) => {
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+      const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate()
+        .first('id', 'status', 'skip_reason', 'claim_id', 'bucket', 'signal_metadata');
+      if (!row || !sameQueueClaim(row, run)
+        || row.bucket !== 'citability_backfill' || !queue.pageEditSuperseded(row)
+        || row.status !== 'pending_review' || row.skip_reason !== pendingReason) {
+        throw new Error('queue row moved during superseded PR retirement');
+      }
+      const now = new Date();
+      const queueRows = await trx('opportunity_queue').where('id', run.opportunity_id)
+        .where('status', 'pending_review').where('skip_reason', pendingReason)
+        .update({ status: 'skipped', skip_reason: queue.PAGE_EDIT_SUPERSEDED_REASON, completed_at: now, updated_at: now });
+      if (Number(queueRows) !== 1) throw new Error('queue retirement CAS lost');
+      const fresh = await trx('autonomous_runs').where('id', run.id).first('reviewer_notes');
+      const runRows = await trx('autonomous_runs').where('id', run.id)
+        .where('outcome', PENDING_OUTCOME).where('skip_reason', pendingReason)
+        .update({
+          skip_reason: SUPERSEDED_SKIP_REASON,
+          reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes,
+            `PR #${pr.number} was closed and its branch retired because an ordinary page edit permanently superseded this citability backfill.`]
+            .filter(Boolean).join(' | ').slice(0, 4000),
+          poll_pending_reason: null,
+          poll_pending_since: null,
+          poll_pending_annotated_at: null,
+          updated_at: now,
+        });
+      if (Number(runRows) !== 1) throw new Error('run retirement CAS lost');
+    });
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] superseded citability retirement bookkeeping failed for run ${run.id}: ${err.message} (retried next tick)`);
+    return { pending: true, transient: true, reason: 'citability_retirement_bookkeeping_pending' };
+  }
+  logger.warn(`[autonomous-pr-poller] retired superseded citability PR #${pr.number} for run ${run.id}`);
+  return { skipped: true, retired: true, reason: 'citability_backfill_superseded' };
+}
+
 async function pollRun(run, { allowMerge = true } = {}) {
   const prNumber = prNumberFromUrl(run.astro_pr_url);
   if (!prNumber) {
@@ -1860,6 +1953,14 @@ async function pollRun(run, { allowMerge = true } = {}) {
         mergeSha: pr.merge_commit_sha || null,
         mergedAt: pr.merged_at || null,
       });
+    }
+    if (run.action_type === 'refresh_existing_page' && run.opportunity_id) {
+      const row = await db('opportunity_queue').where('id', run.opportunity_id)
+        .first('bucket', 'signal_metadata');
+      const { pageEditSuperseded } = require('./opportunity-queue')._internals;
+      if (row?.bucket === 'citability_backfill' && pageEditSuperseded(row)) {
+        return retireSupersededCitabilityPr(run, { ...pr, number: prNumber }, gh);
+      }
     }
     if (pr.state !== 'open') {
       if (run.action_type === 'new_supporting_blog') {
@@ -2152,6 +2253,7 @@ module.exports = {
     reconcileTopicBlockedPrs,
     queueRowStillParkedLocked,
     retireTopicBlockedPr,
+    retireSupersededCitabilityPr,
     pendingSkipReasonForRun,
     isMetadataLane,
     closedSkipReasonForRun,

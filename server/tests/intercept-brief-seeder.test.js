@@ -459,8 +459,13 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     const snapshots = [{ url: 'https://example.com/a/', snapshot_url: 'https://web.archive.org/web/2026/https://example.com/a/', ok: true }];
     jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 1, ok: 1, snapshots });
     const update = jest.fn(() => Promise.resolve(1));
-    const where = jest.fn(() => ({ update }));
-    db.mockImplementation(() => ({ where }));
+    const query = {
+      where: jest.fn(() => query),
+      whereNull: jest.fn(() => query),
+      update,
+    };
+    db.mockImplementation(() => query);
+    db.raw.mockImplementation((_sql, bindings) => bindings[0]);
 
     const opp = {
       id: 'opp-1',
@@ -470,7 +475,8 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     // The draft cites a live URL the manifest only described — the runner
     // must snapshot the union of manifest sources + body citations.
     const draft = { body: 'Per [Orkin terms](https://www.orkin.com/terms/), pricing is quote-based.' };
-    const run = {};
+    const claimedAt = new Date('2026-06-11T12:00:00Z');
+    const run = { queue_claim_id: 'claim-1', queue_claimed_at: claimedAt };
     await runner._snapshotInterceptSources(opp, draft, run);
 
     expect(seeder.snapshotSources).toHaveBeenCalledWith([
@@ -479,9 +485,41 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     ]);
     expect(draft.source_snapshots).toEqual(snapshots);
     expect(run.draft_payload).toBe(draft);
-    expect(where).toHaveBeenCalledWith('id', 'opp-1');
+    expect(query.where).toHaveBeenCalledWith({ id: 'opp-1', status: 'claimed' });
+    expect(query.where).toHaveBeenCalledWith('claimed_at', claimedAt);
+    expect(query.where).toHaveBeenCalledWith('claim_id', 'claim-1');
     const persisted = JSON.parse(update.mock.calls[0][0].signal_metadata);
     expect(persisted.intercept_snapshots).toEqual(snapshots);
+  });
+
+  test('a snapshot finishing after claim replacement cannot overwrite the new claim evidence', async () => {
+    const snapshots = [{ url: 'https://example.com/a/', snapshot_url: 'https://web.archive.org/a', ok: true }];
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 1, ok: 1, snapshots });
+    const update = jest.fn(() => Promise.resolve(0));
+    const query = {
+      where: jest.fn(() => query),
+      whereNull: jest.fn(() => query),
+      update,
+    };
+    db.mockImplementation(() => query);
+    db.raw.mockImplementation((_sql, bindings) => bindings[0]);
+    const oldClaimedAt = new Date('2026-06-11T12:00:00Z');
+    const opp = {
+      id: 'opp-1',
+      bucket: 'operator_intercept',
+      signal_metadata: { intercept_brief: { sources: ['https://example.com/a/'] } },
+    };
+
+    await runner._snapshotInterceptSources(opp, {}, {
+      queue_claim_id: 'old-claim',
+      queue_claimed_at: oldClaimedAt,
+    });
+
+    expect(query.where).toHaveBeenCalledWith({ id: 'opp-1', status: 'claimed' });
+    expect(query.where).toHaveBeenCalledWith('claimed_at', oldClaimedAt);
+    expect(query.where).toHaveBeenCalledWith('claim_id', 'old-claim');
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('queue claim changed during capture'));
   });
 });
 
