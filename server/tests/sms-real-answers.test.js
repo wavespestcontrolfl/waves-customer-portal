@@ -23,7 +23,6 @@ const {
   buildSystemPromptWithProfile,
   buildFactsBlock,
   followupSlaPhrase,
-  fetchOpenTimesBlock,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
   INTENDED_ACTION_TYPES,
   PROMPT_VERSION,
