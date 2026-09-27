@@ -184,7 +184,7 @@ const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|
 // surrounding detector rather than being absorbed as part of the token.
 // Uppercase relation/action words are context too: consuming "AT THE SIDE"
 // or "TO OPEN THE" would erase the link between a credential and its device.
-const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AT|FOR|TO|ON|IN|INTO|NEAR|BY|AS|WITH|USING|VIA|IS|WAS|WERE|REMAINS?|STAYS?|BECOMES?|OPEN(?:S|ED|ING)?|UNLOCK(?:S|ED|ING)?|ACCESS(?:ES|ED|ING)?|ENTER(?:S|ED|ING)?)\b)(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
+const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AND|THEN|OR|BUT|AT|FOR|TO|ON|IN|INTO|NEAR|BY|AS|WITH|USING|VIA|IS|WAS|WERE|REMAINS?|STAYS?|BECOMES?|OPEN(?:S|ED|ING)?|UNLOCK(?:S|ED|ING)?|ACCESS(?:ES|ED|ING)?|ENTER(?:S|ED|ING)?)\b)(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
 // A suffix joined by a hyphen is part of the credential token even when it
 // is lowercase ("24-68-ab"). Keep the uppercase-only rule for whitespace:
 // lowercase words separated by spaces are ordinary surrounding prose.

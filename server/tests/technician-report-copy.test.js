@@ -152,6 +152,8 @@ describe('custom action credential screening', () => {
     'Applied Lesco 24-0-11 near the rear gate',
     'Applied Lesco 24-0-11, then opened the rear gate',
     'Applied Lesco 24-0-11 and opened the rear gate',
+    'APPLIED LESCO 24-0-11 AND OPENED THE REAR GATE',
+    'APPLIED LESCO 24-0-11 THEN UNLOCKED THE REAR GATE',
     'Broadcast granular 24-0-11 near the rear gate',
     'Spread slow-release granular 24-0-11 near the rear gate',
   ])('preserves dimensional work details: %s', (action) => {
@@ -196,6 +198,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Applied Lesco 24-0-11 near the rear gate',
     'Applied Lesco 24-0-11, then opened the rear gate',
     'Applied Lesco 24-0-11 and opened the rear gate',
+    'APPLIED LESCO 24-0-11 AND OPENED THE REAR GATE',
+    'APPLIED LESCO 24-0-11 THEN UNLOCKED THE REAR GATE',
     'Broadcast granular 24-0-11 near the rear gate',
   ])('publishes a qualified fertilizer analysis in reviewed report copy: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
