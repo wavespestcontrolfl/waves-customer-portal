@@ -15789,7 +15789,9 @@ export function CompletionPanel({
             type: schema.type,
             values: entry.values,
             nextStepChips: entry.chips,
-            activityScore: Number.isInteger(entry.score) ? entry.score : null,
+            activityScore: Number.isInteger(entry.score) && !schema.activity?.deriveField
+              ? entry.score
+              : null,
           };
         }),
       }
@@ -17512,7 +17514,11 @@ export function CompletionPanel({
           type: typedFindingsSchema.type,
           values: findingsValues,
         };
-        if (typedActivityScore != null) {
+        // A derive-mapped type has no gauge to pin any more (owner ruling
+        // 2026-09-26), so never submit a score the tech can't see — a
+        // pin restored from an older draft would otherwise ride along
+        // invisibly. The server derives it from the findings field.
+        if (typedActivityScore != null && !typedFindingsSchema.activity?.deriveField) {
           body.activityScore = typedActivityScore;
           body.activityScoreSource = typedActivityTouched
             ? "technician"
@@ -17561,7 +17567,7 @@ export function CompletionPanel({
             nextStepChips: entry.chips,
             // Same pin semantics as the primary: untouched-and-derived
             // submits as 'derived', any tap pins 'technician'.
-            ...(entry.score != null
+            ...(entry.score != null && !schema.activity?.deriveField
               ? {
                   activityScore: entry.score,
                   activityScoreSource: entry.scoreTouched
