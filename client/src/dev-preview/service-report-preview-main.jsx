@@ -9,6 +9,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import ReportViewPage from '../pages/ReportViewPage';
+import WavesShell from '../components/brand/WavesShell';
 import legacyLawnReport from '../pages/__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from '../pages/__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from '../pages/__fixtures__/mosquito-report-v2.json';
@@ -141,7 +142,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <>
     <MemoryRouter initialEntries={['/report/preview-token-000']}>
       <Routes>
-        <Route path="/report/:token" element={<ReportViewPage />} />
+        <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
       </Routes>
     </MemoryRouter>
     <ScenarioBar />

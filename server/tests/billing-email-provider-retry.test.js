@@ -143,6 +143,31 @@ test('a stale producer reason terminates before provider preparation or a provid
   expect(reservation.resolveBillingEmailReservationRefusal).toHaveBeenCalledTimes(1);
 });
 
+test('a resendable refusal settles as a definitely-unsent failure, never a block, so the next send re-delivers', async () => {
+  billingEmailReplayEligible.mockResolvedValue({
+    eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true,
+  });
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true, reason: 'invoice-send-not-finalized' });
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'pending',
+  }));
+  expect(query.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
+});
+
+test('a final-boundary resendable refusal settles the started attempt as rejected without delivering its reservation', async () => {
+  billingEmailReplayEligible.mockResolvedValueOnce({ eligible: true }).mockResolvedValueOnce({
+    eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true,
+  });
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true });
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'rejected',
+  }));
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
+});
+
 test('a temporary eligibility failure stays on the bounded retry schedule without a provider request', async () => {
   billingEmailReplayEligible.mockResolvedValue({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, error: expect.any(Error) });
