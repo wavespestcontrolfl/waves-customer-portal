@@ -1271,7 +1271,11 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
     if (turnResult.conflict) return null; // a conflict on any prior turn refuses outright
     if (turnResult.named.size > 1) return null; // that turn alone is ambiguous — refuse, don't guess
     if (turnResult.named.size === 1) return decide(turnResult.named);
-    // Named nothing: this turn has no opinion — check the next-older one.
+    // Named nothing. Only a bare reply ("yes", "1 bottle") has no opinion
+    // and may be skipped; any other turn ("Actually use Unlisted Chemical
+    // instead") may be a correction this catalog can't read, so the scan
+    // stops rather than reach past it to an older product.
+    if (!isBareFollowUp(turn)) return null;
   }
   return null;
 }

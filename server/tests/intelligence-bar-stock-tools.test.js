@@ -520,6 +520,28 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toMatchObject({ code: 'target_clarification_required' });
   });
 
+  test('an unreadable correction in a newer turn stops the look-back; a bare reply does not', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    // Newest first, as recentOperatorTurns returns them.
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['Actually use Unlisted Chemical instead', 'We bought Alpine WSG']);
+    const corrected = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: '1 bottle',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(corrected).toMatchObject({ code: 'target_clarification_required' });
+
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['Yes', 'We bought Alpine WSG']);
+    const confirmed = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: '1 bottle',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(confirmed).toEqual({ productId: ALPINE.id });
+  });
+
   test('a follow-up naming nothing ("1 bottle") grounds off a recent prior OPERATOR turn', async () => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
     IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
