@@ -7649,6 +7649,33 @@ const InvoiceService = {
     };
 
     const runEdit = async (client) => {
+      // Lock order (round-4 Codex P1 on #5021): every date-changing writer
+      // (rebooker, admin-schedule, the Intelligence Bar movers) locks
+      // scheduled_services FIRST, then locks the invoice
+      // (first-application-sibling-split.js's loadLockedEstimateGroup /
+      // findLockedFirstApplicationInvoice). This edit is about to lock the
+      // INVOICE first (below) — the opposite order — and Postgres's own
+      // referential-integrity check on invoices.scheduled_service_id means
+      // even the LATER billing-review write below (unrelated columns) can
+      // need an implicit lock on the linked scheduled_services row. Taking
+      // the SAME scheduled_services-group lock here, BEFORE the invoice
+      // lock, keeps one consistent order everywhere and closes a genuine
+      // deadlock risk against a concurrent reschedule on the same estimate
+      // group — a concurrent reschedule now either wins this lock first (this
+      // edit waits, same as any other row-lock wait) or loses it outright
+      // (it waits for OUR edit to finish), never both waiting on each other.
+      // Cheap when it doesn't apply: loadLockedEstimateGroup's own early
+      // skips (`not_estimate_anchor` / `no_siblings`) take no lock at all,
+      // so this only matters — and only locks anything — for an invoice
+      // that's actually linked to a multi-member estimate-accept group.
+      // Skipped entirely for a non-retotal edit (metadata only): a plain
+      // title/notes/due-date save changes no protected money field, so
+      // reopenBillingReviewOnInvoiceMoneyChange below is a no-op fingerprint
+      // compare either way — no reason to take this lock for it.
+      if (isRetotal && existing.scheduled_service_id) {
+        await require("./first-application-sibling-split")
+          .loadLockedEstimateGroup(client, existing.scheduled_service_id);
+      }
       // Serialize against in-flight dun sends: lock the invoice row FIRST.
       // fireStep's claim transaction locks this same row before stamping
       // touch_claimed_at, so one of the two strictly precedes the other —

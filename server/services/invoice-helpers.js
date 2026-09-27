@@ -314,16 +314,85 @@ function assertInvoiceNotWithdrawnFromCustomer(invoice) {
   }
 }
 
+function parseLineItems(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// A stable fingerprint of exactly the columns the same-trip billing-review
+// hold protects (first-application-sibling-split.js) — never `updated_at`,
+// which is only a proxy other invoice-mutating code paths are
+// conventionally supposed to bump and nothing enforces: a write that
+// changed real money but forgot to touch updated_at would let
+// maybeAutoClearBillingReview treat a genuinely-edited, still-uncovered
+// invoice as "untouched" and silently release the hold. Comparing the
+// money fields themselves has no such gap — anything that actually changed
+// what the customer owes shows up here directly. Canonical home (round-4
+// Codex P1): billingReviewVersion below needs the money-only variant too,
+// and importing it FROM first-application-sibling-split.js (which itself
+// imports THIS file) would be circular — these fingerprints live here
+// instead, and that module imports them from here.
+function invoiceMoneyFingerprint(invoice) {
+  return JSON.stringify({
+    total: invoice?.total ?? null,
+    subtotal: invoice?.subtotal ?? null,
+    discount_amount: invoice?.discount_amount ?? null,
+    status: invoice?.status ?? null,
+    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
+  });
+}
+
+// Money-ONLY fingerprint — everything invoiceMoneyFingerprint hashes EXCEPT
+// `status` (pre-push P1, first-application-sibling-split.js: a manual-clear
+// resolution's own money fingerprint must not include status — reusing the
+// status-inclusive one would reopen a correctly-resolved review the moment
+// an invoice simply progressed through its ordinary delivery lifecycle,
+// draft -> scheduled -> sent -> paid, with no money change at all).
+// isDivergenceAlreadyResolved, clearBillingReview's resolution record, and
+// billingReviewVersion below all use this one; maybeAutoClearBillingReview
+// keeps invoiceMoneyFingerprint (with status) unchanged.
+function invoiceMoneyOnlyFingerprint(invoice) {
+  return JSON.stringify({
+    total: invoice?.total ?? null,
+    subtotal: invoice?.subtotal ?? null,
+    discount_amount: invoice?.discount_amount ?? null,
+    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
+  });
+}
+
 // A stable fingerprint of the review state an admin operator saw on the
-// invoice detail page — never `updated_at` (see invoiceMoneyFingerprint in
-// first-application-sibling-split.js for why that column is unreliable).
-// POST /admin/invoices/:id/billing-review/clear requires the caller to echo
-// this back; the server recomputes it under the row's own lock right
-// before releasing the hold, and a mismatch means the review changed
-// (typically: a NEW sibling diverged) since the operator loaded the page —
-// clearing on stale information would silently drop that later divergence
-// (Codex #5021 r3 P1). Returns null when no review is open — nothing for a
-// client to echo back.
+// invoice detail page — never `updated_at` (see invoiceMoneyFingerprint
+// above for why that column is unreliable). POST /admin/invoices/:id/
+// billing-review/clear requires the caller to echo this back; the server
+// recomputes it under the row's own lock right before releasing the hold,
+// and a mismatch means the review changed (typically: a NEW sibling
+// diverged) since the operator loaded the page — clearing on stale
+// information would silently drop that later divergence (Codex #5021 r3
+// P1). Returns null when no review is open — nothing for a client to echo
+// back.
+//
+// Includes the invoice's own MONEY-ONLY fingerprint (round-4 Codex P1):
+// reopenBillingReviewOnInvoiceMoneyChange (first-application-sibling-
+// split.js) deliberately does nothing to opened_at/reason/context when a
+// review is ALREADY open and money changes on it (that state is already
+// held/alerted — nothing new to record) — but without the money fingerprint
+// here, an operator who loaded the page BEFORE that money change would
+// still hold a version that matches the UNCHANGED review metadata, and
+// could Clear the review against amounts they never actually saw. Folding
+// the money-only fingerprint into this hash means ANY money change while a
+// review is open — including the office's own by-hand split, exactly the
+// thing the banner instructs — invalidates any previously-fetched version,
+// forcing a reload before Clear can succeed. The admin UI already refetches
+// the invoice (and this version) after every save, so the ordinary
+// edit-then-clear workflow is unaffected; only a genuinely STALE page is
+// refused, same as the existing sibling-divergence case this was already
+// built for.
 function billingReviewVersion(invoice) {
   if (!invoice?.billing_review_opened_at) return null;
   // Normalize context to an object before stringifying — pg's jsonb driver
@@ -337,6 +406,7 @@ function billingReviewVersion(invoice) {
     opened_at: new Date(invoice.billing_review_opened_at).toISOString(),
     reason: invoice.billing_review_reason || null,
     context: context || null,
+    money: invoiceMoneyOnlyFingerprint(invoice),
   });
   return crypto.createHash('sha1').update(payload).digest('hex');
 }
@@ -421,4 +491,6 @@ module.exports = {
   formatCardLine,
   billingReviewVersion,
   billingReviewSummary,
+  invoiceMoneyFingerprint,
+  invoiceMoneyOnlyFingerprint,
 };

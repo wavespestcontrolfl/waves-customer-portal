@@ -35,6 +35,7 @@ describeOrSkip("InvoiceService.update() reopens a resolved billing review when m
   const {
     flagFirstApplicationInvoiceReviewOnDateChange,
     clearBillingReview,
+    loadLockedEstimateGroup,
   } = require("../services/first-application-sibling-split");
   const { assertInvoiceCollectible, billingReviewVersion } = require("../services/invoice-helpers");
 
@@ -149,6 +150,110 @@ describeOrSkip("InvoiceService.update() reopens a resolved billing review when m
       const after = await db("invoices").where({ id: ids.invoiceId }).first();
       expect(after.billing_review_opened_at).toBeNull();
     } finally {
+      await cleanup(ids);
+    }
+  });
+
+  // Round-4 Codex P1 #2: a money edit while the review is ALREADY open
+  // deliberately does nothing to opened_at/reason/context (it's already
+  // held/alerted — reopenBillingReviewOnInvoiceMoneyChange's own
+  // 'review_already_open' skip) — but without folding the money into
+  // billingReviewVersion, an operator who loaded the page BEFORE that edit
+  // would still hold a version that matches the unchanged metadata, and
+  // could Clear against amounts they never saw.
+  test("a money edit WHILE the review is open changes billingReviewVersion — a stale (pre-edit) version is refused; the fresh one clears", async () => {
+    const ids = await makeFixture();
+    try {
+      await db("scheduled_services").where({ id: ids.lawnId }).update({ scheduled_date: "2026-11-02" });
+      await db.transaction((trx) => flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId));
+      const opened = await db("invoices").where({ id: ids.invoiceId }).first();
+      expect(opened.billing_review_opened_at).toBeTruthy();
+      const staleVersion = billingReviewVersion(opened);
+
+      // An edit changes the invoice's ACTUAL money while the review is
+      // STILL open — no date write involved (e.g. the sibling's charge
+      // getting added back).
+      await InvoiceService.update(ids.invoiceId, {
+        line_items: [
+          { description: "First service application", quantity: 1, unit_price: 97.2, amount: 97.2 },
+          { description: "Lawn care — sibling", quantity: 1, unit_price: 56.4, amount: 56.4 },
+        ],
+      });
+
+      const afterEdit = await db("invoices").where({ id: ids.invoiceId }).first();
+      expect(afterEdit.billing_review_opened_at).toBeTruthy(); // still open — untouched by design
+      const freshVersion = billingReviewVersion(afterEdit);
+      expect(freshVersion).not.toBe(staleVersion);
+
+      const staleClear = await clearBillingReview(ids.invoiceId, staleVersion, db);
+      expect(staleClear.code).toBe("stale");
+      expect((await db("invoices").where({ id: ids.invoiceId }).first()).billing_review_opened_at).toBeTruthy();
+
+      const freshClear = await clearBillingReview(ids.invoiceId, freshVersion, db);
+      expect(freshClear.code).toBe("cleared");
+    } finally {
+      await cleanup(ids);
+    }
+  });
+
+  // Round-4 Codex P1 #1: InvoiceService.update() locks the INVOICE first
+  // (its own editability guard), while every date-changing writer locks
+  // scheduled_services FIRST, then the invoice — a lock-order inversion
+  // that could deadlock a concurrent reschedule against a concurrent
+  // invoice edit on the same estimate group (confirmed against real
+  // Postgres: even an UPDATE that never touches scheduled_service_id can
+  // need an implicit lock on the linked scheduled_services row, via the
+  // invoices→scheduled_services foreign key's own referential-integrity
+  // check, once the invoice row has already been written once in the same
+  // transaction). The fix: runEdit takes the SAME scheduled_services-group
+  // lock (loadLockedEstimateGroup) at the very top of its transaction,
+  // BEFORE its own invoice lock — establishing ONE consistent order
+  // everywhere. Proven here with two REAL, concurrently open connections
+  // and the ACTUAL InvoiceService.update(), not just the module helper:
+  // connection 1 takes the group lock first (mimicking a reschedule
+  // in-flight); the real update() call — reaching the very same lock —
+  // WAITS for it (ordinary contention, not a deadlock) and completes
+  // cleanly the moment connection 1 releases.
+  test("two connections: a concurrent reschedule's group lock never deadlocks a real InvoiceService.update() money edit", async () => {
+    const ids = await makeFixture();
+    let trx1;
+    try {
+      await db("scheduled_services").where({ id: ids.lawnId }).update({ scheduled_date: "2026-11-02" });
+
+      // Connection 1: holds the SAME scheduled_services FOR UPDATE lock a
+      // real date-change writer would hold at this point, left OPEN
+      // (uncommitted) for a moment.
+      trx1 = await db.transaction();
+      const group = await loadLockedEstimateGroup(trx1, ids.lawnId);
+      expect(group.skip).toBeUndefined();
+
+      // Connection 2: the REAL InvoiceService.update() money edit, on its
+      // own transaction/connection. It reaches the SAME lock at the top of
+      // runEdit and must wait for connection 1 — kicked off but not
+      // awaited yet, so both are genuinely in flight together.
+      const updatePromise = InvoiceService.update(ids.invoiceId, {
+        line_items: [
+          { description: "First service application", quantity: 1, unit_price: 97.2, amount: 97.2 },
+          { description: "Lawn care — sibling", quantity: 1, unit_price: 56.4, amount: 56.4 },
+        ],
+      });
+
+      // Give the update a moment to actually be waiting on connection 1,
+      // then release it — if this were a real deadlock, releasing one
+      // side is exactly what would be IMPOSSIBLE (each side would already
+      // be blocked on the other). Here it's ordinary, resolvable
+      // contention: connection 1 lets go, and the update proceeds.
+      await new Promise((resolve) => { setTimeout(resolve, 500); });
+      await trx1.rollback();
+      trx1 = null;
+
+      await updatePromise;
+
+      const after = await db("invoices").where({ id: ids.invoiceId }).first();
+      expect(after.billing_review_opened_at).toBeTruthy();
+      expect(after.billing_review_reason).toBe("sibling_date_diverged");
+    } finally {
+      if (trx1) await trx1.rollback().catch(() => {});
       await cleanup(ids);
     }
   });

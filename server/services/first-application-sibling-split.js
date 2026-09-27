@@ -114,9 +114,27 @@
 // date only, or a line-item resend with byte-identical amounts) never
 // reaches the DB at all: the money-fingerprint compare that gates it is
 // pure JS.
+//
+// LOCK ORDER (round-4 Codex P1, second finding): every date writer locks
+// scheduled_services (loadLockedEstimateGroup) BEFORE it locks the invoice
+// (findLockedFirstApplicationInvoice) — but InvoiceService.update()'s OWN
+// editability guard locks the invoice FIRST, and Postgres's own referential-
+// integrity check on the invoices→scheduled_services foreign key means EVEN
+// AN UNRELATED later UPDATE of the invoice row (this module's own billing_
+// review_* write) can need an implicit lock on the linked scheduled_
+// services row — the exact opposite order, a genuine deadlock risk against
+// a concurrent reschedule. InvoiceService.update() closes this by taking
+// the SAME scheduled_services-group lock this module already uses, at the
+// very top of its transaction, BEFORE its own invoice guard lock — see its
+// own comment. reopenBillingReviewOnInvoiceMoneyChange's own lock requests
+// below are then always instant re-locks of rows the transaction already
+// holds.
 const logger = require('./logger');
 const db = require('../models/db');
-const { isInvoiceUndeliveredForBillingReview, billingReviewVersion } = require('./invoice-helpers');
+const {
+  isInvoiceUndeliveredForBillingReview, billingReviewVersion,
+  invoiceMoneyFingerprint, invoiceMoneyOnlyFingerprint,
+} = require('./invoice-helpers');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -131,6 +149,20 @@ function dateOnly(value) {
 
 // Locates the estimate-accept group's locked member rows for a moved row, or
 // a terminal skip when this row cannot be part of one.
+//
+// LOCK ORDER (round-4 Codex P1): every date-changing writer locks
+// scheduled_services here FIRST, then locks the invoice
+// (findLockedFirstApplicationInvoice below). InvoiceService.update()'s own
+// money-edit chokepoint (reopenBillingReviewOnInvoiceMoneyChange) reaches
+// this SAME function — and must establish the SAME order BEFORE it ever
+// locks the invoice, or a concurrent reschedule (holding this lock, wanting
+// the invoice's) can deadlock against a concurrent invoice edit (holding
+// the invoice's lock, and — Postgres's OWN referential-integrity check
+// firing on ANY later UPDATE of a row that changed since the transaction
+// began, even one that never touches scheduled_service_id — needing an
+// implicit lock here too). See InvoiceService.update()'s own pre-lock,
+// taken at the very top of its transaction before the invoice's own guard
+// lock, for how the money-edit path keeps this order.
 async function loadLockedEstimateGroup(trx, scheduledServiceId) {
   const moved = await trx('scheduled_services')
     .where({ id: scheduledServiceId })
@@ -184,60 +216,6 @@ async function findLockedFirstApplicationInvoice(trx, moved, members) {
   const invoiceRow = members.find((m) => String(m.id) === String(invoice.scheduled_service_id));
   if (!invoiceRow) return { skip: { action: 'skipped', reason: 'invoice_row_missing', moved, invoice } };
   return { invoice, invoiceRow };
-}
-
-// A stable fingerprint of exactly the columns the collection hold actually
-// protects — never `updated_at`, which is only a proxy other invoice-
-// mutating code paths are conventionally supposed to bump and nothing
-// enforces (Claude fallback-auditor P1, this branch's own first push): a
-// write that changed real money but forgot to touch updated_at would let
-// maybeAutoClearBillingReview treat a genuinely-edited, still-uncovered
-// invoice as "untouched" and silently release the hold. Comparing the
-// money fields themselves has no such gap — anything that actually changed
-// what the customer owes shows up here directly.
-function invoiceMoneyFingerprint(invoice) {
-  return JSON.stringify({
-    total: invoice?.total ?? null,
-    subtotal: invoice?.subtotal ?? null,
-    discount_amount: invoice?.discount_amount ?? null,
-    status: invoice?.status ?? null,
-    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
-  });
-}
-
-// Money-ONLY fingerprint — everything invoiceMoneyFingerprint hashes
-// EXCEPT `status` (pre-push P1: a manual-clear resolution's own money
-// fingerprint must not include status. invoiceMoneyFingerprint's `status`
-// field exists for maybeAutoClearBillingReview, whose window is short —
-// review opened, sibling realigns soon after — where a status change
-// plausibly means something happened to the invoice worth re-reviewing.
-// A manual resolution's window is open-ended: the invoice goes on to
-// progress through its ordinary delivery lifecycle — draft -> scheduled ->
-// sending -> sent -> paid — with NO money change at all, purely because
-// time passed and it got sent/paid normally. Reusing the status-inclusive
-// fingerprint here would reopen a correctly-resolved review the moment the
-// invoice was next sent or paid, exactly the false-reopen this fix exists
-// to stop. isDivergenceAlreadyResolved and clearBillingReview's resolution
-// record both use this one instead; maybeAutoClearBillingReview keeps
-// invoiceMoneyFingerprint (with status) unchanged.
-function invoiceMoneyOnlyFingerprint(invoice) {
-  return JSON.stringify({
-    total: invoice?.total ?? null,
-    subtotal: invoice?.subtotal ?? null,
-    discount_amount: invoice?.discount_amount ?? null,
-    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
-  });
-}
-
-function parseLineItems(raw) {
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw !== 'string' || !raw.trim()) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
 }
 
 // Members that have diverged from the invoice-holding row's date and have
