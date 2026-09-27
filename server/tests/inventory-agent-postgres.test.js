@@ -189,6 +189,36 @@ jest.setTimeout(30000);
     expect(await bellsFor(line.id)).toHaveLength(0);
   });
 
+  test('a product added by hand while the agent creates the same item is never duplicated', async () => {
+    const line = await pendingLine();
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    let signalLocked;
+    const locked = new Promise((resolve) => { signalLocked = resolve; });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    // The admin screen's insert, holding its transaction (and the catalog
+    // lock) open until the agent is waiting on that lock.
+    const manual = mockConn.transaction(async (trx) => {
+      await inventoryOperations.createCatalogProduct({ name: 'Bifen XTS', category: 'insecticide', unitSize: '96 oz', inventoryUnit: 'oz' }, { trx });
+      signalLocked();
+      await held;
+    });
+    await locked;
+    const agent = run({ ok: true, json: decision });
+    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    release();
+    await manual;
+    await agent;
+
+    expect(await mockConn('products_catalog').where({ name: 'Bifen XTS' })).toHaveLength(1);
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+  });
+
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
     const [bare] = await mockConn('products_catalog').insert({
       name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,

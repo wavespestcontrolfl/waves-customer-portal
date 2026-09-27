@@ -45,20 +45,15 @@ const LLM_TIMEOUT_MS = 20000;
 const INVENTORY_LINK = '/admin/inventory?tab=products';
 const VENDOR_LABEL = { amazon: 'Amazon delivery', siteone: 'SiteOne invoice' };
 const VENDOR_BEST = { amazon: 'Amazon', siteone: 'SiteOne' };
-// Serializes every agent-created product across concurrent applies (see
-// applyDecision's new_product branch) — a single global key, since the
-// resource being protected is "the active-product name space" as a whole,
-// not one specific product (there is no product row to lock yet).
-const NEW_PRODUCT_LOCK_KEY = 'inventory-agent:new-product';
 
 // Count-item nouns receipt-processor's own SIZE_UNITS has no reason to know
 // (it only reads measured sizes): a title reading like "12 Count" or "1
 // Station" normalizes to inventory unit 'each' (inventory-units.js already
 // supports it as the count dimension).
+const COUNT_UNIT_WORD_RE = /^(?:count|ct|each|ea|pcs|pieces|traps?|stations?|cartridges?|tablets?|dunks?|briquets?|briquettes?)$/i;
 // Plural count nouns this lane counts as items (see COUNT_UNIT_WORD_RE):
 // left beside a weight or volume reading, they mean several items.
 const PLURAL_COUNT_NOUN_RE = /\b(?:dunks|tablets|traps|stations|cartridges|briquets|briquettes|pieces|pcs)\b/i;
-const COUNT_UNIT_WORD_RE = /^(?:count|ct|each|ea|pcs|pieces|traps?|stations?|cartridges?|tablets?|dunks?|briquets?|briquettes?)$/i;
 
 const EPA_REG_RE = /\bEPA\s*(?:Reg(?:istration)?\.?)?\s*(?:No\.?|#)?\s*[:#-]?\s*(\d{1,6}-\d{1,6}(?:-\d{1,6})?)\b/i;
 
@@ -626,18 +621,13 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
         catalogChangeNote = `set ${product.name}'s container size to ${decision.setContainerSize}`;
       }
     } else {
-      // Serialize every concurrent new-product creation, then re-check the
-      // collision against the CURRENT active catalog (not the possibly
-      // stale list the decision was validated against) — two lines for the
-      // same brand-new item in one run, or a manual add landing in between,
-      // must never both create it. A hit here is never a hard failure:
-      // leave the line pending so the next run sees the (now-existing)
-      // product as a candidate and very likely resolves to 'existing'.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [NEW_PRODUCT_LOCK_KEY]);
-      const currentActive = await trx('products_catalog').where({ active: true }).select('id', 'name');
-      if (collidesWithActiveProduct(decision.newProduct.name, line.raw_title, currentActive)) {
-        return { applied: false, reason: 'name_collision_retry' };
-      }
+      // createCatalogProduct serializes every catalog insert (this agent and
+      // the admin screen alike), and the guard re-checks the collision
+      // against the CURRENT active catalog under that lock, not the possibly
+      // stale list the decision was validated against. A hit is never a hard
+      // failure: the line stays pending, and the next run sees the
+      // now-existing product as a candidate and very likely resolves to
+      // 'existing'.
       const created = await inventoryOperations.createCatalogProduct({
         name: decision.newProduct.name,
         category: decision.newProduct.category,
@@ -647,7 +637,16 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
         inventoryUnit: decision.newProduct.inventoryUnit,
         bestVendor: VENDOR_BEST[vendor] || null,
         autoReorderEnabled: false,
-      }, { trx, source: 'inventory_agent_create' });
+      }, {
+        trx,
+        source: 'inventory_agent_create',
+        // Checked under createCatalogProduct's catalog lock, which the admin
+        // "add product" screen takes too, so a product added a moment ago by
+        // hand or by another run is seen here.
+        guard: async (lockedTrx) => collidesWithActiveProduct(decision.newProduct.name, line.raw_title,
+          await lockedTrx('products_catalog').where({ active: true }).select('id', 'name')),
+      });
+      if (!created) return { applied: false, reason: 'name_collision_retry' };
       productId = created.id;
       createdProductId = created.id;
       catalogChangeNote = `added "${created.name}" to the catalog`;

@@ -242,8 +242,15 @@ async function createRestockRequest(productId, raw, options = {}) {
  * optional initial-stock movement, unchanged from the route's prior inline
  * version. options.trx runs on an already-open transaction; options.source
  * / options.actorId label the initial movement the same way adjustStock's
- * do.
+ * do. Every call takes CATALOG_CREATE_LOCK; options.guard(trx), checked
+ * under it, can refuse the insert (the call then returns null).
  */
+// Every catalog insert takes this transaction-level lock (see
+// createCatalogProduct), so one caller's duplicate check sees every product
+// another caller committed before it: the admin screen and the inventory
+// agent never create the same item side by side.
+const CATALOG_CREATE_LOCK = 'catalog:create-product';
+
 async function createCatalogProduct(fields, options = {}) {
   const {
     name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
@@ -251,6 +258,10 @@ async function createCatalogProduct(fields, options = {}) {
   } = fields;
   const initialStock = numberOrNull(inventoryOnHand);
   const run = async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CATALOG_CREATE_LOCK]);
+    // options.guard(trx) runs under the lock; a truthy result means "don't
+    // create": the call returns null and inserts nothing.
+    if (options.guard && await options.guard(trx)) return null;
     const [inserted] = await trx('products_catalog').insert({
       name, category: category || null, subcategory: subcategory || null,
       active_ingredient: activeIngredient || 'Unknown - pending SDS',
