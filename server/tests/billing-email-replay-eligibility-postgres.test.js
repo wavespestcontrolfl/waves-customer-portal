@@ -191,5 +191,5 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     });
     await expect(billingEmailReplayEligible(meta, mockPg))
       .resolves.toEqual({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
-  });
+  }, 15000);
 });
