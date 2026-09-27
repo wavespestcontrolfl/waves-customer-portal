@@ -9,8 +9,8 @@
  *     do_not_text blocks only sms, do_not_email only email);
  *   - when the rail has a TARGET invoice, that invoice must be in the
  *     verdict's eligible set — an allowed verdict about a sibling invoice is
- *     not permission (pass invoiceId: null only for aggregate-balance rails
- *     with no single target, e.g. the previsit dues reminder).
+ *     not permission. A frozen aggregate passes invoiceIds so every quoted
+ *     invoice must remain eligible; dues-only aggregates pass an empty set.
  *
  * evaluate() fails closed internally (an error is a denial), so a policy
  * blip skips the send rather than bypassing the policy.
@@ -62,9 +62,16 @@ async function collectionsChannelVerdict({
   return { permitted: true, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [] };
 }
 
+function includesQuotedInvoices(eligibleInvoiceIds, invoiceId, invoiceIds) {
+  const targets = invoiceIds ?? (invoiceId == null ? [] : [invoiceId]);
+  const eligible = new Set((eligibleInvoiceIds || []).map(String));
+  return Array.isArray(targets) && targets.every((id) => eligible.has(String(id)));
+}
+
 async function collectionsChannelPermitted({
   customerId,
   invoiceId = null,
+  invoiceIds = null,
   channel,
   purpose,
   now = new Date(),
@@ -90,9 +97,7 @@ async function collectionsChannelPermitted({
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
     return answer(false);
   }
-  const member = invoiceId == null
-    ? true
-    : (verdict.eligibleInvoiceIds || []).map(String).includes(String(invoiceId));
+  const member = includesQuotedInvoices(verdict.eligibleInvoiceIds, invoiceId, invoiceIds);
   if (!verdict.allowed || !member) {
     const why = !verdict.allowed ? verdict.denialReasons.join(', ') : 'invoice_not_eligible';
     logger.info(`[${logTag}] collections policy denied ${channel} for customer ${customerId}${invoiceId ? ` invoice ${invoiceId}` : ''}: ${why}`);
