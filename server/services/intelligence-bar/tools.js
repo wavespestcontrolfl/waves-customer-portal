@@ -2473,6 +2473,9 @@ async function activeCustomerHasLiveRecurringCoverage(customer, conn = db) {
 // coverage (the only extra query, run only when the plain check fails).
 // Returns { row, recurringCustomer } or null.
 async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db }) {
+  // An inactive customer is no member, whatever tier a cancellation left on
+  // the row (the wind-down gate can retain it) — isActivePlanCustomer's rule.
+  if (!customer || customer.active === false) return null;
   const rows = await conn('discounts')
     .whereIn('discount_key', MEMBER_DISCOUNT_KEYS)
     .where({ is_active: true, show_in_invoices: true })

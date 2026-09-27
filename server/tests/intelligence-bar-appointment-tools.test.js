@@ -891,6 +891,18 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(result).toMatchObject({ price: 250, discountId: null });
     });
 
+    test('an inactive customer with a retained tier does NOT get the member discount', async () => {
+      const retained = { ...MEMBER, active: false };
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(retained) })],
+        services: [catalog([ONE_TIME_PEST])],
+        discounts: [listing([GENERIC])],
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) })],
+      });
+      const result = await ibBookingProposal('cust-1', ONE_TIME_PEST.name, undefined);
+      expect(result).toMatchObject({ price: 250, discountId: null });
+    });
+
     test('an excluded service (bed bug) never gets the automatic 15% — the generic member row carries no service filter (Codex r2 on #5093, P1)', async () => {
       const BED_BUG = {
         id: 'svc-bb', name: 'Bed Bug Treatment Service', short_name: null, service_key: 'bed_bug', base_price: '200.00', category: 'pest',
