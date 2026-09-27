@@ -2497,6 +2497,38 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(publisher.planInternalLinksForTarget).not.toHaveBeenCalled();
   });
 
+  test('page supersession landing after merge retires the current-claim citability PR and queue park', async () => {
+    const run = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-a' });
+    const parked = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: 'claim-a',
+      bucket: 'citability_backfill', signal_metadata: {},
+    };
+    const superseded = {
+      ...parked,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:race' } },
+    };
+    const updates = setupDb({ pending: [run], queue: [parked], queueFirst: superseded });
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z',
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({
+      skipped: true, retired: true, merged: true, reason: 'citability_backfill_superseded',
+    });
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    expect(updates.find((u) => u.updates && u.updates.outcome === 'completed_published')).toBeUndefined();
+    expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
   test('operator action landing between tick-start and finalize (closed PR): superseded, never failed', async () => {
     const updates = setupDb({
       pending: [makeRun()],

@@ -83,7 +83,7 @@ const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
 // SERP on the representative query reroute it to an article would freeze
 // the key on completion without ever creating the page — and no later
 // mine could reopen it.
-const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap']);
+const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap', 'citability_backfill']);
 
 function isOperatorPinned(opportunity = {}) {
   if (OPERATOR_PINNED_BUCKETS.has(opportunity.bucket)) return true;

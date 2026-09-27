@@ -1002,6 +1002,18 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
   // A lookup error throws → transient via pollRun's catch, no finalize.
   // `autoMerged` is preserved so a just-merged PR still consumes the cap.
   const { parked, row: queueRow } = await queueRowParkedState(run);
+  if (!parked && queueRow && sameQueueClaim(queueRow, run)
+    && queueRow.bucket === 'citability_backfill'
+    && queueRow.status === 'pending_review'
+    && queueRow.skip_reason === pendingSkipReasonForRun(run)) {
+    const queue = require('./opportunity-queue')._internals;
+    if (queue.pageEditSuperseded(queueRow)) {
+      const retired = await finalizeMergedSupersededCitability(
+        run, { number: prNumber, merged_at: mergedAt }, queue, pendingSkipReasonForRun(run)
+      );
+      return { ...retired, autoMerged };
+    }
+  }
   if (!parked) return { ...(await supersedeRun(run, queueRow)), autoMerged };
 
   const target = await resolveTargetForRun(run);
