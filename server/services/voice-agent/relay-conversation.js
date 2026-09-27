@@ -465,6 +465,23 @@ function providerFor(model) {
   return (meta && meta.provider) || 'anthropic';
 }
 
+/**
+ * The effort this session's model requests actually carry, for the version
+ * and per-turn stamps: the Anthropic `output_config` effort (voiceEffortFor)
+ * on an Anthropic session, or, on an OpenAI session, the Responses
+ * `reasoning.effort` relay-openai-client.js reads from MODEL_CATALOG's
+ * `voice.reasoning` ('none' included — distinct from no effort at all). Only
+ * the Anthropic value is ever sent as `output_config`.
+ */
+function stampedEffortFor(provider, model, anthropicEffort) {
+  if (provider !== 'openai') return anthropicEffort;
+  try {
+    return require('./relay-openai-client').reasoningEffortFor(model);
+  } catch {
+    return null;
+  }
+}
+
 /** The provider client for a resolved session — never a silent Claude substitute. */
 function clientFor(provider) {
   return provider === 'openai' ? openaiClient : anthropic;
@@ -858,6 +875,9 @@ class RelayConversation {
     // no separate check is needed to keep output_config off an OpenAI round.
     this._provider = providerFor(this.model);
     this._effort = voiceEffortFor(this.model);
+    // What the stamps record: the effort actually sent, whichever provider
+    // carries it (an OpenAI session's reasoning effort is not `_effort`).
+    this._stampedEffort = stampedEffortFor(this._provider, this.model, this._effort);
     // PR C: resolved once, pinned for the session — see resolveSessionRenderer
     // and the file header. 'block' is byte-identical to this file's original
     // behavior; only 'stream' runs the new sentence-chunked path below.
@@ -1407,7 +1427,7 @@ class RelayConversation {
       model: this.model,
       provider: this._provider,
       model_fallback_reason: this._modelFallbackReason || null,
-      effort: this._effort,
+      effort: this._stampedEffort,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
       tool_schema_sha: this._toolSchemaSha,
@@ -2093,7 +2113,7 @@ class RelayConversation {
       toolMs: 0,
       toolCount: 0,
       rounds: 0,
-      effort: this._effort,
+      effort: this._stampedEffort,
       renderer: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : 'block',
       interrupted: false,
       durationUntilInterruptMs: null,

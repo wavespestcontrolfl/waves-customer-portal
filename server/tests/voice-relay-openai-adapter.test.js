@@ -307,7 +307,30 @@ describe('a full turn loop on the OpenAI adapter — tool-call round then text r
     const stamps = convo._versionStamps();
     expect(stamps.model).toBe(OPENAI_CANDIDATE);
     expect(stamps.provider).toBe('openai');
-    expect(stamps.effort).toBeNull(); // voiceEffortFor never sends output_config to a non-Anthropic model
+    // Codex r9 P2: the stamp records the reasoning effort the OpenAI request
+    // actually carried (MODEL_CATALOG voice.reasoning), never output_config.
+    expect(stamps.effort).toBe('low');
+    expect(convo._effort).toBeNull(); // voiceEffortFor never sends output_config to a non-Anthropic model
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).reasoning).toEqual({ effort: 'low' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body)).not.toHaveProperty('output_config');
+  });
+
+  test('each turn stamps the reasoning effort its OpenAI requests carried', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
+    global.fetch = mockFetchSequence([[
+      { type: 'response.completed', response: { id: 'r1', model: OPENAI_CANDIDATE, status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'Hi, how can I help?' }] }] } },
+    ]]);
+    const convo = new RelayConversation({ callSid: 'CA-openai-effort', from: '+19415551234', evalHarness: true, send: () => {} });
+    await convo.handlePrompt('hello');
+    expect(convo._turnStats).toHaveLength(1);
+    expect(convo._turnStats[0].effort).toBe('low');
+  });
+
+  test('an Anthropic session still stamps its output_config effort', () => {
+    const convo = new RelayConversation({ callSid: 'CA-anthropic-effort', from: '+19415551234', send: () => {} });
+    expect(convo._provider).toBe('anthropic');
+    expect(convo._versionStamps().effort).toBe(convo._effort);
   });
 
   // Codex r5/r6 P1: the round-1 reasoning item reaches round 2's request in
