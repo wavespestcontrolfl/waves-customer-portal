@@ -61,7 +61,7 @@ function everyDayIs(days, date) {
 // slot's and on the hour, every day the slot's date — no day at all only
 // when the slot keeps `sameDayAs`?
 function namesSlot(quote, slot, started, sameDayAs) {
-  const hours = extractHourMentions(quote);
+  const hours = extractHourMentions(quote, started);
   const days = parseDayMentions(quote, started);
   return hours.length > 0 && hours.every((h) => h.hour24 === slot.hour24 && !h.offHour)
     && everyDayIs(days, slot.date) && (days.length > 0 || slot.date === sameDayAs);

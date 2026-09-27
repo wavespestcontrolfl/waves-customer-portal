@@ -191,8 +191,10 @@ const SPELLED_NUMBERS = {
   seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
 };
 const NAMED_HOURS = { noon: 12, midnight: 0 };
-// A part of the day said in the sentence sets an hour's am/pm when none is
-// said with it ("Thursday evening at eight" is 8 PM).
+// A part of the day said right after an hour is its am/pm ("two in the
+// afternoon"). Said elsewhere in the sentence it sets the am/pm of an hour
+// marked some other way ("Thursday evening at eight" is 8 PM), and never makes
+// a number an hour by itself.
 const DAY_PART_PERIODS = { morning: 'am', afternoon: 'pm', evening: 'pm', tonight: 'pm' };
 // Minute words that, after an hour, put a spoken time off the hour.
 const MINUTE_WORDS = new Set(['fifteen', 'twenty', 'thirty', 'forty', 'fifty']);
@@ -270,12 +272,21 @@ function runsIntoDuration(toks, j) {
   return DURATION_UNITS.has(toks[k]);
 }
 
+// A part of the day said at `k`, right after an hour ("in the afternoon",
+// "this morning", "tonight"): { period, len } with its token count; period
+// null and len 0 when none is said there.
+function dayPartAt(toks, k) {
+  const lead = toks[k] === 'in' && toks[k + 1] === 'the' ? 2 : (toks[k] === 'this' ? 1 : 0);
+  const part = toks[k + lead] || '';
+  return Object.hasOwn(DAY_PART_PERIODS, part) && (lead > 0 || part === 'tonight') ? { period: DAY_PART_PERIODS[part], len: lead + 1 } : { period: null, len: 0 };
+}
+
 // The am/pm said after an hour and its minutes, past any "00" or "o'clock"
-// ("2 pm", "2 00 pm", "two o clock pm"), or null.
+// ("2 pm", "2 00 pm", "two o clock pm", "two in the afternoon"), or null.
 function periodAfter(toks, j) {
   let k = j;
   while (toks[k] === '00' || toks[k] === 'clock' || OCLOCK.has(toks[k])) k += 1;
-  return toks[k] === 'am' || toks[k] === 'pm' ? toks[k] : null;
+  return toks[k] === 'am' || toks[k] === 'pm' ? toks[k] : dayPartAt(toks, k).period;
 }
 
 // Is the hour at `i`, its mention ending at `end`, inexact: minutes before
@@ -309,9 +320,12 @@ function rangeStartHour(toks, n, rangeEnd) {
 /**
  * Hour mentions in one turn, in spoken order: { hour24, offHour, pos, end },
  * the turn-level token span of the number, its minutes and am/pm (a range's
- * whole span). A number is a clock time
+ * whole span). `started` is the call's start (a Date), for the turn's day
+ * mentions: a day's own number ("October 2", "10/2") is never an hour. A
+ * number is a clock time
  * only when something marks it as one: "at", "around" or "about" before it;
- * "ish", am/pm or o'clock after it; being a range's start ("two to four",
+ * "ish", am/pm, o'clock or a part of the day ("in the afternoon", "this
+ * morning", "tonight") after it; being a range's start ("two to four",
  * "between eight and nine" — the end belongs to the range); or minutes
  * ("two ten", "2:30", "two oh five") or a half/quarter lead-in ("half past
  * two"), both of which put it off the hour — a slot is always on the hour,
@@ -322,28 +336,33 @@ function rangeStartHour(toks, n, rangeEnd) {
  * morning; 12 and 1-6 afternoon): a period said about another time ("my 9
  * AM visit") says nothing about it.
  */
-function extractHourMentions(turnText) {
+function extractHourMentions(turnText, started) {
+  const dateTokens = new Set(parseDayMentions(turnText, started)
+    .flatMap((d) => Array.from({ length: d.end - d.pos }, (_, k) => d.pos + k)));
   const mentions = [];
   let offset = 0; // token offset of this sentence within the whole turn
   for (const sentence of splitTurnSentences(turnText)) {
     const toks = normalize(sentence).split(' ').filter(Boolean);
     const dayParts = new Set(toks.filter((t) => Object.hasOwn(DAY_PART_PERIODS, t)).map((t) => DAY_PART_PERIODS[t]));
     const sentencePeriod = dayParts.size === 1 ? [...dayParts][0] : null;
-    let rangeEnd = -1;
     for (let i = 0; i < toks.length; i += 1) {
+      if (dateTokens.has(offset + i)) continue;
       if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: inexactAt(toks, i, i + 1), pos: offset + i, end: offset + i + 1 });
       const n = hourNumber(toks[i]);
-      if (n == null || i === rangeEnd) continue;
+      if (n == null) continue;
       const after = i + 1 + minuteTokensAfter(toks, i);
-      rangeEnd = rangeEndAfter(toks, i, after);
+      const rangeEnd = rangeEndAfter(toks, i, after);
       let end = Math.max(after, rangeEnd + 1);
       while (CLOCK_TAIL.has(toks[end])) end += 1;
+      end += dayPartAt(toks, end).len;
       const offHour = after > i + 1 || inexactAt(toks, i, end);
-      const period = periodAfter(toks, after) || sentencePeriod;
-      const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
+      const ownPeriod = periodAfter(toks, after);
+      const marked = offHour || rangeEnd > 0 || ownPeriod || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;
+      const period = ownPeriod || sentencePeriod;
       mentions.push({ hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, pos: offset + i, end: offset + end });
-      i = after - 1;
+      // Past the whole mention: its minutes, a range's end, its am/pm.
+      i = end - 1;
     }
     offset += toks.length;
   }

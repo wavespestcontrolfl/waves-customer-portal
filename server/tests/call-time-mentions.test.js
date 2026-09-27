@@ -54,7 +54,7 @@ describe('parseDayMentions', () => {
 });
 
 describe('extractHourMentions', () => {
-  const hours = (text) => extractHourMentions(text).map((m) => [m.hour24, m.offHour]);
+  const hours = (text) => extractHourMentions(text, STARTED).map((m) => [m.hour24, m.offHour]);
 
   test('a number is a clock time only when something marks it as one', () => {
     expect(hours('Can we do Thursday at two? Two people will be home.')).toEqual([[14, false]]);
@@ -68,6 +68,13 @@ describe('extractHourMentions', () => {
 
   test('a part of the day in the sentence sets an hour\'s am/pm', () => {
     expect(hours('We will see you Thursday evening at eight. Tomorrow morning at 6. Morning or afternoon, at two?')).toEqual([[20, false], [6, false], [14, false]]);
+  });
+
+  test('a part of the day marks only the number it follows, and a day\'s own number is never an hour', () => {
+    expect(hours('Two in the afternoon. Nine this morning. Eight tonight.')).toEqual([[14, false], [9, false], [20, false]]);
+    expect(hours('Two of us will be home in the afternoon. October 2 in the afternoon. Oct. 2 in the morning. 10/2 in the evening.')).toEqual([]);
+    // The date's 2 is neither the hour nor the window's minutes.
+    expect(hours('October 2, 2 to 4.')).toEqual([[14, false]]);
   });
 
   test('a range counts its start, reading the end\'s am/pm across noon', () => {
@@ -84,7 +91,8 @@ describe('extractHourMentions', () => {
   });
 
   test('an hour mention spans its am/pm and o\'clock', () => {
-    expect(extractHourMentions('We will see you at 2 pm sharp, or at two o clock.').map((m) => [m.pos, m.end])).toEqual([[5, 7], [10, 13]]);
+    expect(extractHourMentions('We will see you at 2 pm sharp, or at two o clock.', STARTED).map((m) => [m.pos, m.end])).toEqual([[5, 7], [10, 13]]);
+    expect(extractHourMentions('See you at two in the afternoon or later.', STARTED).map((m) => [m.pos, m.end, m.offHour])).toEqual([[3, 7, true]]);
   });
 
   test('a length of time is not a clock time', () => {

@@ -25,6 +25,12 @@ function v2({ scheduling = {}, evidence } = {}) {
   };
 }
 const ground = (extraction, transcript = TRANSCRIPT) => groundRescheduleAgreement({ v2: extraction, transcript, callStartedAt: CALL_STARTED_AT });
+// The agent commits to `slot` saying `text`, which is also the agreed-slot quote.
+const agreedAt = (slot, text) => ground(v2({ scheduling: { confirmed_start_at: slot }, evidence: [
+  quote('/scheduling/agent_committed_booking', 'agent', text),
+  quote('/scheduling/confirmed_start_at', 'agent', text),
+  quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+] }), `Caller: Can we move my visit?\nAgent: ${text}\nCaller: ${ACCEPT}`);
 
 describe('groundRescheduleAgreement', () => {
   test('grounded quotes from both speakers naming the slot establish the agreement', () => {
@@ -76,11 +82,7 @@ describe('groundRescheduleAgreement', () => {
   });
 
   test('the agreed-slot quote must name the slot: its hour, on the hour, and its day', () => {
-    const slotQuote = (text, agentLine = text) => ground(v2({ evidence: [
-      quote('/scheduling/agent_committed_booking', 'agent', agentLine),
-      quote('/scheduling/confirmed_start_at', 'agent', text),
-      quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
-    ] }), `Caller: Can we move my visit?\nAgent: ${agentLine}\nCaller: ${ACCEPT}`);
+    const slotQuote = (text) => agreedAt(THURSDAY_2PM, text);
     expect(slotQuote('We will see you Thursday at one.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(slotQuote('We will see you Friday at two.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     for (const said of ['Thursday at two or four', 'Thursday at 2:30', 'Thursday before two', 'Thursday at two or later']) {
@@ -93,16 +95,18 @@ describe('groundRescheduleAgreement', () => {
   });
 
   test('a weekday beside an explicit date describes that date', () => {
-    const farSlot = '2026-12-17T12:00:00-05:00';
-    const at = (text) => ground(v2({ scheduling: { confirmed_start_at: farSlot }, evidence: [
-      quote('/scheduling/agent_committed_booking', 'agent', text),
-      quote('/scheduling/confirmed_start_at', 'agent', text),
-      quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
-    ] }), `Caller: Can we move my visit?\nAgent: ${text}\nCaller: ${ACCEPT}`);
+    const at = (text) => agreedAt('2026-12-17T12:00:00-05:00', text);
     expect(at('We will see you Thursday, December 17 at noon.').ok).toBe(true);
     expect(at('We will see you Wednesday, December 17 at noon.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     // A weekday alone names only this week's or next week's.
     expect(at('We will see you Thursday at noon.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+  });
+
+  test('a date\'s own number never stands in for the agreed hour', () => {
+    const at = (text) => agreedAt('2026-10-02T14:00:00-04:00', text);
+    expect(at('We will see you October 2 in the afternoon.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(at('We will see you October 2, 2 to 4.').ok).toBe(true);
+    expect(at('We will see you October 2 at two in the afternoon.').ok).toBe(true);
   });
 
   test('the moved appointment must be named by a grounded quote, and a same-day change needs no day in the slot quote', () => {
