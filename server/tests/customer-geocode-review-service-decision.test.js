@@ -4,6 +4,7 @@ const review = {
   customer_id: 'customer-1',
   primary_property_id: 'primary-1',
   primary_address_matches_review: true,
+  primary_pin_matches_review: true,
   address_snapshot: ['100 Primary Way', null, 'Bradenton', 'FL', '34205'],
   status: 'outside_area',
   latitude: null,
@@ -49,4 +50,13 @@ test('a verified primary pin remains reusable for the reviewed appointment addre
   }, {
     ...review, status: 'verified', latitude: 27.5, longitude: -82.5,
   })).toEqual({ location: { lat: 27.5, lng: -82.5 }, permanent: false });
+});
+
+test('a verified pin blocks when the matching primary pin changed', () => {
+  expect(serviceReviewDecision({
+    ...staleService,
+    service_address_line1: '100 Primary Way',
+  }, {
+    ...review, status: 'verified', latitude: 27.5, longitude: -82.5, primary_pin_matches_review: false,
+  })).toEqual({ location: null, permanent: true, reason: 'address_review_required' });
 });

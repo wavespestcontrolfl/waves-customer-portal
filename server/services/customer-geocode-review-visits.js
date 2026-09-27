@@ -104,10 +104,11 @@ function seriesParentId(row) {
 async function prelockVisitContext(trx, customerId) {
   const visits = await candidateVisits(trx, customerId);
   const roots = await recurringRoots(trx, customerId);
-  await lockTechDays(trx, visits.map(row => ({
+  const techDaysLocked = await lockTechDays(trx, visits.map(row => ({
     techId: row.technician_id,
     date: toDateStr(row.scheduled_date),
-  })));
+  })), { wait: false });
+  if (techDaysLocked === false) throw retry();
   const seriesIds = [...new Set([
     ...visits.map(seriesParentId), ...roots.map(row => row.id),
   ].filter(Boolean))].map(String).sort();
@@ -159,7 +160,14 @@ async function lockVisitContext(trx, customerId, prelocked, {
   includeProtected = false, customer, primary, verifyPin = false,
 } = {}) {
   const groups = await groupedPlans(trx, prelocked, { customer, primary, verifyPin });
-  for (const group of groups) await lockAppointmentAddress(trx, group.plan);
+  for (const group of groups) {
+    try {
+      await lockAppointmentAddress(trx, group.plan, {}, { noWait: true });
+    } catch (error) {
+      if (error?.code === 'visit_busy') throw retry();
+      throw error;
+    }
+  }
 
   const visits = await candidateVisits(trx, customerId, { lock: true });
   const roots = await recurringRoots(trx, customerId, { lock: true });
@@ -169,12 +177,10 @@ async function lockVisitContext(trx, customerId, prelocked, {
     || roots.some((row, index) => String(row.id) !== prelocked.rootIds[index]);
   if (changed) throw retry();
 
-  if (groups.length) {
-    const lockedById = new Map(visits.map(row => [String(row.id), row]));
-    if (groups.some(group => group.memberIds.some(id => isProtected(lockedById.get(id))
-      || !rowIsEligible(lockedById.get(id), customer, primary, true)))) {
-      throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
-    }
+  const lockedById = new Map(visits.map(row => [String(row.id), row]));
+  if (groups.some(group => group.memberIds.some(id => isProtected(lockedById.get(id))
+    || !rowIsEligible(lockedById.get(id), customer, primary, true)))) {
+    throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
   }
   if (verifyPin) {
     const plannedIds = new Set(groups.flatMap(group => group.memberIds));
