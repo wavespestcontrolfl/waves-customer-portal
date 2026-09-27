@@ -47,8 +47,10 @@ const HOUR_WORDS = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
 };
 // Words that state a half of the day, and the half each states.
+// A window ending at noon starts in the morning ("between 10 and noon"),
+// and one ending at midnight starts in the evening.
 const PERIOD_WORDS = {
-  am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm',
+  am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm', noon: 'am', midnight: 'pm',
 };
 
 function padded(s) { return ` ${s} `; }
@@ -107,7 +109,9 @@ function statedHour(hourWords, periodWords) {
 }
 
 // "Next Thursday" / "this coming Thursday" read as the weekday (both are
-// bounded to this week or next below); "tonight" is the call's own day.
+// bounded to this week or next below); "tonight", "this morning", "this
+// afternoon" and "this evening" are the call's own day.
+const TODAY_WORDS = /^\s*(?:tonight|this (?:morning|afternoon|evening))\s*$/i;
 const WEEKDAY_LEAD = /^\s*(?:this coming|this|coming|next)\s+/i;
 
 // Do these words name `date` (YYYY-MM-DD)? The words must be exactly one
@@ -118,7 +122,7 @@ const WEEKDAY_LEAD = /^\s*(?:this coming|this|coming|next)\s+/i;
 // next (13 days), a day of the month alone this month or next (62), a
 // month and day this year or next (366).
 function namesDate(words, date, started) {
-  const said = statedDateComponents(String(words).replace(/\btonight\b/gi, 'today').replace(WEEKDAY_LEAD, ''), started);
+  const said = statedDateComponents(String(words).replace(TODAY_WORDS, 'today').replace(WEEKDAY_LEAD, ''), started);
   if (!said) return false;
   const [year, month, day] = date.split('-').map(Number);
   const is = { year, month, day, weekday: new Date(`${date}T12:00:00Z`).getUTCDay() };

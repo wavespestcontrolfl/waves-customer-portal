@@ -116,6 +116,12 @@ describe('groundRescheduleAgreement', () => {
     expect(agreedAt('2026-09-24T20:00:00-04:00', 'We will be there between eight and nine tonight.', { day: 'tonight', hour: 'eight', period: 'tonight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' }); // "tonight" is the call's own day, not Thursday
     expect(agreedAt('2026-09-23T20:00:00-04:00', 'We will be there between eight and nine tonight.', { day: 'tonight', hour: 'eight', period: 'tonight' }).ok).toBe(true);
+    // Codex #5092 r5: "this evening" is the call's day, and a window ending at
+    // noon puts its start in the morning.
+    expect(agreedAt('2026-09-23T18:00:00-04:00', 'We can come by at six this evening.', { day: 'this evening', hour: 'six', period: 'this evening' }).ok).toBe(true);
+    expect(agreedAt('2026-09-24T10:00:00-04:00', 'We will be there between 10 and noon tomorrow.', { day: 'tomorrow', hour: '10', period: 'noon' }).ok).toBe(true);
+    expect(agreedAt('2026-09-24T22:00:00-04:00', 'We will be there between 10 and noon tomorrow.', { day: 'tomorrow', hour: '10', period: 'noon' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
   });
 
   // Codex #5092 r4: day words are read by the shared reschedule date grammar
