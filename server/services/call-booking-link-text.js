@@ -128,6 +128,7 @@ const EXCLUDED_TRIAGE_FLAGS = new Set([
   'caller_not_authorized', 'no_sms_consent_captured', 'do_not_contact_requested',
   'address_unverifiable', 'competing_quotes_active', 'spam_or_wrong_number',
   'cancellation_request', 'manual_review_requested', 'quote_promised',
+  'callback_number_needed',
 ]);
 
 const NON_CONVERSATION_DISPOSITIONS = new Set([
@@ -313,6 +314,12 @@ const STAGING_CHECKS = [
     const priced = sr.quoted_price_usd != null || sr.price?.amount_usd != null || (Array.isArray(sr.prices) && sr.prices.length > 0);
     return priced ? 'priced_on_call' : null;
   },
+  // The field itself, not only the triage flag (codex pre-push P1): the
+  // processor derives quote_promised into its own final flag list and does
+  // not merge it back into the persisted extraction's triage_flags, so the
+  // flag check above can miss a promised quote. A quote we owe is the
+  // estimate's job, never the free-visit link's.
+  (call, extraction) => (extraction.service_request?.quote_promised === true ? 'quote_promised' : null),
   (call, extraction) => (extraction.service_request?.urgency === 'no_appointment_needed' ? 'no_appointment_needed' : null),
   (call, extraction) => (extraction.scheduling?.status === 'confirmed' ? 'already_booked_on_call' : null),
   (call, extraction) => {
@@ -321,6 +328,12 @@ const STAGING_CHECKS = [
   },
   (call, extraction) => (extraction.consent?.do_not_contact_request === true ? 'do_not_contact' : null),
   (call, extraction) => (extraction.consent?.sms_consent_given === false ? 'sms_consent_refused' : null),
+  // Owner rule: never text someone who said the number isn't theirs (codex
+  // pre-push P1). Read straight off the extraction: callback_number_needed
+  // is derived into the processor's final flags, and the canonical sender
+  // does not enforce this call-specific hold. A disclaimer skips the text
+  // even when a spoken number was given, because staff call those back.
+  (call, extraction) => (extraction.caller?.caller_id_disclaimed === true ? 'caller_id_disclaimed' : null),
   (call, extraction) => (extraction.caller?.preferred_contact_method === 'phone' ? 'prefers_phone_contact' : null),
   (call, extraction) => {
     const leadQuality = extraction.sentiment_and_lead?.lead_quality;
