@@ -198,12 +198,34 @@ describe('resolveScheduledServiceCharge', () => {
       })).toBe(97.2);
     });
 
-    test('a lookup failure fails toward the fee, never toward a false $0', async () => {
+    // Codex pre-push P0: a MINT decision must fail CLOSED on a lookup
+    // failure, unlike the read-only schedule prediction — completion's own
+    // mint refuses (throws, retryable) rather than risk minting a duplicate
+    // when its equivalent lookup errors. Falling through to bill the fee
+    // here would do exactly what completion refuses to do.
+    test('a lookup failure refuses the fee (never a false mint) — the resolver, not completion, still parks it as "no chargeable amount"', async () => {
       findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
       expect(await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(97.2);
+      })).toBe(0);
+    });
+
+    // Codex pre-push P0: findFirstApplicationInvoiceForEstimateService
+    // deliberately surfaces a refunded/canceled match ahead of any live
+    // replacement (liveBeside) — completion parks THAT shape for a human
+    // (manual-billing alert), it never re-mints. Treating it as "no
+    // sibling, bill the fee" here would mint a THIRD invoice for a trip
+    // that may still have a live collectible one riding as liveBeside.
+    test('a terminal/refunded sibling match refuses the fee too — that stays completion\'s own manual-billing alert, not a remint', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
+        liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      });
+      expect(await resolveScheduledServiceCharge({
+        estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+        perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
+      })).toBe(0);
     });
 
     test('without svc/dbConn (a caller that has neither) skips the lookup and still bills the fee', async () => {

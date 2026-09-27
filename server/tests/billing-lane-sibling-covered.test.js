@@ -21,7 +21,7 @@ jest.mock('../services/estimate-first-application-invoice', () => ({
 }));
 
 const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
-const { siblingCoveredCompletionPrediction } = require('../services/billing-lane');
+const { siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, coveringSiblingInvoice } = require('../services/billing-lane');
 
 // Minimal knex-like stand-in: distinguishes the two 'scheduled_services'
 // queries the function issues by their `where` shape — a lookup by id
@@ -165,5 +165,66 @@ describe('siblingCoveredCompletionPrediction', () => {
     findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
     const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn: fakeDbConn() });
     expect(prediction).toBeNull();
+  });
+});
+
+// Codex pre-push P0 (x2): a MINT decision (resolveScheduledServiceCharge,
+// admin-schedule.js) must tell "definitely no relevant sibling invoice"
+// apart from "a lookup failure" and "a terminal/refunded match" — both of
+// which completion's own mint refuses to remint over. siblingCoveredCompletionPrediction's
+// display-safe wrapper (coveringSiblingInvoice) collapses all three
+// non-covered cases to null on purpose (advisory, never toward a false
+// "covered"); the verdict function underneath must NOT collapse them the
+// same way, so a write caller can refuse instead of bill.
+describe('siblingInvoiceCoverageVerdict', () => {
+  test('covered — a live sibling invoice', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({
+      status: 'covered',
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+    });
+  });
+
+  test('none — no match at all', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'none' });
+  });
+
+  test('none — a match naming this visit\'s OWN row (not a sibling)', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: LAWN_SVC.id, status: 'sent', total: 56.4 },
+      liveBeside: null,
+    });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'none' });
+  });
+
+  test('needs_review — a terminal/refunded match, carrying any live replacement as liveBeside', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
+      liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+    });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({
+      status: 'needs_review',
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
+      liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+    });
+  });
+
+  test('error — the shared lookup throws', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'error' });
+  });
+
+  test('coveringSiblingInvoice (the display-safe wrapper) still collapses needs_review/error to null', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
+      liveBeside: null,
+    });
+    expect(await coveringSiblingInvoice(LAWN_SVC, {})).toBeNull();
+    findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
+    expect(await coveringSiblingInvoice(LAWN_SVC, {})).toBeNull();
   });
 });

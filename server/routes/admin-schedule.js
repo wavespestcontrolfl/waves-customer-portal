@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, coveringSiblingInvoice, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -5198,7 +5198,26 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   // source estimate to look a sibling up from; any lookup failure falls
   // through to the existing gap logic below unchanged.
   const moneyGapReason = billingLane?.prediction?.kind === 'no_charge' ? billingLane.prediction.reason : null;
-  if (moneyGapReason && UNBILLED_MONEY_GAP_REASONS.has(moneyGapReason) && svc?.source_estimate_id) {
+  // The OTHER shape a sibling-covered promoted row can take (codex pre-push
+  // P1): an established per_application customer's fee survives an add-on
+  // accept (estimate-converter.js ~5212-5217 preserves it) even on THIS
+  // sibling-covered row, so predictCompletionBilling's per_application
+  // branch falls back to that lingering fee and predicts an ordinary
+  // 'invoice'/'auto_charge' — never the no_charge money gap the check above
+  // alone catches. Left unchecked, the schedule preview showed fee+extras
+  // while the Charge Now mint resolver (already sibling-aware) billed
+  // extras alone — a preview the actual charge then contradicts. Ask the
+  // SAME sibling lookup whenever this row has no price of its own,
+  // regardless of what the naive fallback already predicted — completion
+  // itself asks unconditionally too (findFirstApplicationInvoiceForEstimateService,
+  // re-checked right before minting). Excludes the RESERVED row's own
+  // attached-invoice prediction (that visit genuinely bills the combined
+  // total; it is not the one being asked "is a sibling covering YOU").
+  const hasOwnPrice = svc?.estimated_price != null && Number(svc.estimated_price) > 0;
+  const feeFallbackPrediction = !hasOwnPrice
+    && ['invoice', 'auto_charge'].includes(billingLane?.prediction?.kind)
+    && billingLane?.prediction?.source !== 'attached_invoice';
+  if (((moneyGapReason && UNBILLED_MONEY_GAP_REASONS.has(moneyGapReason)) || feeFallbackPrediction) && svc?.source_estimate_id) {
     try {
       const covered = await siblingCoveredCompletionPrediction({ svc, dbConn: db });
       if (covered) {
@@ -15653,23 +15672,37 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // unrelated charge for a trip that is already billed on the sibling's
 // invoice — Charge Now would even stack it under an operator-added
 // checkout extra, though the checkout sheet only ever previewed the extra.
-// Ask coveringSiblingInvoice (billing-lane.js) — the SAME sibling-coverage
-// determination siblingCoveredCompletionPrediction reads for the schedule
-// sheet's own prediction, so this resolver, the sheet, and completion
-// itself (which re-checks findFirstApplicationInvoiceForEstimateService
+// Ask siblingInvoiceCoverageVerdict (billing-lane.js) — the SAME
+// sibling-coverage determination siblingCoveredCompletionPrediction reads
+// for the schedule sheet's own prediction, so this resolver, the sheet, and
+// completion itself (which re-checks findFirstApplicationInvoiceForEstimateService
 // directly before minting) can never disagree — before ever falling back
 // to the fee. `svc`/`dbConn` are optional so a caller that hasn't been
 // updated (or a pure unit test) still gets the unchanged, DB-free
-// precedence; an unreadable svc/dbConn or a lookup failure fails toward
-// the existing fee, never toward a false $0.
+// precedence.
+//
+// A MINT decision must fail CLOSED here, unlike the read-only schedule
+// prediction (codex pre-push P0, x2): a lookup FAILURE ('error') means an
+// invoice may exist unseen — completion's own mint refuses to mint under
+// exactly that condition rather than risk a duplicate — and a
+// terminal/refunded match ('needs_review') is completion's own
+// manual-billing-alert shape, never a green light to remint. So EVERY
+// non-'none' verdict refuses the fee fallback (returns 0, the resolver's
+// existing "nothing chargeable" signal, which both callers already treat
+// as "don't mint — park for manual review"); only a definitive 'none'
+// (genuinely no relevant sibling invoice at all) lets the established fee
+// through.
 async function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType, svc = null, dbConn = null }) {
   const perApplicationBilling = billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType);
   const hasOwnPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   if (perApplicationBilling && !hasOwnPrice && svc && dbConn) {
+    let verdict;
     try {
-      const covering = await coveringSiblingInvoice(svc, dbConn);
-      if (covering) return 0;
-    } catch { /* fails toward the fee below */ }
+      verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+    } catch {
+      verdict = { status: 'error' };
+    }
+    if (verdict.status !== 'none') return 0;
   }
   return completionInvoiceAmount({
     estimatedPrice,

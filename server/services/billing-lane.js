@@ -757,18 +757,49 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
 // split-provenance exemption (e.g. a marker that some visits are NOT subject
 // to sibling coverage) belongs HERE, gating the `inv` match below, so every
 // caller inherits the exemption in one place instead of drifting.
-async function coveringSiblingInvoice(svc, dbConn) {
+//
+// Returns a verdict, never a bare invoice-or-null — a MINT decision (the
+// resolver below) must tell "definitely nothing to worry about" apart from
+// "couldn't tell" (codex pre-push P0, x2): collapsing a lookup FAILURE, or a
+// terminal/refunded match completion itself parks for a human
+// (findFirstApplicationInvoiceForEstimateService deliberately surfaces a
+// refunded match ahead of any live replacement — see its own header, and
+// `liveBeside` here), into a bare null let a mint decision treat either the
+// same as "no sibling, bill normally" and double-charge. completion's own
+// mint refuses (throws, retryable) on exactly these two cases
+// (invoiceLookupFailed / the terminal-invoice branch) rather than mint —
+// this verdict lets other write callers refuse the same way.
+//   { status: 'covered', invoice }                     — a live sibling invoice covers this trip
+//   { status: 'needs_review', invoice, liveBeside }     — a terminal/refunded match only a human can reconcile
+//   { status: 'error' }                                 — the lookup itself failed
+//   { status: 'none' }                                  — no relevant match at all
+async function siblingInvoiceCoverageVerdict(svc, dbConn) {
   let result;
   try {
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     result = await findFirstApplicationInvoiceForEstimateService(svc, dbConn);
   } catch {
-    return null;
+    return { status: 'error' };
   }
   const inv = result?.invoice;
-  if (!inv || !inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return null;
+  if (!inv || !inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return { status: 'none' };
   const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
-  return CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(inv.status)) ? null : inv;
+  if (CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(inv.status))) {
+    return { status: 'needs_review', invoice: inv, liveBeside: result?.liveBeside || null };
+  }
+  return { status: 'covered', invoice: inv };
+}
+
+// Read-only/advisory shape for the schedule sheet's prediction: a live
+// covering invoice, or null for every other verdict — 'needs_review' and
+// 'error' both fail toward null exactly as before (fail toward the ordinary
+// unbilled-gap verdict, never toward a false "covered"; a terminal/refunded
+// match stays completion's own manual-billing alert, not a quiet "nothing
+// to see"). A MINT decision must NOT use this shape — see
+// siblingInvoiceCoverageVerdict above.
+async function coveringSiblingInvoice(svc, dbConn) {
+  const verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+  return verdict.status === 'covered' ? verdict.invoice : null;
 }
 
 /**
@@ -907,6 +938,7 @@ module.exports = {
   monthlyDuesCollected,
   siblingCoveredCompletionPrediction,
   coveringSiblingInvoice,
+  siblingInvoiceCoverageVerdict,
   sameTripFirstApplicationBreakdown,
   verifyExtendedCompletionAnchor,
   attachedInvoiceAutoChargeLikely,
