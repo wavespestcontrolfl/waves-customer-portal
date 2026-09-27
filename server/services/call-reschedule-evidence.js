@@ -85,8 +85,9 @@ const HEDGE_MARKERS = [
   ' see if i have ', ' see if we have ', ' check the schedule ', ' look at the schedule ',
   // The caller deferring to someone or to later ("I need to ask my husband").
   ' need to ask ', ' have to ask ', ' let me ask ', ' check with my ', ' talk to my ', ' think about it ',
-  // A place in line is not an appointment ("I'll put you down on the waiting list").
-  ' waiting list ', ' wait list ', ' waitlist ', ' standby ', ' cancellation list ',
+  // A place in line, or a callback, is not an appointment ("I'll put you
+  // down on the waiting list", "for a callback about Thursday").
+  ' waiting list ', ' wait list ', ' waitlist ', ' standby ', ' cancellation list ', ' callback ', ' call back ', ' a call about ',
 ];
 
 // An explicit refusal or withdrawal after the agreement ("that won't work",
@@ -232,11 +233,16 @@ function lastDayNamesSlot(dayRefs, turns, slotDate) {
   return chain.every((m) => (pinned && m.weekday != null ? m.weekday === slotWeekday : m.candidates.has(slotDate)));
 }
 
-// Does the call's last hour reference name the slot's hour: on the hour, and
-// not offered with another ("two or four" never settles which)?
-function lastHourNamesSlot(lastHour, turns, slotHour) {
-  return lastHour.hour24 === slotHour && !lastHour.offHour
-    && !offeredWithAnotherHour(turns[lastHour.turnIdx].ns.split(' '), lastHour.pos, lastHour.end);
+// Does the call's last hour reference name the slot's hour: on the hour, not
+// offered with another ("two or four" never settles which), and not
+// superseded by another hour said unmarked after it, up to the turn completing
+// the slot ("Make that three. I'll put you down for Thursday")?
+function lastHourNamesSlot(lastHour, turns, slotHour, anchorIdx, refs) {
+  const toks = turns[lastHour.turnIdx].ns.split(' ');
+  const saidAfter = [textBesideMentions(turns[lastHour.turnIdx], lastHour.turnIdx, refs, lastHour.end),
+    ...turns.slice(lastHour.turnIdx + 1, anchorIdx + 1).map((t, k) => textBesideMentions(t, lastHour.turnIdx + 1 + k, refs))];
+  return lastHour.hour24 === slotHour && !lastHour.offHour && !offeredWithAnotherHour(toks, lastHour.pos, lastHour.end)
+    && !saidAfter.some((ns) => talksOtherTime(ns, slotHour));
 }
 
 // Does the caller turn at `idx` answer the agent's closing question
@@ -267,10 +273,11 @@ function slotRunStarts(turns, dayRefs, hourRefs, slot) {
   return [runStart(dayRefs), runStart(hourRefs)].sort((a, b) => a - b);
 }
 
-// A turn's text outside the day and hour mentions parsed from it.
-function textBesideMentions(turn, idx, refs) {
+// A turn's text outside the day and hour mentions parsed from it, from token
+// `from` on.
+function textBesideMentions(turn, idx, refs, from = 0) {
   const covered = new Set(refs.filter((m) => m.turnIdx === idx).flatMap((m) => Array.from({ length: m.end - m.pos }, (_, k) => m.pos + k)));
-  return turn.ns.split(' ').filter((_, k) => !covered.has(k)).join(' ');
+  return turn.ns.split(' ').filter((_, k) => k >= from && !covered.has(k)).join(' ');
 }
 
 // The caller's replies to the slot between it first being put to them and
@@ -380,14 +387,14 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   const lastDay = dayRefs[dayRefs.length - 1];
   const lastHour = hourRefs[hourRefs.length - 1];
   if (!lastDayNamesSlot(dayRefs, turns, slot.date)) return { ok: false, reason: 'last_day_ref_mismatch', window: null, excerpt: null };
-  if (!lastHourNamesSlot(lastHour, turns, slot.hour24)) return { ok: false, reason: 'last_hour_ref_mismatch', window: null, excerpt: null };
+  const anchorIdx = Math.max(lastDay.turnIdx, lastHour.turnIdx);
+  if (!lastHourNamesSlot(lastHour, turns, slot.hour24, anchorIdx, [...dayRefs, ...hourRefs])) return { ok: false, reason: 'last_hour_ref_mismatch', window: null, excerpt: null };
 
   // V2's confirmed_start_at and the transcript-resolved day+hour are checked
   // against the SAME `slot` object derived from confirmed_start_at, so
   // agreement between the two sources is structural here, not a separate
   // runtime comparison — there is no second, independently-derived slot to
   // diff against.
-  const anchorIdx = Math.max(lastDay.turnIdx, lastHour.turnIdx);
   const failAt = (reason, toTurn = anchorIdx) => ({ ok: false, reason, window: { fromTurn: anchorIdx, toTurn }, excerpt: excerptOf(turns, anchorIdx, toTurn, 2) });
   // The slot's day and hour words, the clauses stating them, and the rest of
   // the turn completing the slot.
