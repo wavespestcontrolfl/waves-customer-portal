@@ -962,9 +962,9 @@ async function stampAstroPrMergedAt(run, mergedAt = null) {
   // flight — a backlog could exceed the cap by one merge per tick until
   // deploys caught up. whereNull keeps the first-observed time stable
   // across the many pending re-polls. Covers human merges too (they also
-  // go live and consume the day's publish budget). Fail-soft: the marker
-  // is cap accounting — a write error must never block reconciliation
-  // (the cap just stays conservative-by-omission for that run, as before).
+  // go live and consume the day's publish budget). Callers that make a run
+  // terminal must require a successful stamp so a transient write error
+  // cannot permanently hide a real merge from the daily cap.
   try {
     const mergedAtMsRaw = mergedAt ? Date.parse(mergedAt) : NaN;
     await db('autonomous_runs')
@@ -974,8 +974,10 @@ async function stampAstroPrMergedAt(run, mergedAt = null) {
         astro_pr_merged_at: Number.isFinite(mergedAtMsRaw) ? new Date(mergedAtMsRaw) : new Date(),
         updated_at: new Date(),
       });
+    return true;
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] astro_pr_merged_at stamp failed for run ${run.id}: ${err.message}`);
+    return false;
   }
 }
 
@@ -1925,7 +1927,9 @@ async function retireSupersededCitabilityRecords(run, prNumber, queue, pendingRe
 }
 
 async function finalizeMergedSupersededCitability(run, pr, queue, pendingReason) {
-  await stampAstroPrMergedAt(run, pr.merged_at || null);
+  if (!await stampAstroPrMergedAt(run, pr.merged_at || null)) {
+    return { pending: true, transient: true, reason: 'citability_merge_stamp_pending' };
+  }
   if (!await stampTerminal(pr.number, 'merged', run)) {
     return { pending: true, transient: true, reason: 'citability_terminal_stamp_pending' };
   }

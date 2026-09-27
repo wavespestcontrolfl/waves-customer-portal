@@ -888,6 +888,45 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(indexNow.submit).not.toHaveBeenCalled();
   });
 
+  test('a merged superseded PR stays pending until its publish-cap timestamp is durable', async () => {
+    let failMergeStamp = true;
+    const updates = setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{
+        id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+        bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+      }],
+      updateResult: (table, _filters, patch) => {
+        if (table === 'autonomous_runs' && patch.astro_pr_merged_at instanceof Date && failMergeStamp) {
+          failMergeStamp = false;
+          return Promise.reject(new Error('temporary stamp failure'));
+        }
+        return 1;
+      },
+    });
+    gh.getPr.mockResolvedValue({
+      ...openPr(), state: 'closed', merged: true, merged_at: '2026-09-27T01:55:00Z',
+    });
+
+    const first = await poller.pollPending();
+
+    expect(first.results[0]).toMatchObject({
+      pending: true, transient: true, reason: 'citability_merge_stamp_pending',
+    });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+    expect(runUpdates(updates).some((u) => u.updates.skip_reason === 'superseded_by_review_queue_action')).toBe(false);
+
+    const second = await poller.pollPending();
+
+    expect(second.results[0]).toMatchObject({
+      skipped: true, retired: true, merged: true, reason: 'citability_backfill_superseded',
+    });
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+  });
+
   test.each(['locked read', 'close', 'branch retirement'])('a citability retirement failure during %s does not stop the remaining poll batch', async (failure) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
     const first = makeRun({ action_type: 'refresh_existing_page' });
