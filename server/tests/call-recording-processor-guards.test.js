@@ -947,10 +947,13 @@ describe('call recording appointment guardrails', () => {
 
     expect(incomplete.ok).toBe(false);
     expect(incomplete.missing).toEqual(expect.arrayContaining([
-      'last_name',
       'street_address',
       'zip',
     ]));
+    // last_name is ADVISORY, not blocking (owner ruling 2026-09-26) — it must
+    // never appear in `missing`.
+    expect(incomplete.missing).not.toContain('last_name');
+    expect(incomplete.advisory).toContain('last_name');
 
     const complete = validatePhoneCallAppointmentCustomer(
       {
@@ -1002,6 +1005,45 @@ describe('call recording appointment guardrails', () => {
     expect(alsoMissingZip.ok).toBe(false);
     expect(alsoMissingZip.missing).toEqual(['zip']);
     expect(alsoMissingZip.advisory).toEqual(['email']);
+  });
+
+  test('missing last name is ADVISORY — the booking proceeds (owner ruling 2026-09-26)', () => {
+    const base = {
+      first_name: 'Testcaller',
+      phone: '+19417308491',
+      email: 'testcaller@example.com',
+      address_line1: '123 Main St',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34205',
+    };
+
+    // No last name on file or extracted → still books; advisory card requested.
+    const noLastName = validatePhoneCallAppointmentCustomer(base, {}, null);
+    expect(noLastName.ok).toBe(true);
+    expect(noLastName.missing).toEqual([]);
+    expect(noLastName.advisory).toEqual(['last_name']);
+
+    // A last name extracted on THIS call (not yet persisted) satisfies it.
+    const extractedLast = validatePhoneCallAppointmentCustomer(base, { last_name: 'Alvarez' }, null);
+    expect(extractedLast.ok).toBe(true);
+    expect(extractedLast.advisory).toEqual([]);
+
+    // A stored last name satisfies it too.
+    const stored = validatePhoneCallAppointmentCustomer({ ...base, last_name: 'Alvarez' }, {}, null);
+    expect(stored.advisory).toEqual([]);
+
+    // Missing last name AND email both surface as advisory together, and
+    // neither masks a REAL missing field.
+    const bothAdvisoryPlusRealMiss = validatePhoneCallAppointmentCustomer(
+      { ...base, email: undefined, zip: '' },
+      {},
+      null
+    );
+    expect(bothAdvisoryPlusRealMiss.ok).toBe(false);
+    expect(bothAdvisoryPlusRealMiss.missing).toEqual(['zip']);
+    expect(bothAdvisoryPlusRealMiss.advisory).toEqual(expect.arrayContaining(['email', 'last_name']));
+    expect(bothAdvisoryPlusRealMiss.advisory).toHaveLength(2);
   });
 });
 
@@ -2115,5 +2157,61 @@ describe('round-13: extraction anchor and skipped-card snapshot', () => {
   test('both fileSkippedBookingCard sites pass the legacy booking-authority snapshot first', () => {
     const n = src.split('extraction: disputeSchedulingAuthority || v2ApprovedExtraction || v2CanonicalExtraction,').length - 1;
     expect(n).toBe(2);
+  });
+});
+
+// codex #4991 r1 P2: the booking no longer holds on a missing surname, and
+// the triage-flag path only raises missing_last_name for hot/warm leads with
+// an extracted first name — so the booking site itself must file the
+// advisory "get the full name" card, deduped on the same partial index.
+describe('booking site files the missing_last_name advisory card (codex #4991 r1+r2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const { sanitizeLastNameAdvisoryInsertError } = CallRecordingProcessor._test;
+
+  test('the card helper inserts an advisory missing_last_name card with the heard_name_v1 snapshot, deduped', () => {
+    const helperAt = processorSrc.indexOf('const fileLastNameAdvisoryCard = (conn) =>');
+    expect(helperAt).toBeGreaterThan(-1);
+    const section = processorSrc.slice(helperAt, helperAt + 800);
+    expect(section).toContain("flag: 'missing_last_name'");
+    expect(section).toContain("severity: 'advisory'");
+    // name_moot auto-resolve needs the filing-time V1 name snapshot.
+    expect(section).toContain('heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null }');
+    expect(section).toContain('.ignore()');
+    expect(section).toContain('.catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });');
+  });
+
+  test('it fires on the pre-fence validation AND on the under-fence revalidation, in the booking transaction', () => {
+    expect(processorSrc).toContain("if (customerValidation.advisory?.includes('last_name')) {\n            await fileLastNameAdvisoryCard(db)");
+    expect(processorSrc).toContain("if (freshValidation.advisory?.includes('last_name')) {\n                    await fileLastNameAdvisoryCard(trx);");
+  });
+
+  test('the shared rejection boundary drops synthetic customer PII while retaining only an allowlisted token', () => {
+    const pii = 'Jane Fixture jane.fixture@example.test +19415550123';
+    const raw = new Error(`insert into triage_items values ('${pii}')`);
+    raw.code = `23505-${pii}`;
+    raw.name = pii;
+    raw.stack = `${raw.name}: ${raw.message}\n    at ${pii}`;
+
+    const sanitized = sanitizeLastNameAdvisoryInsertError(raw);
+    const exposed = [sanitized.message, sanitized.code, sanitized.errorToken, sanitized.stack].join('\n');
+
+    expect(sanitized).toMatchObject({
+      message: 'last-name advisory insert failed',
+      code: 'CALL_LAST_NAME_ADVISORY_INSERT_FAILED',
+      errorToken: 'error',
+    });
+    expect(sanitized.cause).toBeUndefined();
+    expect(exposed).not.toContain('Jane Fixture');
+    expect(exposed).not.toContain('jane.fixture@example.test');
+    expect(exposed).not.toContain('+19415550123');
+  });
+
+  test('the rejection boundary preserves a safe database code without preserving raw error text', () => {
+    const raw = Object.assign(new Error('Jane Fixture violated a database constraint'), { code: '23505' });
+    const sanitized = sanitizeLastNameAdvisoryInsertError(raw);
+
+    expect(sanitized.errorToken).toBe('23505');
+    expect(sanitized.message).toBe('last-name advisory insert failed');
+    expect(sanitized.stack).not.toContain(raw.message);
   });
 });
