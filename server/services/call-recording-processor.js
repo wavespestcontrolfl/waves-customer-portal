@@ -31,6 +31,7 @@ const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
+const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 
@@ -899,6 +900,20 @@ function maskSid(sid) {
   return `${value.slice(0, 2)}...${value.slice(-6)}`;
 }
 
+const LAST_NAME_ADVISORY_INSERT_ERROR_CODE = 'CALL_LAST_NAME_ADVISORY_INSERT_FAILED';
+
+// Knex can embed bound customer fields and the failing SQL in its error
+// message/stack. Replace the rejection at this insert's boundary so both the
+// best-effort logger and the transaction failure path receive only fixed text
+// plus an allowlisted machine token. A fresh Error deliberately drops the
+// original cause and stack while still rejecting under the comms fence.
+function sanitizeLastNameAdvisoryInsertError(err) {
+  const sanitized = new Error('last-name advisory insert failed');
+  sanitized.code = LAST_NAME_ADVISORY_INSERT_ERROR_CODE;
+  sanitized.errorToken = safeErrorToken(err?.code) || safeErrorToken(err?.name) || 'error';
+  return sanitized;
+}
+
 async function updateUnifiedVoiceMessage(call, patch = {}) {
   if (!call?.twilio_call_sid) return null;
   const media = call.recording_url
@@ -1554,6 +1569,57 @@ function buildFailOpenRoutingContext({
       knownCustomer: failOpenKnownCustomer(knownCaller),
     },
   };
+}
+
+// Codex #4933 r3 P2: the SAME known-caller selection contract production's
+// Step 2 pre-lookup uses (call-recording-processor.js's own knownCustomer
+// assignment, ~L8589) — an operator relink (call.metadata.customer_link_override)
+// outranks the phone lookup entirely; an EXPLICIT unlink (an override present
+// with customer_id: null) means NO known caller at all, regardless of what the
+// phone would otherwise resolve to. The offline audit scripts used to pass
+// the persisted call.customer_id straight into buildFailOpenRoutingContext —
+// wrong whenever that column disagrees with the live selection (an operator
+// relink since the row was fetched, or a lead-webhook-auto-bridge row whose
+// resolveCallContactPhone comes back null because of broken metadata: with
+// no override, findCustomerForCallContact(null, {}) correctly returns null,
+// where reading call.customer_id would have kept using the persisted link
+// and reported an auto-route production would have held instead).
+//
+// Deliberately NOT wired into the live pass itself: production derives its
+// customerLinkOverride once, early (~L7907), from a call.metadata that a
+// later step (the claim/seal check, ~L8056) can reassign for the rest of
+// that pass — re-deriving it here from the (by-then-possibly-mutated)
+// call.metadata at the live call site risks reading a DIFFERENT override
+// than the one production actually decided on for that pass. The offline
+// scripts instead read one frozen row straight from the DB with no such
+// in-pass mutation, so recomputing the override from it here is safe and
+// matches exactly what production computed at ITS pre-lookup time for that
+// same row. Read-only (whereNull('deleted_at') selects, no writes). Takes
+// an optional opts.db (Codex #4933 r3 P1) so a caller with its OWN
+// connection — the two offline scripts that read DATABASE_PUBLIC_URL rather
+// than this module's own `db` — queries the SAME database it read the call
+// from, and never leaves a second, undestroyed connection pool open.
+async function resolveKnownCallerCustomer(call = {}, contactPhone = null, opts = {}) {
+  // opts.db (Codex #4933 r3 P1): the offline audit scripts read a DIFFERENT
+  // database than this module's own internal `db` when run outside
+  // Railway's private network (their own dbConn() prefers
+  // DATABASE_PUBLIC_URL) — querying the wrong one would silently null out
+  // or diverge every customer lookup, and a successful lookup on this
+  // module's internal `db` would also leave a second, never-destroyed
+  // connection pool open past the script's own cleanup. Every production
+  // call site omits opts.db and gets the module's own `db`, byte-identical
+  // to before.
+  const conn = opts.db || db;
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const override = metadata?.customer_link_override;
+  const customerLinkOverride = (override && typeof override === 'object' && 'customer_id' in override) ? override : null;
+  if (customerLinkOverride) {
+    return customerLinkOverride.customer_id
+      ? conn('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
+      : null;
+  }
+  return findCustomerForCallContact(contactPhone, {}, { db: opts.db });
 }
 
 function persistedOnFileAddressVerdict(call) {
@@ -2975,7 +3041,10 @@ async function avAddressUniqueOwner(matches, opts) {
     const callKey = addressKey(opts.callAddress);
     if (!callKey) return null;
     const candidateIds = matches.map((m) => m.id);
-    const props = await db('customer_properties')
+    // opts.db (Codex #4933 r3 P1): same caller-supplied connection override
+    // findCustomerForCallContact reads — this function only ever runs as
+    // its helper, sharing the same opts object.
+    const props = await (opts.db || db)('customer_properties')
       .whereIn('customer_id', candidateIds)
       .where({ active: true })
       .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
@@ -2999,11 +3068,19 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
 
+  // Codex #4933 r3 P1: an optional caller-supplied connection (opts.db) —
+  // the offline audit scripts read a DIFFERENT database than this module's
+  // own internal `db` when run outside Railway's private network
+  // (DATABASE_PUBLIC_URL vs DATABASE_URL); querying the wrong one there
+  // would silently null out or diverge every customer lookup. Every
+  // production call site omits opts.db and gets the module's own `db`,
+  // byte-identical to before.
+  const conn = opts.db || db;
   const predicateFor = (col) => (contactKey.length === 10
     ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
     : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
   const base = () => {
-    const query = db('customers').whereNull('deleted_at');
+    const query = conn('customers').whereNull('deleted_at');
     return query.where(function orPhones() {
       for (const col of CONTACT_MATCH_PHONE_COLS) {
         this.orWhereRaw(predicateFor(col), [contactKey]);
@@ -3013,7 +3090,7 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const matchedViaPrimary = (c) => samePhone(phone, c.phone);
 
   if (opts.preferredCustomerId) {
-    const preferred = await db('customers')
+    const preferred = await conn('customers')
       .where({ id: opts.preferredCustomerId })
       .whereNull('deleted_at')
       .first();
@@ -5617,7 +5694,6 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
 
   const missing = [];
   if (!String(merged.firstName || '').trim()) missing.push('first_name');
-  if (!String(merged.lastName || '').trim()) missing.push('last_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
@@ -5630,9 +5706,21 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   // site files. A stored/extracted email that fails EMAIL_RE also lands here
   // (garbled capture ≈ no capture). PERSISTED-OR-REVIEW above still governs
   // WHICH emails count when one exists.
+  //
+  // Last name is ADVISORY too (owner ruling 2026-09-26: "this is stupid,
+  // that the client has to have his last name on file to book an appt when
+  // we spoke to him, and invited us to go for an assessment" — a real
+  // outbound call where staff confirmed a Waves Assessment with only a
+  // first name went unbooked). The separate `missing_last_name` triage flag
+  // (call-triage-flags.js, ADVISORY_TRIAGE_FLAGS) already files a
+  // `name_review` card for the office to collect the surname — this gate
+  // must not ALSO hold the booking for the same missing field.
   const advisory = [];
   if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) {
     advisory.push('email');
+  }
+  if (!String(merged.lastName || '').trim()) {
+    advisory.push('last_name');
   }
 
   return { ok: missing.length === 0, missing, advisory, details: merged };
@@ -15123,7 +15211,36 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore()
-              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+              // Knex prefixes err.message with the SQL and its bound values
+              // (the extraction payload) — log only an allowlisted token.
+              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)} (${safeErrorToken(e?.code) || safeErrorToken(e?.name) || 'error'})`));
+          }
+          // Last-name advisory (owner ruling 2026-09-26): the booking no
+          // longer holds on a missing surname, so the "get the full name"
+          // card must be filed HERE — the triage-flag path only raises
+          // missing_last_name for hot/warm leads with an extracted first
+          // name. Same partial unique index as the flag path, so a card that
+          // path already filed is not duplicated. The snapshot mirrors the
+          // flag path's heard_name_v1 so triage-auto-resolve's name_moot
+          // rule can close the card once staff add the surname (codex #4991
+          // r2). Also re-run under the comms fence below (a merge-undo can
+          // remove an inherited surname while the booking waits).
+          const fileLastNameAdvisoryCard = (conn) => conn('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'missing_last_name',
+              extraction: v2ApprovedExtraction || undefined,
+              severity: 'advisory',
+              extraPayload: {
+                heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+              },
+            }))
+            .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore()
+            .catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });
+          if (customerValidation.advisory?.includes('last_name')) {
+            await fileLastNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
           }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's
@@ -15613,6 +15730,13 @@ const CallRecordingProcessor = {
                     : { ok: false, missing: ['customer_row'] };
                   if (!freshValidation.ok) {
                     throw new Error(`customer record changed while waiting on the comms fence (merge-undo in flight?) — missing ${freshValidation.missing.join(', ')}; booking held for office review`);
+                  }
+                  // The fresh row may have LOST an inherited surname the
+                  // pre-fence validation saw — file the advisory card in
+                  // this transaction so it commits with the booking
+                  // (codex #4991 r2).
+                  if (freshValidation.advisory?.includes('last_name')) {
+                    await fileLastNameAdvisoryCard(trx);
                   }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled
@@ -20385,6 +20509,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  sanitizeLastNameAdvisoryInsertError,
   legacyDisputeServiceIntent,
   backfillLinkedCustomerFromExtraction,
   prelinkedBackfillGate,
@@ -20491,6 +20616,7 @@ CallRecordingProcessor._test = {
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
+  resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
   isUsableContactPhone,
@@ -20522,6 +20648,12 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+// Codex #4933 r3 P2: the customer the audits pass INTO buildFailOpenRoutingContext
+// must be selected the same way production's Step 2 pre-lookup selects it
+// (operator override outranks the phone lookup; an explicit unlink is no
+// known caller at all) — not read straight off the persisted call.customer_id
+// column, which can disagree with the live selection.
+CallRecordingProcessor.resolveKnownCallerCustomer = resolveKnownCallerCustomer;
 
 // Production contract for the VOICE-RELAY booking path (NOT test-only): the
 // relay must decide WHICH PREMISE a voice booking lands on with the exact

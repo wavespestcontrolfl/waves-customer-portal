@@ -336,7 +336,7 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
       outcome = { created: false, skipped: 'duplicate', existingEstimateId: duplicateBlock.existingEstimateId || null };
       return;
     }
-    const built = buildAutomatedLeadDraftEstimate({ intake, customer: {}, body: {}, readiness });
+    const built = await buildAutomatedLeadDraftEstimate({ intake, customer: {}, body: {}, readiness });
     const crypto = require('crypto');
     const estimateData = built?.estimateData
       || { automation: { leadEstimateAutomation: readiness } };
