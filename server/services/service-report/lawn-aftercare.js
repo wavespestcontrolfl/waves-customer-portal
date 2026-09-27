@@ -1,7 +1,7 @@
 'use strict';
 
 const LEGACY_WATER_IN_COPY = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
-const WATER_IN_CONFIRMATION = 'Today’s application is recorded as requiring water-in; the exact amount and timing are not recorded in this report. Confirm the directions with your technician before changing irrigation.';
+const WATER_IN_CONFIRMATION = 'Today’s application is recorded as requiring water-in. Confirm the directions with your technician before changing irrigation.';
 const LEGACY_NOTE_CONFIRMATION = 'Confirm the product watering directions with your technician before changing irrigation.';
 
 function hasCreditableWaterIn(aftercare) {

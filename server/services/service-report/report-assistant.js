@@ -35,7 +35,7 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
-const WATERING_ADVICE_QUESTION_RE = /\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:(?:should|can|could|do)\s+(?:i|we)\s+)?|(?:should|can|could|do)\s+(?:i|we)\s+)(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b/;
+const WATERING_ADVICE_QUESTION_RE = /\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:(?:should|can|could|do)\s+(?:i|we)\s+)?|(?:should|can|could)\s+(?:i|we)\s+|do\s+(?:i|we)\s+(?:(?:still\s+)?(?:need|have)\s+to\s+)?|is\s+it\s+(?:still\s+)?(?:okay|ok|safe)\s+to\s+)(?:still\s+)?(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b/;
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
@@ -570,10 +570,17 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
 
 function answerConditionalWateringPlan({ weekPlan, aftercare }) {
   if (!weekPlan?.title) return aftercare.watering;
+  const plan = [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ');
+  // An explicitly historical visit cannot qualify today's plan with that
+  // visit's restriction. Keep the recorded note visible, but do not present
+  // it as a prerequisite for a later week's plan. Older payloads without the
+  // membership field keep the conservative current-week behavior.
+  if (weekPlan.visitInPlanWeek === false) {
+    return [aftercare.watering, plan].filter(Boolean).join(' ');
+  }
   const condition = aftercare.needsReview === true
     ? 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.'
     : 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.';
-  const plan = [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ');
   return [aftercare.watering, condition, plan].filter(Boolean).join(' ');
 }
 

@@ -627,9 +627,14 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
     && care.evidenceSource === 'product_instruction'
     && care.wateringHold !== true
     && !needsReview;
-  // Week membership cannot establish whether a timed restriction has ended.
-  // Keep the full plan conditional on the recorded restriction and its windows.
-  const planConditionState = PLAN_CONDITION_STATE[`${needsReview}:${care.wateringHold === true}`];
+  // Week membership cannot establish whether a timed restriction has ended,
+  // but an explicitly historical visit cannot qualify this week's plan with
+  // that old restriction. Legacy payloads without membership keep the safer
+  // current-week interpretation. The note itself remains visible below.
+  const aftercareAppliesToPlanWeek = weekPlan.visitInPlanWeek !== false;
+  const planConditionState = aftercareAppliesToPlanWeek
+    ? PLAN_CONDITION_STATE[`${needsReview}:${care.wateringHold === true}`]
+    : null;
   const planCondition = PLAN_CONDITION_COPY[planConditionState];
   const visitCredit = canCreditWaterIn && weekPlan.visitInPlanWeek === true;
   const credited = visitCredit && weekPlan.prescribesRun === true && weekPlan.afterTreatment;

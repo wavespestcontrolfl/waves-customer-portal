@@ -260,6 +260,28 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent(/Confirm the product watering directions/);
     expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
   });
+  it.each([
+    ['current-week', true],
+    ['legacy without week membership', undefined],
+  ])('keeps review-required aftercare as a plan condition for a %s visit', (_label, visitInPlanWeek) => {
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek } }} aftercare={{
+      watering: 'Apply 0.25 inches within 24 hours.',
+      evidenceSource: 'legacy_unverified_instruction',
+      needsReview: true,
+    }} />);
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent('Apply 0.25 inches within 24 hours.');
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent(/before applying the plan below/);
+  });
+  it('keeps a historical aftercare note visible without gating the current-week plan', () => {
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={{
+      watering: 'Apply 0.25 inches within 24 hours.',
+      evidenceSource: 'legacy_unverified_instruction',
+      needsReview: true,
+    }} />);
+    expect(screen.queryByTestId('lawn-week-plan-condition')).toBeNull();
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
+    expect(document.querySelector('.lawn-callout-after')).toHaveTextContent('Apply 0.25 inches within 24 hours.');
+  });
 });
 
 // The live page's Print button / Cmd+P used to print every ring the customer

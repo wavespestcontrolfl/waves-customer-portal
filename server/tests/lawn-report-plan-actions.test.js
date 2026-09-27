@@ -114,6 +114,18 @@ describe('aftercare evidence guards', () => {
     expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
   });
 
+  test('does not deny an amount or timing that the retained product note records', () => {
+    const aftercare = buildAftercare([{
+      product: {
+        irrigation_required: true,
+        irrigation_notes: 'Apply 0.25 inches within 24 hours.',
+      },
+    }]);
+    expect(aftercare.watering).toContain('Apply 0.25 inches within 24 hours.');
+    expect(aftercare.watering).toMatch(/Confirm the directions with your technician/);
+    expect(aftercare.watering).not.toMatch(/amount and timing are not recorded|not recorded in this report/);
+  });
+
   test('review and hold evidence override irrigation-changing insight copy', () => {
     const water = { status: 'deficit', weekPlan: RUN_PLAN };
     const card = (aftercare) => buildLawnInsightCards({ categories: [], water, grassLabel: 'St. Augustine', aftercare })

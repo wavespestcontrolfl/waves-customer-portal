@@ -151,7 +151,18 @@ describe('watering questions answer with the weekly plan when the report carries
   const plan = { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now; run one cycle only if less than ½" has fallen.' };
   test('plan present → the plan, before re-entry / trend routing', () => {
     const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: plan } } };
-    for (const q of ['How should I water this week?', 'What is my irrigation plan?', 'Should I run the sprinklers?', 'I found mushrooms; should I water this week?', 'I spotted dry areas; how often should I water?']) {
+    for (const q of [
+      'How should I water this week?',
+      'What is my irrigation plan?',
+      'Should I run the sprinklers?',
+      'I found mushrooms; should I water this week?',
+      'I spotted dry areas; how often should I water?',
+      'I observed dry spots; do I need to water?',
+      'I found mushrooms; is it okay to water?',
+      'I spotted fungus; do we need to run the sprinklers?',
+      'I observed dry spots; do I still need to water?',
+      'I found mushrooms; is it okay to still water?',
+    ]) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
     }
     // gh-r38: controller phrasing without the word "water" is a watering question too.
@@ -220,16 +231,55 @@ describe('watering questions answer with the weekly plan when the report carries
       findings: [{ title: 'Sprinkler area checked', detail: 'No pest activity was observed there.' }],
       reportV2: { aftercare, water: { weekPlan: null } },
     };
-    for (const question of ['How should I water?', 'What is my irrigation plan?', 'I found mushrooms; should I water this week?', 'I spotted dry areas; how often should I water?', 'I observed mushrooms; what is my irrigation plan?']) {
+    for (const question of [
+      'How should I water?',
+      'What is my irrigation plan?',
+      'I found mushrooms; should I water this week?',
+      'I spotted dry areas; how often should I water?',
+      'I observed mushrooms; what is my irrigation plan?',
+      'I observed dry spots; do I need to water?',
+      'I found mushrooms; is it okay to water?',
+      'I spotted fungus; do we need to run the sprinklers?',
+      'I observed dry spots; do I still need to water?',
+      'I found mushrooms; is it still okay to water?',
+    ]) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(expected);
       expect(answer).not.toMatch(/This week:|re-entry guidance/);
     }
-    for (const question of ['What did you find by the sprinkler?', 'How much fungus did you find by the sprinkler?']) {
+    for (const question of [
+      'What did you observe in the dry spots?',
+      'Did you find mushrooms by the sprinkler?',
+      'What fungus did you spot near the irrigation zone?',
+    ]) {
       const findingsAnswer = answerServiceReportQuestion({ question, data });
       expect(findingsAnswer).toMatch(/Sprinkler area checked/);
       expect(findingsAnswer).not.toMatch(expected);
     }
+  });
+
+  test.each([
+    [true, true],
+    [undefined, true],
+    [false, false],
+  ])('a review condition applies only when visitInPlanWeek=%s is current or legacy', (visitInPlanWeek, conditioned) => {
+    const aftercare = {
+      watering: 'Apply 0.25 inches within 24 hours.',
+      needsReview: true,
+      evidenceSource: 'legacy_unverified_instruction',
+    };
+    const data = {
+      pressureIndex: null,
+      dynamicContext: {},
+      reportV2: { aftercare, water: { weekPlan: { ...plan, visitInPlanWeek } } },
+    };
+    const answer = answerServiceReportQuestion({
+      question: 'I found mushrooms; is it okay to water?',
+      data,
+    });
+    expect(answer).toContain(aftercare.watering);
+    expect(answer).toContain(plan.title);
+    expect(answer.includes('before applying the plan below')).toBe(conditioned);
   });
 
   test.each(['snapshot', 'recommendation', 'fallback'])('generic next-step questions retain mandatory aftercare in the %s answer', (source) => {
