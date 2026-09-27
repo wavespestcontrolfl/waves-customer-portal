@@ -19,7 +19,6 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
-const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -93,10 +92,10 @@ function automationSuppressionReason(suppression) {
   return `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
 }
 
-async function activeAutomationSuppressionFor(template, email) {
+async function activeAutomationSuppressionFor(template, email, database = db) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) return null;
-  const rows = await db('email_suppressions')
+  const rows = await database('email_suppressions')
     .whereRaw('LOWER(email) = ?', [normalizedEmail])
     .where({ status: 'active' });
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
@@ -127,9 +126,12 @@ function requiresTermiteBond(templateKey) {
   return templateKey === 'service_renewal';
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
   if (testRecipient) return null;
-  const suppression = await activeAutomationSuppressionFor(template, recipient);
+  // A billing send checks suppression for the CURRENT billing recipient,
+  // inside the shared billing email authority under its recipient lock; the
+  // address snapshotted at enrollment may no longer be the one it goes to.
+  const suppression = billingSend ? null : await activeAutomationSuppressionFor(template, recipient);
   if (suppression) {
     const reason = automationSuppressionReason(suppression);
     return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason: 'email_suppressed' });
@@ -145,14 +147,82 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
   }
-  if (template.key !== 'payment_failed' || !enrollment.customer_id) return null;
-  // SELECT * keeps this consumer deployable before the additive foundation
-  // migration; an absent column is the same legacy NULL behavior.
-  const prefs = await db('notification_prefs').where({ customer_id: enrollment.customer_id }).first();
-  const selected = billingChannelAllowed(prefs, 'payment_issue', 'email');
-  if (selected === null || (selected && prefs.email_enabled !== false)) return null;
-  return blockSendAndCancelEnrollment({ enrollment, sendId,
-    reason: 'Billing delivery preference excludes Email', cancelReason: 'billing_email_deselected' });
+  return null;
+}
+
+// A payment-failed notice is billing mail, so it goes through the shared
+// billing email authority (owner ruling 2026-09-27): only to the customer's
+// CURRENT billing recipient, with the switch, the payment-issue channel
+// choice, the recipient and suppressions (this automation's own group
+// included) rechecked under the authority's locks and held through the
+// provider request. A billing recipient changed since enrollment re-points
+// the enrollment, and the step is re-rendered for them on the next tick.
+async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId, dispatch }) {
+  const { loadBillingEmailContext, dispatchUnderBillingEmailAuthority, blocked } = require('./billing-channel-email-authority');
+  const input = {
+    customerId: enrollment.customer_id, channel: 'email',
+    metadata: { billingDeliveryCategory: 'payment_issue' },
+  };
+  let context;
+  try {
+    context = await loadBillingEmailContext(input);
+  } catch (err) {
+    logger.warn(`[automation-runner] payment-failed billing email context unavailable enrollment=${enrollment.id}: ${err.message}`);
+    context = { error: blocked('BILLING_EMAIL_RECHECK_FAILED', 'Billing email authority could not be verified', { retryable: true }) };
+  }
+  if (context.error) return settlePaymentFailedRefusal({ enrollment, sendId, block: context.error });
+  const normalizedEmail = (value) => String(value || '').trim().toLowerCase();
+  if (normalizedEmail(context.recipientEmail) !== normalizedEmail(recipient)) {
+    return repointPaymentFailedEnrollment({ enrollment, sendId, current: context.recipient, email: context.recipientEmail });
+  }
+  const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+  let res;
+  await dispatchUnderBillingEmailAuthority({
+    input,
+    recipientEmail: context.recipientEmail,
+    emailSuppression: async (trx, email) => {
+      const suppression = await activeAutomationSuppressionFor(template, email, trx);
+      return suppression ? blocked('EMAIL_SUPPRESSED', automationSuppressionReason(suppression)) : null;
+    },
+    // The authority's final check runs inside sendOne, after its own
+    // provider preparation and right before the request.
+    dispatch: async (_trx, providerBoundaryCheck) => { res = await dispatch(providerBoundaryCheck); },
+    state,
+  });
+  if (state.boundaryBlock) return settlePaymentFailedRefusal({ enrollment, sendId, block: state.boundaryBlock });
+  return res;
+}
+
+// A refusal that stands until the customer's record changes cancels the
+// enrollment, as before. One the authority marks retryable (a recheck that
+// could not run, a recipient that moved mid-send) leaves the step due for
+// the next tick. A deselected Email is final here: a routed billing leg
+// re-reads it as a schedulable hold, but nothing re-reads it for this step.
+async function settlePaymentFailedRefusal({ enrollment, sendId, block }) {
+  const reason = String(block.reason || block.code || 'Billing email refused');
+  if (block.retryable === true && block.code !== 'BILLING_PREFERENCES_CHANGED') {
+    await db('automation_step_sends').where({ id: sendId }).update({
+      status: 'failed', failure_reason: reason.slice(0, 500), updated_at: new Date(),
+    });
+    return { sent: false, deferred: true, reason };
+  }
+  const cancelReason = block.code === 'BILLING_PREFERENCES_CHANGED'
+    ? 'billing_email_deselected' : String(block.code || 'billing_email_refused').toLowerCase();
+  return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason });
+}
+
+async function repointPaymentFailedEnrollment({ enrollment, sendId, current, email }) {
+  const parts = String(current?.name || '').trim().split(/\s+/).filter(Boolean);
+  await db('automation_step_sends').where({ id: sendId }).update({
+    status: 'blocked', failure_reason: 'Billing recipient changed since enrollment', updated_at: new Date(),
+  });
+  await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
+    email,
+    ...(parts.length ? { first_name: parts[0], last_name: parts.slice(1).join(' ') || null } : {}),
+    updated_at: new Date(),
+  });
+  logger.warn(`[automation-runner] enrollment=${enrollment.id} re-pointed to the current billing recipient`);
+  return { sent: false, deferred: true, reason: 'billing_recipient_changed' };
 }
 
 // {{consultation_booking}} / {{consultation_booking_text}} — the new_lead
@@ -601,22 +671,28 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
 
+  const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
-    sendId: sendRow.id, testRecipient });
+    sendId: sendRow.id, testRecipient, billingSend });
   if (deliveryBlock) return deliveryBlock;
 
+  const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
+    to: recipient,
+    fromEmail,
+    fromName: step.from_name,
+    replyTo: step.reply_to,
+    subject: testRecipient ? `[TEST] ${subject}` : subject,
+    html: html || undefined,
+    text: text || undefined,
+    categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
+    asmGroupId,
+    ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
+  });
   try {
-    const res = await sendgrid.sendOne({
-      to: recipient,
-      fromEmail,
-      fromName: step.from_name,
-      replyTo: step.reply_to,
-      subject: testRecipient ? `[TEST] ${subject}` : subject,
-      html: html || undefined,
-      text: text || undefined,
-      categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
-      asmGroupId,
-    });
+    const res = billingSend
+      ? await sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
+      : await dispatch();
+    if (res?.sent === false) return res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({
       status: 'sent',

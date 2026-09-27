@@ -24,7 +24,7 @@ const knex = require('knex');
 const sendgrid = require('../services/sendgrid-mail');
 const { dispatchUnderBillingEmailAuthority } = require('../services/billing-channel-email-authority');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { claimDueRetries, retryOne } = require('../services/transactional-email-provider-retry');
+const { claimDueRetries, recoverStaleClaims, retryOne } = require('../services/transactional-email-provider-retry');
 const { recordSuppression } = require('../services/messaging/validators/suppression');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -105,9 +105,21 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.boolean('has_attachments').notNullable().defaultTo(false);
       for (const key of ['sent_at', 'queued_at', 'updated_at', 'provider_retry_next_at', 'provider_retry_exhausted_at']) table.timestamp(key);
     });
+    await mockPg.raw('CREATE TABLE retry_commit_guard (message_id uuid REFERENCES email_messages(id) DEFERRABLE INITIALLY DEFERRED)');
     await mockPg('customers').insert({ id: customerId, email: 'qa@example.invalid' });
     await mockPg('notification_prefs').insert({ customer_id: customerId,
       email_enabled: true, billing_channels: ['email'] });
+
+    // Minimal invoices shape for the invoiceId dispatch below: just enough
+    // columns for withInvoiceDepositSettlement's own lock+read (payer_id,
+    // total, notes for its deposit-provenance scan), selfPayAtDispatch's
+    // ownership recheck (payer_id, scheduled_send_error), and
+    // billingEmailPreSendCheck's own re-read (send_claim_token).
+    await mockPg.schema.createTable('invoices', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id'); table.uuid('payer_id');
+      table.text('status'); table.text('send_claim_token'); table.text('scheduled_send_error');
+      table.text('total'); table.decimal('credit_applied'); table.jsonb('line_items'); table.text('notes');
+    });
   }, 30000);
 
   beforeEach(() => {
@@ -137,13 +149,14 @@ postgres('billing Email provider preparation on its held connection', () => {
       const outcome = await dispatchUnderBillingEmailAuthority({
         input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
         recipientEmail: 'qa@example.invalid', state,
-        dispatch: async (database) => {
+        dispatch: async (database, providerBoundaryCheck) => {
           expect(database.isTransaction).toBe(true);
           await database('estimates').insert({ id: estimateId, token, status: 'accepted', estimate_data: {} });
           await sendgrid.sendOne({
             to: 'qa@example.invalid', subject: 'Synthetic billing update',
             html: `<a href="https://example.invalid/estimate/${token}">Review</a>`,
-            text: `https://example.invalid/estimate/${token}`, withheldLinkPolicy: policy, database,
+            text: `https://example.invalid/estimate/${token}`, withheldLinkPolicy: policy,
+            database, providerBoundaryCheck,
           });
         },
       });
@@ -156,10 +169,61 @@ postgres('billing Email provider preparation on its held connection', () => {
     } finally { mockPg.removeListener('query', collect); }
   }, 15000);
 
+  // Invoice delivery's explicit billing Email leg (send-customer-message.js
+  // billingEmailLeg) composes billingEmailPreSendCheck into preSendCheck
+  // here — invoice.js's own hook re-reads `invoices` by id through the SAME
+  // database it is given, never opening a fresh root-pool connection. This
+  // pool has exactly ONE slot: a hook that reached through the plain `db`
+  // module instead of its given `database` would starve on the still-open
+  // outer transaction and this test would time out.
+  test('an invoiceId dispatch composes the invoice pre-send check under the SAME held connection, never a second slot', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: 'sending', send_claim_token: 'qa-claim',
+      total: '50.00', credit_applied: 0, line_items: JSON.stringify([]),
+    });
+    const queries = [];
+    const collect = (query) => { if (/"invoices"/.test(query.sql)) queries.push(query); };
+    mockPg.on('query', collect);
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    // Stand-in for invoice.js's billingEmailPreSendCheck: re-reads the
+    // invoice by id through the given locked handle and checks the SAME
+    // send-claim precondition checkInvoiceDeliveryPreconditions runs first.
+    const billingEmailPreSendCheck = jest.fn(async ({ database }) => {
+      const current = await database('invoices').where({ id: invoiceId }).first();
+      return current?.send_claim_token === 'qa-claim'
+        ? { ok: true }
+        : { ok: false, code: 'send_claim_lost', reason: 'Invoice send claim changed; delivery not attempted' };
+    });
+    try {
+      const outcome = await dispatchUnderBillingEmailAuthority({
+        input: { customerId, invoiceId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state,
+        // Exactly how providerPreparationCheck (send-customer-message.js)
+        // calls it: channel + the locked database it was itself given.
+        preSendCheck: async ({ database }) => billingEmailPreSendCheck({ channel: 'email', database }),
+        dispatch: async (database) => {
+          expect(database.isTransaction).toBe(true);
+          await sendgrid.sendOne({
+            to: 'qa@example.invalid', subject: 'Synthetic invoice notice',
+            html: '<p>Your invoice is ready.</p>', text: 'Your invoice is ready.', database,
+          });
+        },
+      });
+      expect(outcome).toEqual({ ok: true });
+      expect(state.providerAccepted).toBe(true);
+      expect(billingEmailPreSendCheck).toHaveBeenCalledTimes(1);
+      expect(new Set(queries.map((query) => query.__knexTxId)).size).toBe(1);
+      expect(queries[0].__knexTxId).toBeTruthy();
+    } finally { mockPg.removeListener('query', collect); }
+  }, 15000);
+
   test.each([true, false])('full billing replay on one root slot respects current Email choice %s', async (emailEnabled) => {
     const chargeDate = etDateString(addETDays(new Date(), 1));
     await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
       monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
+    await mockPg('notification_prefs').where({ customer_id: customerId })
+      .update({ email_enabled: true, billing_channels: ['email'] });
     await mockPg('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: emailEnabled });
     const estimateToken = randomUUID().replaceAll('-', '');
     await mockPg('estimates').insert({ id: randomUUID(), token: estimateToken, status: 'accepted', estimate_data: {} });
@@ -202,6 +266,120 @@ postgres('billing Email provider preparation on its held connection', () => {
       status: 'sent', sent_at: expect.any(Date), provider_retry_exhausted_at: null,
     });
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  test('a stale recovery that wins after the started marker prevents the provider request', async () => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
+      monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
+    await mockPg('notification_prefs').where({ customer_id: customerId })
+      .update({ email_enabled: true, billing_channels: ['email'] });
+    const now = new Date();
+    const stored = billingReplayRow(chargeDate, {
+      queued_at: new Date(now.getTime() - 20 * 60 * 1000), updated_at: new Date(now.getTime() - 20 * 60 * 1000),
+    });
+    await mockPg('email_messages').insert(stored);
+    const markerDatabase = mockMarkerPg;
+    mockMarkerPg = (table) => {
+      const query = markerDatabase(table);
+      if (table !== 'email_messages') return query;
+      const update = query.update.bind(query);
+      query.update = async (patch) => {
+        const count = await update(patch);
+        const rootDatabase = mockPg;
+        mockPg = writer;
+        try { await recoverStaleClaims(now, writer); } finally { mockPg = rootDatabase; }
+        return count;
+      };
+      return query;
+    };
+    try {
+      await expect(retryOne(stored)).resolves.toEqual({ sent: false, stopped: true, reason: 'claim_lost' });
+      expect(global.fetch.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(0);
+      await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+        status: 'failed', provider_handoff_phase: 'started', provider_retry_exhausted_at: expect.any(Date),
+      });
+    } finally {
+      mockMarkerPg = markerDatabase;
+    }
+  }, 15000);
+
+  test('the final retry claim lock survives provider acceptance and its token-scoped settlement', async () => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
+      monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
+    await mockPg('notification_prefs').where({ customer_id: customerId })
+      .update({ email_enabled: true, billing_channels: ['email'] });
+    const now = new Date();
+    const stored = billingReplayRow(chargeDate, {
+      queued_at: new Date(now.getTime() - 20 * 60 * 1000), updated_at: new Date(now.getTime() - 20 * 60 * 1000),
+    });
+    await mockPg('email_messages').insert(stored);
+    const rootDatabase = mockPg;
+    let recovery;
+    let recoverySettled = false;
+    global.fetch.mockImplementation(async (_url, options) => {
+      if (options.method !== 'POST') return { ok: true, headers: { get: () => null } };
+      mockPg = writer;
+      recovery = recoverStaleClaims(now, writer).finally(() => { recoverySettled = true; });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(recoverySettled).toBe(false);
+      return { ok: true, headers: { get: () => 'synthetic-provider-id' } };
+    });
+    try {
+      await expect(retryOne(stored)).resolves.toMatchObject({ sent: true });
+      await expect(recovery).resolves.toBe(0);
+      await expect(writer('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+        status: 'sent', send_attempt_token: stored.send_attempt_token,
+        provider_message_id: 'synthetic-provider-id', sent_at: expect.any(Date),
+      });
+    } finally {
+      mockPg = rootDatabase;
+    }
+  }, 15000);
+
+  test.each([false, true])('acceptance is reconciled only when durable after a commit failure (committed: %s)', async (committed) => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
+      monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
+    await mockPg('notification_prefs').where({ customer_id: customerId })
+      .update({ email_enabled: true, billing_channels: ['email'] });
+    const stored = billingReplayRow(chargeDate);
+    await mockPg('email_messages').insert(stored);
+    const originalTransaction = Object.getOwnPropertyDescriptor(mockPg, 'transaction');
+    let injectFailure = true;
+    Object.defineProperty(mockPg, 'transaction', { configurable: true, value: async (callback) => {
+      const inject = injectFailure;
+      injectFailure = false;
+      const result = await originalTransaction.value.call(mockPg, async (trx) => {
+        const outcome = await callback(trx);
+        // The deferred FK rejects COMMIT after the acceptance UPDATE ran.
+        if (inject && !committed) await trx('retry_commit_guard').insert({ message_id: randomUUID() });
+        return outcome;
+      });
+      if (inject) throw new Error('Synthetic lost commit acknowledgement');
+      return result;
+    } });
+    const reservation = require('../services/billing-email-reservation');
+    const delivered = jest.spyOn(reservation, 'markBillingEmailReservationDelivered').mockResolvedValue(true);
+    try {
+      const outcome = await retryOne(stored);
+      const saved = await mockPg('email_messages').where({ id: stored.id }).first();
+      expect(global.fetch.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1);
+      expect(saved.provider_retry_next_at).toBeNull();
+      if (committed) {
+        expect(outcome).toMatchObject({ sent: true });
+        expect(saved).toMatchObject({ status: 'sent', sent_at: expect.any(Date) });
+        expect(delivered).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, sent_at: expect.any(Date) }));
+      } else {
+        expect(outcome).toMatchObject({ sent: false, uncertain: true });
+        expect(saved).toMatchObject({ status: 'failed', sent_at: null, provider_retry_exhausted_at: expect.any(Date) });
+        expect(delivered).not.toHaveBeenCalled();
+      }
+    } finally {
+      Object.defineProperty(mockPg, 'transaction', originalTransaction);
+      delivered.mockRestore();
+    }
   }, 15000);
 
   test('a Text-only billing choice defers the same row until Email is selected again', async () => {
@@ -318,8 +496,10 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(await dispatchUnderBillingEmailAuthority({
         input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
         recipientEmail: 'qa@example.invalid', state,
-        dispatch: (database) => sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic update',
-          html: '<p>Authorized Email</p>', text: 'Authorized Email', database }),
+        dispatch: (database, providerBoundaryCheck) => sendgrid.sendOne({
+          to: 'qa@example.invalid', subject: 'Synthetic update',
+          html: '<p>Authorized Email</p>', text: 'Authorized Email', database, providerBoundaryCheck,
+        }),
       })).toEqual({ ok: true });
       expect(state.providerAccepted).toBe(true);
       expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -436,10 +616,10 @@ postgres('billing Email provider preparation on its held connection', () => {
           await waitForPhoneLock(pid);
           return { ok: true };
         },
-        dispatch: async (database) => {
+        dispatch: async (database, providerBoundaryCheck) => {
           expect(committed).toBe(false);
           await sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic billing update',
-            html: '<p>Authorized</p>', text: 'Authorized', database });
+            html: '<p>Authorized</p>', text: 'Authorized', database, providerBoundaryCheck });
           expect(committed).toBe(false);
         },
       });
