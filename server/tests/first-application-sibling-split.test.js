@@ -12,6 +12,7 @@ const {
   evaluateGroupDivergence,
   divergingSiblings,
   divergenceStateFingerprint,
+  representativeCandidatesByEstimate,
   isInvoiceSettled,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
@@ -164,6 +165,37 @@ describe('divergenceStateFingerprint', () => {
     const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
     const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 142.50 });
     expect(fp1).not.toBe(fp2);
+  });
+});
+
+describe('representativeCandidatesByEstimate', () => {
+  const row = (over = {}) => ({
+    source_estimate_id: 'est-1', invoice_status: 'draft', invoice_created_at: '2026-09-01T00:00:00Z', ...over,
+  });
+
+  test('a single row per estimate passes through unchanged', () => {
+    const r = row();
+    expect(representativeCandidatesByEstimate([r])).toEqual([r]);
+  });
+
+  test('a live row always wins over a settled row for the same estimate, regardless of order', () => {
+    const live = row({ invoice_id: 'live', invoice_status: 'draft' });
+    const settled = row({ invoice_id: 'settled', invoice_status: 'void', invoice_created_at: '2026-09-05T00:00:00Z' });
+    expect(representativeCandidatesByEstimate([settled, live])).toEqual([live]);
+    expect(representativeCandidatesByEstimate([live, settled])).toEqual([live]);
+  });
+
+  test('two live rows for the same estimate — the newer invoice wins', () => {
+    const older = row({ invoice_id: 'older', invoice_created_at: '2026-09-01T00:00:00Z' });
+    const newer = row({ invoice_id: 'newer', invoice_created_at: '2026-09-10T00:00:00Z' });
+    expect(representativeCandidatesByEstimate([older, newer])).toEqual([newer]);
+  });
+
+  test('rows for different estimates are kept independently', () => {
+    const a1 = row({ source_estimate_id: 'est-a', invoice_id: 'a' });
+    const b1 = row({ source_estimate_id: 'est-b', invoice_id: 'b' });
+    expect(representativeCandidatesByEstimate([a1, b1])).toEqual(expect.arrayContaining([a1, b1]));
+    expect(representativeCandidatesByEstimate([a1, b1])).toHaveLength(2);
   });
 });
 

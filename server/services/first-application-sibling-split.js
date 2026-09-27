@@ -113,6 +113,17 @@
 // 'split_completed' (distinct from 'realigned', which means the dates
 // actually matched again).
 //
+// One representative row per estimate (Codex round-3 P1): loadCandidates
+// can return MORE THAN ONE invoice row for the same estimate — a stale,
+// now-settled invoice a standing alert still names (the second half of
+// loadCandidates) alongside its LIVE replacement for the same anchor visit
+// (the alerted invoice was voided and re-minted). Evaluating each
+// independently — one per transaction, in whichever order loadCandidates
+// returned them — let the settled row's own 'clear' verdict undo the live
+// row's own 'alert' verdict for the SAME group. runSweepInner runs every
+// candidate through representativeCandidatesByEstimate first, which always
+// prefers a live (non-settled) row as the one that governs the group.
+//
 // Durability: each candidate estimate group is evaluated in its OWN
 // transaction. A failure on one group is logged and left for the next
 // tick to retry — it never blocks or rolls back any other group's
@@ -203,10 +214,43 @@ function divergenceStateFingerprint({ anchor, diverging, invoiceId, invoiceTotal
 
 const CANDIDATE_COLUMNS = [
   'i.id as invoice_id', 'i.status as invoice_status', 'i.invoice_number', 'i.title', 'i.notes',
-  'i.total as invoice_total',
+  'i.total as invoice_total', 'i.created_at as invoice_created_at',
   'anchor.id as anchor_id', 'anchor.customer_id', 'anchor.source_estimate_id',
   'anchor.scheduled_date as anchor_scheduled_date', 'anchor.completed_at as anchor_completed_at',
 ];
+
+// Consolidates multiple candidate INVOICE rows for the SAME estimate down
+// to ONE representative to evaluate (Codex round-3 P1 on the pre-push
+// fix): loadCandidates' second half can return a stale, now-SETTLED
+// invoice a standing alert still names alongside its LIVE replacement for
+// the same anchor visit (the alerted invoice was voided and re-minted).
+// Evaluating both independently — one per transaction, in whichever order
+// loadCandidates happened to return them — let the settled row's own
+// 'clear' verdict undo the live row's own 'alert' verdict for the SAME
+// estimate group. A live (non-settled) row always wins: that is the
+// invoice actually governing the group right now. Only when EVERY row for
+// the estimate is settled (the group is genuinely, fully resolved) does a
+// settled row represent it — any one of them decides the same 'clear'
+// verdict either way, so ties there are broken by newest invoice only for
+// determinism, not correctness.
+function representativeCandidatesByEstimate(candidates) {
+  const byEstimate = new Map();
+  for (const candidate of candidates) {
+    const key = candidate.source_estimate_id;
+    const current = byEstimate.get(key);
+    if (!current) { byEstimate.set(key, candidate); continue; }
+    const currentLive = !isInvoiceSettled(current.invoice_status);
+    const candidateLive = !isInvoiceSettled(candidate.invoice_status);
+    if (candidateLive && !currentLive) {
+      byEstimate.set(key, candidate);
+    } else if (candidateLive === currentLive) {
+      const currentCreated = current.invoice_created_at ? new Date(current.invoice_created_at).getTime() : 0;
+      const candidateCreated = candidate.invoice_created_at ? new Date(candidate.invoice_created_at).getTime() : 0;
+      if (candidateCreated > currentCreated) byEstimate.set(key, candidate);
+    }
+  }
+  return [...byEstimate.values()];
+}
 
 // invoiceId values every currently-UNREAD sibling-divergence alert names in
 // its own metadata (stamped there when raised — see raiseDivergenceAlert).
@@ -428,10 +472,14 @@ async function evaluateCandidate(conn, candidate) {
 
 async function runSweepInner() {
   const candidates = await loadCandidates(db);
+  // One representative row per estimate (Codex round-3 P1) — never evaluate
+  // a stale/settled invoice candidate and its live replacement as two
+  // independent groups for the same estimate.
+  const representatives = representativeCandidatesByEstimate(candidates);
   let alerted = 0;
   let cleared = 0;
   let failed = 0;
-  for (const candidate of candidates) {
+  for (const candidate of representatives) {
     try {
       const result = await db.transaction((trx) => evaluateCandidate(trx, candidate));
       if (result.action === 'alerted') alerted += 1;
@@ -442,7 +490,7 @@ async function runSweepInner() {
     }
   }
   if (failed) {
-    throw new Error(`${failed} of ${candidates.length} first-application sibling-split group(s) failed this tick — left for the next run`);
+    throw new Error(`${failed} of ${representatives.length} first-application sibling-split group(s) failed this tick — left for the next run`);
   }
   return {
     scanned: candidates.length, alerted, cleared, failed,
@@ -462,6 +510,7 @@ module.exports = {
   evaluateGroupDivergence,
   divergenceStateFingerprint,
   loadCandidates,
+  representativeCandidatesByEstimate,
   loadGroupMembers,
   clearStandingAlerts,
   raiseDivergenceAlert,

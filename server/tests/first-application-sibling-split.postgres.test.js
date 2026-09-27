@@ -37,6 +37,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
   let db;
   const {
     loadCandidates,
+    representativeCandidatesByEstimate,
     evaluateCandidate,
     clearStandingAlerts,
   } = require('../services/first-application-sibling-split');
@@ -116,7 +117,11 @@ suite('first-application-sibling-split — periodic sweep', () => {
   // (rollbackTest already isolates the whole test in one transaction).
   async function sweepOnce(trx, estimateId) {
     const candidates = await loadCandidates(trx);
-    const mine = candidates.filter((c) => c.source_estimate_id === estimateId);
+    // Same consolidation runFirstApplicationSiblingSplitSweep applies
+    // (Codex round-3 P1) — never evaluate a stale/settled invoice candidate
+    // and its live replacement as two independent groups.
+    const representatives = representativeCandidatesByEstimate(candidates);
+    const mine = representatives.filter((c) => c.source_estimate_id === estimateId);
     const results = [];
     for (const candidate of mine) {
       results.push(await evaluateCandidate(trx, candidate));
@@ -336,6 +341,48 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const [result] = await sweepOnce(trx, ids.estimateId);
     expect(result.action).toBe('alerted');
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+  }));
+
+  // Codex round-3 P1 on the pre-push fix: the ALERTED (anchor's own)
+  // invoice is voided and re-minted for the SAME anchor visit while the
+  // group is STILL diverging. loadCandidates now returns two rows for this
+  // one estimate — the live replacement (from the primary non-settled
+  // scan) and the stale voided original (pulled in only because the
+  // standing alert still names it) — and evaluating both independently
+  // let the voided row's 'invoice_settled' clear verdict wipe out the
+  // live row's 'alert' verdict for the very same group.
+  test('the alerted invoice is voided and replaced — the live replacement governs, not the stale voided row', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    // The original invoice is voided...
+    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+    // ...and re-minted for the SAME anchor visit (pestId) — same shared-
+    // invoice pattern, still open, the group still genuinely diverging.
+    const replacementInvoiceId = randomUUID();
+    await trx('invoices').insert({
+      id: replacementInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'First Service Application',
+      notes: `Auto-generated from accepted estimate #${ids.estimateId}. Customer selected pay per application — first application only.`,
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 }]),
+      subtotal: 153.60, total: 153.60,
+    });
+
+    const results = await sweepOnce(trx, ids.estimateId);
+    // Only ONE representative evaluated for this estimate — the live
+    // replacement — never a second, contradictory 'cleared' verdict from
+    // the stale voided row.
+    expect(results).toHaveLength(1);
+    expect(results[0].action).toBe('alerted');
+
+    const stillOpen = await readBell(trx, dedupeKey);
+    expect(stillOpen.read_at).toBeNull();
+    const metadata = typeof stillOpen.metadata === 'string' ? JSON.parse(stillOpen.metadata) : stillOpen.metadata;
+    expect(metadata.invoiceId).toBe(replacementInvoiceId);
   }));
 
   // Dismissal semantics (pre-push P1 fix): a dismissed alert must not
