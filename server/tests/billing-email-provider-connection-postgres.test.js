@@ -89,6 +89,7 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.uuid('customer_id').primary().references('id').inTable('customers'); table.boolean('email_enabled');
       table.specificType('billing_channels', 'text[]');
       table.text('billing_email');
+      table.boolean('payment_receipt');
     });
     await mockPg.schema.createTable('messaging_suppression', (table) => {
       table.text('phone').primary(); table.text('reason'); table.boolean('active'); table.timestamp('created_at');
@@ -376,19 +377,99 @@ postgres('billing Email provider preparation on its held connection', () => {
     }, 15000,
   );
 
-  test.each(['billing.notice', 'billing.receipt_notice'])('a contextless %s still reaches the existing provider retry path', async (templateKey) => {
-    const stored = billingReplayRow('2026-01-01', {
+  // #4843 gate checklist: a billing row whose producer stored no replay
+  // contract (the monthly payment receipt, say) re-authorizes the customer
+  // notice written on the row through the Email authority before its retry,
+  // instead of retrying on the generic path with only a suppression check.
+  function unregisteredRow(templateKey, categories, overrides = {}) {
+    const key = `monthly_billing_success:${randomUUID()}`;
+    return billingReplayRow('2026-01-01', {
       template_key: templateKey,
       payload_snapshot: { first_name: 'QA', notification_body: 'Payment received' },
-      categories: JSON.stringify(['billing', 'payment_receipt']),
-      trigger_event_id: `monthly_billing_success:${randomUUID()}`,
+      categories: JSON.stringify(categories),
+      trigger_event_id: key,
+      idempotency_key: `billing_channel_email:${key}:email`,
+      ...overrides,
     });
+  }
+
+  test.each([
+    ['billing.notice', ['email_template', 'billing']],
+    ['billing.receipt_notice', ['email_template', 'billing', 'payment_receipt']],
+  ])('an unregistered %s retries through the Email authority', async (templateKey, categories) => {
+    const stored = unregisteredRow(templateKey, categories);
     await mockPg('email_messages').insert(stored);
     await expect(retryOne(stored)).resolves.toMatchObject({ sent: true });
     await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
       status: 'sent', sent_at: expect.any(Date), provider_retry_exhausted_at: null,
     });
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  test('an unregistered billing row waits while the customer has dropped Email', async () => {
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: ['sms'] });
+    try {
+      const stored = unregisteredRow('billing.notice', ['email_template', 'billing']);
+      await mockPg('email_messages').insert(stored);
+      await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, error: { code: 'BILLING_PREFERENCES_CHANGED' } });
+      await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+        status: 'failed', provider_retry_next_at: expect.any(Date), provider_retry_exhausted_at: null,
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: ['email'] });
+    }
+  }, 15000);
+
+  // Payment receipts sent before billing.receipt_notice existed used
+  // billing.notice; their retries keep working.
+  test('a pre-migration receipt on billing.notice still retries through the Email authority', async () => {
+    const stored = unregisteredRow('billing.notice', ['email_template', 'billing', 'payment_receipt']);
+    await mockPg('email_messages').insert(stored);
+    await expect(retryOne(stored)).resolves.toMatchObject({ sent: true });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  // A receipt still honors notification_prefs.payment_receipt, like the
+  // first send (receipt-delivery-queue.js).
+  test('a customer who turned receipts off gets no retried receipt', async () => {
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: false });
+    try {
+      const stored = unregisteredRow('billing.receipt_notice', ['email_template', 'billing', 'payment_receipt']);
+      await mockPg('email_messages').insert(stored);
+      await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, stopped: true, reason: 'receipt_opted_out' });
+      await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+        status: 'blocked', provider_retry_next_at: null,
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: null });
+    }
+  }, 15000);
+
+  test('an autopay pre-charge reminder honors the receipt switch on its retry', async () => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: false });
+    try {
+      const stored = billingReplayRow(chargeDate);
+      await mockPg('email_messages').insert(stored);
+      await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, stopped: true, reason: 'receipt_opted_out' });
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: null });
+    }
+  }, 15000);
+
+  test('an unregistered row that does not carry its notice identity is refused, never resent', async () => {
+    const stored = unregisteredRow('billing.notice', ['email_template', 'billing'], {
+      idempotency_key: `billing_channel_email:another-notice-${randomUUID()}:email`,
+    });
+    await mockPg('email_messages').insert(stored);
+    await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, stopped: true });
+    await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+      status: 'blocked', provider_retry_next_at: null,
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
   }, 15000);
 
   test('a stale recovery that wins after the started marker prevents the provider request', async () => {

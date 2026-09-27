@@ -643,7 +643,7 @@ async function retryOne(message) {
     if (message.template_key === 'service.visit_summary') {
       const handoff = await retrySummaryThroughHandoff(message, dispatchToProvider, state);
       if (handoff.outcome) return handoff.outcome;
-    } else if (billingReplay.isBillingEmailProviderReplay(message)) {
+    } else if (billingReplay.isBillingEmailTemplateRetry(message)) {
       const handoff = await billingReplay.runBillingEmailProviderReplayHandoff(message, dispatchToProvider, {
         providerBoundaryCheck: ({ database }) => retryClaimAtProviderBoundary(message, database),
       });

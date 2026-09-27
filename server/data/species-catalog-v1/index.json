@@ -24,7 +24,7 @@
       "label": "Insect",
       "generic": "an insect",
       "next_photo": {
-        "ask": "A sharp photo of the whole insect from above and one from the side, next to a coin for size.",
+        "ask": "Use camera zoom from a safe distance to show the whole insect and the sides already visible. Do not approach, disturb, handle it, or place objects beside it.",
         "why": "Body shape, wings, legs and antennae tell us which group it belongs to."
       }
     },
@@ -42,7 +42,7 @@
       "label": "Rodent",
       "generic": "a rat, mouse, or other rodent",
       "next_photo": {
-        "ask": "A photo of the animal, droppings or gnaw marks next to a coin or ruler for size. Don’t handle droppings.",
+        "ask": "Use zoom from a safe distance for the animal or signs and their location. Do not approach or handle it, touch droppings, or place objects beside them.",
         "why": "Size and shape of droppings and marks separate rats from mice."
       }
     },
@@ -51,8 +51,17 @@
       "label": "Wildlife",
       "generic": "a wildlife visitor",
       "next_photo": {
-        "ask": "From a safe distance, a clear photo of the whole animal, head and markings included. Never approach or handle it.",
+        "ask": "Use zoom from a safe distance to show the whole animal and markings already visible. Never approach, handle, or disturb any animal, nest, burrow, or shelter.",
         "why": "Head shape, markings and size identify the animal and whether it is protected."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Guidance",
+          "inspectionRequired": true,
+          "urgency": "low"
+        }
       }
     },
     "other": {
@@ -60,7 +69,7 @@
       "label": "Other",
       "generic": "something we want a closer look at",
       "next_photo": {
-        "ask": "A sharp, well-lit close-up of the whole creature or sign, next to a coin for size.",
+        "ask": "Use camera zoom from a safe distance to show the whole creature or sign. Do not approach, disturb, touch it, or place objects beside it.",
         "why": "A clearer view of the body or the damage tells us which group to look in."
       }
     }
@@ -70,9 +79,14 @@
       "id": "ants",
       "label": "Ants",
       "generic": "an ant",
+      "aliases": [
+        "sugar ant",
+        "sugar ants",
+        "pheidole"
+      ],
       "category": "insect",
       "next_photo": {
-        "ask": "A sharp close-up from directly above, showing the waist and antennae, next to a coin for scale.",
+        "ask": "Use zoom from a safe distance for a whole-trail or whole-mound photo showing the ants' size and movement. Do not approach, disturb, handle, or place objects beside the ants.",
         "why": "The waist shape and antennae are what separate ant genera and rule out a termite swarmer."
       }
     },
@@ -84,6 +98,15 @@
       "next_photo": {
         "ask": "A close-up of the mud tubes, wings, or pellets, plus a wide shot of where on the structure you found it.",
         "why": "Location and the exact sign (tube vs. pellet vs. wing) point to which follow-up applies."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        }
       }
     },
     {
@@ -92,7 +115,7 @@
       "generic": "a cockroach",
       "category": "insect",
       "next_photo": {
-        "ask": "A side-on close-up showing the band behind the head and whether the wings reach past the abdomen.",
+        "ask": "Use camera zoom from a safe distance to show the insect or signs already visible and a wide view of the location. Do not touch or handle the insect or signs for a photo.",
         "why": "The head-band pattern and wing length separate species with very different treatments."
       }
     },
@@ -102,7 +125,7 @@
       "generic": "a mosquito",
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up of the legs and back markings while it's resting (on skin or a wall works).",
+        "ask": "Use zoom from a safe distance for legs and back markings on a wall or another non-contact surface. Do not use your skin as a perch or allow it to bite for a photo.",
         "why": "Leg-stripe pattern and back markings separate day-biting container mosquitoes from the rest."
       }
     },
@@ -112,8 +135,15 @@
       "generic": "a biting fly",
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up of the wings and body, plus where and when you were bitten (dawn, dusk, near water).",
+        "ask": "Use zoom from a safe distance for wings and body on a non-contact surface. Do not let it land on skin or bite for a photo. Tell us where and when you saw it.",
         "why": "Wing pattern and bite timing separate no-see-ums from horse, deer, and stable flies."
+      },
+      "generic_guidance": {
+        "safety_line": "Biting-fly bites can be painful, itchy, or swollen. See a doctor if a bite becomes very swollen, increasingly red or painful, or does not improve.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN155",
+          "https://ask.ifas.ufl.edu/publication/IN626"
+        ]
       }
     },
     {
@@ -122,7 +152,7 @@
       "generic": "a fly or gnat",
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up of the wings and body size next to a coin, plus where you saw it (drain, plant, window).",
+        "ask": "Use zoom from a safe distance for wings and body on a non-contact surface. Do not touch, handle, or place objects beside it. Tell us where you saw it.",
         "why": "Size, wing shape, and location separate lovebugs, drain flies, and fungus gnats."
       }
     },
@@ -132,8 +162,24 @@
       "generic": "a flea",
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up on a white paper towel or pet comb, plus a photo of any dark specks on bedding.",
+        "ask": "Use camera zoom from a safe distance to show an insect already visible on a surface or pet comb, plus any dark specks on bedding. Do not touch or handle it for a photo.",
         "why": "Jumping behavior and flea dirt confirm fleas rather than another tiny biter."
+      },
+      "generic_guidance": {
+        "safety_line": "Flea bites can itch, trigger allergies, and spread disease. See a doctor if bites become infected or a rash spreads.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN137"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "flea",
+          "serviceLabel": "Flea & Tick Treatment",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -154,15 +200,33 @@
       "next_photo": {
         "ask": "A close-up of the insect next to a mattress seam, plus a photo of any dark spotting on the fabric.",
         "why": "Body shape and the fecal-spotting pattern confirm bed bugs versus a bat bug or carpet beetle."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "Bed Bug Inspection",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        },
+        "safety_line": "Bed bug and related bug bites can itch or welt. See a doctor if a bite site looks infected or you have a strong allergic reaction.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN297",
+          "https://pmc.ncbi.nlm.nih.gov/articles/PMC10146278/"
+        ]
       }
     },
     {
       "id": "spiders",
       "label": "Spiders",
       "generic": "a spider",
+      "aliases": [
+        "banana spider",
+        "banana spiders"
+      ],
       "category": "arachnid",
       "next_photo": {
-        "ask": "A close-up of the top and underside of the abdomen from a few feet away, plus the web if there is one.",
+        "ask": "Use camera zoom from a safe distance to show the body markings and web. Photograph only surfaces already visible; do not approach, disturb, turn over, or handle the spider.",
         "why": "Underside markings and web style are what separate a harmless spider from a widow."
       }
     },
@@ -172,7 +236,7 @@
       "generic": "a scorpion or other arachnid",
       "category": "arachnid",
       "next_photo": {
-        "ask": "A close-up of the tail and pincers from a few feet away — don't handle it.",
+        "ask": "Use camera zoom from a safe distance to show the tail and pincers. Do not approach, disturb, or handle it.",
         "why": "Tail and pincer shape separate a scorpion from a harmless daddy longlegs."
       }
     },
@@ -180,10 +244,23 @@
       "id": "wasps-bees",
       "label": "Wasps, bees & hornets",
       "generic": "a wasp or bee",
+      "aliases": [
+        "bee",
+        "bees",
+        "ground wasp",
+        "ground wasps"
+      ],
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up of the nest shape and a wide shot of where it's attached, taken from a few feet away.",
+        "ask": "Use zoom from a safe distance to show the insect or nest and its location. Do not approach, touch, or disturb the nest.",
         "why": "Nest shape and location separate paper wasps, yellowjackets, and bees, which are handled very differently."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          }
+        }
       }
     },
     {
@@ -192,7 +269,7 @@
       "generic": "a caterpillar or moth",
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up of the body markings and any spines or hairs, without touching it.",
+        "ask": "Use camera zoom from a safe distance to show the body markings and any spines or hairs. Do not approach, touch, or handle it.",
         "why": "Spine pattern and color are what separate a harmless caterpillar from one that stings."
       }
     },
@@ -224,6 +301,19 @@
       "next_photo": {
         "ask": "An extreme close-up of the leaf underside where the insects are clustered, plus the whole plant.",
         "why": "Cluster shape and any waxy coating separate aphids, scale, mealybugs, and whiteflies."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "tree_shrub",
+          "serviceKey": null,
+          "serviceLabel": "Tree & Shrub Care",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/in330",
+          "https://ask.ifas.ufl.edu/publication/IN522"
+        ]
       }
     },
     {
@@ -232,7 +322,7 @@
       "generic": "a cricket or grasshopper",
       "category": "insect",
       "next_photo": {
-        "ask": "A side-on close-up showing the back legs and wings, plus where you found it (in turf, on a wall).",
+        "ask": "Use camera zoom from a safe distance to show the back legs, wings, and where you found it. Do not approach, touch, or handle it.",
         "why": "Leg shape and where it was found separate mole crickets, lubbers, and other grasshoppers."
       }
     },
@@ -240,6 +330,9 @@
       "id": "small-crawlers",
       "label": "Silverfish, earwigs & other small crawlers",
       "generic": "a small crawling insect",
+      "aliases": [
+        "archipsocus"
+      ],
       "category": "insect",
       "next_photo": {
         "ask": "A close-up from above showing the tail end (pincers vs. bristles) next to a coin.",
@@ -252,17 +345,34 @@
       "generic": "a pantry or fabric pest",
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up of the insect next to the food package or fabric it was found in.",
+        "ask": "Use camera zoom from a safe distance to show the insect and the food package or fabric where you found it. Do not touch or handle the insect for a photo.",
         "why": "What it's found in — food vs. fabric — narrows this group fast."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN153",
+          "https://ask.ifas.ufl.edu/publication/IN873"
+        ]
       }
     },
     {
       "id": "many-legged",
       "label": "Millipedes, centipedes & pillbugs",
       "generic": "a millipede, centipede, or pillbug",
+      "aliases": [
+        "centipede",
+        "centipedes"
+      ],
       "category": "other",
       "next_photo": {
-        "ask": "A close-up from the side showing how many legs there are per body segment, next to a coin.",
+        "ask": "Use zoom from a safe distance for a side view showing the legs and body segments. Do not handle it or place objects beside it.",
         "why": "Leg count per segment separates millipedes, centipedes, and pillbugs."
       }
     },
@@ -270,10 +380,25 @@
       "id": "other-insects",
       "label": "Other insects",
       "generic": "an insect",
+      "aliases": [
+        "praying mantis",
+        "praying mantises",
+        "mantid",
+        "mantids"
+      ],
       "category": "insect",
       "next_photo": {
-        "ask": "A clear, well-lit close-up of the whole insect from above and from the side.",
+        "ask": "Use camera zoom from a safe distance to show the whole insect and any markings already visible. Do not approach, disturb, or handle it.",
         "why": "A full-body view from two angles is what a generic ID needs to narrow further."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -282,7 +407,7 @@
       "generic": "a snail, slug, or worm",
       "category": "other",
       "next_photo": {
-        "ask": "A close-up of the whole body and, for anything shelled, the shell pattern.",
+        "ask": "Use camera zoom from a safe distance to show the whole body and any shell pattern. Do not approach, touch, or handle it.",
         "why": "Shell presence and body texture separate snails, slugs, and worms."
       }
     },
@@ -292,18 +417,47 @@
       "generic": "a rat or mouse, or signs of one",
       "category": "rodent",
       "next_photo": {
-        "ask": "A close-up of the droppings next to a coin, plus a wide shot of where you found them.",
+        "ask": "Use zoom from a safe distance for the animal or signs and their location. Do not approach or handle it, touch droppings, or place objects beside them.",
         "why": "Dropping size and shape, plus location, tell rat from mouse before a tech ever sets a trap."
+      },
+      "generic_guidance": {
+        "safety_line": "Avoid stirring up dust from rodent droppings or nests. See a doctor if flu-like symptoms follow a cleanup or heavy exposure.",
+        "sources": [
+          "https://www.cdc.gov/hantavirus/about/index.html"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "rodent",
+          "serviceKey": null,
+          "serviceLabel": "Rodent Inspection & Exclusion",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
       "id": "wild-mammals",
       "label": "Wild mammals",
       "generic": "a wild animal",
+      "aliases": [
+        "tree squirrel",
+        "tree squirrels"
+      ],
       "category": "wildlife",
       "next_photo": {
-        "ask": "A photo from a safe distance showing the whole animal and any digging or damage nearby.",
+        "ask": "Use zoom from a safe distance for the animal and any digging or damage already visible. Never approach, handle, or disturb the animal or its shelter.",
         "why": "Body shape and the damage pattern point to which animal it is."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": true,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -312,18 +466,42 @@
       "generic": "a lizard",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A close-up of the head and throat from a few feet away, plus the whole body for size.",
+        "ask": "Use camera zoom from a safe distance to show the whole lizard and any head, throat, and tail markings already visible. Do not approach, corner, touch, or handle it.",
         "why": "Throat color (dewlap) and overall size separate native anoles from the larger invasive lizards."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
       "id": "snakes",
       "label": "Snakes",
       "generic": "a snake",
+      "aliases": [
+        "black snake",
+        "black snakes",
+        "rat snake",
+        "rat snakes"
+      ],
       "category": "wildlife",
       "next_photo": {
-        "ask": "A photo of the head and body pattern from several feet away — never approach or handle it.",
+        "ask": "Use camera zoom from a safe distance to show the whole snake and body pattern only if already visible. Never approach, disturb, or handle it.",
         "why": "Head shape and body pattern are what separate a harmless snake from a venomous one."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -332,8 +510,21 @@
       "generic": "a turtle or tortoise",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A wide photo of the shell and the burrow entrance if there is one.",
+        "ask": "Use zoom from a safe distance for the shell and any burrow already visible. Never approach or disturb the animal or its burrow; do not handle or block either.",
         "why": "Shell shape and a burrow nearby point to a protected gopher tortoise versus another turtle."
+      },
+      "generic_guidance": {
+        "referral": "protected_leave_alone",
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://myfwc.com/wildlifehabitats/wildlife/gopher-tortoise/"
+        ]
       }
     },
     {
@@ -342,8 +533,17 @@
       "generic": "a frog or toad",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A close-up of the skin texture and the area just behind the eyes.",
+        "ask": "Use camera zoom from a safe distance to show the skin texture and area behind the eyes only if already visible. Do not approach, touch, or handle the animal.",
         "why": "Skin texture and the glands behind the eyes separate toxic toads from harmless frogs."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -352,8 +552,17 @@
       "generic": "a bird",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A photo of the whole bird and any nest, burrow, or damage nearby.",
+        "ask": "Use zoom from a safe distance for the bird and any nest, burrow, or damage already visible. Never approach, handle, or disturb the bird, nest, or burrow.",
         "why": "Body shape plus where it's nesting narrows which bird and whether it's protected."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     }
   ],
@@ -366,8 +575,25 @@
       "scientific": "Solenopsis",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up from above of the largest workers from the mound, next to a coin.",
-        "why": "Major-worker head shape and node count separate red imported fire ants from tropical fire ants."
+        "ask": "Use camera zoom from a safe distance only if you can photograph the activity without approaching or disturbing the mound. Do not place objects near the ants.",
+        "why": "Mound shape and activity help us compare ant groups while keeping you clear of stinging workers."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "safety_line": "Fire-ant stings can trigger allergic reactions. Keep people and pets away from the mound, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/in352"
+        ]
       }
     },
     {
@@ -380,6 +606,18 @@
       "next_photo": {
         "ask": "A sharp photo (or video frame) of the running trail from above.",
         "why": "The zigzag running pattern and antenna length separate crazy ants from other trailing ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/in1071"
+        ]
       }
     },
     {
@@ -392,6 +630,18 @@
       "next_photo": {
         "ask": "A close-up of the thorax profile from the side, next to a coin.",
         "why": "An evenly rounded thorax in profile is the carpenter-ant tell versus other large ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1075"
+        ]
       }
     },
     {
@@ -404,6 +654,18 @@
       "next_photo": {
         "ask": "A close-up of the mud tube broken open, plus a wide shot of where it climbs the foundation.",
         "why": "An active (moist, repaired) tube versus an old dry one changes how urgent the inspection is."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -416,6 +678,18 @@
       "next_photo": {
         "ask": "A close-up of the pellet pile and the hole above it, next to a coin.",
         "why": "Pellet shape and the kick-out hole confirm drywood termites over carpenter-ant frass."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -426,8 +700,20 @@
       "scientific": "Periplaneta / Eurycotis",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up from above showing the band behind the head and how far the wings reach.",
+        "ask": "Use camera zoom from a safe distance to show the band behind the head and wing length already visible. Do not touch or handle the insect for a photo.",
         "why": "The head band and wing length separate American, smokybrown, and woods roaches."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN298"
+        ]
       }
     },
     {
@@ -438,8 +724,20 @@
       "scientific": "Blattella / Supella",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up from above showing the stripe pattern on the back, next to a coin.",
+        "ask": "Use camera zoom from a safe distance to show the back markings already visible. Do not touch or handle the insect or place objects beside it.",
         "why": "Stripe pattern and whether it was found only indoors separate German from brown-banded roaches."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://blogs.ifas.ufl.edu/pestalert/2020/04/17/which-roach-is-around-your-yard/"
+        ]
       }
     },
     {
@@ -447,11 +745,32 @@
       "group": "mosquitoes",
       "label": "Container Mosquitoes",
       "generic": "a container-breeding mosquito",
+      "aliases": [
+        "container mosquito",
+        "container mosquitoes"
+      ],
       "scientific": "Aedes",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up of the legs and back while it rests on skin or a wall.",
+        "ask": "Use zoom from a safe distance for legs and back on a wall or another non-contact surface. Do not use your skin as a perch or allow it to bite for a photo.",
         "why": "Leg-stripe pattern and back marking separate Aedes species from each other."
+      },
+      "generic_guidance": {
+        "safety_line": "These mosquitoes can spread disease. See a doctor if fever, rash, or joint pain develops after a bite.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN792",
+          "https://ask.ifas.ufl.edu/publication/IN594"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "mosquito",
+          "serviceKey": "mosquito",
+          "serviceLabel": "Mosquito Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -459,11 +778,31 @@
       "group": "ticks-mites",
       "label": "Ticks",
       "generic": "a tick",
+      "aliases": [
+        "dog tick",
+        "dog ticks"
+      ],
       "scientific": "Ixodida",
       "rank": "order",
       "next_photo": {
-        "ask": "A close-up from above showing body shape and color, next to a coin, plus where it was attached.",
+        "ask": "Use camera zoom from a safe distance to show body shape and color already visible, and tell us where it was found. Do not touch or handle it or delay care to get a photo.",
         "why": "Body shape and where it was found (pet, person, indoors) separate tick species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "Pest Consultation",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "safety_line": "Ticks can spread disease. See a doctor if fever, headache, or a rash develops after a bite.",
+        "sources": [
+          "https://www.cdc.gov/rocky-mountain-spotted-fever/about/index.html"
+        ]
       }
     },
     {
@@ -476,6 +815,20 @@
       "next_photo": {
         "ask": "The closest photo the camera can manage, plus when and where (after yard work, near a bird nest).",
         "why": "Because mites are nearly invisible, timing and location do most of the work separating chiggers from bird/rodent mites."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        },
+        "safety_line": "Mite bites can cause persistent, itchy welts. See a doctor if the reaction is severe, you develop a fever, or it does not improve.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IG085",
+          "https://en.wikipedia.org/wiki/Rodent_mite_dermatitis"
+        ]
       }
     },
     {
@@ -486,8 +839,24 @@
       "scientific": "Latrodectus",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up of the underside of the abdomen from a few feet away — don't handle it.",
+        "ask": "From a safe distance, use camera zoom on the underside only if it is already visible. Do not approach, disturb, or handle the spider.",
         "why": "The hourglass shape and color (red vs. tan) tell black widow from brown widow."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "safety_line": "Widow bites can be medically significant. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1000"
+        ]
       }
     },
     {
@@ -500,6 +869,20 @@
       "next_photo": {
         "ask": "A photo of the whole web shape plus the spider sitting in it.",
         "why": "Web shape and body pattern separate the harmless orb-weavers from each other."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN467",
+          "https://ask.ifas.ufl.edu/publication/IN568",
+          "https://ask.ifas.ufl.edu/publication/IN1243"
+        ]
       }
     },
     {
@@ -512,6 +895,47 @@
       "next_photo": {
         "ask": "A close-up of the face and the large front eyes.",
         "why": "Eye arrangement and color pattern confirm a jumping spider and which one."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://en.wikipedia.org/wiki/Phidippus_regius"
+        ]
+      }
+    },
+    {
+      "id": "lubber-grasshoppers",
+      "group": "crickets-grasshoppers",
+      "label": "Lubber Grasshoppers",
+      "generic": "a lubber grasshopper",
+      "scientific": "Romalea",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the whole grasshopper and its colors. Do not touch or allow pets to mouth it.",
+        "why": "The bold black, yellow, or orange pattern distinguishes a lubber from other grasshoppers."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true,
+            "toxic_to_pets": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Keep pets away and do not handle it. Its defensive foam can irritate skin and eyes, and a pet can become ill if it eats one; call your vet if that happens.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN132"
+        ]
       }
     },
     {
@@ -522,8 +946,25 @@
       "scientific": "Vespidae",
       "rank": "family",
       "next_photo": {
-        "ask": "A photo of the whole nest shape from a few feet away — don't approach it closely.",
+        "ask": "Use camera zoom from a safe distance to show the whole nest shape and location without approaching or disturbing the nest.",
         "why": "An open umbrella comb versus a paper-covered nest separates paper wasps from yellowjackets and hornets."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Stings can trigger allergic reactions. See a doctor if swelling spreads beyond the sting site, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1112"
+        ]
       }
     },
     {
@@ -531,23 +972,89 @@
       "group": "wasps-bees",
       "label": "Solitary Wasps",
       "generic": "a solitary wasp",
+      "aliases": [
+        "digger wasp",
+        "digger wasps"
+      ],
       "scientific": "several families",
       "rank": "group",
       "next_photo": {
-        "ask": "A close-up of the waist and the nest material (mud tube vs. burrow) from a few feet away.",
+        "ask": "From a safe distance, use camera zoom to show the waist and nest material (mud tube vs. burrow) without approaching or disturbing it.",
         "why": "Waist shape and nest type separate mud daubers from cicada killers and other solitary wasps."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          }
+        }
       }
     },
     {
       "id": "bees",
       "group": "wasps-bees",
-      "label": "Bees",
-      "generic": "a bee",
-      "scientific": "Apidae / Megachilidae",
-      "rank": "group",
+      "label": "Honey Bees",
+      "generic": "a honey bee",
+      "scientific": "Apis mellifera",
+      "rank": "species",
       "next_photo": {
-        "ask": "A close-up of the abdomen (fuzzy vs. shiny) and the hole or gap it's using.",
-        "why": "A shiny black abdomen and a drilled hole point to carpenter bee; fuzzy and a wall gap points to honey bee."
+        "ask": "Use zoom from a safe distance to show the whole cluster or the bee activity and its location. Do not approach, disturb, spray, or seal active bees.",
+        "why": "A temporary cluster versus steady traffic through one opening separates a swarm from a colony in a structure."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "Bee Assessment & Referral",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        },
+        "referral": "bee_relocation",
+        "safety_line": "Keep your distance and do not spray or seal active honey bees. See a doctor for a serious allergic reaction, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1005"
+        ]
+      },
+      "aliases": [
+        "honey bee",
+        "honey bees",
+        "honeybee",
+        "honeybees",
+        "apis mellifera"
+      ]
+    },
+    {
+      "id": "carpenter-bees",
+      "group": "wasps-bees",
+      "label": "Carpenter Bees",
+      "generic": "a carpenter bee",
+      "scientific": "Xylocopa",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "From a safe distance, use camera zoom to show the abdomen and any round drilled opening without approaching or disturbing the bee.",
+        "why": "A shiny bare abdomen and a round drilled hole distinguish a carpenter bee from fuzzy honey bees and bumble bees."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true,
+            "structural_threat": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Female carpenter bees can sting if handled, though they rarely do. See a doctor for signs of an allergic reaction, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/view/108283"
+        ]
       }
     },
     {
@@ -558,8 +1065,24 @@
       "scientific": "several families",
       "rank": "group",
       "next_photo": {
-        "ask": "A close-up of the spines or hairs and the color pattern, without touching it.",
+        "ask": "From a safe distance, use camera zoom to show the spines or hairs and color pattern. Do not approach, touch, or handle it.",
         "why": "Spine density and color tell a merely fuzzy caterpillar from one with venomous spines."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          },
+          "serviceLine": "tree_shrub",
+          "serviceKey": null,
+          "serviceLabel": "Tree & Shrub Care",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Contact with the hairs can cause an itchy rash. Avoid touching or handling it, and seek medical care if a reaction is severe or does not improve.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1032"
+        ]
       }
     },
     {
@@ -579,10 +1102,18 @@
       "group": "caterpillars-moths",
       "label": "Garden Caterpillars",
       "generic": "a caterpillar on your plants",
+      "aliases": [
+        "armyworm",
+        "armyworms",
+        "army worm",
+        "army worms",
+        "hornworm",
+        "hornworms"
+      ],
       "scientific": "several families",
       "rank": "group",
       "next_photo": {
-        "ask": "A close-up of the caterpillar and the specific plant it's feeding on.",
+        "ask": "Use camera zoom from a safe distance to show the caterpillar and the plant it is feeding on. Do not touch or handle it.",
         "why": "The host plant plus body pattern narrows garden caterpillars fast."
       }
     },
@@ -591,10 +1122,16 @@
       "group": "beetles",
       "label": "Lady Beetles",
       "generic": "a lady beetle",
+      "aliases": [
+        "ladybug",
+        "ladybugs",
+        "ladybird beetle",
+        "ladybird beetles"
+      ],
       "scientific": "Coccinellidae",
       "rank": "family",
       "next_photo": {
-        "ask": "A close-up from above of the spot pattern and the head/pronotum color.",
+        "ask": "Use camera zoom from a safe distance to show the spot pattern and head markings. Do not touch or handle the insect for a photo.",
         "why": "Spot count and pronotum pattern separate native lady beetles from the Asian lady beetle."
       }
     },
@@ -630,8 +1167,21 @@
       "scientific": "Reduviidae",
       "rank": "family",
       "next_photo": {
-        "ask": "A close-up from above of the head shape and front legs, next to a coin.",
+        "ask": "Use camera zoom from a safe distance to show the head shape and front legs. Do not approach, touch, or handle it or place objects beside it.",
         "why": "Head and leg shape separate a beneficial assassin bug from the kissing bug that bites people."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://en.wikipedia.org/wiki/Arilus_cristatus",
+          "https://en.wikipedia.org/wiki/Zelus_longipes"
+        ]
       }
     },
     {
@@ -663,11 +1213,24 @@
       "group": "plant-pests-small",
       "label": "Whiteflies",
       "generic": "a whitefly",
+      "aliases": [
+        "white fly",
+        "white flies"
+      ],
       "scientific": "Aleyrodidae",
       "rank": "family",
       "next_photo": {
         "ask": "A close-up of the leaf underside showing the egg pattern and any waxy coating.",
         "why": "Egg-laying pattern (spiral vs. scattered) separates whitefly species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "urgency": "moderate"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1015",
+          "https://edis-news.ifas.ufl.edu/2018/05/pest-identification-guide-ficus-whitefly-singhiella-simplex"
+        ]
       }
     },
     {
@@ -702,8 +1265,25 @@
       "scientific": "Rattus",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up of the droppings next to a coin, plus a wide shot of where you found them (attic vs. ground level).",
+        "ask": "Use camera zoom from a safe distance to show the animal or signs and where you found them. Do not approach or handle the animal, touch droppings, or place objects beside them.",
         "why": "Where the activity is (roofline vs. foundation) separates roof rats from Norway rats."
+      },
+      "generic_guidance": {
+        "safety_line": "Rodents can carry disease and chew wiring. See a doctor after a bite or scratch, or if you feel unwell after contact with droppings.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1397"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true,
+            "structural_threat": true
+          },
+          "serviceLine": "rodent",
+          "serviceKey": null,
+          "serviceLabel": "Rodent Inspection & Exclusion",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -714,8 +1294,25 @@
       "scientific": "Mus",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up of the droppings next to a coin, plus the gap it may be using to get in.",
+        "ask": "Use camera zoom from a safe distance to show the animal or signs and any nearby gap. Do not approach or handle the animal, touch droppings, or place objects beside them.",
         "why": "Dropping size and a dime-sized gap nearby confirm a mouse over a rat."
+      },
+      "generic_guidance": {
+        "safety_line": "Rodents can carry disease. See a doctor after a bite or scratch, or if you feel unwell after contact with droppings.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1397"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true,
+            "structural_threat": true
+          },
+          "serviceLine": "rodent",
+          "serviceKey": null,
+          "serviceLabel": "Rodent Inspection & Exclusion",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -752,6 +1349,24 @@
       "next_photo": {
         "ask": "A wide photo of the whole animal from a safe distance, including the tail.",
         "why": "Overall size, coloring, and tail shape separate iguanas, tegus, and monitors, which need different responses."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true,
+            "structural_threat": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "referral": "wildlife_trapper",
+        "safety_line": "Keep people and pets away and do not corner or handle the lizard. It can bite or scratch and may carry Salmonella.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Common_green_iguana"
+        ]
       }
     },
     {
@@ -762,8 +1377,25 @@
       "scientific": "Viperidae / Elapidae",
       "rank": "group",
       "next_photo": {
-        "ask": "A photo of the head shape and body pattern from several feet away — never approach or handle it.",
+        "ask": "Use camera zoom from a safe distance to show the whole snake and body pattern only if already visible. Never approach, disturb, or handle it.",
         "why": "Head shape and banding pattern are the safe way to tell a venomous snake from a look-alike."
+      },
+      "generic_guidance": {
+        "referral": "wildlife_trapper",
+        "compatibility": {
+          "safety": {
+            "venomous": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Venomous Snake Removal",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "safety_line": "Keep well back and keep children and pets away. Get medical help right away if anyone is bitten.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/UW229"
+        ]
       }
     },
     {
@@ -774,8 +1406,14 @@
       "scientific": "Bufonidae",
       "rank": "family",
       "next_photo": {
-        "ask": "A close-up of the area just behind the eyes (the parotoid glands).",
+        "ask": "Use camera zoom from a safe distance to show the area behind the eyes only if already visible. Do not approach, touch, or handle the toad.",
         "why": "The size and shape of the parotoid glands separate the toxic cane toad from the native southern toad."
+      },
+      "generic_guidance": {
+        "safety_line": "Toad skin secretions can irritate a pet's mouth. Prevent pets from mouthing it, and contact a veterinarian if irritation persists.",
+        "sources": [
+          "https://edis.ifas.ufl.edu/uw432"
+        ]
       }
     },
     {
@@ -786,8 +1424,1123 @@
       "scientific": "Hylidae",
       "rank": "family",
       "next_photo": {
-        "ask": "A close-up of the toe pads and the stripe pattern along the side.",
+        "ask": "Use camera zoom from a safe distance to show the toe pads and side markings only if already visible. Do not approach, touch, or handle the frog.",
         "why": "Toe-pad size and the side stripe separate the oversized Cuban treefrog from native treefrogs."
+      }
+    },
+    {
+      "id": "irritant-treefrogs",
+      "group": "frogs-toads",
+      "parent": "treefrogs",
+      "label": "Irritant Treefrogs",
+      "generic": "a treefrog",
+      "scientific": "Osteopilus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the toe pads, skin texture, and overall size only if already visible. Do not approach, touch, or handle the frog.",
+        "why": "Large toe pads, warty skin, and overall size help separate a Cuban treefrog from native treefrogs."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true,
+            "toxic_to_pets": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Skin secretions can irritate eyes, nose, and airways, especially for people with asthma, and can bother pets that mouth one. Wash hands after contact; see a doctor if irritation doesn’t clear up.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/UW259",
+          "https://ask.ifas.ufl.edu/publication/UW394"
+        ]
+      }
+    },
+    {
+      "id": "bats",
+      "group": "wild-mammals",
+      "label": "Bats",
+      "generic": "a bat",
+      "aliases": [
+        "bat",
+        "bats"
+      ],
+      "scientific": "Chiroptera",
+      "rank": "order",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the bat, flight shape, or roost opening already visible. Never approach, disturb, touch, trap, or handle it.",
+        "why": "Wing shape, flight pattern, and roost location help distinguish a bat while keeping a safe distance."
+      },
+      "generic_guidance": {
+        "referral": "bat_exclusion",
+        "compatibility": {
+          "safety": {
+            "stinging": false,
+            "venomous": false,
+            "disease_vector": true,
+            "structural_threat": false
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral (exclusion only)",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "sources": [
+          "https://www.cdc.gov/rabies/prevention/bats.html",
+          "https://www.cdc.gov/coca/media/pdfs/2026/CDC-COCA-Call-Rabies-still-here.pdf",
+          "https://myfwc.com/conservation/you-conserve/wildlife/bats/bats-in-buildings/"
+        ],
+        "safety_line": "Never touch a bat bare-handed. See a doctor right away after a bite or scratch, or if you wake up with a bat in the room."
+      }
+    },
+    {
+      "id": "millipedes",
+      "group": "many-legged",
+      "label": "Millipedes",
+      "generic": "a millipede",
+      "aliases": [
+        "millipede",
+        "millipedes"
+      ],
+      "scientific": "Diplopoda",
+      "rank": "class",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for a side view showing the legs and body segments. Do not handle it or place objects beside it.",
+        "why": "Body shape, color, and leg count per segment help separate common millipedes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Millipede defensive secretions can irritate skin or eyes. Avoid bare-hand contact and sweep them up instead of picking them up.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IG093"
+        ]
+      }
+    },
+    {
+      "id": "stinging-ants",
+      "group": "ants",
+      "label": "Stinging Ants",
+      "generic": "a stinging ant",
+      "scientific": "several genera",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole ant and any mound or trail. Do not disturb or handle it.",
+        "why": "Body shape and the nesting pattern narrow the ant group while keeping you away from a possible sting."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "A sting can be sharply painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/in536"
+        ]
+      }
+    },
+    {
+      "id": "venomous-caterpillars",
+      "group": "caterpillars-moths",
+      "label": "Caterpillars with Venomous Spines",
+      "generic": "a caterpillar with venomous spines",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the spines and color pattern. Do not touch or handle the caterpillar.",
+        "why": "The spine pattern separates caterpillars with venomous spines from harmless fuzzy species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "urgency": "low"
+        },
+        "safety_line": "Do not touch a caterpillar with spines or dense hairs. Call 911 if someone has trouble breathing, and see a doctor for severe pain or a spreading rash.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/in014",
+          "https://ask.ifas.ufl.edu/publication/IN834"
+        ]
+      }
+    },
+    {
+      "id": "filth-flies",
+      "group": "flies-gnats",
+      "label": "Health-Relevant Flies",
+      "generic": "a common fly",
+      "scientific": "Muscidae / Calliphoridae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for the body, wings, and the surface where it landed. Do not touch or handle it.",
+        "why": "Body shape and location separate health-relevant flies from harmless outdoor look-alikes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "These flies can carry bacteria from waste to food and counters. Keep food covered and clean surfaces where they land.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/view/138696",
+          "https://edis.ifas.ufl.edu/publication/in903"
+        ]
+      }
+    },
+    {
+      "id": "non-biting-outdoor-flies",
+      "group": "flies-gnats",
+      "label": "Non-Biting Outdoor Flies",
+      "generic": "a non-biting outdoor fly",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for the body, wings, and the surface where it landed. Do not touch or handle it.",
+        "why": "Body shape and location separate health-relevant flies from harmless outdoor look-alikes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "These flies do not bite, but large swarms and dead-insect buildup can bother people with asthma or insect allergies.",
+        "sources": [
+          "https://blogs.ifas.ufl.edu/polkco/2017/10/11/aquatic-midges-also-known-as-blind-mosquitoes/"
+        ]
+      }
+    },
+    {
+      "id": "toxic-toads",
+      "group": "frogs-toads",
+      "label": "Potentially Toxic Toads",
+      "generic": "a toad that may be toxic to pets",
+      "scientific": "Bufonidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the area behind the eyes. Do not touch or handle the toad, and keep pets away.",
+        "why": "The glands behind the eyes help separate a potentially toxic toad from a harmless native species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "safety_line": "Keep pets away. If a pet mouths the toad, wipe its mouth and gums with a cloth, rinse only with its head tilted down, and call your vet right away.",
+        "sources": [
+          "https://www.cvcboca.com/keep-your-dog-safe-how-to-spot-treat-bufo-toad-poisoning/"
+        ]
+      }
+    },
+    {
+      "id": "reportable-large-lizards",
+      "group": "lizards",
+      "label": "Reportable Large Lizards",
+      "generic": "a large lizard",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole lizard, including its head and tail. Do not approach, corner, or handle it.",
+        "why": "Overall size, coloring, and tail shape narrow the type of large lizard and the right wildlife response."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Report to FWC",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "referral": "report_fwc",
+        "safety_line": "Keep people and pets away and do not corner or handle the lizard; large invasive lizards can bite or scratch.",
+        "sources": [
+          "https://myfwc.com/wildlifehabitats/profiles/reptiles/lizards/nile-monitor/"
+        ]
+      }
+    },
+    {
+      "id": "culex-mosquitoes",
+      "group": "mosquitoes",
+      "label": "Culex Mosquitoes",
+      "generic": "a Culex mosquito",
+      "scientific": "Culex",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for legs and back on a wall or another non-contact surface. Do not use your skin as a perch or allow it to bite for a photo.",
+        "why": "Leg and back markings narrow the mosquito group and its health-risk guidance."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "mosquito",
+          "serviceKey": "mosquito",
+          "serviceLabel": "Mosquito Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "safety_line": "These mosquitoes can spread disease. See a doctor if a bite site becomes very swollen or a fever develops after a bite.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN837"
+        ]
+      }
+    },
+    {
+      "id": "high-risk-indoor-roaches",
+      "group": "roaches",
+      "label": "Higher-Risk Indoor Roaches",
+      "generic": "an indoor cockroach",
+      "scientific": "Blattodea",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the roach or signs and where they were found. Do not touch the insect or signs.",
+        "why": "Body markings or the exact sign help distinguish an established indoor infestation."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "safety_line": "Indoor roach infestations can trigger allergies and asthma and contaminate food. Keep food sealed and surfaces clean while treatment is underway.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN128"
+        ]
+      }
+    },
+    {
+      "id": "roach-signs",
+      "group": "roaches",
+      "label": "Cockroach Activity Signs",
+      "generic": "signs of cockroach activity",
+      "scientific": "Blattodea (sign)",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the roach or signs and where they were found. Do not touch the insect or signs.",
+        "why": "Body markings or the exact sign help distinguish an established indoor infestation."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "safety_line": "Clean and disinfect surfaces where droppings or egg cases are found before storing food or dishes there again.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/view/119483"
+        ]
+      }
+    },
+    {
+      "id": "stinging-scorpions",
+      "group": "scorpions-arachnids",
+      "label": "Stinging Scorpions",
+      "generic": "a stinging scorpion",
+      "scientific": "Buthidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the pincers and tail. Do not approach, disturb, or handle it.",
+        "why": "Pincer and tail shape distinguish a stinging scorpion from harmless arachnids."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "A sting can be painful. Call 911 if someone has trouble breathing, and see a doctor for chest pain or a strong reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Centruroides_gracilis"
+        ]
+      },
+      "parent": "centruroides-scorpions"
+    },
+    {
+      "id": "regulated-land-snails",
+      "group": "snails-slugs-worms",
+      "label": "Regulated Large Land Snails",
+      "generic": "a large land snail",
+      "scientific": "Achatinidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole shell and nearby surface. Do not touch or move the snail.",
+        "why": "Shell size and shape distinguish a regulated large land snail from common garden snails."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "referral": "report_fdacs",
+        "referral_template": "report_fdacs_snail_exposure",
+        "sources": [
+          "https://www.fdacs.gov/Agriculture-Industry/Pests-and-Diseases/Plant-Pests-and-Diseases/Giant-African-Land-Snail",
+          "https://www.cdc.gov/dpdx/angiostrongyliasis/index.html"
+        ],
+        "safety_line": "Never touch a large unidentified land snail bare-handed. Wash your hands after contact and keep children and pets away."
+      }
+    },
+    {
+      "id": "medically-significant-spiders",
+      "group": "spiders",
+      "label": "Medically Significant Spiders",
+      "generic": "a spider that may be venomous",
+      "scientific": "Araneae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the body markings only if already visible. Do not approach, disturb, or handle it.",
+        "why": "Body markings help separate a medically significant spider from common harmless spiders."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Do not handle the spider. See a doctor if a suspected bite worsens, blisters, or does not start healing within a few days.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Brown_recluse_spider"
+        ]
+      }
+    },
+    {
+      "id": "disease-vector-assassin-bugs",
+      "group": "true-bugs",
+      "label": "Disease-Vector Assassin Bugs",
+      "generic": "a biting true bug",
+      "scientific": "Reduviidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the head, beak, and side markings. Do not touch or handle it.",
+        "why": "Head shape and side markings separate a disease-vector assassin bug from defensive look-alikes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "safety_line": "Avoid touching the insect or rubbing the bite. See a doctor if the bite site swells or a fever or rash develops.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Triatoma_sanguisuga"
+        ]
+      }
+    },
+    {
+      "id": "high-risk-social-wasps",
+      "group": "wasps-bees",
+      "label": "Higher-Risk Social Wasps",
+      "generic": "a social wasp",
+      "scientific": "Vespidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the wasp and nest location. Do not approach or disturb the nest.",
+        "why": "Nest type and body markings narrow the social wasp group while keeping you away from stings."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "safety_line": "These wasps can sting repeatedly when a colony is disturbed. See a doctor if swelling spreads, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN238"
+        ]
+      }
+    },
+    {
+      "id": "structure-bee-colonies",
+      "group": "wasps-bees",
+      "parent": "bees",
+      "label": "Bee Colonies in Structures",
+      "generic": "a bee colony in a structure",
+      "scientific": "Apidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bee activity and occupied opening. Do not approach, disturb, or seal the opening.",
+        "why": "The activity pattern and nest location distinguish a structural colony from solitary or foraging bees."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "urgency": "high"
+        }
+      }
+    },
+    {
+      "id": "beneficial-bees",
+      "group": "wasps-bees",
+      "label": "Beneficial Solitary and Ground Bees",
+      "generic": "a solitary or ground-nesting bee",
+      "scientific": "Apidae / Megachilidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bee activity and occupied opening. Do not approach, disturb, or seal the opening.",
+        "why": "The activity pattern and nest location distinguish a structural colony from solitary or foraging bees."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Leave the bees undisturbed. See a doctor for a strong allergic reaction to a sting, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Bumblebee"
+        ]
+      }
+    },
+    {
+      "id": "contact-risk-wild-mammals",
+      "group": "wild-mammals",
+      "label": "Wild Mammals with Contact Risk",
+      "generic": "a wild mammal",
+      "scientific": "Mammalia",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole animal or signs and their location. Never approach, corner, touch, or handle it.",
+        "why": "Body shape and the activity location narrow the wildlife group and the safest referral."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "referral": "wildlife_trapper",
+        "safety_line": "Do not handle the animal bare-handed, and wash your hands after contact with it or soil it disturbed.",
+        "sources": [
+          "https://myfwc.com/wildlifehabitats/profiles/mammals/land/armadillo/"
+        ]
+      }
+    },
+    {
+      "id": "wildlife-removal-mammals",
+      "group": "wild-mammals",
+      "label": "Wild Mammals Needing Removal",
+      "generic": "a wild mammal",
+      "scientific": "Mammalia",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole animal or signs and their location. Never approach, corner, touch, or handle it.",
+        "why": "Body shape and the activity location narrow the wildlife group and the safest referral."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "referral": "wildlife_trapper"
+      }
+    },
+    {
+      "id": "rabies-risk-wild-mammals",
+      "group": "wild-mammals",
+      "label": "Wild Mammals with Rabies Exposure Risk",
+      "generic": "a wild mammal",
+      "scientific": "Mammalia",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole animal or signs and their location. Never approach, corner, touch, or handle it.",
+        "why": "Body shape and the activity location narrow the wildlife group and the safest referral."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true,
+            "structural_threat": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "referral": "wildlife_trapper",
+        "referral_template": "rabies_exposure_wildlife_trapper",
+        "sources": [
+          "https://www.cdc.gov/rabies/prevention/index.html",
+          "https://ask.ifas.ufl.edu/uw033"
+        ],
+        "safety_line": "Do not handle the animal and keep pets away. See a doctor right away after a bite or scratch."
+      }
+    },
+    {
+      "id": "protected-bird-damage",
+      "group": "birds",
+      "label": "Protected Bird Damage",
+      "generic": "damage from a bird",
+      "scientific": "Aves (sign)",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bird, burrow, or damage already visible. Never approach or disturb the bird or shelter.",
+        "why": "The setting and activity distinguish protected ground nesting from protected bird damage."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Repair & Deterrence",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "referral": "protected_leave_alone",
+        "sources": [
+          "https://www.fws.gov/law/migratory-bird-treaty-act-1918",
+          "https://www.fws.gov/media/list-birds-protected-migratory-bird-treaty-act-2023"
+        ],
+        "referral_template": "protected_bird_deterrence"
+      }
+    },
+    {
+      "id": "protected-ground-birds",
+      "group": "birds",
+      "label": "Protected Ground-Nesting Birds",
+      "generic": "a ground-nesting bird",
+      "scientific": "Aves",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bird, burrow, or damage already visible. Never approach or disturb the bird or shelter.",
+        "why": "The setting and activity distinguish protected ground nesting from protected bird damage."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Protected Species - Leave Alone",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "referral": "protected_leave_alone"
+      }
+    },
+    {
+      "id": "persistent-bite-assassin-bugs",
+      "group": "true-bugs",
+      "parent": "assassin-bugs",
+      "label": "Painful-bite Assassin Bugs",
+      "generic": "an assassin bug",
+      "scientific": "Arilus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the wheel-shaped crest and front legs. Do not approach, touch, or handle it.",
+        "why": "The wheel-shaped crest separates a wheel bug from other assassin bugs."
+      },
+      "generic_guidance": {
+        "safety_line": "A bite can be very painful if the insect is picked up or handled. See a doctor if numbness or pain lasts more than a few days.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Arilus_cristatus"
+        ],
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low",
+          "safety": {
+            "bites": true,
+            "allergen": true
+          }
+        }
+      }
+    },
+    {
+      "id": "medical-solitary-wasps",
+      "group": "wasps-bees",
+      "parent": "solitary-wasps",
+      "label": "Allergy-risk Solitary Wasps",
+      "generic": "a solitary wasp",
+      "scientific": "Sceliphron / Trypoxylon spp.",
+      "rank": "group",
+      "next_photo": {
+        "ask": "From a safe distance, use camera zoom to show the narrow waist and mud nest without approaching or disturbing it.",
+        "why": "Body shape and a mud nest separate a mud dauber from other solitary wasps."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "These wasps rarely sting. See a doctor for an unusual allergic reaction, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1478"
+        ]
+      }
+    },
+    {
+      "id": "allergy-risk-ants",
+      "group": "ants",
+      "label": "Allergy-risk Ants",
+      "generic": "an ant",
+      "scientific": "Pseudomyrmex",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the long slender body and trail. Do not approach, disturb, or handle the ants.",
+        "why": "Body shape and color help separate this ant from other slender ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "A sting can be sharply painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/download/116996/115141"
+        ]
+      }
+    },
+    {
+      "id": "allergen-lady-beetles",
+      "group": "beetles",
+      "parent": "lady-beetles",
+      "label": "Allergen Lady Beetles",
+      "generic": "a lady beetle",
+      "scientific": "Harmonia",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the marking behind the head and any indoor cluster. Do not handle it.",
+        "why": "The head marking and cluster location separate this lady beetle from native species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "allergen": true,
+            "irritant": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Large indoor clusters can bother people with allergies or asthma, and their yellow defensive fluid can stain fabric.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN361"
+        ]
+      }
+    },
+    {
+      "id": "pet-risk-garden-caterpillars",
+      "group": "caterpillars-moths",
+      "parent": "garden-caterpillars",
+      "label": "Milkweed-fed Caterpillars",
+      "generic": "a milkweed-feeding caterpillar",
+      "scientific": "Danaus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the stripe pattern and host plant. Do not let pets mouth it.",
+        "why": "Stripe pattern and the host plant separate this caterpillar from similar garden caterpillars."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "toxic_to_pets": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Milkweed toxins stored by the caterpillar can upset a pet’s stomach if a large amount is eaten. Keep pets from mouthing it.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN780"
+        ]
+      }
+    },
+    {
+      "id": "bite-risk-centipedes",
+      "group": "many-legged",
+      "label": "Bite-risk Centipedes",
+      "generic": "a centipede",
+      "scientific": "Chilopoda",
+      "rank": "class",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the body and legs. Do not touch or handle it.",
+        "why": "Body shape, leg length, and color help separate common centipedes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "bites": true
+          }
+        },
+        "safety_line": "A centipede bite can hurt. See a doctor if you have an unusual or allergic reaction.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IG093"
+        ]
+      }
+    },
+    {
+      "id": "irritant-fabric-beetles",
+      "group": "pantry-fabric",
+      "label": "Irritant Fabric Beetles",
+      "generic": "a fabric beetle",
+      "scientific": "Dermestidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the beetle or larva and the fabric where it was found. Do not handle it.",
+        "why": "Body covering and the damaged material separate fabric beetles from pantry pests."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true,
+            "allergen": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Bristly larvae can cause mild skin irritation or an allergic-type reaction in sensitive people. This is not a bite or sting.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN873",
+          "https://ask.ifas.ufl.edu/publication/IN144"
+        ]
+      }
+    },
+    {
+      "id": "irritant-walkingsticks",
+      "group": "other-insects",
+      "label": "Defensive-spray Walkingsticks",
+      "generic": "a defensive-spray walkingstick",
+      "scientific": "Anisomorpha",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the back stripes and full body. Do not approach, touch, or handle it.",
+        "why": "Back stripes and body shape help distinguish defensive-spray walkingsticks."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Defensive spray can cause intense eye burning. Do not handle it. If the spray reaches an eye, rinse it with plenty of water right away.",
+        "sources": [
+          "https://edis.ifas.ufl.edu/publication/IN590"
+        ]
+      }
+    },
+    {
+      "id": "allergy-risk-scorpions",
+      "group": "scorpions-arachnids",
+      "label": "Allergy-risk Scorpions",
+      "generic": "a small striped scorpion",
+      "scientific": "Centruroides",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the body stripes and tail. Do not approach, touch, or handle it.",
+        "why": "Body markings and tail shape help separate Florida scorpions."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true,
+            "stinging": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "The sting is painful but is not medically dangerous for most people. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Centruroides_hentzi"
+        ]
+      },
+      "parent": "centruroides-scorpions"
+    },
+    {
+      "id": "toxic-flatworms",
+      "group": "snails-slugs-worms",
+      "label": "Toxic Flatworms",
+      "generic": "a flatworm",
+      "scientific": "Bipalium",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the head and body shape. Do not touch or handle it, and keep pets away.",
+        "why": "The hammer-shaped head separates this flatworm from earthworms and slugs."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "toxic_to_pets": true,
+            "irritant": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Do not handle it bare-handed or let pets mouth it. Wash hands well after any contact.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/in206",
+          "https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0100718"
+        ]
+      }
+    },
+    {
+      "id": "medical-sac-spiders",
+      "group": "spiders",
+      "label": "Medical-advice Sac Spiders",
+      "generic": "a sac spider",
+      "scientific": "Cheiracanthium",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the pale body and resting sac only if already visible. Do not handle it.",
+        "why": "Body color and the resting sac help separate sac spiders from other indoor spiders."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true,
+            "bites": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Bites usually cause mild pain and itching. See a doctor if a bite site worsens or does not improve.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Cheiracanthium_inclusum"
+        ]
+      }
+    },
+    {
+      "id": "allergy-risk-velvet-ants",
+      "group": "wasps-bees",
+      "label": "Allergy-risk Velvet Ants",
+      "generic": "a wingless wasp",
+      "aliases": [
+        "velvet ant",
+        "velvet ants"
+      ],
+      "scientific": "Mutillidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the fuzzy body and color pattern. Do not touch or handle it.",
+        "why": "Body shape and dense hair separate a velvet ant from true ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "The sting can be extremely painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Dasymutilla_occidentalis"
+        ]
+      }
+    },
+    {
+      "id": "centruroides-scorpions",
+      "group": "scorpions-arachnids",
+      "label": "Centruroides Scorpions",
+      "generic": "a scorpion",
+      "aliases": [
+        "bark scorpion",
+        "bark scorpions"
+      ],
+      "scientific": "Centruroides",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the body markings, pincers, and tail. Do not approach, touch, or handle it.",
+        "why": "Body markings and overall size help separate Florida scorpion species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Scorpion stings can be painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Centruroides_gracilis",
+          "https://en.wikipedia.org/wiki/Centruroides_hentzi"
+        ]
+      }
+    },
+    {
+      "id": "defensive-stinging-ants",
+      "group": "ants",
+      "label": "Defensive Stinging Ants",
+      "generic": "a defensive stinging ant",
+      "scientific": "several genera",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole ant and its jaws or abdomen. Do not handle it or disturb a nest.",
+        "why": "The jaw shape and whether the abdomen lifts over the body help separate these defensive ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": false
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "These ants can bite or sting if handled or disturbed, and the sting may be painful. Leave them alone and use camera zoom for a closer look.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/in610",
+          "https://blogs.ifas.ufl.edu/escambiaco/2019/03/14/a-new-ant-experience-in-the-landscape/"
+        ]
+      }
+    },
+    {
+      "id": "termite-swarm-activity",
+      "group": "termites",
+      "label": "Termite Swarm Activity",
+      "generic": "termite swarm activity",
+      "scientific": "Isoptera (winged reproductives)",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Photograph the wings or swarmers already visible and a wider view of where they appeared. Do not disturb walls or wood for a photo.",
+        "why": "Equal-length wings, straight antennae, and the location help distinguish termite activity from winged ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN369",
+          "https://ask.ifas.ufl.edu/publication/IN278",
+          "https://ask.ifas.ufl.edu/publication/IN537"
+        ]
       }
     }
   ],
@@ -918,7 +2671,7 @@
     "silverfish": {
       "node": "silverfish",
       "kind": "entry",
-      "note": "v1 alias list also included \"firebrat\" (a separate species, added by another owner in this batch); resolves to silverfish for now."
+      "note": "The dedicated firebrat entry now resolves that separate species; this legacy slug maps only to silverfish."
     },
     "earwig": {
       "node": "earwig",
@@ -926,14 +2679,14 @@
       "note": ""
     },
     "millipede": {
-      "node": "millipede",
-      "kind": "entry",
-      "note": ""
+      "node": "millipedes",
+      "kind": "subgroup",
+      "note": "The generic v1 label covers multiple catalog species; maps to the Millipedes subgroup."
     },
     "centipede": {
-      "node": "house-centipede",
-      "kind": "entry",
-      "note": "v1's own alias list named \"house centipede\" specifically; other centipede species added later stay separate."
+      "node": "many-legged",
+      "kind": "group",
+      "note": "The v1 entry mixed the qualified house-centipede name with generic centipede labels; maps to the group now that another centipede species is cataloged."
     },
     "stink-bug": {
       "node": "stink-bug",
@@ -966,185 +2719,5 @@
       "note": "v1 lumped many unrelated beneficial species (lady beetle, lacewing, dragonfly, mantis, earthworm, anole, gecko, frog, toad) under one slug. No single catalog node covers all of them without over-claiming, so this resolves to null; the caller should keep its own generic beneficial fallback copy until each species is looked up individually."
     }
   },
-  "planned_slugs": [
-    "acrobat-ant",
-    "american-dog-tick",
-    "antlion",
-    "argentine-tegu",
-    "asian-citrus-psyllid",
-    "asian-cockroach",
-    "asian-lady-beetle",
-    "asian-subterranean-termite",
-    "australian-cockroach",
-    "azalea-lace-bug",
-    "bagworm",
-    "bald-faced-hornet",
-    "bark-lice",
-    "bat-bug",
-    "bed-bug-signs",
-    "bess-beetle",
-    "big-eyed-bug",
-    "bird-rodent-mites",
-    "black-soldier-fly",
-    "blacklegged-tick",
-    "blow-fly",
-    "blue-winged-scoliid-wasp",
-    "booklice",
-    "brahminy-blind-snake",
-    "brazilian-free-tailed-bat",
-    "brown-banded-cockroach",
-    "brown-cockroach",
-    "brown-recluse",
-    "buck-moth-caterpillar",
-    "bumble-bee",
-    "burrowing-owl",
-    "camel-cricket",
-    "cane-toad",
-    "carolina-mantis",
-    "carpet-beetle",
-    "cellar-spider",
-    "chiggers",
-    "chilli-thrips",
-    "cicada",
-    "cicada-killer",
-    "cigarette-beetle",
-    "citrus-leafminer",
-    "corn-snake",
-    "crab-spider",
-    "crane-fly",
-    "cuban-cockroach",
-    "cycad-aulacaspis-scale",
-    "dampwood-termite",
-    "dark-rover-ant",
-    "deer-fly",
-    "diaprepes-root-weevil",
-    "discarded-wings",
-    "dragonfly",
-    "drugstore-beetle",
-    "drywood-termite-frass",
-    "dusky-pygmy-rattlesnake",
-    "earthworm",
-    "eastern-coral-snake",
-    "eastern-diamondback-rattlesnake",
-    "eastern-gray-squirrel",
-    "eastern-mole",
-    "eastern-rat-snake",
-    "eyed-click-beetle",
-    "feral-hog-rooting",
-    "ficus-whitefly",
-    "field-cricket",
-    "fire-ant-mound",
-    "firebrat",
-    "florida-bark-scorpion",
-    "florida-blue-centipede",
-    "florida-cottonmouth",
-    "florida-harvester-ant",
-    "florida-wax-scale",
-    "florida-woods-roach",
-    "fruit-fly",
-    "gallinipper",
-    "garden-snails",
-    "giant-african-land-snail",
-    "graceful-twig-ant",
-    "great-golden-digger-wasp",
-    "green-anole",
-    "green-iguana",
-    "green-lacewing",
-    "green-lynx-spider",
-    "green-treefrog",
-    "greenhouse-millipede",
-    "ground-beetle",
-    "hag-moth-caterpillar",
-    "hammerhead-flatworm",
-    "harvestman",
-    "hentz-striped-scorpion",
-    "hispid-cotton-rat",
-    "horse-fly",
-    "house-fly",
-    "hover-fly",
-    "hunting-billbug",
-    "indian-meal-moth",
-    "june-beetle",
-    "katydid",
-    "kissing-bug",
-    "lady-beetle",
-    "leaf-footed-bug",
-    "leafcutter-bee",
-    "little-fire-ant",
-    "lobate-lac-scale",
-    "lone-star-tick",
-    "longhorn-crazy-ant",
-    "mealybug-destroyer",
-    "milkweed-assassin-bug",
-    "monarch-caterpillar",
-    "mosquito-larvae",
-    "muscovy-duck",
-    "nile-monitor",
-    "non-biting-midge",
-    "oleander-caterpillar",
-    "orange-dog-caterpillar",
-    "orchard-orbweaver",
-    "ox-beetle",
-    "palmetto-weevil",
-    "pharaoh-ant",
-    "phorid-fly",
-    "pink-hibiscus-mealybug",
-    "polka-dot-wasp-moth",
-    "potter-wasp",
-    "powderpost-beetle",
-    "pyramid-ant",
-    "raccoon",
-    "red-flour-beetle",
-    "regal-jumping-spider",
-    "rice-weevil",
-    "ring-necked-snake",
-    "roach-droppings-egg-cases",
-    "robber-fly",
-    "rodent-droppings",
-    "rodent-gnaw-marks",
-    "rodent-rub-marks",
-    "royal-palm-bug",
-    "saddleback-caterpillar",
-    "saltmarsh-mosquito",
-    "sawtoothed-grain-beetle",
-    "scarlet-kingsnake",
-    "slugs",
-    "sooty-mold",
-    "south-american-palm-weevil",
-    "southeastern-pocket-gopher",
-    "southern-black-racer",
-    "southern-flying-squirrel",
-    "southern-house-mosquito",
-    "southern-house-spider",
-    "southern-toad",
-    "southern-water-snake",
-    "sowbug",
-    "spider-mites",
-    "spiny-tailed-iguana",
-    "spinybacked-orbweaver",
-    "springtails",
-    "squirrel-treefrog",
-    "stable-fly",
-    "surinam-cockroach",
-    "tailless-whip-scorpion",
-    "termite-mud-tubes",
-    "termite-swarmers",
-    "thief-ant",
-    "tomato-hornworm",
-    "tortoise-beetle",
-    "trap-jaw-ant",
-    "tropical-fire-ant",
-    "tropical-orbweaver",
-    "tussock-moth-caterpillar",
-    "two-striped-walkingstick",
-    "velvet-ant",
-    "virginia-opossum",
-    "webbing-clothes-moth",
-    "wheel-bug",
-    "winged-ants",
-    "woodpecker-damage",
-    "yellow-fly",
-    "yellow-garden-spider",
-    "yellow-sac-spider"
-  ]
+  "planned_slugs": []
 }

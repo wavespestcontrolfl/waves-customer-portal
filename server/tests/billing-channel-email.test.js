@@ -443,24 +443,33 @@ describe('billing channel email adapter', () => {
     });
   });
 
-  test('classifies SENDGRID_NOT_CONFIGURED as not sent even after handoff started (no provider request was ever made)', async () => {
+  // A definite rejection after the handoff accepted nothing, and only a
+  // SendGrid webhook schedules the provider retry rail, which never follows a
+  // synchronous refusal. The notice is held for a replay under the same key,
+  // or an Email-only notice would be lost (#4843 gate checklist).
+  test('holds SENDGRID_NOT_CONFIGURED after handoff started for a replay (no provider request was ever made)', async () => {
     mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {
       throw Object.assign(new Error('SENDGRID_API_KEY not configured'), { code: 'SENDGRID_NOT_CONFIGURED' });
     }));
     await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'SENDGRID_NOT_CONFIGURED',
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'SENDGRID_NOT_CONFIGURED',
     });
   });
 
   test.each([400, 401, 403, 404, 405, 413, 415, 422, 429])(
-    'classifies a definite SendGrid %s rejection after handoff as not sent',
+    'holds a definite SendGrid %s rejection after handoff for a replay of the notice',
     async (status) => {
       mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {
         throw Object.assign(new Error(`SendGrid ${status}: rejected`), { status });
       }));
-      await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-        sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_PROVIDER_ERROR',
+      const result = await sendBillingChannelEmail(input());
+      expect(result).toMatchObject({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+        code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PROVIDER_ERROR',
       });
+      expect(Date.parse(result.nextAllowedAt)).toBeGreaterThan(Date.now());
+      expect(require('../services/messaging/billing-channel-routing').isReplayHold(result)).toBe(true);
     },
   );
 
