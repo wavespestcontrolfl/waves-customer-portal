@@ -365,9 +365,11 @@ const RANGE_HOUR = `(?:${HOUR}|${HOUR_WORDS_ES})`;
 const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:1[0-2]|0?[1-9])(?::[0-5]\\d)?\\s*${MERIDIEM}`, 'i'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
-  // Codex r14 on #4946: catch ordinary Spanish ETA prepositions while keeping
-  // "a las dos personas del equipo" as a count rather than a clock time.
-  new RegExp(`\\b(?:a(?:\\s+eso\\s+de)?|tipo|sobre|cerca\\s+de|alrededor\\s+de|hacia|antes\\s+de|despu[eé]s\\s+de)\\s+(?:las?\\s+)?(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
+  // Codex r14 on #4946: ordinary Spanish ETA prepositions require the clock
+  // article ("a las dos"), so ordinary quantities such as "a dos clientes"
+  // do not become times. Only colloquial "tipo dos" permits a bare hour;
+  // "a eso de las dos" keeps its normal article.
+  new RegExp(`\\b(?:(?:a|sobre|cerca\\s+de|alrededor\\s+de|hacia|antes\\s+de|despu[eé]s\\s+de)\\s+las?\\s+|a\\s+eso\\s+de\\s+las?\\s+|tipo\\s+(?:las?\\s+)?)(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:${HOUR_WORDS}|${HOUR_WORDS_ES})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
   // Codex round-5 P1: a spoken "oh/zero/cero" minute prefix with no colon and
   // no meridiem ("three oh five", "3 oh 5", "las tres cero cinco") is still

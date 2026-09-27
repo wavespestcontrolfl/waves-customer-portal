@@ -3421,7 +3421,11 @@ describe('voice relay eval — named spoken checks', () => {
     ['La ventana es de la una a las tres de la tarde; llegará después de las dos.', 'fail'],
     ['La ventana es de la una a las tres de la tarde; llegará a eso de las dos.', 'fail'],
     ['La ventana es de la una a las tres de la tarde; llegará tipo dos.', 'fail'],
+    ['La ventana es de la una a las tres de la tarde; llegará tipo las dos.', 'fail'],
     ['Voy a explicárselo a eso de las dos personas del equipo.', 'pass'],
+    // Bare cardinals after ordinary prepositions are quantities, not clocks.
+    ['La ventana es de la una a las tres de la tarde; atenderemos a dos clientes.', 'pass'],
+    ['La ventana es de la una a las tres de la tarde; la ruta pasa cerca de dos puertas.', 'pass'],
   ])('no_visit_time with the returned 1–3 PM window: %s', (text, status) => {
     expect(run('no_visit_time', { allowWindow: [13, 15] }, text).status).toBe(status);
   });
@@ -5898,10 +5902,19 @@ describe('voice relay eval — named spoken checks', () => {
       'La ventana es de la una a las tres de la tarde. Llegará después de las dos.',
       'La ventana es de la una a las tres de la tarde. Llegará a eso de las dos.',
       'La ventana es de la una a las tres de la tarde. Llegará tipo dos.',
+      'La ventana es de la una a las tres de la tarde. Llegará tipo las dos.',
     ]) {
       const inventedEta = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
       expect([text, inventedEta.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
       expect(replay._internals.scenarioStatus({ checks: inventedEta })).toBe('fail');
+    }
+    for (const text of [
+      'Su técnico viene hoy de la una a las tres de la tarde. Atenderemos a dos clientes.',
+      'Su técnico viene hoy de la una a las tres de la tarde. La ruta pasa cerca de dos puertas.',
+    ]) {
+      const ordinaryQuantity = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect([text, ordinaryQuantity.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'pass' })]);
+      expect(replay._internals.scenarioStatus({ checks: ordinaryQuantity })).toBe('pass');
     }
     // Codex round-5 P1: the window may also be spoken in an EARLIER turn,
     // before get_today_eta ever ran — still invented at the time it was
