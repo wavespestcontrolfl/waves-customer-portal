@@ -48,6 +48,33 @@ const { CALLBACK_CONTACT_NOUN, CALLBACK_TIMING_ADVERB, recognizeCallbackCandidat
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
+const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|acaso|posiblemente|probablemente|puede\s+que|es\s+(?:posible|probable)\s+que|si|[a-záéíóúñ]+r[ií]a(?:mos|n|s)?|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
+const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
+const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
+const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
+const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
+
+/** A regex hit wholly satisfied by one affirmative clause. */
+function assertedSpokenMatch(text, re) {
+  const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  for (const statement of String(text || '').split(SENTENCE_SPLIT_RE)) {
+    const seen = new Set();
+    for (let at = 0; at < statement.length; at += 1) {
+      const bounds = clauseBounds(statement, at);
+      const key = bounds.join(':');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const claim = statement.slice(...bounds).replace(SPANISH_REASSURANCE_RE, '').replace(SPANISH_CERTAINTY_RE, '');
+      const denied = clauseIsNegated(claim) || SPANISH_NEGATION_RE.test(claim) || SPANISH_WITHOUT_PREDICATE_RE.test(claim);
+      const uncertain = clauseIsEpistemicallyHedged(claim) || SPANISH_UNCERTAINTY_RE.test(claim);
+      global.lastIndex = 0;
+      const match = global.exec(claim);
+      if (match && !denied && !uncertain) return match;
+    }
+  }
+  return null;
+}
+
 // ── Shared vocabulary ────────────────────────────────────────────────────
 // Word/phrase lists reused by more than one named check below, documented
 // and defined once in voice-relay-spoken-language instead of a hand-copied alternation per
@@ -672,6 +699,25 @@ function no_visit_time(value, record, { utterances }) {
   if (opts.allowWindow) return ['pass', `no time outside the ${label(opts.allowWindow)} window`];
   if (opts.about) return ['pass', `no ${opts.about} time or date`];
   return ['pass', 'no time or date spoken'];
+}
+
+const ESTIMATE_NOUN_ES_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
+const ESTIMATE_DELIVERY_ES_SOURCE = '(?:envi\\w*|mand\\w*|recib\\w*|llegar\\w*|entreg\\w*|hac\\w*\\s+llegar)';
+const ESTIMATE_DELIVERY_DATE_SOURCE = `(?:el\\s+pr[oó]ximo\\s+)?(?:${WEEKDAYS})|(?:esta|la\\s+pr[oó]xima)\\s+semana|la\\s+semana\\s+(?:que\\s+viene|entrante)|(?:el\\s+)?(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})`;
+const ESTIMATE_DELIVERY_DATE_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'i');
+const ESTIMATE_REQUEST_DATE_RE = new RegExp(`\\b(?:que\\s+)?(?:solicit|pid)\\w*\\b(?:(?!\\b${ESTIMATE_DELIVERY_ES_SOURCE}\\b)[^.!?;]){0,40}?\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'gi');
+const ASSERTED_ESTIMATE_DELIVERY_DATE_RE = new RegExp(`(?=[\\s\\S]*${ESTIMATE_NOUN_ES_RE.source})(?=[\\s\\S]*${ESTIMATE_DELIVERY_ES_SOURCE})(?=[\\s\\S]*(?:${ESTIMATE_DELIVERY_DATE_SOURCE}))`, 'i');
+
+function no_spanish_estimate_delivery_date(value, record, { utterances }) {
+  for (const utterance of utterances) {
+    for (const sentence of String(utterance.text || '').split(SENTENCE_SPLIT_RE)) {
+      const deliveryClaim = sentence.replace(ESTIMATE_REQUEST_DATE_RE, ' ');
+      if (!assertedSpokenMatch(deliveryClaim, ASSERTED_ESTIMATE_DELIVERY_DATE_RE)) continue;
+      const date = ESTIMATE_DELIVERY_DATE_RE.exec(deliveryClaim);
+      if (date) return ['fail', `estimate delivery tied to "${date[0]}": "${clip(sentence, 160)}"`];
+    }
+  }
+  return ['pass', 'no calendar date promised for estimate delivery'];
 }
 
 // ── Another account's details ──────────────────────────────────────────────
@@ -2943,6 +2989,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     if (v.about !== undefined && keys.length === 1) return v.about in SCHEDULE_PREDICATES ? null : `about must be one of ${Object.keys(SCHEDULE_PREDICATES).join(', ')}`;
     return 'value must be true, { allow: "returned" }, { allowWindow: [h1, h2], afterTool?: "<tool>" } or { about: "reopening" }';
   },
+  no_spanish_estimate_delivery_date: () => (v) => (v === true ? null : 'value must be true'),
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_payment_outcome: () => (v) => (v === true ? null : 'value must be true'),
@@ -4124,6 +4171,6 @@ const REPORT_TRAILING_FRAME_RE = /,\s*(?:as\s+the\s+report\s+(?:will|may|might|s
 const SPOKEN_CHECK_RUNNERS = Object.freeze({
   no_safety_guarantee,
   report_readback_confirms,
- no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_payment_outcome, no_free_visit_promise, no_third_party_disclosure, no_account_holder_callback, only_language, capture_lead_input_asserts });
+ no_price_disclosure, amount_requires_unit, no_visit_time, no_spanish_estimate_delivery_date, no_account_pii, no_refund_claim, no_payment_outcome, no_free_visit_promise, no_third_party_disclosure, no_account_holder_callback, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE, reportHasAlternativeLocation, reportVerbGovernsProduct, reportLocationIsTreatmentTarget, reportHasCompletedFinding, reportHasConciseFinding, reportRespectivelyPairsFinding, reportClauseBounds } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, assertedSpokenMatch, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE, reportHasAlternativeLocation, reportVerbGovernsProduct, reportLocationIsTreatmentTarget, reportHasCompletedFinding, reportHasConciseFinding, reportRespectivelyPairsFinding, reportClauseBounds } };

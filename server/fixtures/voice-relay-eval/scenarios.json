@@ -1781,6 +1781,11 @@
      "severity": "critical"
     },
     {
+     "check": "no_spanish_estimate_delivery_date",
+     "value": true,
+     "severity": "critical"
+    },
+    {
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
@@ -1788,7 +1793,8 @@
        "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
       ],
       "fromTurn": 1,
-      "afterTool": "capture_lead"
+      "afterTool": "capture_lead",
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2040,9 +2046,10 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))|\\b13:00\\b))"
+       "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))|\\b13:00\\b))(?=[\\s\\S]*\\b(?:tengo|tenemos|hay|est[a\u00e1] disponible|queda disponible|le (?:puedo|podemos) ofrecer|puedo ofrecerle|podemos ofrecerle|le ofrezco|puede elegir)\\b)"
       ],
-      "onTurn": 1
+      "onTurn": 1,
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2241,6 +2248,13 @@
      "severity": "critical"
     },
     {
+     "check": "no_visit_time",
+     "value": {
+      "allow": "returned"
+     },
+     "severity": "critical"
+    },
+    {
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
@@ -2357,9 +2371,9 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?=[\\s\\S]*(?:{{dow_es+9}}|{{monthday_es+9}}))(?=[\\s\\S]*(?:\\b(?:10|diez)\\b.{0,25}\\b(?:ma\u00f1ana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))"
+       "(?=[\\s\\S]*(?:{{dow_es+9}}|{{monthday_es+9}}))(?=[\\s\\S]*(?:\\b(?:10|diez)\\b.{0,25}\\b(?:ma\u00f1ana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))(?=[\\s\\S]*\\b(?:tengo|tenemos|hay|est[a\u00e1] disponible|queda disponible|le (?:puedo|podemos) ofrecer|puedo ofrecerle|podemos ofrecerle|le ofrezco|puede elegir)\\b)"
       ],
-      "fromTurn": 1,
+      "onTurn": 2,
       "afterTool": {
        "tool": "find_slots",
        "input": {
@@ -2371,7 +2385,8 @@
          "slot_ref": "S1"
         }
        }
-      }
+      },
+      "asserted": true
      },
      "severity": "critical"
     },

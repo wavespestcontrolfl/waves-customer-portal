@@ -195,7 +195,14 @@ than written per scenario as regexes:
   and "no" belong to both languages.
 
 The remaining spoken checks are small per-scenario regexes: "on the way", the booking
-outcome words behind a negation guard, a turnaround time, a diagnosis.
+outcome words behind a negation guard, a turnaround duration, a diagnosis. A scoped
+`spoken_matches_any` may set `asserted: true`; then a match counts only inside one
+affirmative clause, with every part of the regex satisfied there, so Spanish negation,
+conditionals and uncertainty such as "quizás", "tal vez" or a conditional-tense verb
+cannot satisfy an offer or delivery commitment. `no_spanish_estimate_delivery_date`
+separately rejects a written-estimate delivery promise tied to a weekday, week-relative
+phrase or numeric/spelled Spanish calendar date; a date that modifies when the estimate
+was requested remains historical context.
 
 Three scenarios carry natural-language privacy prohibitions: eta-third-party,
 third-party-neighbor and eta-recognised-redacted. Their named deterministic checks
