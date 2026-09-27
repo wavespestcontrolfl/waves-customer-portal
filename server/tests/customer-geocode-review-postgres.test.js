@@ -103,6 +103,7 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     expect((await listReviewQueue({}, mockConnection)).total).toBe(0);
   });
   test('primary-only pins are displayed and participate in the review revision', async () => {
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ address_line2: '' });
     const before = await getReviewDetail(CUSTOMER, mockConnection);
     await mockConnection('customer_properties').where({ customer_id: CUSTOMER }).update({
       latitude: PIN.lat,
@@ -224,6 +225,14 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     expect(await attemptReviewedGeocode(CUSTOMER, mockConnection, { onCoordinatesCommitted })).toBeNull();
     expect(onCoordinatesCommitted).not.toHaveBeenCalled();
     expect((await getReviewDetail(CUSTOMER, mockConnection)).review.status).toBe('verified');
+    expect(Number((await customer()).latitude)).toBe(PIN.lat);
+  });
+  test('a stale non-verified address pin can be replaced after the review address changes', async () => {
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ latitude: 27.4, longitude: -82.4 });
+    await saveReview(mockConnection, await customer(), { status: 'geocoded', reason: 'provider_match', latitude: 27.4, longitude: -82.4 });
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ address_line1: '200 Fixture Way' });
+    await mockConnection('customer_properties').where({ id: PRIMARY }).update({ address_line1: '200 Fixture Way' });
+    expect(await attemptReviewedGeocode(CUSTOMER, mockConnection)).toEqual(PIN);
     expect(Number((await customer()).latitude)).toBe(PIN.lat);
   });
   test('a concurrent address edit or gate kill prevents a provider write', async () => {
