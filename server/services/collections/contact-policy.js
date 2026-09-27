@@ -56,7 +56,9 @@ const FLAG_BLOCKED_CHANNELS = {
   collection_hold: ALL_CHANNELS,
   attorney_represented: ALL_CHANNELS,
   bankruptcy: ALL_CHANNELS,
-  wrong_number: ALL_CHANNELS,
+  // A wrong number is a fact about the phone: it never stops a payment email
+  // (owner ruling 2026-09-27, the suppression list's rule for the same fact).
+  wrong_number: ALL_CHANNELS.filter((channel) => channel !== 'email'),
   do_not_call: ['voice', 'manual_call'],
   do_not_text: ['sms'],
   do_not_email: ['email'],
@@ -357,10 +359,12 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // its own doc declares suppression HARD across channels. The new
     // collections_flags table does not replace it — a customer with a
     // canonical DNC and no duplicate flag must still be denied. Phone-keyed
-    // (one row per E.164). Mapping: manual_dnc and unknown reasons deny
-    // every channel; opt-outs and wrong_number deny the phone-based
-    // channels; non_mobile is an SMS-deliverability fact only (voice
-    // line-type has its own pilot check). A read failure propagates into
+    // (one row per E.164). Mapping: non_mobile is an SMS-deliverability
+    // fact only (voice line-type has its own pilot check); every other
+    // reason denies every channel, except that Email here is a payment
+    // email, which only a staff do-not-contact or an unknown reason stops
+    // (owner ruling 2026-09-27, the suppression module's
+    // suppressionBlocksPaymentEmail). A read failure propagates into
     // evaluate's fail-closed catch.
     if (customer.phone) {
       const { toE164 } = require('../../utils/phone');
@@ -369,13 +373,15 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
         .where({ phone: e164, active: true })
         .first('reason');
       if (sup) {
-        // The canonical semantics are HARD across every channel (the
-        // suppression module's own doc; codex r3 — do not reinterpret
-        // them here). The single carve-out is non_mobile: a carrier
-        // deliverability fact about SMS, not a consent withdrawal.
+        // The canonical semantics are the suppression module's own (codex
+        // r3 — do not reinterpret them here): HARD across every channel,
+        // except non_mobile (a carrier deliverability fact about SMS, not a
+        // consent withdrawal) and the payment-email rule it owns.
         const reason = sup.reason || 'unknown';
         const deniedChannels = reason === 'non_mobile' ? ['sms'] : ALL_CHANNELS;
-        if (deniedChannels.includes(channel)) deny(`suppression_${reason}`);
+        const paymentEmailAllowed = channel === 'email'
+          && !require('../messaging/validators/suppression').suppressionBlocksPaymentEmail(reason);
+        if (deniedChannels.includes(channel) && !paymentEmailAllowed) deny(`suppression_${reason}`);
       }
     }
 

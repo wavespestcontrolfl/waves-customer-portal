@@ -111,6 +111,7 @@
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking or reschedule of a visit starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
  *   GATE_SELF_BOOK_DAY_CAP=true (owner ruling 2026-09-23: the old "max 3 self-bookings per calendar day" cap — retired in favor of the self-serve notice window, server/services/scheduling/self-serve-notice.js. Unset (default) = no per-day cap anywhere: the offer-time date filtering in routes/booking.js buildBookingAvailability, the commit-time re-checks in routes/booking.js createSelfBooking and services/availability.js confirmBooking, and the offer-time day-loop skip in services/availability.js getAvailableSlots all skip their countActiveSelfBookingsForDay / acquireSelfBookingDayCapLock calls. 'true' = today's cap behavior byte-for-byte. Read at call time via selfBookDayCapEnabled() below — a flip needs no redeploy. The lock/count primitives themselves are unaffected and stay available to every self-booking writer.)
+ *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -2954,6 +2955,32 @@ const gates = {
   // scoring/candidate/apply behavior, byte for byte. Kill switch: unset
   // GATE_AUTO_DISPATCH_SHARED_MODEL.
   autoDispatchSharedModel: gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL'),
+
+  // FLEXIBLE-TIER day moves for existing recurring visits (owner-approved
+  // 2026-09-25/26, capacity-picker-scope-20260925.md §11: "this is costing
+  // us the most money"). Runs INSIDE the auto-dispatch pass, in place of the
+  // ROUTE-TIERS days-out ladder (mutually exclusive — this gate wins if both
+  // are somehow on): every Flexible-tier visit (a series' 2nd+ occurrence —
+  // eligibility.js's existing recurring-child-only checks already exclude a
+  // series' first visit and one-time/first-time customers, the Fixed tier)
+  // may re-time SAME DAY or move up to ±5 days, clamped so it can never
+  // cross the series' adjacent occurrence (COALESCE(
+  // date_exception_cadence_date, scheduled_date) among the parent's
+  // children — auto-dispatch/flex-tier.js's loadSeriesNeighbors), until 73
+  // hours before the visit (tighter than route-tiers' own 72.25h reminder-
+  // claimable band, so it fully covers it) — the 72-hour reminder itself
+  // still carries the FINAL window (appointment-reminders.js reads the
+  // synced row at send time; the scheduled_services_sync_reminder DB
+  // trigger keeps it in lockstep with every scheduled_date/window_start
+  // write, auto-dispatch's included). Still no customer comms — apply.js's
+  // rebooker call is unchanged. **Ships DARK: off unless exactly
+  // `1`/`true`/`on`**, read at CALL time via gateEnvValue (same rationale as
+  // GATE_ROUTE_TIERS — it moves the dates auto-dispatch may write, so the
+  // flip is a deliberate act in every environment, never an ambient dev
+  // default). OFF = whatever GATE_ROUTE_TIERS/legacy-lock behavior applies,
+  // byte for byte. Kill switch: unset GATE_AUTO_DISPATCH_FLEX_TIER.
+  autoDispatchFlexTier: gateEnvValue('GATE_AUTO_DISPATCH_FLEX_TIER'),
+
   // Amazon "Delivered" email → auto-restock (server/services/purchase-receipts).
   // Ships DARK: off unless set (gateEnvValue), read at call time by both the
   // post-email-sync hook and the ~15-minute scheduler sweep — a flip needs no
@@ -2971,6 +2998,13 @@ const gates = {
   // GATE_PURCHASE_RECEIPT_RESTOCK's behavior byte-for-byte unchanged: those
   // three statuses stay held for a person exactly as before this lane.
   inventoryAgent: gateEnvValue('GATE_INVENTORY_AGENT'),
+  // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
+  // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
+  // 'true'. The route reads this via isEnabled('blogReadDepth') at request
+  // time — same convention as payerStatements/lawnAssessmentMagnet above —
+  // so the dark 404 is checked on every request, before the route's own
+  // rate limiter (see server/routes/public-blog-read-depth.js).
+  blogReadDepth: process.env.GATE_BLOG_READ_DEPTH === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

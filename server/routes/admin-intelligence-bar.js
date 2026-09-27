@@ -16,7 +16,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
+const {
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingBillingRefusalFor,
+} = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
@@ -880,6 +882,18 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           name: `${target.first_name || ''} ${target.last_name || ''}`.trim() || 'Unnamed customer',
         },
       };
+    }
+    if (toolUse.name === 'create_appointment' && params.customer_id) {
+      // The booking sets no price (ADMIN-BUG-R12): a customer whose billing
+      // needs one on the visit gets no card — the executor would refuse the
+      // same booking on its locked row at commit. Fail closed on a read error.
+      let billingRefusal;
+      try {
+        billingRefusal = await ibBookingBillingRefusalFor(String(params.customer_id), params.service_type);
+      } catch {
+        return { failed: true, modelResult: { error: 'Could not verify how this customer is billed — book it from the Schedule screen instead. Nothing was changed.' } };
+      }
+      if (billingRefusal) return { failed: true, modelResult: { error: billingRefusal } };
     }
     if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
       // Pin the visit being moved (W0B): the card must name the customer,
