@@ -1059,6 +1059,31 @@ const OUR_NUMBER = '+19415550100';
       expect(triggerNotification).not.toHaveBeenCalled();
     });
 
+    test('a send_estimate promise is not read as kept by evidence from BEFORE its own reopen — followedUpIds must apply the SAME renewal floor to every SLA kind, not just callback (Codex #5019 r12 P1)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' }); // AI, unreviewed initially
+      // Staff reached the lead by an ordinary outbound call — BEFORE the
+      // reopen below. Stale evidence for the ORIGINAL obligation; not
+      // proof the REOPENED one was ever followed up. Without this fix,
+      // followup-sla-watcher's own renewedFloors skipped the renewal check
+      // entirely for any kind but callback, so followedUpIds read this
+      // stale call as still-valid "kept" evidence and findPromiseToRing
+      // excluded the row before it ever reached its own renewal/precedence
+      // check — never alerting at all.
+      const reached = callRow(200, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, reached, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // Staff reopen/re-review the promise AFTER that outbound call.
+      const reopenedAt = new Date(now - 100 * 60000);
+      await mockConn('call_commitments').where({ id: commitment.id })
+        .update({ human_state: 'confirmed', reviewed_at: reopenedAt, updated_at: reopenedAt });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
     test("the ET day in dedupeKey comes from the callback's OWN created_at, never the sweep tick's current time (Codex #5019 r18 P1)", async () => {
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id);

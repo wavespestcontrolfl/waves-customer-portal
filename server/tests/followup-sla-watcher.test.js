@@ -448,13 +448,22 @@ describe('followedUpIds — renewal-boundary propagation', () => {
     await expect(followedUpIds(db, [reopenedRow])).rejects.toThrow('synthetic audit_log lookup failure');
   });
 
-  test('a row the pager itself would ever pass (no human_state) never calls obligationRenewedAt at all', async () => {
+  test('a row the pager itself would ever pass (no human_state) touches no renewal-boundary query at all', async () => {
+    // renewedFloors no longer short-circuits on kind/human_state itself
+    // (Codex #5019 r12 P1: obligationRenewedAt is the single source of
+    // truth for which rows it renews, so this file never duplicates —
+    // or drifts from — that decision), so it IS called for every row now.
+    // The real guarantee this test pins is unchanged: obligationRenewedAt's
+    // OWN human_state guard returns before ever touching audit_log, so a
+    // row the pager's own candidates always look like (no human_state)
+    // still causes zero DB work — `db` (the bare mock) is never invoked.
     const untouchedRow = {
       id: 'fixture-untouched-1', kind: 'callback', party: 'waves', human_state: null,
       customer_id: null, created_at: NOW, call_started_at: NOW, source: 'ai', from_phone: null, to_phone: null, direction: 'inbound',
     };
     await followedUpIds(db, [untouchedRow]).catch(() => {}); // db is a bare mock; only proving the call pattern here
-    expect(obligationRenewedAt).not.toHaveBeenCalled();
+    expect(obligationRenewedAt).toHaveBeenCalledTimes(1);
+    expect(db).not.toHaveBeenCalled();
   });
 });
 

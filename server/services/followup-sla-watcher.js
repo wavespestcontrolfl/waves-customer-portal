@@ -168,14 +168,22 @@ function evidenceFrom(r) {
   return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
 }
 
-// A callback staff RE-OPENED or edited moves the evidence boundary forward
-// to that renewal (call-commitments' own resolveFulfillment rule): the
-// record that kept the promise before is not proof it was kept again. This
-// pager's own candidates never carry a human_state (isPagerScope excludes
-// them — reviewed work stays with the Owed queue), so this is a no-op for
-// every row the pager itself passes in; it only matters for another caller
-// (the promise-chaser bell) that reuses this evidence check on a promise
-// staff have since touched.
+// A WAVES promise staff RE-OPENED or edited moves the evidence boundary
+// forward to that renewal (call-commitments' own resolveFulfillment rule):
+// the record that kept the promise before is not proof it was kept again.
+// This pager's own candidates never carry a human_state (isPagerScope
+// excludes them — reviewed work stays with the Owed queue), so this stays
+// a no-op for every row the pager itself passes in regardless of kind; it
+// matters for another caller (the promise-chaser bell) that reuses this
+// evidence check on a promise staff have since touched — including a
+// send_estimate / schedule_visit promise, not only a callback (Codex #5019
+// r12 P1: a lead texted BEFORE a reopen, then calling back AFTER it, was
+// wrongly read as already kept by that stale pre-renewal text, since this
+// function skipped the renewal check entirely for those kinds even though
+// obligationRenewedAt itself already supports them). No kind filter here
+// at all now — obligationRenewedAt is the single source of truth for which
+// kinds/party/human_state combinations it renews, so this never duplicates
+// (or drifts from) that decision.
 // A lookup failure here PROPAGATES rather than reading as "no renewal" —
 // every caller of followedUpIds already wraps it in its own fail-closed
 // .catch (unproven evidence must never count as fulfillment, here specifically:
@@ -185,7 +193,6 @@ function evidenceFrom(r) {
 async function renewedFloors(conn, rows) {
   const floors = new Map();
   for (const r of rows || []) {
-    if (r.kind !== 'callback' || r.party !== 'waves' || !['confirmed', 'edited'].includes(r.human_state)) continue;
     const renewed = await commitments.obligationRenewedAt(conn, r);
     if (renewed) floors.set(String(r.id), renewed);
   }
@@ -222,8 +229,12 @@ async function followedUpIds(conn, rows) {
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).
-  // Renewal floors only apply to callbacks and appointment slots only to
-  // schedule_visit promises, so the two never meet on one row.
+  // A renewal floor (below) now applies to every alertable SLA kind, not
+  // only callbacks (Codex #5019 r11/r12 P2/P1) — including schedule_visit,
+  // which also carries its own appointment slot. The two serve different
+  // matching paths (`since` vs the exact-slot booking check below) and
+  // don't conflict: a renewed schedule_visit's `since` still advances to
+  // the renewal instant either way.
   const scoped = (rows || []).map((r) => {
     const base = evidenceFrom(r);
     const floor = renewed.get(String(r.id));
