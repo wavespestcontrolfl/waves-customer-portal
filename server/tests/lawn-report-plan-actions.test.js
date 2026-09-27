@@ -286,6 +286,7 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
   });
 
   test.each([
+    'Don’t water for 24 hours after application.',
     'No irrigation for 24 hours after application.',
     'No watering for 24 hours.',
     'Refrain from watering until tomorrow.',
@@ -338,6 +339,28 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
     expect(aftercare.watering).toContain(positive);
     expect(aftercare.watering).toContain(hold);
     expect(aftercare.watering).toMatch(/Confirm the directions/);
+  });
+
+  test.each([
+    'Water within 1 hour after application. Water only after 24 hours have passed.',
+    'Water within 1 hour after application; water only after 24 hours have passed.',
+    'Water within 1 hour after application and water only after 24 hours have passed.',
+    'Water within 1 hour after application, but water only after 24 hours have passed.',
+    'Water within 1 hour after application. Don’t water for 24 hours.',
+  ])('conflicting clauses within one product cannot earn credit: %s', (irrigationNotes) => {
+    const aftercare = buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]);
+    expect(aftercare).toMatchObject({
+      evidenceSource: 'conflicting_product_instructions', needsReview: true, creditableWaterIn: false,
+    });
+    expect(aftercare.watering).toContain(irrigationNotes);
+  });
+
+  test('an unrelated timed clause cannot complete vague watering directions', () => {
+    const aftercare = buildAftercare([{ product: {
+      irrigation_required: true,
+      irrigation_notes: 'Water in. Keep people away for 24 hours.',
+    } }]);
+    expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
   });
 
   test.each([true, false])('the assistant conditions the full plan on the recorded restriction ending (visitInPlanWeek=%s)', (visitInPlanWeek) => {

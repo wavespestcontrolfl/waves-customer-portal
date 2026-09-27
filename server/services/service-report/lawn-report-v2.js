@@ -441,7 +441,7 @@ function isDeferredWateringInstruction(note) {
 
 function isWateringHoldInstruction(note) {
   const text = String(note || '').trim();
-  return /\b(?:do not|don't|avoid|delay|hold)\b[^.]{0,48}\b(?:water|watering|irrigat\w*)\b/i.test(text)
+  return /\b(?:do not|don['’]t|avoid|delay|hold)\b[^.]{0,48}\b(?:water|watering|irrigat\w*)\b/i.test(text)
     || /\bno\s+(?:(?:additional|further)\s+)?(?:water(?:ing)?|irrigation)\b(?!\s+(?:is\s+)?(?:required|needed|necessary)\b)/i.test(text)
     || /\brefrain\s+from\s+(?:water(?:ing)?|irrigat\w*)\b/i.test(text)
     // Passive restrictions keep the same hold authority as imperative notes.
@@ -471,16 +471,18 @@ function isCompleteWaterInInstruction(note) {
   return positiveWaterAction && amountOrTiming;
 }
 
-function recordedWateringInstruction(note) {
+function recordedWateringInstructions(note) {
   // Circular placeholder sentences provide no direction. A separate explicit
   // restriction still belongs in aftercare, including its recorded duration.
   const text = String(note || '').trim();
   const clauses = [];
-  const boundary = /[.!?;]\s+/g;
+  // Preserve each clause for comparison, including a repeated watering action
+  // after a conjunction; one product can contain incompatible directions.
+  const boundary = /[.!?;]\s+|(?:,\s+|\s+(?=(?:and|but|then)\b))(?=(?:(?:and|but|then|only)\s+)*(?:water(?:ing)?|irrigat\w*|do\s+not|don['’]t|avoid|delay|hold|add|apply|give)\b)/gi;
   let start = 0;
   let match;
   while ((match = boundary.exec(text)) !== null) {
-    const end = match.index + 1;
+    const end = match.index + (/^[.!?;,]/.test(match[0]) ? 1 : 0);
     const candidate = text.slice(start, end);
     // `in.` is a supported measurement unit, not a sentence boundary. Keep
     // the following timing/condition attached to the amount it qualifies.
@@ -490,8 +492,7 @@ function recordedWateringInstruction(note) {
   }
   clauses.push(text.slice(start).trim());
   return clauses
-    .filter((clause) => !isDeferredWateringInstruction(clause) || isWateringHoldInstruction(clause))
-    .join(' ');
+    .filter((clause) => clause && (!isDeferredWateringInstruction(clause) || isWateringHoldInstruction(clause)));
 }
 
 // Aftercare watering/re-entry from the manufacturer LABEL on the applied products.
@@ -504,20 +505,20 @@ function buildAftercare(applications) {
     const facts = (a && a.approved_report_product_facts) || {};
     const req = p.irrigation_required ?? facts.irrigationRequired ?? null;
     const note = (p.irrigation_notes || facts.irrigationNotes || '').trim();
-    const recordedNote = recordedWateringInstruction(note);
+    const recordedClauses = recordedWateringInstructions(note);
     return {
       required: req,
       note,
-      recordedNote,
+      recordedNote: recordedClauses.join(' '),
+      recordedClauses,
       reentry: (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null,
-      hasActionableInstruction: isActionableWateringInstruction(recordedNote),
-      hasCompleteWaterInInstruction: isCompleteWaterInInstruction(recordedNote),
-      hasWateringHold: isWateringHoldInstruction(recordedNote),
+      hasCompleteWaterInInstruction: recordedClauses.some(isCompleteWaterInInstruction),
     };
   });
   const unique = (values) => [...new Set(values.filter(Boolean))];
   const productNotes = unique(applicationWaterEvidence.map((entry) => entry.note));
   const displayableProductNotes = unique(applicationWaterEvidence.map((entry) => entry.recordedNote));
+  const wateringClauses = unique(applicationWaterEvidence.flatMap((entry) => entry.recordedClauses));
   const reentry = applicationWaterEvidence.map((entry) => entry.reentry).find(Boolean) || null;
   // true = a product requires watering-in; false = watering-in is not required
   // for the products seen (not a prohibition); null = no requirement evidence.
@@ -526,14 +527,14 @@ function buildAftercare(applications) {
     : (applicationWaterEvidence.some((entry) => entry.required === false) ? false : null);
   // A requirement boolean proves water-in is required, but establishes no
   // amount or timing. Opposing or incomplete product instructions need review.
-  const wateringHold = applicationWaterEvidence.some((entry) => entry.hasWateringHold);
-  const positiveWaterDirection = applicationWaterEvidence.some(
-    (entry) => entry.hasActionableInstruction && !entry.hasWateringHold,
+  const wateringHold = wateringClauses.some(isWateringHoldInstruction);
+  const positiveWaterDirection = wateringClauses.some(
+    (clause) => isActionableWateringInstruction(clause) && !isWateringHoldInstruction(clause),
   );
   const opposingDirections = [wateringHold, positiveWaterDirection].every(Boolean);
   // Distinct positive directions may disagree on timing or amount. Without a
   // compatibility check they cannot establish a completed watering-in credit.
-  const distinctPositiveDirections = displayableProductNotes.filter(
+  const distinctPositiveDirections = wateringClauses.filter(
     (note) => isActionableWateringInstruction(note) && !isWateringHoldInstruction(note),
   ).length > 1;
   const recordedInstructions = displayableProductNotes.join(' ');
