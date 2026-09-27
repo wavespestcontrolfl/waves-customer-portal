@@ -75,6 +75,7 @@ function query({ first, firstError, returning, columnInfo, rows = [] } = {}) {
     'whereBetween',
     'whereNotIn',
     'whereNotNull',
+    'whereRaw',
     'orderBy',
     'select',
     'join',
@@ -187,10 +188,10 @@ describe('annual prepay pre-visit payment reminders', () => {
   });
 
   test.each(['paid', 'processing', 'prepaid', 'void'])(
-    'skips a %s invoice (canonical collectibility — in-flight ACH must not be re-asked) — no claim, no SMS',
+    'skips a %s invoice (canonical collectibility — in-flight ACH must not be re-asked) — releases claim, no SMS',
     async (status) => {
       setDbQueues({
-        annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
+        annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }), query({ returning: [{ ...BASE_TERM }] }), query()],
         invoices: [query({ first: { ...UNPAID_INVOICE, status } })],
       });
 
@@ -201,9 +202,9 @@ describe('annual prepay pre-visit payment reminders', () => {
     },
   );
 
-  test('skips when already-applied account credit fully covers the balance (pre-claim)', async () => {
+  test('skips when already-applied account credit fully covers the balance before the credit seam', async () => {
     setDbQueues({
-      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
+      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }), query({ returning: [{ ...BASE_TERM }] }), query()],
       invoices: [query({ first: { ...UNPAID_INVOICE, credit_applied: '392.04' } })],
       invoice_followup_sequences: [query({ first: undefined })],
     });
@@ -242,7 +243,7 @@ describe('annual prepay pre-visit payment reminders', () => {
 
   test('skips a payer-billed invoice — never texts the homeowner a payer pay link', async () => {
     setDbQueues({
-      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
+      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }), query({ returning: [{ ...BASE_TERM }] }), query()],
       invoices: [query({ first: { ...UNPAID_INVOICE, payer_id: 'payer-9' } })],
     });
     // payer check fires on the first read — before the credit seam re-read.
@@ -255,7 +256,7 @@ describe('annual prepay pre-visit payment reminders', () => {
 
   test('defers to the invoice follow-up sequence when dunning touched the customer recently', async () => {
     setDbQueues({
-      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
+      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }), query({ returning: [{ ...BASE_TERM }] }), query()],
       invoices: [query({ first: { ...UNPAID_INVOICE } })],
       invoice_followup_sequences: [query({
         first: { status: 'active', last_touch_at: new Date(Date.now() - 60 * 60 * 1000), next_touch_at: null },
@@ -666,5 +667,66 @@ describe('explicit annual payment reminder channels', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
     expect(release.update).toHaveBeenCalled();
+  });
+});
+
+describe('durable annual 3-day attempt evidence', () => {
+  const cols = { ...REMINDER_COLS, first_visit_date: {}, payment_reminder_3d_attempted_for: {} };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+  });
+
+  test.each([['explicit', ['email'], '2026-07-11'], ['legacy', undefined, null]])(
+    '%s invoice-read failure releases the claim with the correct durable evidence', async (_label, channels, marker) => {
+      const claim = query({ returning: [{ ...BASE_TERM }] });
+      const release = query();
+      const invoice = query({ firstError: new Error('invoice unreadable') });
+      setDbQueues({ annual_prepay_terms: [query({ columnInfo: cols }), claim, release],
+        notification_prefs: [query({ first: { billing_channels: channels } })], invoices: [invoice] });
+      await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 3))
+        .rejects.toThrow('invoice unreadable');
+      expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ payment_reminder_3d_attempted_for: marker }));
+      expect(claim.update.mock.invocationCallOrder[0]).toBeLessThan(invoice.first.mock.invocationCallOrder[0]);
+      expect(claim.whereRaw).toHaveBeenCalledWith('COALESCE(first_visit_date, term_start) = ?', ['2026-07-11']);
+      expect(release.update).toHaveBeenCalledWith(expect.objectContaining({ payment_reminder_3d_claimed_at: null }));
+    },
+  );
+
+  test('unreadable stored choice cannot certify or claim an explicit attempt', async () => {
+    const claim = query({ returning: [{ ...BASE_TERM }] });
+    setDbQueues({ annual_prepay_terms: [query({ columnInfo: cols }), claim],
+      notification_prefs: [query({ firstError: new Error('choice unreadable') })] });
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 3))
+      .resolves.toEqual({ sent: false, reason: 'notification_prefs_unavailable' });
+    expect(claim.update).not.toHaveBeenCalled();
+  });
+
+  test('clearing the explicit choice after a resumed claim cannot fall through to Text', async () => {
+    reminderProgress.mockResolvedValue([]);
+    setDbQueues({ annual_prepay_terms: [query({ columnInfo: cols }),
+      query({ returning: [{ ...BASE_TERM }] }), query()],
+      notification_prefs: [query({ first: { billing_channels: ['email'] } }), query()],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoice_followup_sequences: [query()], customers: [query({ first: { ...CUSTOMER } })] });
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 3, { resume: true }))
+      .resolves.toEqual({ sent: false, reason: 'resume_not_explicit' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendReminderChannels).not.toHaveBeenCalled();
+  });
+
+  test.each(['scan', 'choice'])('a failed resume %s still runs the normal 1-day reminder', async (failure) => {
+    const resume = query({ rows: [{ ...BASE_TERM }] });
+    if (failure === 'scan') resume.select.mockImplementation(() => Promise.reject(new Error('resume unreadable')));
+    setDbQueues({ 'annual_prepay_terms as t': [query()], annual_prepay_terms: [query({ columnInfo: cols }),
+      query(), resume, query({ rows: [{ ...BASE_TERM }] }), query({ returning: [{ ...BASE_TERM }] }), query()],
+      ...(failure === 'choice' ? { notification_prefs: [query({ firstError: new Error('choice unreadable') })] } : {}),
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoice_followup_sequences: [query()], customers: [query({ first: { ...CUSTOMER } })], customer_interactions: [query()] });
+    renderSmsTemplate.mockResolvedValue('pay reminder body');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    await expect(AnnualPrepayRenewals.checkAndSendPaymentReminders({ today: '2026-07-08' })).resolves.toEqual({ sent: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ days_out: 1 }) }));
   });
 });
