@@ -1868,11 +1868,7 @@ async function finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendin
   // or branch deletion stays in the pending set and converges next tick.
   const closed = await gh.getPr(pr.number);
   if (closed?.merged || closed?.merged_at) {
-    return finalizeMerged(run, pr.number, {
-      autoMerged: false,
-      mergeSha: closed.merge_commit_sha || null,
-      mergedAt: closed.merged_at || null,
-    });
+    return finalizeMergedSupersededCitability(run, { ...closed, number: pr.number }, queue, pendingReason);
   }
   if (!closed || closed.state !== 'closed' || closed.head?.sha !== pr.head?.sha) {
     return { pending: true, transient: true, reason: 'citability_retirement_close_pending' };
@@ -1883,6 +1879,14 @@ async function finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendin
     return { pending: true, transient: true, reason: 'citability_terminal_stamp_pending' };
   }
 
+  const retired = await retireSupersededCitabilityRecords(run, pr.number, queue, pendingReason,
+    `PR #${pr.number} was closed and its branch retired because an ordinary page edit permanently superseded this citability backfill.`);
+  if (!retired) return { pending: true, transient: true, reason: 'citability_retirement_bookkeeping_pending' };
+  logger.warn(`[autonomous-pr-poller] retired superseded citability PR #${pr.number} for run ${run.id}`);
+  return { skipped: true, retired: true, reason: 'citability_backfill_superseded' };
+}
+
+async function retireSupersededCitabilityRecords(run, prNumber, queue, pendingReason, note) {
   try {
     await db.transaction(async (trx) => {
       await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
@@ -1903,8 +1907,7 @@ async function finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendin
         .where('outcome', PENDING_OUTCOME).where('skip_reason', pendingReason)
         .update({
           skip_reason: SUPERSEDED_SKIP_REASON,
-          reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes,
-            `PR #${pr.number} was closed and its branch retired because an ordinary page edit permanently superseded this citability backfill.`]
+          reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note]
             .filter(Boolean).join(' | ').slice(0, 4000),
           poll_pending_reason: null,
           poll_pending_since: null,
@@ -1914,11 +1917,21 @@ async function finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendin
       if (Number(runRows) !== 1) throw new Error('run retirement CAS lost');
     });
   } catch (err) {
-    logger.warn(`[autonomous-pr-poller] superseded citability retirement bookkeeping failed for run ${run.id}: ${err.message} (retried next tick)`);
-    return { pending: true, transient: true, reason: 'citability_retirement_bookkeeping_pending' };
+    logger.warn(`[autonomous-pr-poller] superseded citability retirement bookkeeping failed for run ${run.id} PR #${prNumber}: ${err.message} (retried next tick)`);
+    return false;
   }
-  logger.warn(`[autonomous-pr-poller] retired superseded citability PR #${pr.number} for run ${run.id}`);
-  return { skipped: true, retired: true, reason: 'citability_backfill_superseded' };
+  return true;
+}
+
+async function finalizeMergedSupersededCitability(run, pr, queue, pendingReason) {
+  if (!await stampTerminal(pr.number, 'merged', run)) {
+    return { pending: true, transient: true, reason: 'citability_terminal_stamp_pending' };
+  }
+  const retired = await retireSupersededCitabilityRecords(run, pr.number, queue, pendingReason,
+    `PR #${pr.number} merged before retirement completed, but an ordinary page edit permanently owns this route; the citability queue claim was retired.`);
+  if (!retired) return { pending: true, transient: true, reason: 'citability_retirement_bookkeeping_pending' };
+  logger.warn(`[autonomous-pr-poller] retired merged superseded citability PR #${pr.number} for run ${run.id}`);
+  return { skipped: true, retired: true, merged: true, reason: 'citability_backfill_superseded' };
 }
 
 async function retireSupersededCitabilityPr(run, pr, gh) {
@@ -1926,11 +1939,7 @@ async function retireSupersededCitabilityPr(run, pr, gh) {
   const pendingReason = pendingSkipReasonForRun(run);
   const { state, current } = await closeSupersededCitabilityPr(run, pr, gh, queue, pendingReason);
   if (state === 'merged') {
-    return finalizeMerged(run, pr.number, {
-      autoMerged: false,
-      mergeSha: current.merge_commit_sha || null,
-      mergedAt: current.merged_at || null,
-    });
+    return finalizeMergedSupersededCitability(run, { ...current, number: pr.number }, queue, pendingReason);
   }
   if (state !== 'closed') return { pending: true, transient: true, reason: `citability_retirement_${state}` };
   return finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendingReason);
@@ -1953,13 +1962,6 @@ async function pollRun(run, { allowMerge = true } = {}) {
       return { pending: true, reason: 'pr_not_found' };
     }
 
-    if (pr.merged || pr.merged_at) {
-      return await finalizeMerged(run, prNumber, {
-        autoMerged: false,
-        mergeSha: pr.merge_commit_sha || null,
-        mergedAt: pr.merged_at || null,
-      });
-    }
     if (run.action_type === 'refresh_existing_page' && run.opportunity_id) {
       const row = await db('opportunity_queue').where('id', run.opportunity_id)
         .first('bucket', 'signal_metadata');
@@ -1967,6 +1969,13 @@ async function pollRun(run, { allowMerge = true } = {}) {
       if (row?.bucket === 'citability_backfill' && pageEditSuperseded(row)) {
         return await retireSupersededCitabilityPr(run, { ...pr, number: prNumber }, gh);
       }
+    }
+    if (pr.merged || pr.merged_at) {
+      return await finalizeMerged(run, prNumber, {
+        autoMerged: false,
+        mergeSha: pr.merge_commit_sha || null,
+        mergedAt: pr.merged_at || null,
+      });
     }
     if (pr.state !== 'open') {
       if (run.action_type === 'new_supporting_blog') {

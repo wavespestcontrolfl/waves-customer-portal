@@ -1588,7 +1588,7 @@ class AutonomousRunner {
   async _withPageEditLock(fn) {
     let lockConn = null;
     let acquired = false;
-    let safeToRelease = true;
+    let unlockError = null;
     try {
       lockConn = await db.client.acquireConnection();
       await lockConn.query("SELECT pg_advisory_lock(hashtext($1))", ['opportunity_page_edit']);
@@ -1605,14 +1605,17 @@ class AutonomousRunner {
       if (lockConn && acquired) {
         try { await lockConn.query("SELECT pg_advisory_unlock(hashtext($1))", ['opportunity_page_edit']); }
         catch (err) {
-          safeToRelease = false;
+          unlockError = err;
           logger.warn(`[autonomous-runner] page-edit advisory unlock failed (${err.message}); destroying the locked session`);
         }
       }
       if (lockConn) {
         try {
-          if (safeToRelease) await db.client.releaseConnection(lockConn);
-          else await db.client.destroyRawConnection(lockConn);
+          // Tarn still owns this checkout. Mark it disposed so Knex destroys
+          // it during validation, then release the checkout back to Tarn;
+          // closing the socket directly would leave a dead entry in `used`.
+          if (unlockError) lockConn.__knex__disposed = `page-edit advisory unlock failed: ${unlockError.message}`;
+          await db.client.releaseConnection(lockConn);
         } catch { /* pool reaps */ }
       }
     }

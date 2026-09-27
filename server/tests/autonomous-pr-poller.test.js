@@ -857,6 +857,32 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a superseded citability PR already merged retires its parked queue claim atomically', async () => {
+    const updates = setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{
+        id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+        bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+      }],
+    });
+    const merged = { ...openPr(), state: 'closed', merged: true, merged_at: '2026-09-27T01:55:00Z' };
+    gh.getPr.mockResolvedValue(merged);
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ skipped: true, retired: true, merged: true, reason: 'citability_backfill_superseded' });
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalled();
+    expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
   test.each(['locked read', 'close', 'branch retirement'])('a citability retirement failure during %s does not stop the remaining poll batch', async (failure) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
     const first = makeRun({ action_type: 'refresh_existing_page' });

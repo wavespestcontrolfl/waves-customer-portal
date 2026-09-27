@@ -2608,9 +2608,10 @@ describe('runNext post-publish bookkeeping', () => {
       },
     )).resolves.toMatchObject({ publish_status: 'no_changes' });
     expect(publisher.publishRefresh).toHaveBeenCalledTimes(1);
-    expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'destroy']);
-    expect(lock.client.releaseConnection).not.toHaveBeenCalled();
-    expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
+    expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'release']);
+    expect(lock.conn.__knex__disposed).toMatch(/page-edit advisory unlock failed: connection reset/);
+    expect(lock.client.releaseConnection).toHaveBeenCalledWith(lock.conn);
+    expect(lock.client.destroyRawConnection).not.toHaveBeenCalled();
   });
 
   // These tests exercise publish/queue bookkeeping, not blog dedup. Blog
