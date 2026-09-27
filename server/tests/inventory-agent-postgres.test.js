@@ -36,10 +36,16 @@ jest.setTimeout(30000);
 
   // Every test but the explicit "gated off" one below runs with the gate on
   // (runInventoryAgent self-checks it — see the module header).
-  beforeEach(() => { process.env.GATE_INVENTORY_AGENT = 'true'; });
+  const SINCE_ORIGINAL = process.env.PURCHASE_RECEIPT_SINCE;
+  beforeEach(() => {
+    process.env.GATE_INVENTORY_AGENT = 'true';
+    process.env.PURCHASE_RECEIPT_SINCE = '2026-09-01T00:00:00Z';
+  });
   afterAll(() => {
     if (GATE_ORIGINAL === undefined) delete process.env.GATE_INVENTORY_AGENT;
     else process.env.GATE_INVENTORY_AGENT = GATE_ORIGINAL;
+    if (SINCE_ORIGINAL === undefined) delete process.env.PURCHASE_RECEIPT_SINCE;
+    else process.env.PURCHASE_RECEIPT_SINCE = SINCE_ORIGINAL;
   });
 
   beforeAll(async () => {
@@ -238,6 +244,27 @@ jest.setTimeout(30000);
     await agentSide;
     expect(await adminSide).toBeNull();
     expect(await mockConn('products_catalog').whereRaw('lower(btrim(name)) = ?', ['bifen xts'])).toHaveLength(1);
+  });
+
+  test('with no valid PURCHASE_RECEIPT_SINCE the agent does nothing', async () => {
+    const line = await pendingLine();
+    delete process.env.PURCHASE_RECEIPT_SINCE;
+    const llm = jest.fn();
+    expect(await runInventoryAgent({ conn: mockConn, llm, notifyAdmin })).toEqual({ skipped: 'no_since' });
+    expect(llm).not.toHaveBeenCalled();
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('agent_pending');
+  });
+
+  test('a pending line received before a cutoff that moved forward closes without stock or a bell', async () => {
+    const line = await pendingLine();
+    process.env.PURCHASE_RECEIPT_SINCE = new Date(RECEIVED_AT.getTime() + HOUR).toISOString();
+    const llm = jest.fn();
+    await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(llm).not.toHaveBeenCalled();
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'skipped', movement_id: null });
+    expect(saved.agent_decision).toMatchObject({ reason: 'received_before_cutoff' });
+    expect(await bellsFor(line.id)).toHaveLength(0);
   });
 
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {

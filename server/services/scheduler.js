@@ -2487,11 +2487,12 @@ function initScheduledJobs() {
       await runExclusive('purchase-receipt-restock', async () => {
         const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
         const result = await runPurchaseReceiptRestockSweep();
-        if (!result.skipped) {
-          const { logged, held, errors } = summarize(result);
-          if (logged || held || errors) {
-            logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
-          }
+        // A skipped sweep (no valid PURCHASE_RECEIPT_SINCE) stops the agent
+        // too: clearing the cutoff is a kill switch for every receipt write.
+        if (result.skipped) return;
+        const { logged, held, errors } = summarize(result);
+        if (logged || held || errors) {
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
         }
         // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
         // above just handed off as agent_pending (unmatched/needs_size/

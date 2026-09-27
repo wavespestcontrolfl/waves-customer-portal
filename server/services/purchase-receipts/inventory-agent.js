@@ -24,7 +24,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp } = require('../../config/feature-gates');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { normalizeForMatch, containsWholeWords } = require('./product-matcher');
@@ -38,6 +38,7 @@ const {
 } = require('./receipt-processor');
 
 const GATE = 'GATE_INVENTORY_AGENT';
+const SINCE_ENV = 'PURCHASE_RECEIPT_SINCE';
 const BATCH_LIMIT = 10;
 const MAX_ATTEMPTS = 3;
 const CANDIDATE_LIMIT = 15;
@@ -820,13 +821,27 @@ async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, site
   return { decision, reClassified, raw: res.json };
 }
 
-async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCategories, activeProducts }) {
+async function closeBeforeCutoff(conn, lineId) {
+  return conn.transaction(async (trx) => {
+    const line = await trx('purchase_receipt_lines').where({ id: lineId }).forUpdate().first('status');
+    if (!line || line.status !== 'agent_pending') return { status: 'no_longer_pending' };
+    await trx('purchase_receipt_lines').where({ id: lineId }).update({
+      status: 'skipped', agent_decision: { kind: 'skipped', reason: 'received_before_cutoff' }, agent_decided_at: new Date(),
+    });
+    return { status: 'skipped' };
+  });
+}
+
+async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCategories, activeProducts, since }) {
   // Every pass over a pending line either resolves it or spends an attempt,
   // so no line can sit at the head of the oldest-first queue forever. A line
   // whose email row is gone can never be checked for duplicates: hand it to
   // a person now.
   const email = line.email_id && await conn('emails').where({ id: line.email_id }).first('id', 'received_at');
   if (!email) return recordAttemptFailure(conn, line.id, notifyAdmin, 'its email record is gone', { final: true });
+  // Received before the current cutoff: a physical count taken since then
+  // already includes it, so it closes without stock and without a bell.
+  if (since && new Date(email.received_at) < since) return closeBeforeCutoff(conn, line.id);
 
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, line) : null;
   const outcome = await decideForTitle(conn, dispatch, { rawTitle: line.raw_title, quantity: Number(line.quantity), vendor: line.vendor, siteOneFields }, { allowedCategories, activeProducts });
@@ -846,6 +861,11 @@ async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCatego
  */
 async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LIMIT } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated' };
+  // The receipt cutoff governs this lane too: unset or invalid stops it,
+  // and a pending line from before a cutoff that moved forward (a new
+  // physical count) closes without stock (see processOneLine).
+  const since = gateEnvTimestamp(SINCE_ENV);
+  if (!since) return { skipped: 'no_since' };
   const notify = notifyAdmin || ((...args) => require('../notification-service').notifyAdmin(...args));
   const dispatch = llm || dispatchWithFallback;
 
@@ -863,7 +883,7 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
       // (item 1 of the 2026-09-27 review) — validateNewProduct's collision
       // check must see it.
       const activeProducts = await conn('products_catalog').where({ active: true }).select('id', 'name');
-      const outcome = await processOneLine(conn, line, { dispatch, notifyAdmin: notify, allowedCategories, activeProducts });
+      const outcome = await processOneLine(conn, line, { dispatch, notifyAdmin: notify, allowedCategories, activeProducts, since });
       if (outcome.status === 'logged') totals.logged += 1;
       else if (outcome.status === 'still_pending' || outcome.status === 'no_longer_pending') totals.stillPending += 1;
       else totals.held += 1;
