@@ -153,7 +153,7 @@ const NotificationService = {
       // The bell exposes the same copy as native push. Recheck after any
       // preference/property lookup and dedupe lock, before persisting it.
       if (typeof shouldContinue === 'function') {
-        const verdict = await shouldContinue();
+        const verdict = await shouldContinue({ database: connection });
         const allowed = verdict === true || verdict?.ok === true;
         const hasDeadline = verdict && Object.prototype.hasOwnProperty.call(verdict, 'validUntil');
         const deadlineValid = !hasDeadline || (Number.isFinite(verdict.validUntil) && Date.now() < verdict.validUntil);
@@ -439,7 +439,7 @@ const NotificationService = {
       // Preserve the successful bell even if dispatch fails synchronously.
       logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
     }
-    return { ...notification, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
+    return { ...notification, deduped, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
   },
 
   // Get notifications for admin

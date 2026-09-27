@@ -233,7 +233,8 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // Stack-safe (sliced) validation — a whole-string regex on a multi-megabyte
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
-const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
+// The persisted-turn markers are defined once, with the thread store.
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -260,10 +261,72 @@ function sanitizeQueryImages(images) {
 // does: a follow-up turn can echo the name with no tool call at all, so the
 // taint must survive the round-trip through the client the same way the
 // image taint does.
-const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
 // The persisted user turn of a task continuation. The original request is
 // already in the thread and in the client's history from the first reply.
-const CONTINUATION_TURN = 'Continue the saved request using its recorded step outcomes.';
+// The persisted user turn of a task continuation is defined with the thread
+// store (IbThreads.CONTINUATION_TURN), which also keeps it out of prior-turn
+// grounding.
+const { CONTINUATION_TURN } = IbThreads;
+
+// Phantom-card guard (see the finalResponse assembly below): text that
+// claims confirmation cards. Rounds 10–13 all found a new prose edge case
+// for turning a card CLAIM into an exact card COUNT ("two confirmation
+// cards below; use both cards below to continue" summed to 4; "I've
+// prepared two confirmation cards for the customer updates and another
+// confirmation card for inventory" undercounted to 2 instead of 3) —
+// counting distinct cards from free text is inherently ambiguous and kept
+// producing one more failing prompt. Structural fix: stop inferring a
+// count from prose entirely. A claim only ever gets one of three
+// responses:
+//   - no CARD_CLAIM_RE claim at all — nothing;
+//   - a claim and this turn created ZERO cards — the existing zero-card
+//     notice (nothing to point the operator at is still the one case worth
+//     a correction, not just information);
+//   - a claim and this turn created ONE OR MORE cards — nothing when the
+//     reply reads as a single-card claim (at most one CARD_PHRASE_RE match,
+//     singular, no cardinal/"both"/"another" — including a bare claim with
+//     no noun phrase at all, "click Confirm"); otherwise ("multi-card
+//     language": more than one CARD_PHRASE_RE match, any plural noun, any
+//     cardinal ≥2, "both", or "another") a single NEUTRAL, TRUTHFUL line
+//     stating the real count — never a claim about whether the reply's own
+//     count was right, since that's exactly the ambiguous judgment this
+//     fix removes.
+// A confirmation BUTTON claim ("two confirmation buttons below") is read
+// exactly like a card claim (Codex round-12 P2): each pending action is one
+// card with one Confirm button, so the two nouns count the same thing.
+const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bconfirm(?:ation)? buttons?\b|\b(?:click|press|tap|hit|use)\s+(?:the\s+)?confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
+const CARD_CARDINAL_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
+const CARD_DETERMINER_ALT = '\\d+|a|an|one|two|three|four|five|six|another|both|the|this|that|your';
+const CARD_PHRASE_RE = new RegExp(
+  `\\b(?:(${CARD_DETERMINER_ALT})\\s+(?:(?:new|separate)\\s+)?)?(?:confirm(?:ation)?\\s+(cards?|buttons?)(?:\\s+below)?|(cards?|buttons?)\\s+below)\\b`,
+  'gi',
+);
+function cardinalValue(determiner) {
+  if (CARD_CARDINAL_WORDS[determiner] != null) return CARD_CARDINAL_WORDS[determiner];
+  const n = Number(determiner);
+  return Number.isFinite(n) && n >= 2 ? n : null;
+}
+// "Multi-card language": any signal in the reply's own wording that it
+// might be describing more than one card. Never a count — just a trigger
+// for switching from silence to the truthful server-side line.
+function hasMultiCardLanguage(text) {
+  const matches = [...String(text).matchAll(CARD_PHRASE_RE)];
+  if (matches.length > 1) return true;
+  return matches.some(([, word, noun, nounBelow]) => {
+    const determiner = (word || '').toLowerCase();
+    if (/s$/i.test(noun || nounBelow || '')) return true;
+    if (determiner === 'both' || determiner === 'another') return true;
+    return cardinalValue(determiner) != null;
+  });
+}
+function cardClaimNotice(text, created) {
+  if (!CARD_CLAIM_RE.test(text)) return null;
+  if (created === 0) {
+    return "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
+  }
+  if (!hasMultiCardLanguage(text)) return null;
+  return `${created} confirmation card${created === 1 ? ' was' : 's were'} created for this reply.`;
+}
 
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
@@ -1244,8 +1307,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     }
   }
   if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolUse.name)) {
+    // actorId/threadId only feed the operator-grounding fallback (a prior
+    // OPERATOR turn on the OPERATOR's OWN server-persisted thread naming the
+    // preview's product) — resolveInventoryWriteTarget re-verifies thread
+    // ownership and the threads gate itself before reading anything.
     const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
       toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
+      actorId: getAdminActorId(req), threadId: req.body.thread_id,
+      // The requesting tab's OWN observed thread tail (Codex round-2 P2) —
+      // same parse as the optimistic-append check below — so a stale tab
+      // never grounds off turns appended by another tab it never saw.
+      threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
     });
     if (target.error) return { failed: true, modelResult: target };
     if (toolUse.name !== 'update_restock_request') {
@@ -2608,6 +2680,20 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
+    }
+
+    // Phantom-card guard (2026-09-25 production case): the model can write
+    // "awaiting your Confirm on the card below" in plain prose with no tool
+    // call at all, so THIS turn creates no pending action and no card ever
+    // renders. Deterministic: it compares what this reply claims with what
+    // this turn produced, and the notice stays true when the reply is really
+    // pointing at an earlier card (this reply created none). Appended here,
+    // before analytics logging and thread persistence, so the logged and
+    // persisted text match what the operator sees. The notice is
+    // tool-agnostic: it never names a specific field.
+    {
+      const cardNotice = cardClaimNotice(finalResponse, pendingProposals.length);
+      if (cardNotice) finalResponse += `\n\n${cardNotice}`;
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;

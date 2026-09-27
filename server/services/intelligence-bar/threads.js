@@ -79,6 +79,9 @@ async function appendExchange({ actorId, threadId, expectedSeq, context, userTex
         .slice(-SEED_TURN_LIMIT);
       if (seeds.length) {
         await trx('ib_thread_turns').insert(
+          // Seed rows carry the current time, not their real age, so they are
+          // not live turns (live_turn defaults false) and recent-turn
+          // grounding (recentOperatorTurns) skips them.
           seeds.map((t, i) => ({ thread_id: thread.id, seq: i + 1, role: t.role, content: t.content })),
         );
       }
@@ -91,8 +94,8 @@ async function appendExchange({ actorId, threadId, expectedSeq, context, userTex
     if (threadId && (!Number.isInteger(expectedSeq) || expectedSeq !== tail)) return null;
     const nextSeq = tail + 1;
     await trx('ib_thread_turns').insert([
-      { thread_id: thread.id, seq: nextSeq, role: 'user', content: String(userText) },
-      { thread_id: thread.id, seq: nextSeq + 1, role: 'assistant', content: String(assistantText) },
+      { thread_id: thread.id, seq: nextSeq, role: 'user', content: String(userText), live_turn: true },
+      { thread_id: thread.id, seq: nextSeq + 1, role: 'assistant', content: String(assistantText), live_turn: true },
     ]);
     await trx('ib_threads').where('id', thread.id)
       .update({ last_active_at: trx.fn.now(), updated_at: trx.fn.now() });
@@ -151,6 +154,68 @@ async function getThread(actorId, threadId) {
   };
 }
 
+// Lines the IB route appends to a persisted user turn; they are server
+// metadata, never operator text. The taint markers keep follow-ups redacted
+// (see admin-intelligence-bar.js); the attachment note stands in for images.
+const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
+const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
+// The user turn the route persists when a saved task continues; the operator
+// never typed it.
+const CONTINUATION_TURN = 'Continue the saved request using its recorded step outcomes.';
+
+// A persisted user turn with the server-added lines removed: what the
+// operator actually typed.
+function operatorText(content) {
+  return String(content || '').split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== CONTINUATION_TURN
+        && !ATTACHMENT_NOTE_RE.test(trimmed);
+    })
+    .join('\n').trim();
+}
+
+/**
+ * The actor's most recent OPERATOR (role='user') turns on one thread, bounded
+ * by count and age. Used by the inventory write-target grounding fallback
+ * (procurement-tools.resolveInventoryWriteTarget) to let a follow-up like
+ * "1 bottle" ground off a product the operator themself named a turn or two
+ * earlier — never an assistant turn, tool result, attachment, or note.
+ *
+ * Actor-bound like every other accessor here: a thread owned by a different
+ * actor (or one that doesn't exist) returns []. The CURRENT, in-flight prompt
+ * is never in this table yet (persistence happens after the reply), so this
+ * only ever returns PRIOR turns.
+ *
+ * `maxSeq`, when an integer, bounds the read to turns at or before that seq
+ * (Codex round-2 P2): with the same thread open in two tabs, this stops a
+ * stale tab's request from grounding off turns appended by the OTHER tab
+ * after the one it actually saw. The caller (resolveByOperatorGrounding)
+ * refuses prior-turn grounding entirely when it has no valid bound to pass —
+ * this only enforces whatever bound it IS given.
+ */
+const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes = 30, maxSeq = null } = {}) {
+  // Nothing to read when threads are off, or for a missing actor or a
+  // malformed thread id (never sent to the uuid column).
+  if (!threadsEnabled() || !actorId || !THREAD_ID_RE.test(String(threadId || ''))) return [];
+  const thread = await db('ib_threads').where({ id: threadId, admin_actor_id: actorId }).first();
+  if (!thread) return [];
+  let query = db('ib_thread_turns')
+    .where('thread_id', threadId)
+    .where('role', 'user')
+    .where('live_turn', true)
+    .where('created_at', '>=', db.raw("NOW() - (? || ' minutes')::interval", [maxAgeMinutes]));
+  if (Number.isInteger(maxSeq)) query = query.where('seq', '<=', maxSeq);
+  // Continuation turns are excluded before the limit, so they never crowd
+  // out the operator's real turns; any turn that still strips to nothing is
+  // dropped after.
+  const rows = await query.whereNot('content', 'like', `${CONTINUATION_TURN}%`)
+    .orderBy('seq', 'desc').limit(limit).select('content');
+  return rows.map((r) => operatorText(r.content)).filter(Boolean);
+}
+
 /** Recent threads for the picker (no turns). */
 async function listThreads(actorId, limit = 20) {
   if (!actorId) return [];
@@ -179,6 +244,10 @@ module.exports = {
   latestThread,
   getThread,
   listThreads,
+  recentOperatorTurns,
+  IMAGE_TAINT_MARKER,
+  PII_TAINT_MARKER,
+  CONTINUATION_TURN,
   purgeExpiredThreads,
   deriveTitle,
   RESUME_TURN_LIMIT,

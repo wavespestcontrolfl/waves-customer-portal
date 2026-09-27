@@ -44,8 +44,15 @@ async function invoiceSendRefusal(meta, database) {
   // unsent, since nothing would finalize it (Codex #4963 P1). Refused as
   // RESENDABLE, not blocked: the row settles as a definitely-unsent failure,
   // so the invoice's next send re-delivers through the same notice key
-  // instead of deduping against a block.
-  if (!invoice.sent_at) return { eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true };
+  // instead of deduping against a block. The one exception is a queued
+  // pay-link text whose own finalize marks the delivery
+  // (mark_invoice_delivery: sendViaSMSAndEmail's held text, the only delivery
+  // when its email leg failed too): that replay IS the finalization, so it
+  // may reach an unsent invoice. A stored Email replay context never carries
+  // the flag.
+  if (!invoice.sent_at && meta.mark_invoice_delivery !== true) {
+    return { eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true };
+  }
   if (!(invoiceAmountDue(invoice) > 0)) return refused('invoice-nothing-due');
   const visitStatus = await visitRefusesSettlement(database, await linkedVisitId(invoice, database));
   return visitStatus ? refused(`invoice-visit-${visitStatus}`) : null;
