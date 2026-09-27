@@ -91,7 +91,7 @@ const BOUNDARY = {
   CLAIMED: 'MISSED_CALL_PHONE_CLAIMED',
   CLAIM_BUSY: 'MISSED_CALL_CLAIM_IN_FLIGHT',
   VOICEMAIL_TEXTED: 'MISSED_CALL_VOICEMAIL_TEXTED',
-  SEND_IN_FLIGHT: 'MISSED_CALL_SEND_IN_FLIGHT',
+  CONTACT_IN_FLIGHT: 'MISSED_CALL_CONTACT_IN_FLIGHT',
   CHECK_FAILED: 'MISSED_CALL_CHECK_FAILED',
 };
 // Same lease length / shape as missed-call-bell.js — long enough to cover
@@ -118,6 +118,11 @@ const MAX_CALL_AGE_MS = 16 * 60 * 60 * 1000;
 
 // Later-call outcomes that mean someone already spoke with the caller.
 const ANSWERED_BY_SOMEONE = ['human', 'ai_agent'];
+// A click-to-call row before its customer leg is dialed (call-bridge.js
+// inserts it 'initiated'; /call-status moves the staff leg along). One still
+// in these statuses past BRIDGE_PENDING_MS is a stuck row, not a live call.
+const BRIDGE_LIVE_STATUSES = ['initiated', 'queued', 'ringing', 'in-progress'];
+const BRIDGE_PENDING_MS = 15 * 60 * 1000;
 const AI_OUTCOMES = ['ai_handled', 'ai_transferred'];
 // Outbound sms_log statuses that reached nobody — lead-auto-reply.js's
 // delayed-reply rule: scheduled, cancelled, or bounced.
@@ -260,14 +265,18 @@ function deliveredTexts(dbi) {
 // Contact since the missed call — checked before the lease work and again
 // at the provider boundary (owner: "only if nobody has called or texted
 // them by then"). 'contacted' when a customer record knows the number now,
-// we have called them since, a later call from them was answered (by a
+// we have called them since (a click-to-call counts once its customer leg
+// was dialed — bridged_at; call-bridge.js rings the staff leg first and
+// dials the customer only on press-1), a later call from them was answered (by a
 // person or Sandy) or left a voicemail, a text reached them or came from
 // them since (deliveredTexts), or a staff reply to them is scheduled or
 // mid-send (the human wins — lead-auto-reply.js's same rule). 'in_flight'
 // when another automated text to them is mid-handoff (a 'sending' row):
-// wait for its outcome rather than cross the provider boundary beside it.
-// null when clear. This lane's own texts are never contact: they are the
-// one-shot claim's business.
+// wait for its outcome rather than cross the provider boundary beside it —
+// as is a click-to-call still ringing its staff leg (not bridged, not
+// ended, placed within the last BRIDGE_PENDING_MS). null when clear. This
+// lane's own texts are never contact: they are the one-shot claim's
+// business.
 async function contactState(phone, row, dbi = db) {
   if (await knownCallerPhoneExists(dbi, phone)) return 'contacted';
   const digits = phone.replace(/\D/g, '').slice(-10);
@@ -278,7 +287,7 @@ async function contactState(phone, row, dbi = db) {
     .where('created_at', '>=', row.created_at)
     .whereNot('id', row.id)
     .where((q) => q
-      .where((out) => out.where('direction', 'outbound').whereRaw(...phoneMatches('to_phone')))
+      .where((out) => out.where('direction', 'outbound').whereRaw(...phoneMatches('to_phone')).whereNotNull('bridged_at'))
       .orWhere((inb) => inb.where('direction', 'inbound').whereRaw(...phoneMatches('from_phone'))
         .where((handled) => handled
           .whereIn('answered_by', ANSWERED_BY_SOMEONE)
@@ -288,6 +297,15 @@ async function contactState(phone, row, dbi = db) {
           .orWhereNotNull('voicemail_callback_alerted_at'))))
     .first('id');
   if (laterCall) return 'contacted';
+  const bridgePending = await dbi('call_log')
+    .modify((q) => whereNotSandboxCall(q))
+    .where('direction', 'outbound')
+    .whereRaw(...phoneMatches('to_phone'))
+    .whereNull('bridged_at')
+    .whereIn('status', BRIDGE_LIVE_STATUSES)
+    .where('created_at', '>=', row.created_at)
+    .where('created_at', '>', new Date(Date.now() - BRIDGE_PENDING_MS))
+    .first('id');
   const texted = await deliveredTexts(dbi)
     .whereRaw("COALESCE(message_type, '') <> ?", [MESSAGE_TYPE])
     .where('created_at', '>=', row.created_at)
@@ -304,29 +322,34 @@ async function contactState(phone, row, dbi = db) {
     .whereRaw(...phoneMatches('to_phone'))
     .select('message_type');
   if (pending.some((text) => HUMAN_REPLY_TYPES.includes(text.message_type))) return 'contacted';
-  return pending.length ? 'in_flight' : null;
+  return pending.length || bridgePending ? 'in_flight' : null;
 }
 
 // A claim this lane took at the provider boundary and never resolved: the
 // attempt died between the claim and its outcome. The local sms_log cannot
 // prove absence (a post-accept log insert can fail), so ask the provider
 // (TwilioService.findOutboundMessageSince, the same reconciliation
-// prep-guide-sender.js runs on its stale claims). No outbound message to the
-// number since the claim → nothing was sent: release the orphan. A message
-// → stamp it sent. No answer → leave it for the next pass. Returns the claim
+// prep-guide-sender.js runs on its stale claims) for THIS lane's text — the
+// exact body the attempt stamped on its call before sending, so a staff
+// text to the same number never passes for it. That text since the claim →
+// stamp it sent; none → release the orphan; no answer, or no stamped body
+// to match → leave it (possibly delivered, at most once). Returns the claim
 // row that stands afterwards, or null.
 async function reconcileStaleClaim(phone, claim) {
   if (claim.outcome !== CLAIM.DISPATCHING) return claim;
   const claimedAt = new Date(claim.created_at).getTime();
   if (!Number.isFinite(claimedAt) || Date.now() - claimedAt < STALE_CLAIM_MS) return claim; // still in flight
-  const provider = await require('./twilio').findOutboundMessageSince({ to: phone, sentAfter: claim.created_at });
+  const origin = claim.call_log_id ? await db('call_log').where({ id: claim.call_log_id }).first('metadata') : null;
+  const body = parseMeta(origin?.metadata).missed_call_text_body;
+  if (!body) return claim;
+  const provider = await require('./twilio').findOutboundMessageSince({ to: phone, sentAfter: claim.created_at, bodyFragment: body });
   if (provider?.found) {
     await ownInFlightClaim(phone).update({ outcome: CLAIM.SENT });
   } else if (provider?.found === false && !provider.unavailable) {
     await ownInFlightClaim(phone).where('created_at', '<', new Date(Date.now() - STALE_CLAIM_MS)).del();
     logger.info(`[missed-call-text-back] Released an orphaned claim for ${maskPhone(phone)} — the provider has no message since it`);
   }
-  return (await db('missed_call_text_claims').where({ phone }).first('outcome', 'created_at')) || null;
+  return (await db('missed_call_text_claims').where({ phone }).first('outcome', 'created_at', 'call_log_id')) || null;
 }
 
 // What this lane's existing claim on the number means for a call:
@@ -348,7 +371,7 @@ function claimState(claim) {
 // fate is the claim's business, and a reconciled orphan the provider proved
 // unsent, or a bounced text, must not survive here as a completed one.
 async function priorTextReason(phone) {
-  const found = await db('missed_call_text_claims').where({ phone }).first('outcome', 'created_at');
+  const found = await db('missed_call_text_claims').where({ phone }).first('outcome', 'created_at', 'call_log_id');
   const claim = found && await reconcileStaleClaim(phone, found);
   if (claim) return claimState(claim);
   const voicemailClaim = await db('voicemail_sms_claims').where({ phone }).first('outcome');
@@ -370,7 +393,7 @@ async function reconcileOrphanedClaims({ limit = 20 } = {}) {
     .where('created_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
     .orderBy('created_at', 'asc')
     .limit(limit)
-    .select('phone', 'outcome', 'created_at');
+    .select('phone', 'outcome', 'created_at', 'call_log_id');
   for (const claim of stale) {
     try {
       await reconcileStaleClaim(claim.phone, claim);
@@ -429,7 +452,7 @@ async function precheckRow(row, now) {
 // call (one-shot decision made) or releases the lease for a later retry —
 // never both silent (a released, unsettled call is picked up again by the
 // next sweep pass, until its send slot closes).
-async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFenced) {
+async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFenced, stampBody) {
   try {
     // A resumed lease whose earlier attempt sent the text but crashed before
     // settling 'sent' is caught by priorTextReason below (the claim row, or
@@ -440,10 +463,11 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
       return { outcome: 'skipped', reason: 'already_contacted' };
     }
     if (contact === 'in_flight') {
-      // Another automated text to them is mid-handoff: leave this call
-      // unsettled so a later pass sees how that one landed.
+      // Another text to them, or a staff call still ringing the staff leg,
+      // is mid-handoff: leave this call unsettled so a later pass sees how
+      // that one landed.
       await releaseLease();
-      return { outcome: 'pending', reason: 'send_in_flight' };
+      return { outcome: 'pending', reason: 'contact_in_flight' };
     }
     const prior = await priorTextReason(phone);
     if (prior === 'in_flight') {
@@ -477,6 +501,10 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
     logger.info(`[missed-call-text-back] Template ${MESSAGE_TYPE} missing/disabled — skipped for ${maskPhone(phone)}`);
     return { outcome: 'skipped', reason: 'template_disabled' };
   }
+
+  // The exact text, on the call, before anything can reach the provider —
+  // what reconcileStaleClaim matches if this attempt dies past the boundary.
+  await stampBody(body);
 
   // Set by providerBoundaryCheck once it takes the claim row.
   const attempt = { claimed: false };
@@ -518,7 +546,7 @@ function providerBoundaryCheck(row, phone, attempt) {
         return { ok: false, code: BOUNDARY.CONTACTED, reason: 'the caller was contacted after the missed call' };
       }
       if (contact === 'in_flight') {
-        return { ok: false, code: BOUNDARY.SEND_IN_FLIGHT, reason: 'another text to this number is mid-handoff', retryable: true };
+        return { ok: false, code: BOUNDARY.CONTACT_IN_FLIGHT, reason: 'another text or a staff call to this number is mid-handoff', retryable: true };
       }
       // Yield to the voicemail lane at the boundary too: a delayed voicemail
       // it claimed after the early check is caught here, right before this
@@ -692,8 +720,10 @@ async function attemptForRow(row, now = Date.now()) {
     .catch((e) => logger.warn(`[missed-call-text-back] fenced settle failed: ${e.code || e.name || 'db_error'}`));
   const releaseLease = () => fenced().update({ metadata: db.raw("metadata - 'missed_call_text_leased_at'") })
     .catch((e) => logger.warn(`[missed-call-text-back] lease release failed: ${e.code || e.name || 'db_error'}`));
+  const stampBody = (body) => fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_text_body', ?::text)", [body]) })
+    .catch((e) => logger.warn(`[missed-call-text-back] body stamp failed: ${e.code || e.name || 'db_error'}`));
 
-  return sendWithLease(row, pre, releaseLease, settleFenced);
+  return sendWithLease(row, pre, releaseLease, settleFenced, stampBody);
 }
 
 /**

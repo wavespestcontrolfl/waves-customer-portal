@@ -162,9 +162,11 @@ jest.setTimeout(30000);
     expect(sendInput.body).not.toMatch(/reply stop/i);
     // The callback number is required at render (an edit/variant without it never sends).
     expect(renderSmsTemplate.mock.calls[0][3]).toEqual({ requiredVars: ['callback_clause'] });
+    // The exact body rides the call before the send — what an orphan reconcile matches.
     const after = await stored(row);
     expect(after.metadata.missed_call_text_settled_at).toBeTruthy();
     expect(after.metadata.missed_call_text_outcome).toBe('sent');
+    expect(after.metadata.missed_call_text_body).toBe(sendInput.body);
     // The lane's own one-shot row, marked sent and tied to the call.
     expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT, call_log_id: row.id });
     // The voicemail lane's claim table is never written by this lane.
@@ -322,10 +324,28 @@ jest.setTimeout(30000);
     await database('call_log').insert(row);
     await database('call_log').insert(call(1, {
       direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE,
-      status: 'completed', answered_by: 'human',
+      status: 'completed', answered_by: 'human', bridged_at: new Date(NOW - 60 * 1000),
     }));
     expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_contacted' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a click-to-call still ringing the staff leg holds the text; once it ends with no press-1 (the caller was never dialed) the call is texted', async () => {
+    const row = call(READY_MINUTES_AGO);
+    const bridge = call(1, { direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, status: 'ringing', answered_by: null });
+    await database('call_log').insert([row, bridge]);
+    expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'contact_in_flight' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    await database('call_log').where({ id: bridge.id }).update({ status: 'no-answer' });
+    expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+  });
+
+  test('a click-to-call row stuck pre-connect past its pending window is not a live call', async () => {
+    const row = call(25); // ended 25 minutes ago — still inside its slot
+    const stuck = call(20, { direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, status: 'initiated', answered_by: null });
+    await database('call_log').insert([row, stuck]);
+    expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
   });
 
   test('a later call from the same number that someone answered counts as contact', async () => {
@@ -436,7 +456,7 @@ jest.setTimeout(30000);
       }).returning('id');
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'send_in_flight' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'contact_in_flight' });
       expect(sendCustomerMessage).not.toHaveBeenCalled();
 
       // Its send failed: the provider layer deletes the reservation, the lane releases its claim.
@@ -457,7 +477,7 @@ jest.setTimeout(30000);
       }));
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_SEND_IN_FLIGHT' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_CONTACT_IN_FLIGHT' });
       expect(await claimRow()).toBeUndefined();
       expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
 
@@ -472,7 +492,7 @@ jest.setTimeout(30000);
       }).returning('id');
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'send_in_flight' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'contact_in_flight' });
       await database('sms_log').where({ id: otherId }).del();
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
     });
@@ -563,9 +583,16 @@ jest.setTimeout(30000);
     });
 
     describe('a claim left behind by an attempt that died past the boundary', () => {
-      const orphan = (minutesOld) => database('missed_call_text_claims').insert({
-        phone: PHONE, outcome: CLAIM.DISPATCHING, created_at: new Date(NOW - minutesOld * 60 * 1000),
-      });
+      const ORPHAN_BODY = "Hi there, it's Waves. Sorry we missed your call. Text us here with what you need, or call back anytime at (941) 297-5749.";
+      // The claim a dead attempt left, and its own (older) call carrying the
+      // exact body it stamped before sending — unless `body` is null.
+      const orphan = async (minutesOld, { phone = PHONE, body = ORPHAN_BODY } = {}) => {
+        const origin = call(minutesOld + 5, { from_phone: phone, metadata: body ? { missed_call_text_body: body } : {} });
+        await database('call_log').insert(origin);
+        await database('missed_call_text_claims').insert({
+          phone, outcome: CLAIM.DISPATCHING, call_log_id: origin.id, created_at: new Date(NOW - minutesOld * 60 * 1000),
+        });
+      };
 
       test('the provider has no message to the number since the claim → the orphan is released and this call is texted', async () => {
         await orphan(25 * 60);
@@ -573,8 +600,18 @@ jest.setTimeout(30000);
         const row = call(READY_MINUTES_AGO);
         await database('call_log').insert(row);
         expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
-        expect(TwilioService.findOutboundMessageSince).toHaveBeenCalledWith(expect.objectContaining({ to: PHONE }));
+        // Asked about THIS lane's exact text, never any text to the number.
+        expect(TwilioService.findOutboundMessageSince).toHaveBeenCalledWith(expect.objectContaining({ to: PHONE, bodyFragment: ORPHAN_BODY }));
         expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT });
+      });
+
+      test('an orphan whose attempt stamped no body can\'t be matched to its text — never recycled (possibly delivered, at most once)', async () => {
+        await orphan(25 * 60, { body: null });
+        const row = call(READY_MINUTES_AGO);
+        await database('call_log').insert(row);
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'claim_in_flight' });
+        expect(TwilioService.findOutboundMessageSince).not.toHaveBeenCalled();
+        expect(await claimRow()).toMatchObject({ outcome: CLAIM.DISPATCHING });
       });
 
       test('the provider shows a message since the claim → it was delivered; stamped sent, never texted twice', async () => {
@@ -622,7 +659,7 @@ jest.setTimeout(30000);
       test('every sweep pass reconciles orphans on its own — no eligible call needed, gate off included', async () => {
         isEnabled.mockImplementation(() => false);
         await orphan(25 * 60);
-        await database('missed_call_text_claims').insert({ phone: '+19415550103', outcome: CLAIM.DISPATCHING, created_at: new Date(NOW - 26 * 60 * 60 * 1000) });
+        await orphan(26 * 60, { phone: '+19415550103' });
         TwilioService.findOutboundMessageSince.mockImplementation(async ({ to }) => ({ found: to === '+19415550103' }));
         expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
         expect(await claimRow()).toBeUndefined(); // no message since the claim: released
