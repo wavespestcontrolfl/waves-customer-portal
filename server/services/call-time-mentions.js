@@ -295,20 +295,8 @@ function monthsReferenced({ transcript, callStartedAt } = {}) {
   return months;
 }
 
-/**
- * Every hour the call mentions, in spoken order: { hour24, offHour }, with
- * am/pm inferred from the whole call's period words. Empty for an unlabeled
- * transcript.
- */
-function hoursMentioned({ transcript } = {}) {
-  const turns = parseTurns(transcript);
-  if (!turns) return [];
-  const flags = wholeCallPeriodFlags(turns.map((t) => t.raw));
-  return turns.flatMap((t) => extractHourMentionsWholeCall(t.raw, flags));
-}
-
 module.exports = {
   normalize, parseTurns, etDateOf, addDays, daysBetween, weekdayIdxOf,
   parseDayMentions, wholeCallPeriodFlags, extractHourMentionsWholeCall,
-  exactDatesNamed, monthsReferenced, hoursMentioned,
+  exactDatesNamed, monthsReferenced,
 };

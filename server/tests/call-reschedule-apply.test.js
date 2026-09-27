@@ -80,8 +80,7 @@ const call = (overrides = {}) => ({
 // Each call carries only ITS OWN commitment (#4806 single-sentence rule: any
 // later non-acknowledgement sentence — such as a second, different
 // commitment bundled into one fixture transcript — ungrounds the first).
-// A same-day time change among several occurrences must state the visit's
-// current time, as a real "9 is early, make it noon" call does.
+// A same-day time change, as a real "9 is early, make it noon" call says it.
 const RETIME_TRANSCRIPT = `Agent: You are on September 24th at 9 AM.\nCaller: Can it be later?\nAgent: ${QUOTE}\nCaller: Thank you.`;
 const callFor = (startAt, overrides = {}) => call({ transcription: `Agent: ${quoteFor(startAt)}\nCaller: Thank you.`, ...overrides });
 const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
@@ -190,9 +189,11 @@ describe('planRescheduleFromCall', () => {
     expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Keep December 24th, but can September 24th be Friday?\nAgent: Okay.').reason).toBe('ambiguous_visit');
     // Even a loose reference to another occurrence ("the December one") leaves it to a person.
     expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can my September 24th visit be Friday instead? The December one is fine.\nAgent: Okay.').reason).toBe('ambiguous_visit');
-    // A same-day time change: the date is also the destination, so the visit's current time must come up.
-    expect(plan('2026-09-24T12:00:00-04:00', RETIME_TRANSCRIPT)).toMatchObject({ action: 'apply', visitId: VISIT_ID });
-    expect(plan('2026-09-24T12:00:00-04:00', `Agent: ${QUOTE}\nCaller: Thank you.`).reason).toBe('ambiguous_visit');
+    // A same-day time change can only mean the occurrence already on that day
+    // (moving another onto it would double-book the program)...
+    expect(plan('2026-09-24T12:00:00-04:00', `Agent: ${QUOTE}\nCaller: Thank you.`)).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    // ...unless the call brings up another occurrence.
+    expect(plan('2026-09-24T12:00:00-04:00', `Caller: Not the December one.\nAgent: ${QUOTE}`).reason).toBe('ambiguous_visit');
     // Once September is behind today, December 24 is the only upcoming one.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });

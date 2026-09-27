@@ -76,7 +76,7 @@ const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
-const { exactDatesNamed, monthsReferenced, hoursMentioned } = require('./call-time-mentions');
+const { exactDatesNamed, monthsReferenced } = require('./call-time-mentions');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
@@ -196,20 +196,19 @@ function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) 
 
 // With several upcoming occurrences of a program, the call must identify the
 // one it moves. No other occurrence may come up even loosely (its exact
-// date, or its month without a day: "keep December"), and the chosen one must
-// be named: by its exact date when it moves to another day ("move my October
-// 2nd visit"), by its current start hour when only the time changes that day
-// ("September 24th, 9 a.m. ... switch it to noon"), since there its date is
-// also the destination's and naming it proves nothing.
+// date, or its month without a day: "the December one is fine"). A move to
+// another day must name the moved visit's own date exactly ("move my October
+// 2nd visit"). A time change on the visit's own day needs nothing more: a
+// program never holds two visits on one day, so the occurrence already on
+// the destination date is the only one a same-day change can mean — moving
+// another occurrence onto that day would double-book it.
 function sourceOccurrenceGrounded({ call, chosen, others, newDate }) {
   const ctx = { transcript: call.transcription, callStartedAt: call.created_at };
   const named = exactDatesNamed(ctx);
   const looseMonths = monthsReferenced(ctx);
   if (others.some((row) => named.has(dateOnly(row.scheduled_date)) || looseMonths.has(dateOnly(row.scheduled_date).slice(0, 7)))) return false;
   const chosenDate = dateOnly(chosen.scheduled_date);
-  if (chosenDate !== newDate) return named.has(chosenDate);
-  const startHour = Number((hhmm(chosen.window_start) || '').slice(0, 2));
-  return hoursMentioned(ctx).some((m) => m.hour24 === startHour && !m.offHour);
+  return chosenDate === newDate || named.has(chosenDate);
 }
 
 /**
