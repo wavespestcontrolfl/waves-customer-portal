@@ -93,12 +93,14 @@ jest.setTimeout(30000);
     return row;
   }
 
+  // Only this database's sessions count: other lanes share this Postgres
+  // server, and a waiter of theirs would release the held side early.
   // Resolves once some session is blocked on an advisory lock (the catalog
   // lock), so a race test releases its held transaction only after the other
   // side is really waiting, never on a guess about timing.
   async function waitForLockWaiter() {
     for (let i = 0; i < 100; i += 1) {
-      const { rows } = await mockConn.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'");
+      const { rows } = await mockConn.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'");
       if (rows[0].n > 0) return;
       await new Promise((resolve) => { setTimeout(resolve, 50); });
     }
@@ -111,7 +113,7 @@ jest.setTimeout(30000);
     let done = false;
     settled.then(() => { done = true; }, () => { done = true; });
     for (let i = 0; i < 100 && !done; i += 1) {
-      const { rows } = await mockConn.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple')");
+      const { rows } = await mockConn.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple')");
       if (rows[0].n > 0) return;
       await new Promise((resolve) => { setTimeout(resolve, 50); });
     }
