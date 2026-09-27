@@ -793,9 +793,9 @@ describe('deferred-replay registry', () => {
     test('the wrapper\'s own pre-existing rows (no partial_fanout_retry marker) never touch the durable checks — finalizeDeferredCompletionSend owns them byte-identically', async () => {
       const { finalizeDeferredCompletionSend } = require('../services/dispatch-completion-deferred');
       const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', mark_invoice_delivery: true,
-      });
-      expect(finalizeDeferredCompletionSend).toHaveBeenCalledWith({ invoice_id: 'inv-1', mark_invoice_delivery: true });
+        invoice_id: 'inv-1', mark_invoice_delivery: true, app_event_already_visible_at: '2026-09-08T15:00:00Z', finalize_only: true,
+      }, { retry: true });
+      expect(finalizeDeferredCompletionSend).toHaveBeenCalledWith({ invoice_id: 'inv-1', mark_invoice_delivery: true, app_event_already_visible_at: '2026-09-08T15:00:00Z', finalize_only: true });
       expect(db).not.toHaveBeenCalledWith('email_messages');
       expect(db).not.toHaveBeenCalledWith('sms_log');
       expect(db).not.toHaveBeenCalledWith('invoices');

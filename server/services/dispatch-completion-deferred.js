@@ -164,6 +164,7 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
         sms: true,
         source: claimMeta.original_message_type || 'completion_sms_with_invoice',
         payUrl: claimMeta.pay_url || null,
+        ...(claimMeta.app_event_already_visible_at ? { eventVisibleAt: claimMeta.app_event_already_visible_at, deduped: true } : {}),
       });
     } catch (err) {
       ok = false;

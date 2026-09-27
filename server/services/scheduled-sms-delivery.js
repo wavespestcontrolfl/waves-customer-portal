@@ -36,6 +36,12 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
     bindings.push(result.providerMessageId || null);
   }
+  if (result.deduped === true && result.eventVisibleAt
+    && (result.reason === 'app_event_already_visible'
+      || result.channelResults?.push?.reason === 'app_event_already_visible')) {
+    metadataSql += " || jsonb_build_object('app_event_already_visible_at', ?::timestamptz)";
+    bindings.push(result.eventVisibleAt);
+  }
   if (reviewAsk) {
     metadataSql += " || jsonb_build_object('review_ask_delivered_at', ?::timestamptz)";
     bindings.push(completedAt);

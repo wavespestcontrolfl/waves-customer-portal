@@ -9,6 +9,8 @@
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/invoice', () => ({ markDeliverySent: jest.fn(async () => ({ status: 'sent' })) }));
+
 
 const updates = [];
 const chain = {
@@ -157,4 +159,13 @@ test('the delivered-at stamp is only added when the record has none; status is a
   const stamp = JSON.parse(bindings[1]);
   expect(Object.keys(stamp)).toEqual(['completionSmsDeferredDeliveredAt']);
   expect(Number.isNaN(Date.parse(stamp.completionSmsDeferredDeliveredAt))).toBe(false);
+});
+
+test('wrapper invoice completion forwards the original App witness on finalize-only retry', async () => {
+  const Invoice = require('../services/invoice');
+  const meta = { invoice_id: 'inv-1', mark_invoice_delivery: true, app_event_already_visible_at: '2026-09-08T15:00:00Z' };
+  expect(await finalizeDeferredCompletionSend(meta, { retry: true })).toEqual({ ok: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    sms: true, deduped: true, eventVisibleAt: meta.app_event_already_visible_at,
+  }));
 });

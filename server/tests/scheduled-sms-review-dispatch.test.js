@@ -15,7 +15,7 @@ jest.mock('../utils/cron-lock', () => ({
   wasLockSkipped: result => result?.skipped === true,
 }));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({
-  requiresDurableFinalize: entry => entry === 'durable-test',
+  requiresDurableFinalize: entry => ['durable-test', 'invoice_send_deferred'].includes(entry),
 }));
 const db = require('../models/db');
 const history = require('../services/review-ask-history');
@@ -181,6 +181,18 @@ test('repeated settlement failures preserve accepted evidence for the scheduler 
   expect(row.metadata.review_ask_reservation).toBe(true);
   expect(row.created_at).toEqual(new Date());
   expect(row.metadata.queued_at).toEqual(queuedAt);
+});
+
+test('a wrapper invoice replay persists the old App event time with its durable finalize claim', async () => {
+  const visibleAt = new Date('2026-09-08T15:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  const result = { sent: true, deduped: true, eventVisibleAt: visibleAt, deliveryOutcome: 'accepted',
+    channelResults: { push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt } } };
+  expect(await dispatchScheduledSms(row, row.metadata, async () => result)).toMatchObject({ sent: true, deduped: true });
+  expect(row.created_at).toEqual(visibleAt);
+  expect(updates[0].patch.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
+  expect(updates[0].patch.metadata.bindings).toContain(visibleAt);
 });
 
 test.each(['recent', 'history', 'busy'])('completion durably arms its stripped review fallback through finalization: %s', async kind => {
@@ -442,12 +454,13 @@ test('retiring an earlier billing event keeps the original queue time and mints 
   const visibleAt = new Date(queuedAt.getTime() + 1000);
   row.created_at = queuedAt;
   row.message_body = 'Billing event';
-  row.metadata = { entry_point: 'durable-test', queued_at: queuedAt.toISOString() };
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true, queued_at: queuedAt.toISOString() };
   const send = jest.fn(async () => ({ sent: true, deduped: true, deliveryOutcome: 'accepted', reason: 'app_event_already_visible', eventVisibleAt: visibleAt }));
   const result = await dispatchScheduledSms(row, row.metadata, send, 'billing');
   expect(result.deduped).toBe(true);
   const final = updates.find(({ patch }) => patch.status === 'sent').patch;
   expect(new Date(final.created_at)).toEqual(visibleAt);
-  expect(final.metadata.bindings).toEqual([null]);
+  expect(final.metadata.bindings).toEqual([null, visibleAt]);
+  expect(final.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
   expect(row.status).toBe('sent');
 });

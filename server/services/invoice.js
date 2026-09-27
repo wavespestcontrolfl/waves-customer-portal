@@ -5613,6 +5613,12 @@ const InvoiceService = {
     // invoice stays under its 'sending' claim for processScheduledSends'
     // existing stale-claim recovery to park for operator review — never a
     // half-committed "stamped but the retry vanished" state.
+    const smsFinalizationStamp = (trx) => {
+      if (acceptedChannelResults?.sms?.deduped) return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)",
+        [acceptedChannelResults.sms.sentAt || settledEvent.eventVisibleAt || null]);
+      if (legAccepted(acceptedChannelResults?.sms)) return new Date();
+      return settledEvent.eventVisibleAt || new Date();
+    };
     const finalizeInvoiceAfterSms = () => db.transaction(async (trx) => {
       // Stamp each channel's OWN durable delivery evidence (the same
       // convention invoice-email.js's markEmailDelivered and this same
@@ -5637,14 +5643,14 @@ const InvoiceService = {
         // hasEmailLeg always excludes Email from THIS call's own fan-out
         // (billing-channel-routing.js selectedLegs), so acceptedChannelResults
         // never carries an accepted email leg here — sms_sent_at is correct.
-        sms_sent_at: settledEvent.eventVisibleAt || new Date(),
+        sms_sent_at: smsFinalizationStamp(trx),
         updated_at: new Date(),
       } : {
           status: trx.raw(
             "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
           ),
           sent_at: settledEvent.eventVisibleAt || new Date(),
-          ...(smsOrAppAccepted ? { sms_sent_at: legAccepted(acceptedChannelResults?.sms) ? new Date() : (acceptedChannelResults?.push?.eventVisibleAt || new Date()) } : {}),
+          ...(smsOrAppAccepted ? { sms_sent_at: smsFinalizationStamp(trx) } : {}),
           ...(emailAccepted ? { email_sent_at: acceptedChannelResults.email.deduped ? trx.raw("email_sent_at") : new Date() } : {}),
           scheduled_send_at: null,
           scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(trx),
@@ -6778,6 +6784,8 @@ const InvoiceService = {
       // claim out from under it. Callers with no claim to release (the
       // deferred-queue rails, project reports) omit it — unchanged.
       claimToken = null,
+      eventVisibleAt = null,
+      deduped = false,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
@@ -6806,18 +6814,19 @@ const InvoiceService = {
     }
 
     const now = new Date();
+    const deliveryAt = eventVisibleAt ? new Date(eventVisibleAt) : now;
     const updates = {
       status: db.raw(
         "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
       ),
-      sent_at: db.raw("COALESCE(sent_at, ?)", [now]),
+      sent_at: db.raw("COALESCE(sent_at, ?)", [deliveryAt]),
       scheduled_send_at: null,
       scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
       scheduled_request_review: false,
       scheduled_review_delay_minutes: null,
       updated_at: now,
     };
-    if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [now]);
+    if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [deliveryAt]);
 
     const finalizeQuery = db("invoices")
       .where({ id: invoiceId })
@@ -6855,7 +6864,7 @@ const InvoiceService = {
       );
     }
 
-    await db("activity_log")
+    if (!deduped) await db("activity_log")
       .insert({
         customer_id: finalInvoice.customer_id,
         action: "invoice_sent",
