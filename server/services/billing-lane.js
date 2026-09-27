@@ -365,13 +365,24 @@ function predictCompletionBilling({
     // Owned by the renewal flow, not a data gap — bills nothing BY DESIGN.
     if (!hasVisitPrice) return noCharge('annual_renewal_owned');
     const amount = Number(estimatedPrice);
-    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+    // grossAmount (codex round-9 P2): this lane can reach hasVisitPrice via
+    // hasAuthoritativeZeroPrice too (a stamped $0 with a positive
+    // primaryLinePrice), which the CLIENT reads as UNPRICED — the same gap
+    // the per_application/self-pay branches below already close with their
+    // own `grossAmount: amount`. Without it here, MobileCheckoutSheet's
+    // missing-gross guard (priceNeedsRefresh) misread this prediction as a
+    // stale/legacy payload and permanently disabled Charge Now for it.
+    // Always ride it alongside `amount` — a consumer that doesn't stack
+    // extras on top (completion, the other three schedule surfaces) never
+    // reads it, exactly like the other two lanes.
+    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
     return {
       // No-cost exclusions mirror the charge lane (manual-audit P1): a
       // callback/always-free visit never auto-charges, so never promise it.
       kind: (autopayActive && completionAutopayChargeEnabled
         && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
       amount: Math.max(0, amount - prepaid),
+      grossAmount: amount,
       conflictStampedPrice: false,
     };
   }
@@ -771,13 +782,26 @@ const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file', 'no_invoice_wil
  * own estimated_price when it carries no anchored marker (the reserved row
  * keeps its stamped price rather than a template override).
  *
- * Returns the breakdown array ONLY when it fully reconciles to
- * `invoiceTotal` (cent-exact) and names more than one service — a partial
- * or stale split must never relabel money that doesn't add up. Returns
- * null otherwise (including on any lookup error), so callers can leave
- * their prediction exactly as it was.
+ * Returns the breakdown array ONLY when it fully reconciles to the
+ * invoice's own APPLICATION-LINE subtotal (cent-exact) and names more than
+ * one service — a partial or stale split must never relabel money that
+ * doesn't add up. Returns null otherwise (including on any lookup error),
+ * so callers can leave their prediction exactly as it was.
+ *
+ * Reconciles against `invoiceLineItems` (the invoice's own `line_items`,
+ * summed excluding any one-time setup fee line — see
+ * attachedInvoiceAutoChargeLikely above for the same pattern), never the
+ * raw `invoiceTotal` (codex round-9 P2): total folds in tax and, on a
+ * combined acceptance invoice, the one-time setup fee line — neither of
+ * which the anchored per-visit splits (or a row's plain estimated_price)
+ * ever included. Comparing a genuinely correct split against the taxed,
+ * fee-inclusive total rejected it outright whenever the invoice also
+ * carried a setup fee and/or a nonzero tax rate. Falls back to
+ * `invoiceTotal` only when the line items can't be read at all (a caller
+ * that didn't pass them, or an unparseable value) — a stale/legacy payload
+ * stays exactly as safe as before, never both compared at once.
  */
-async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } = {}) {
+async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, invoiceLineItems, dbConn } = {}) {
   if (!svc?.source_estimate_id || !svc?.customer_id || !svc?.scheduled_date || !dbConn) return null;
   try {
     const members = await dbConn('scheduled_services')
@@ -800,8 +824,19 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
     };
     const breakdown = members.map((row) => ({ id: row.id, serviceType: row.service_type, amount: amountFor(row) }));
     const sum = breakdown.reduce((acc, item) => (acc === null || item.amount == null ? null : acc + item.amount), 0);
-    const total = Number(invoiceTotal);
-    if (sum != null && Number.isFinite(total) && Math.round(sum * 100) === Math.round(total * 100)) {
+    let target = Number(invoiceTotal);
+    try {
+      const rawLines = invoiceLineItems;
+      const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : rawLines;
+      if (Array.isArray(lines) && lines.length) {
+        target = lines.reduce((acc, li) => {
+          if (/one-time setup fee/i.test(String(li?.description || ''))) return acc;
+          const lineAmount = Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0)));
+          return Number.isFinite(lineAmount) ? acc + lineAmount : acc;
+        }, 0);
+      }
+    } catch { /* unreadable line items — reconcile against invoiceTotal instead */ }
+    if (sum != null && Number.isFinite(target) && Math.round(sum * 100) === Math.round(target * 100)) {
       return breakdown;
     }
     return null;
@@ -1046,8 +1081,26 @@ async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
   } else if (inv.payer_id) {
     coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'payer_billed' };
   } else if (!isInvoiceCollectibleStatus(inv.status)) {
-    // paid / prepaid / processing — money already collected or in flight.
-    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'invoice_settled' };
+    // paid / prepaid / processing — a technician never collects any of
+    // these (there's nothing left for THEM to charge), but 'processing' is
+    // NOT the same fact as paid/prepaid: it's a payment still in flight
+    // (e.g. a pending ACH debit) that can still fail to settle. codex
+    // round-9 P2: lumping it into the same 'invoice_settled' reason read as
+    // fully paid to every consumer that branches on `reason` — the
+    // schedule sheet's CompletionPanel previewed an immediate review
+    // request for it, while complete-scheduled-service.js's own
+    // invoiceBlocksReview holds the ask for every status except literal
+    // 'paid'/'prepaid'. Keep the reason distinct (state stays 'settled' —
+    // a technician still collects nothing either way) so a consumer that
+    // needs the finer distinction (review timing) can ask for it, without
+    // reclassifying what a technician does at the door.
+    coverage = {
+      state: 'settled',
+      invoiceId: inv.id,
+      invoiceNumber: inv.invoice_number || null,
+      amountDue: 0,
+      reason: String(inv.status) === 'processing' ? 'invoice_processing' : 'invoice_settled',
+    };
   } else if (!(amountDue > 0)) {
     // A draft/sent/... invoice fully covered by account credit.
     coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'credit_applied' };
@@ -1067,7 +1120,9 @@ async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
     if (siblingVisit?.service_type) prediction.siblingServiceType = siblingVisit.service_type;
   } catch { /* no service-type label — the coverage verdict still stands */ }
   try {
-    const breakdown = await sameTripFirstApplicationBreakdown({ svc, invoiceTotal: inv.total, dbConn });
+    const breakdown = await sameTripFirstApplicationBreakdown({
+      svc, invoiceTotal: inv.total, invoiceLineItems: inv.line_items, dbConn,
+    });
     if (breakdown) prediction.breakdown = breakdown;
   } catch { /* no breakdown — the coverage verdict still stands */ }
   return { coverage, prediction };

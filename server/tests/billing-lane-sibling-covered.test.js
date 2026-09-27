@@ -116,6 +116,73 @@ describe('siblingCoverageForSchedule', () => {
     expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(LAWN_SVC, dbConn);
   });
 
+  // Codex round-9 P2: the invoice ALSO carries a one-time setup fee line
+  // and sales tax — `total` (262.35 = $99 setup + $153.60 applications +
+  // $9.75 tax) folds in both, so comparing the anchored per-visit splits
+  // (which never included either) against the raw total rejected a
+  // genuinely correct breakdown outright. Reconciling against the
+  // invoice's own line items — excluding the setup fee line, and tax was
+  // never a line item to begin with — must still find the match.
+  test('reconciles the breakdown against the application-line subtotal, excluding setup fee and tax', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: {
+        id: 'inv-1',
+        scheduled_service_id: 'svc-pest',
+        invoice_number: 'WPC-TEST-0002',
+        status: 'sent',
+        total: 262.35,
+        line_items: [
+          { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
+          { description: 'Quarterly Pest Control', amount: 97.2 },
+          { description: 'Every 6 Weeks Lawn Care', amount: 56.4 },
+        ],
+      },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({
+      byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } },
+      members: [PEST_ROW, LAWN_ROW],
+    });
+
+    const { prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+
+    expect(prediction.kind).toBe('covered_sibling_invoice');
+    expect(prediction.breakdown).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ serviceType: 'Quarterly Pest Control', amount: 97.2 }),
+        expect.objectContaining({ serviceType: 'Every 6 Weeks Lawn Care', amount: 56.4 }),
+      ]),
+    );
+  });
+
+  // A stringified line_items JSON column (as Postgres can return it) must
+  // parse the same way — never silently fall back to the (mismatching)
+  // raw total for a real row shape.
+  test('reconciles against a STRINGIFIED line_items column the same way', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: {
+        id: 'inv-1',
+        scheduled_service_id: 'svc-pest',
+        invoice_number: 'WPC-TEST-0003',
+        status: 'sent',
+        total: 262.35,
+        line_items: JSON.stringify([
+          { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
+          { description: 'Quarterly Pest Control', amount: 97.2 },
+          { description: 'Every 6 Weeks Lawn Care', amount: 56.4 },
+        ]),
+      },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({
+      byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } },
+      members: [PEST_ROW, LAWN_ROW],
+    });
+
+    const { prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(prediction.breakdown).toBeDefined();
+  });
+
   // Codex round-7 P1 (mechanism retained, verdict now server-side): the raw
   // invoice status alone told a consumer THAT a sibling invoice exists,
   // never whether it still needs collecting. `amountDue` (total minus
@@ -188,7 +255,10 @@ describe('siblingCoverageForSchedule', () => {
   });
 
   // A paid/prepaid/processing sibling invoice is settled — money already
-  // collected or in flight — regardless of amountDue's raw value.
+  // collected or in flight — regardless of amountDue's raw value. A
+  // technician collects nothing from any of the three either way, but
+  // 'processing' keeps its OWN reason (codex round-9 P2) — see the test
+  // right below.
   test('a paid sibling invoice reads settled', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'paid', total: 153.6 },
@@ -198,6 +268,26 @@ describe('siblingCoverageForSchedule', () => {
 
     const { coverage } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
     expect(coverage).toEqual({ state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled' });
+  });
+
+  // Codex round-9 P2: a covering sibling invoice that is only 'processing'
+  // (money in flight, e.g. a pending ACH debit) still reads `state:
+  // 'settled'` — a technician collects nothing from it either way — but
+  // its `reason` must stay 'invoice_processing', distinct from a genuinely
+  // paid/prepaid 'invoice_settled'. Lumping the two together let the
+  // schedule sheet's CompletionPanel preview an immediate review request
+  // for a visit whose completion path (complete-scheduled-service.js
+  // invoiceBlocksReview) actually holds the ask until the sibling invoice
+  // is literally 'paid'/'prepaid'.
+  test('a processing sibling invoice reads settled with its own distinct reason', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'processing', total: 153.6 },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
+
+    const { coverage } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_processing' });
   });
 
   test('omits the breakdown when the anchored splits do not reconcile to the invoice total', async () => {

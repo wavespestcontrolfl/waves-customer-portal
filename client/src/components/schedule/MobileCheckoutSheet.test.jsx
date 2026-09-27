@@ -332,6 +332,41 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.getByRole('button', { name: /price needs a refresh/i })).toBeDisabled();
   });
 
+  // Codex round-9 P2: the annual_prepay lane's own predictCompletionBilling
+  // branch (billing-lane.js) used to return 'invoice'/'prepaid' with NO
+  // grossAmount at all — unlike the per_application/self-pay lanes right
+  // above, which always carried it. A same-day sibling-covered annual-plan
+  // add-on (unpriced here, its own price arriving only via the prediction)
+  // with a recorded prepayment then hit the exact "refuses to guess" guard
+  // proven above and permanently disabled Charge Now, even though the
+  // server's own mint would happily collect the real remaining balance.
+  // Once billing-lane.js supplies grossAmount for this lane too, Charge
+  // Now must NOT be blocked.
+  it('does not block Charge Now on the missing-gross guard for an annual_prepay lane prediction now that it carries grossAmount', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'annual_prepay',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 40, grossAmount: 100, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /price needs a refresh/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $40.00' })).toBeInTheDocument();
+    expect(screen.getByText('Prepaid credit')).toBeInTheDocument();
+    expect(screen.getByText('−$60.00')).toBeInTheDocument();
+  });
+
   // Codex round 4 P1: a CONFIRMED no-charge prediction ('no_charge' with
   // reason 'fully_discounted' — hasAuthoritativeZeroPrice's genuine $0 net)
   // never carries grossAmount by design (it is 0 either way), and the

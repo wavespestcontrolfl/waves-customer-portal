@@ -219,13 +219,16 @@ describe('predictCompletionBilling', () => {
     // Uncovered + unpriced = renewal flow's problem, nothing bills here.
     expect(predictCompletionBilling(annual))
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'annual_renewal_owned' });
-    // Uncovered + priced add-on bills normally.
+    // Uncovered + priced add-on bills normally. grossAmount rides along
+    // (codex round-9 P2) — the same field the per_application/self-pay
+    // lanes already carry, so a checkout sheet that stacks extras on top
+    // never misreads this prediction as a stale/legacy payload.
     expect(predictCompletionBilling({ ...annual, estimatedPrice: 150 }))
-      .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 150, grossAmount: 150, conflictStampedPrice: false });
     // A term-validated verdict beats the raw stamp: stale stamp + dead term
     // must not read as covered (Codex r3)...
     expect(predictCompletionBilling({ ...annual, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: false, estimatedPrice: 150 }))
-      .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 150, grossAmount: 150, conflictStampedPrice: false });
     // ...and a validated-true verdict covers even mid-refresh oddities.
     expect(predictCompletionBilling({ ...annual, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: true }).kind)
       .toBe('covered_annual');
@@ -272,10 +275,10 @@ describe('predictCompletionBilling', () => {
       annualCoverageValidated: false,
     };
     expect(predictCompletionBilling(staleStamp))
-      .toEqual({ kind: 'invoice', amount: 100, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 100, grossAmount: 100, conflictStampedPrice: false });
     // Out-of-band prepay (cash/Zelle) still covers by amount.
     expect(predictCompletionBilling({ ...staleStamp, prepaidMethod: 'cash' }))
-      .toEqual({ kind: 'prepaid', amount: 500, conflictStampedPrice: false });
+      .toEqual({ kind: 'prepaid', amount: 500, grossAmount: 100, conflictStampedPrice: false });
   });
 
   test('inferred membership (NULL mode, tier+rate) predicts coverage like the completion path', () => {
@@ -477,7 +480,7 @@ describe('predictCompletionBilling — GATE_COMPLETION_AUTOPAY_CHARGE extension 
   test('annual-prepay uncovered priced add-on predicts auto_charge under the gate', () => {
     expect(predictCompletionBilling({
       ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay', estimatedPrice: 150, completionAutopayChargeEnabled: true,
-    })).toEqual({ kind: 'auto_charge', amount: 150, conflictStampedPrice: false });
+    })).toEqual({ kind: 'auto_charge', amount: 150, grossAmount: 150, conflictStampedPrice: false });
   });
   test('per-visit lane priced invoice predicts auto_charge under the gate; partial prepay still nets', () => {
     const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null, estimatedPrice: 100, completionAutopayChargeEnabled: true };

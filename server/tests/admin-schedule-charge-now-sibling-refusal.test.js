@@ -30,7 +30,16 @@ const mockDb = jest.fn((table) => {
   q.modify = jest.fn((fn) => { fn(q); return q; });
   q.leftJoin = jest.fn(() => q);
   q.select = jest.fn(() => q);
-  q.first = jest.fn(async () => (table === 'scheduled_services' ? mockDb.__svcRow : undefined));
+  q.first = jest.fn(async () => {
+    if (table === 'scheduled_services') return mockDb.__svcRow;
+    // Codex round-9 P1: a legacy invoice already attached to THIS visit's
+    // own scheduled_service_id (e.g. an extras-only invoice minted before
+    // the sibling-coverage lookup existed) — set only by the tests below
+    // that prove the reuse block never bypasses a 'covered'/'needs_review'
+    // verdict.
+    if (table === 'invoices') return mockDb.__existingInvoiceRow;
+    return undefined;
+  });
   return q;
 });
 mockDb.schema = { hasTable: jest.fn(async () => false) };
@@ -86,6 +95,7 @@ function makeReqRes(body) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.__svcRow = SVC_ROW;
+  mockDb.__existingInvoiceRow = undefined;
   mockResolveForInvoice.mockResolvedValue({ payerId: null });
   mockBuildLineItems.mockResolvedValue({ lineItems: [], discountIds: [] });
 });
@@ -312,6 +322,68 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       expect(mockMint.mock.calls[0][0].recheckInTrx).toBeNull();
     });
   });
+
+  // Codex round-9 P1: a legacy invoice can already sit on THIS visit's own
+  // scheduled_service_id from before the sibling-coverage lookup existed
+  // (e.g. an operator-added extras-only invoice). The pre-fix route
+  // returned that invoice via the "reuse existing" branch WITHOUT ever
+  // asking whether a sibling invoice actually covers the trip — completion
+  // then found the sibling's own live invoice and never reconciled the
+  // stale one. The sibling verdict must be checked BEFORE any existing
+  // invoice is even looked up, so a 'covered'/'needs_review' verdict
+  // refuses instead of handing back the stale invoice.
+  describe('own-invoice reuse never bypasses the sibling verdict (codex round-9 P1)', () => {
+    test('a "covered" sibling verdict refuses even though this visit already has its OWN attached invoice', async () => {
+      mockDb.__existingInvoiceRow = {
+        id: 'inv-legacy', status: 'sent', total: 40, token: 'tok-legacy',
+        scheduled_service_id: 'svc-lawn', payer_id: null,
+      };
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+        liveBeside: null,
+      });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.body.error).toMatch(/combined trip invoice/i);
+      // Never the stale reuse response for the legacy invoice.
+      expect(res.body).not.toMatchObject({ reused: true, invoiceId: 'inv-legacy' });
+      expect(mockMint).not.toHaveBeenCalled();
+    });
+
+    test('a "needs_review" sibling verdict also refuses instead of reusing this visit\'s own existing invoice', async () => {
+      mockDb.__existingInvoiceRow = {
+        id: 'inv-legacy', status: 'sent', total: 40, token: 'tok-legacy',
+        scheduled_service_id: 'svc-lawn', payer_id: null,
+      };
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
+        liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.body.error).toMatch(/manual review/i);
+      expect(res.body).not.toMatchObject({ reused: true, invoiceId: 'inv-legacy' });
+      expect(mockMint).not.toHaveBeenCalled();
+    });
+
+    test('a "none" verdict still reuses this visit\'s own existing invoice normally', async () => {
+      mockDb.__existingInvoiceRow = {
+        id: 'inv-legacy', status: 'sent', total: 97.2, token: 'tok-legacy',
+        scheduled_service_id: 'svc-lawn', payer_id: null,
+      };
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+
+      expect(res.status).not.toHaveBeenCalledWith(409);
+      expect(res.body).toMatchObject({ success: true, reused: true, invoiceId: 'inv-legacy' });
+      expect(mockMint).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // mintOrReuseScheduledServiceInvoice backs the Mark-prepaid / prepaid-receipt
@@ -373,5 +445,27 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
     });
     await expect(recheckInTrx({})).rejects.toMatchObject({ code: 'SIBLING_COVERAGE_CHANGED' });
     expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(SVC, {}, { lockRows: true, noWait: true });
+  });
+
+  // Codex round-9 P1 (the same fix as the Charge Now route above): a legacy
+  // invoice already on svc's own scheduled_service_id must not be reused
+  // when the sibling verdict is anything but 'none'.
+  test('a "covered" sibling verdict refuses to mint even though svc already has its OWN existing invoice', async () => {
+    mockDb.__existingInvoiceRow = { id: 'inv-legacy', status: 'sent', total: 40, scheduled_service_id: 'svc-lawn' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    const result = await mintOrReuseScheduledServiceInvoice(SVC);
+    expect(result).toEqual({ invoice: null, reason: 'sibling_invoice_covered' });
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  test('a "none" verdict still reuses svc\'s own existing invoice normally', async () => {
+    mockDb.__existingInvoiceRow = { id: 'inv-legacy', status: 'sent', total: 97.2, scheduled_service_id: 'svc-lawn' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    const result = await mintOrReuseScheduledServiceInvoice(SVC);
+    expect(result).toEqual({ invoice: mockDb.__existingInvoiceRow, reused: true });
+    expect(mockMint).not.toHaveBeenCalled();
   });
 });
