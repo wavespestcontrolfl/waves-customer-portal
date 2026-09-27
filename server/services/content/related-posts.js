@@ -310,6 +310,32 @@ function candidateLiveKeys(candidate) {
   return sites.map((site) => `${site}|${path}`);
 }
 
+// A completed run proves that publication once succeeded; current registry
+// truth decides whether the URL is still live and indexable. The wrapper
+// below intersects this richer run metadata with a verified Astro-only row.
+function candidateFromAutonomousRun(row) {
+  const payload = parseJsonObject(row?.draft_payload);
+  const frontmatter = parseJsonObject(payload.frontmatter);
+  const rawUrl = row?.published_url;
+  const publishedSites = normalizeSpokeSites([rawUrl]);
+  if (!rawUrl || (/^https?:\/\//i.test(rawUrl) && publishedSites.length === 0)) return null;
+  const areas = Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag : [];
+  return {
+    id: row.id,
+    title: frontmatter.title || payload.title || null,
+    path: normalizePathForCompare(rawUrl),
+    keyword: frontmatter.primary_keyword || row.brief_keyword || null,
+    city: areas[0] || row.brief_city || null,
+    service: row.brief_service || frontmatter.service || null,
+    category: frontmatter.category || null,
+    targetSites: publishedSites.length ? publishedSites : [...HUB_SITE_KEYS],
+    workflowStatus: 'published',
+    astroStatus: 'live',
+    pathVerified: true,
+  };
+
+}
+
 // The registry is the only durable inventory for Astro-authored posts that
 // have neither a blog_posts row nor an autonomous run. Accept only its
 // strongest state: an Astro source is present, the workflow is published,
@@ -346,6 +372,21 @@ function candidateFromRegistryRow(row) {
 async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
   const rows = await database('blog_posts')
     .select('id', 'title', 'keyword', 'tag', 'category', 'slug', 'city', 'target_sites', 'status', 'astro_status', 'astro_live_url');
+  const autonomousRows = await database('autonomous_runs')
+    .leftJoin('content_briefs as cb', 'cb.id', 'autonomous_runs.brief_id')
+    .where({
+      'autonomous_runs.outcome': 'completed_published',
+      'autonomous_runs.action_type': 'new_supporting_blog',
+    })
+    .whereNotNull('autonomous_runs.published_url')
+    .select(
+      'autonomous_runs.id',
+      'autonomous_runs.published_url',
+      'autonomous_runs.draft_payload',
+      'cb.target_keyword as brief_keyword',
+      'cb.city as brief_city',
+      'cb.service as brief_service'
+    );
   const registryRows = await database('content_registry')
     .select(
       'id',
@@ -376,11 +417,31 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
     // never offer a build_failed or still-pending target to a hard link gate.
     .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live'
       && c.workflowStatus === 'published' && candidateLiveKeys(c).some((key) => liveRegistryKeys.has(key)));
+  const registryCandidatesByPath = new Map();
   for (const row of registryRows || []) {
     try {
       const candidate = candidateFromRegistryRow(row);
-      if (candidate) candidates.push(candidate);
+      if (candidate) registryCandidatesByPath.set(candidate.path, candidate);
     } catch { /* malformed registry row: exclude it */ }
+  }
+  const autonomousPaths = new Set();
+  for (const row of autonomousRows || []) {
+    try {
+      const candidate = candidateFromAutonomousRun(row);
+      const verified = candidate && registryCandidatesByPath.get(candidate.path);
+      if (!verified) continue;
+      // Current registry truth controls both rendering and topical identity.
+      // Historical run metadata fills only fields the live registry lacks.
+      for (const field of ['title', 'keyword', 'city', 'service', 'category']) {
+        if (verified[field]) candidate[field] = verified[field];
+      }
+      candidate.targetSites = verified.targetSites;
+      candidates.push(candidate);
+      autonomousPaths.add(candidate.path);
+    } catch { /* malformed historical row: exclude it */ }
+  }
+  for (const candidate of registryCandidatesByPath.values()) {
+    if (!autonomousPaths.has(candidate.path)) candidates.push(candidate);
   }
   return rankRelatedPosts(target, candidates, { limit });
 }
@@ -390,6 +451,7 @@ module.exports = {
   RELATED_POSTS_TARGET_MIN,
   rankRelatedPosts,
   candidateFromRow,
+  candidateFromAutonomousRun,
   candidateFromRegistryRow,
   registryRowLivePath,
   registryRowLiveKeys,

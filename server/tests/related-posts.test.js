@@ -11,6 +11,7 @@ const {
   rankRelatedPosts,
   getRelatedPostsForBrief,
   candidateFromRow,
+  candidateFromAutonomousRun,
   candidateFromRegistryRow,
   RELATED_POSTS_DEFAULT_LIMIT,
 } = require('../services/content/related-posts');
@@ -293,6 +294,21 @@ describe('candidateFromRow', () => {
   });
 });
 
+describe('candidateFromAutonomousRun', () => {
+  test('uses stored draft and brief signals for a fleet URL', () => {
+    expect(candidateFromAutonomousRun({
+      id: 'run-1',
+      published_url: 'https://www.wavespestcontrol.com/termite/autonomous-post/',
+      brief_service: 'termite',
+      draft_payload: { frontmatter: { title: 'Autonomous Termite Post', primary_keyword: 'termite mud tubes' } },
+    })).toMatchObject({ path: '/termite/autonomous-post/', service: 'termite' });
+  });
+
+  test('rejects an off-fleet absolute URL', () => {
+    expect(candidateFromAutonomousRun({ published_url: 'https://example.com/post/' })).toBeNull();
+  });
+});
+
 describe('candidateFromRegistryRow', () => {
   const liveAstroOnly = {
     id: 'registry-1',
@@ -378,12 +394,19 @@ describe('candidateFromRegistryRow', () => {
 });
 
 describe('getRelatedPostsForBrief — DB wrapper', () => {
-  function fakeDb({ blogRows = [], registryRows = [] } = {}) {
+  function fakeDb({ blogRows = [], autonomousRows = [], registryRows = [] } = {}) {
+    const autonomousQuery = {};
+    autonomousQuery.leftJoin = jest.fn(() => autonomousQuery);
+    autonomousQuery.where = jest.fn(() => autonomousQuery);
+    autonomousQuery.whereNotNull = jest.fn(() => autonomousQuery);
+    autonomousQuery.select = jest.fn().mockResolvedValue(autonomousRows);
     const database = jest.fn((table) => {
       if (table === 'blog_posts') return { select: jest.fn().mockResolvedValue(blogRows) };
       if (table === 'content_registry') return { select: jest.fn().mockResolvedValue(registryRows) };
+      if (table === 'autonomous_runs') return autonomousQuery;
       throw new Error(`unexpected table: ${table}`);
     });
+    database.autonomousQuery = autonomousQuery;
     return database;
   }
 
@@ -474,6 +497,49 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     await expect(getRelatedPostsForBrief(
       { service: 'termite', keyword: 'termite damage inspection' },
       { database: fakeDb({ blogRows, registryRows }) }
+    )).resolves.toEqual([]);
+  });
+
+  test('admits completed autonomous posts only through matching current live registry truth', async () => {
+    const autonomousRows = [
+      { id: 'live-run', published_url: 'https://www.wavespestcontrol.com/termite/live-run/', brief_service: 'rodent', draft_payload: { frontmatter: { title: 'Old Rodent Title', primary_keyword: 'old rodent topic' } } },
+      { id: 'stale-run', published_url: 'https://www.wavespestcontrol.com/termite/stale-run/', brief_service: 'termite', draft_payload: { frontmatter: { title: 'Stale Run' } } },
+      { id: 'missing-run', published_url: 'https://www.wavespestcontrol.com/termite/missing-run/', brief_service: 'termite', draft_payload: { frontmatter: { title: 'Missing Run' } } },
+    ];
+    const baseRegistry = {
+      content_type: 'blog', reconciliation_status: 'astro_only', workflow_status: 'published',
+      astro_status: 'present', live_status: 'live', noindex_detected: false,
+      target_service: 'termite', metadata: { frontmatter: { domains: ['wavespestcontrol.com'] } },
+    };
+    const registryRows = [
+      { ...baseRegistry, id: 'live-registry', canonical_url_normalized: '/termite/live-run/', title: 'Current Termite Title', target_keyword: 'current termite topic', target_service: 'termite' },
+      { ...baseRegistry, id: 'stale-registry', canonical_url_normalized: '/termite/stale-run/', live_status: 'missing' },
+    ];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    const out = await getRelatedPostsForBrief({ service: 'termite' }, { database });
+
+    expect(out.map((candidate) => candidate.path)).toEqual(['/termite/live-run/']);
+    expect(out[0]).toMatchObject({
+      title: 'Current Termite Title',
+      keyword: 'current termite topic',
+      path: '/termite/live-run/',
+    });
+  });
+
+  test('uses current registry domains for an autonomous path', async () => {
+    const autonomousRows = [{ id: 'run', published_url: 'https://www.wavespestcontrol.com/termite/domain-run/', brief_service: 'termite' }];
+    const registryRows = [{
+      id: 'registry', canonical_url_normalized: '/termite/domain-run/', content_type: 'blog',
+      reconciliation_status: 'astro_only', workflow_status: 'published', astro_status: 'present',
+      live_status: 'live', noindex_detected: false, target_service: 'termite',
+      metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } },
+    }];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    await expect(getRelatedPostsForBrief(
+      { service: 'termite', domains: ['wavespestcontrol.com'] },
+      { database }
     )).resolves.toEqual([]);
   });
 
