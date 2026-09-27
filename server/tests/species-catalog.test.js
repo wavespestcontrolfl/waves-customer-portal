@@ -419,6 +419,12 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('water snake')).toMatchObject({ via: 'node', node: { level: 'group', id: 'snakes' } });
   });
 
+  test('a generic billbug name does not claim the hunting billbug subspecies', () => {
+    expect(catalog.resolveName('billbug')).toBeNull();
+    expect(catalog.resolveName('billbugs')).toBeNull();
+    expect(catalog.resolveName('hunting billbug')).toMatchObject({ node: { slug: 'hunting-billbug' } });
+  });
+
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
     expect(catalog.resolveName('walkingstick')).toBeNull();
     expect(catalog.resolveName('antenna')).toBeNull();
@@ -527,6 +533,25 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('')).toBeNull();
     expect(catalog.resolveName('   ')).toBeNull();
     expect(catalog.resolveName('xyzzyplugh')).toBeNull();
+  });
+});
+
+describe('reviewed catalog correction regressions', () => {
+  test('sooty mold does not require its honeydew-producing insects to remain visible', () => {
+    const entry = catalog.getEntry('sooty-mold');
+    expect(entry.traits.join(' ')).toMatch(/insects are no longer present/i);
+    expect(entry.traits.join(' ')).not.toMatch(/always found.+also has/i);
+    expect(entry.review.status).toBe('draft');
+  });
+
+  test('oleander caterpillar customer copy keeps its qualified related-host range', () => {
+    const entry = catalog.getEntry('oleander-caterpillar');
+    expect(entry.copy.what_it_means).toMatch(/mainly on oleander.+occasionally.+related plants/i);
+    expect(entry.review.status).toBe('draft');
+  });
+
+  test('changed hunting billbug aliases require owner re-review', () => {
+    expect(catalog.getEntry('hunting-billbug').review.status).toBe('draft');
   });
 });
 

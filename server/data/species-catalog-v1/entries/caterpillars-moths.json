@@ -907,7 +907,7 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "A harmless-to-touch but hungry caterpillar that feeds only on oleander and can strip a shrub's leaves in groups if left alone. It looks intimidating with its black hair tufts, but those hairs cause no irritation; the real concern is how fast it can defoliate a favorite oleander.",
+      "what_it_means": "A harmless-to-touch but hungry caterpillar that feeds mainly on oleander and occasionally on a few related plants. Groups can strip a shrub's leaves quickly. Its black hair tufts look intimidating but cause no irritation; rapid defoliation is the real concern.",
       "fact": "It feeds almost exclusively on oleander, a plant that is toxic to most animals, yet the caterpillar handles those toxins without any trouble."
     },
     "tech_notes": "Hairs are not urticating; safe to handle. Gregarious feeder that can rapidly defoliate oleander; spot-treat per label if defoliation is a concern to the homeowner.",
@@ -920,8 +920,8 @@
       "https://en.wikipedia.org/wiki/Syntomeida_epilais"
     ],
     "review": {
-      "status": "owner_approved",
-      "notes": ""
+      "status": "draft",
+      "notes": "Returned to draft after restoring the qualified related-host range in customer-facing copy; owner re-approval is required."
     },
     "role": "plant_pest",
     "risk": "low",

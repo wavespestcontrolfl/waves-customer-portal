@@ -259,7 +259,8 @@ function candidateNodeId(candidate) {
 
 // Contract delta 2026-09-26 #5: risk dimensions for escalation are sting,
 // venom, structural, disease, inspection-first, toxic_to_pets, allergen,
-// irritant, and an explicit medical risk — any of these, or a "call" verdict,
+// irritant, protected status, and an explicit medical risk — any of these,
+// or a "call" verdict,
 // makes a candidate
 // consequential for the look-alike-close escalation trigger and decision
 // #2's harmless-plainly guard.
@@ -268,7 +269,7 @@ function isConsequential(entry) {
   const s = entry.safety || {};
   return entry.verdict === 'call'
     || entry.risk === 'medical'
-    || !!s.stings || !!s.venomous || !!s.structural || !!s.toxic_to_pets || !!s.allergen || !!s.irritant || !!s.disease_vector
+    || !!s.stings || !!s.venomous || !!s.structural || !!s.toxic_to_pets || !!s.allergen || !!s.irritant || !!s.disease_vector || !!s.protected
     || !!entry.service?.inspection_first;
 }
 
@@ -895,7 +896,7 @@ function groupBlockFor(level, nodeId, entry) {
 function buildAnswer(ctx) {
   const {
     candidates, disagreed, disagreementNode, escalationTriggered, openaiAnswered, openaiStoodInAlone,
-    qualityUsable, qualityIssue, subjectConflict, signOnly, organismOnly, currentMonth,
+    qualityUsable, qualityIssue, subjectConflict, signOnly, organismOnly, shownKind: explicitShownKind, currentMonth,
   } = ctx;
   const unansweredTrigger = escalationTriggered && !openaiAnswered;
   // Codex round-0 P1 (round 10): an OpenAI candidate that stood in ALONE
@@ -917,7 +918,10 @@ function buildAnswer(ctx) {
   // candidate can still be the answer (r11). If nothing remains, the
   // answer climbs the full list's lineage but names nothing.
   const hiddenKind = signOnly ? 'organism' : (organismOnly ? 'sign' : null);
-  const shownKind = signOnly ? 'sign' : (organismOnly ? 'organism' : null);
+  // `both` is meaningful here: a veto scoped to a sign-only photo must not
+  // govern a photo set that also shows the organism. `null` remains the
+  // conservative fallback when no leg classified what the photos show.
+  const shownKind = explicitShownKind || (signOnly ? 'sign' : (organismOnly ? 'organism' : null));
   const shownCandidates = hiddenKind ? candidates.filter((c) => c.entry?.kind !== hiddenKind) : candidates;
   const top = shownCandidates[0] || null;
   const picked = disagreed
@@ -1352,6 +1356,7 @@ async function identifyPestV2(photos = []) {
   const showsReads = [candidatesJson?.shows, escalationJson?.shows].filter(Boolean);
   const signOnly = showsReads.length > 0 && showsReads.every((v) => v === 'sign');
   const organismOnly = showsReads.length > 0 && showsReads.every((v) => v === 'organism');
+  const shownKind = signOnly ? 'sign' : (organismOnly ? 'organism' : (showsReads.includes('both') ? 'both' : null));
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({
@@ -1366,6 +1371,7 @@ async function identifyPestV2(photos = []) {
     subjectConflict,
     signOnly,
     organismOnly,
+    shownKind,
     currentMonth,
   });
 

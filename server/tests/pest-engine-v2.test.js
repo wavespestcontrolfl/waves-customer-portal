@@ -298,6 +298,15 @@ describe('buildAnswer — tier', () => {
     expect(likely.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
   });
 
+  test("a sign-only veto does not govern when shows='both'", () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95)], shownKind: 'both', currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+    expect(built.nextPhoto).toBeNull();
+    expect(built.tier).toBe('ai_suggestion');
+  });
+
   test('a second candidate that is NOT the curated pair still falls back to the top entry\'s own unconfirmable pair — Codex round-0 P1 (round 7)', () => {
     // ghost-ant is a real second candidate, but it is not no-photo-pair-a's
     // curated pair (that's no-photo-pair-b) — the fallback must still apply.
@@ -486,6 +495,9 @@ describe('isConsequential', () => {
   test('disease_vector makes a candidate consequential', () => {
     expect(isConsequential({ verdict: 'watch', safety: { disease_vector: true } })).toBe(true);
   });
+  test('protected status makes a candidate consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: { protected: true } })).toBe(true);
+  });
   test.each([
     ['medical risk', { verdict: 'watch', risk: 'medical', safety: {} }],
     ['allergen safety', { verdict: 'watch', risk: 'low', safety: { allergen: true } }],
@@ -599,6 +611,20 @@ function candidatesReply(candidates, quality = { usable: true, issue: 'none' }, 
 }
 
 describe('identifyPestV2 — escalation triggers', () => {
+  test("preserves shows='both' so a sign-only veto does not govern the final answer", async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'no-photo-pair-a', confidence: 0.95 }], undefined, 'both'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'no-photo-pair-a', confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+      ] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(false);
+    expect(result.v2.answer).toMatchObject({ node_id: 'no-photo-pair-a', wording: 'pretty_sure' });
+    expect(result.v2.next_photo).toBeNull();
+    expect(result.v2.tier).toBe('ai_suggestion');
+  });
+
   test('Gemini missed entirely + OpenAI stands in ALONE with EMPTY trait arrays never reads pretty_sure — Codex round-0 P1 (round 10)', async () => {
     // Gemini's total failure means candidateContextFor had nothing to hand
     // OpenAI — its own escalation prompt tells it to report empty trait

@@ -1611,8 +1611,6 @@
       "hunting billbug",
       "hunting billbugs",
       "zoysia billbug",
-      "billbug",
-      "billbugs",
       "sphenophorus venatus"
     ],
     "scientific_name": "Sphenophorus venatus vestitus",
@@ -1700,8 +1698,8 @@
       "https://journals.flvc.org/edis/article/view/112502"
     ],
     "review": {
-      "status": "owner_approved",
-      "notes": ""
+      "status": "draft",
+      "notes": "Returned to draft after removing the generic 'billbug' and 'billbugs' aliases, which cannot identify this hunting billbug subspecies; owner re-approval is required."
     },
     "role": "lawn_pest",
     "risk": "low",

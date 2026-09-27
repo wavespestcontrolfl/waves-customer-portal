@@ -895,7 +895,7 @@
     "traits": [
       "Black, powdery or crusty coating over the tops and undersides of leaves, twigs, and surfaces underneath the plant",
       "Wipes or flakes off in dry, sooty smudges rather than staining like ground-in dirt",
-      "Always found on or under a plant that also has aphids, mealybugs, scale or whiteflies feeding on it",
+      "Sticky, clear honeydew or its residue may be visible nearby, even when the sap-feeding insects are no longer present",
       "Leaves underneath look shaded and grow more slowly, but the mold itself isn't infecting the plant"
     ],
     "look_alikes": [
@@ -976,8 +976,8 @@
       "https://blogs.ifas.ufl.edu/okaloosaco/sooty-mold/"
     ],
     "review": {
-      "status": "owner_approved",
-      "notes": "sign_of list is illustrative of common causes, not exhaustive; any sap-feeding, honeydew-producing insect on the plant or an overhanging tree can be the true source."
+      "status": "draft",
+      "notes": "sign_of list is illustrative of common causes, not exhaustive; any sap-feeding, honeydew-producing insect on the plant or an overhanging tree can be the true source. Returned to draft after correcting the visible trait so an old honeydew deposit does not require live feeders to remain visible; owner re-approval is required."
     },
     "role": "plant_pest",
     "risk": "low",
