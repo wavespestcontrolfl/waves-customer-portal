@@ -251,6 +251,23 @@ async function createRestockRequest(productId, raw, options = {}) {
 // agent never create the same item side by side.
 const CATALOG_CREATE_LOCK = 'catalog:create-product';
 
+// The same transaction-level lock createCatalogProduct takes, exported so
+// every OTHER writer of a brand-new products_catalog row (the sheet-pricing
+// importer, admin-import-sheets.js) serializes against it too — one
+// caller's duplicate check must see every product another caller committed
+// before it, catalog insert or not.
+function lockCatalogCreate(trx) {
+  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CATALOG_CREATE_LOCK]);
+}
+
+// The same exact-active-name duplicate check createCatalogProduct runs
+// under the lock above — exported so a caller that inserts its own row (the
+// importer) re-checks it identically instead of drifting from this one.
+async function findActiveProductByExactName(trx, name) {
+  return trx('products_catalog').where({ active: true })
+    .whereRaw('lower(btrim(name)) = ?', [String(name || '').trim().toLowerCase()]).first();
+}
+
 async function createCatalogProduct(fields, options = {}) {
   const {
     name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
@@ -258,13 +275,12 @@ async function createCatalogProduct(fields, options = {}) {
   } = fields;
   const initialStock = numberOrNull(inventoryOnHand);
   const run = async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CATALOG_CREATE_LOCK]);
+    await lockCatalogCreate(trx);
     // Under the lock, for every caller: an active product with the same
     // name (trimmed, case-insensitive) means this item already exists, so
     // nothing is inserted and the call returns null. options.guard(trx) adds
     // a caller's own refusal the same way (the agent's stricter check).
-    const sameName = await trx('products_catalog').where({ active: true })
-      .whereRaw('lower(btrim(name)) = ?', [String(name || '').trim().toLowerCase()]).first('id');
+    const sameName = await findActiveProductByExactName(trx, name);
     if (sameName) return null;
     if (options.guard && await options.guard(trx)) return null;
     const [inserted] = await trx('products_catalog').insert({
@@ -401,4 +417,5 @@ async function updateRestockRequest(requestId, raw, options = {}) {
 }
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,
-  previewRestockAction, updateRestockRequest, productIdentity, createCatalogProduct };
+  previewRestockAction, updateRestockRequest, productIdentity, createCatalogProduct,
+  lockCatalogCreate, findActiveProductByExactName };

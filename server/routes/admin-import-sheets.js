@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { parse } = require('csv-parse/sync');
+const inventoryOperations = require('../services/inventory-operations');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -307,14 +308,25 @@ router.post('/pricing', async (req, res, next) => {
           needs_pricing: !hasValidPrice,
         };
         if (sku) insertData.sku = sku;
-        // subcategory column may not exist yet — try with it, fall back without
-        try {
-          insertData.subcategory = subcategory || null;
-          [productRecord] = await db('products_catalog').insert(insertData).returning('*');
-        } catch (colErr) {
-          delete insertData.subcategory;
-          [productRecord] = await db('products_catalog').insert(insertData).returning('*');
-        }
+        // The same catalog-create advisory lock createCatalogProduct takes
+        // (the admin "add product" screen, the purchase-receipt inventory
+        // agent) — so this importer's insert never races either of them
+        // onto the same product name. Re-check the exact-active-name
+        // duplicate under the lock; a hit uses that row instead of
+        // inserting a second one.
+        productRecord = await db.transaction(async (trx) => {
+          await inventoryOperations.lockCatalogCreate(trx);
+          const existingActive = await inventoryOperations.findActiveProductByExactName(trx, product);
+          if (existingActive) return existingActive;
+          // subcategory column may not exist yet — try with it, fall back without
+          try {
+            const [inserted] = await trx('products_catalog').insert({ ...insertData, subcategory: subcategory || null }).returning('*');
+            return inserted;
+          } catch (colErr) {
+            const [inserted] = await trx('products_catalog').insert(insertData).returning('*');
+            return inserted;
+          }
+        });
       } else {
         // Update if we have more info
         const upd = {};
