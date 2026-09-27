@@ -98,6 +98,8 @@ describe('groundRescheduleAgreement', () => {
     expect(slotQuote('We will see you at two.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(slotQuote('We will see you September 24th at 2 PM.').ok).toBe(true);
     expect(slotQuote('We will see you Thursday PM at 2.').ok).toBe(true);
+    expect(slotQuote('I am moving you to Thursday at two.').ok).toBe(true);
+    expect(slotQuote('I am moving you to Thursday at 2 PM.').ok).toBe(true);
   });
 
   // Pre-push audit P1 (552f7a5ac2): a quote that stops partway through a

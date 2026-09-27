@@ -327,13 +327,20 @@ const PERIOD_ATTACHED_PREV = new Set(['00', 'o', 'clock', 'oclock']);
 
 // The am/pm a sentence states apart from any one hour: a part of the day
 // ("Thursday evening at eight") or an am/pm that follows no hour ("Thursday
-// PM at 10"). Returns the set of periods said.
+// PM at 10"; "am" only after a day, see below). Returns the set of periods
+// said.
 function sentencePeriods(toks) {
   return new Set(toks.flatMap((t, i) => {
     if (Object.hasOwn(DAY_PART_PERIODS, t)) return [DAY_PART_PERIODS[t]];
     const prev = toks[i - 1] || '';
     const attached = hourNumber(prev) != null || /^\d+$/.test(prev) || PERIOD_ATTACHED_PREV.has(prev) || isMinuteToken(prev);
-    return (t === 'am' || t === 'pm') && !attached ? [t] : [];
+    // "Am" is also the verb ("I am moving you"): on its own it marks the
+    // morning only right after a day ("Thursday AM") or beside "or" ("AM or
+    // PM"); "pm" has no other sense.
+    const meridiemAm = WEEKDAY_NAMES.includes(prev) || Object.hasOwn(RELATIVE_DAYS, prev) || ORDINAL_DAY.test(prev)
+      || prev === 'or' || toks[i + 1] === 'or';
+    if (attached) return [];
+    return (t === 'pm' || (t === 'am' && meridiemAm)) ? [t] : [];
   }));
 }
 

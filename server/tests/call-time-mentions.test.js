@@ -72,6 +72,8 @@ describe('extractHourMentions', () => {
 
   test('an am/pm that follows no hour is the sentence\'s period, and periods that disagree make its hours inexact', () => {
     expect(hours('We will see you Thursday PM at 10.')).toEqual([[22, false]]);
+    // "Am" the verb is not a period.
+    expect(hours('I am moving you to Thursday at two. I am moving you to Thursday at 2 PM.')).toEqual([[14, false], [14, false]]);
     expect(hours('Thursday AM at noon. Morning or afternoon, at two? This morning at 2 pm. AM or PM, at ten.'))
       .toEqual([[12, true], [14, true], [14, true], [10, true]]);
   });
