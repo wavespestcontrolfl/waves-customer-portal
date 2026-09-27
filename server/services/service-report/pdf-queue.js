@@ -111,6 +111,10 @@ async function loadServiceRecordForPdf(recordId, knex = db) {
       'technicians.photo_url as technician_photo_url',
       'technicians.avatar_url as technician_avatar_url',
       'technicians.photo_s3_key as technician_photo_s3_key',
+      // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+      // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+      'technicians.fl_applicator_license as technician_fdacs_id',
+      'technicians.license_expiry as technician_license_expiry',
     )
     .first()
     // Frozen identity overlays the join before the canonical lawn pin and

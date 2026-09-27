@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveApplicatorFdacsId } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -678,6 +678,10 @@ async function findProjectByReportSegment(segment) {
       'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
       'c.nearest_location_id',
       't.name as technician_name',
+      // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+      // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+      't.fl_applicator_license as technician_fdacs_id',
+      't.license_expiry as technician_license_expiry',
     );
   if (lookup.type === 'full') {
     return query.where({ 'p.report_token': lookup.value }).first();
@@ -866,6 +870,15 @@ router.get('/project/:token/data', async (req, res, next) => {
         && !filingBinaryMayDiscloseFee(lastFiling);
     }
 
+    // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+    // judged against viewerProjectDate (the WDO last-filing date when one
+    // exists), same rules as the service report's applicatorFdacsId.
+    const applicatorFdacsId = resolveApplicatorFdacsId(
+      project.technician_fdacs_id,
+      project.technician_license_expiry,
+      viewerProjectDate,
+    );
+
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
     // raw payload, so the strip is enforced at the egress point too (audit
@@ -919,6 +932,7 @@ router.get('/project/:token/data', async (req, res, next) => {
         [project.city, [project.state, project.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
       ].filter(Boolean).join(', '),
       technicianName: project.technician_name,
+      applicatorFdacsId,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
       findings: viewerFindings,
@@ -1736,7 +1750,11 @@ router.post('/:token/ask', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first();
 
     if (!service || service.report_template_version !== 'service_report_v1') {
@@ -1874,7 +1892,11 @@ router.get('/:token', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       // Frozen identity (report-identity-snapshot.js) overlays the live join
       // HERE, before the filename, the canonical lawn pin, and the cache
@@ -2144,7 +2166,11 @@ router.get('/:token/map.svg', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
@@ -2216,7 +2242,11 @@ router.get('/:token/data', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 

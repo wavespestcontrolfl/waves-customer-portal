@@ -6,7 +6,7 @@ import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile'
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
-import PoisonControlCopy from '../components/report/PoisonControlCopy';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
@@ -16,7 +16,7 @@ import TermiteReportV2Section from '../components/report/termiteV2/TermiteReport
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
-import { isProductApplication } from '../lib/product-application';
+import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { isLawnFindingSelection } from '../lib/lawn-completion';
 import { serviceCompletionChoicesFor } from '../lib/service-completion-choices';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
@@ -3489,7 +3489,21 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   // monitoring devices (stations, cartridges) are checks, not products
   // applied (codex P2 #3600 r23).
   const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
-  if (!applications.length) return null;
+  if (!applications.length) {
+    // No product rows, yet something went down: the server's applicationMade
+    // verdict from typed / specialty treatment evidence (product rows are
+    // optional there — Codex r1 #5032), or rodenticide in bait stations,
+    // which servicing does not count as an application (owner 2026-09-26).
+    // Poison Control prints on its own; this mount is the one slot both
+    // layouts share.
+    if (data.applicationMade !== true && !reportHasRodenticide(data)) return null;
+    return (
+      <section data-glass="card" className="sr-section applied-products-section" id="poison-control">
+        <h2>Poison Control</h2>
+        <PoisonControlNote data={data} titled />
+      </section>
+    );
+  }
   const isLawn = data.serviceLine === 'lawn';
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
   const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
@@ -3627,10 +3641,19 @@ function AppliedProductsSection({ data, mode = 'live' }) {
       {/* Poison Control rides the product list: this section only mounts
           when something was actually applied, so WDO, assessment and
           monitoring-only visits never carry it (owner 2026-09-26). */}
-      <div className="manufacturer-guideline-note poison-control-note" data-testid="poison-control-note">
-        <strong>Poison Control.</strong> <PoisonControlCopy listsProducts />
-      </div>
+      <PoisonControlNote data={data} listsProducts />
     </section>
+  );
+}
+
+// titled: the standalone section already heads it "Poison Control".
+function PoisonControlNote({ data, listsProducts = false, titled = false }) {
+  const applicator = applicatorIdLine(data.technicianName, data.applicatorFdacsId);
+  return (
+    <div className="manufacturer-guideline-note poison-control-note" data-testid="poison-control-note">
+      {!titled && <><strong>Poison Control.</strong>{' '}</>}<PoisonControlCopy listsProducts={listsProducts} />
+      {applicator && <div className="poison-control-applicator">{applicator}</div>}
+    </div>
   );
 }
 
@@ -7466,6 +7489,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-weight: 700;
           white-space: nowrap;
+        }
+        .poison-control-applicator {
+          margin-top: 8px;
+          font-weight: 600;
         }
         .applied-product-maker {
           margin: -2px 0 8px;

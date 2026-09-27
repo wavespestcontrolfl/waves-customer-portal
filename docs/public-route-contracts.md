@@ -386,7 +386,17 @@ renders the report's IDENTITY facts from the completion-time snapshot on
 carries one: `customerName`, `serviceAddress` / `propertyAddress` /
 `cityState` and the `mapCenter` those resolved to, `technicianName`, the
 `serviceDisplayName` title, and each application's approved product facts
-(EPA number, precaution / re-entry / summary copy, approval). Records
+(EPA number, precaution / re-entry / summary copy, approval). The payload
+also carries `applicatorFdacsId` (F.S. 482.2265(1)(b) — the applying
+technician's FDACS identification card number, `technicians.fl_applicator_license`):
+`null` when blank on file, when `technicians.license_expiry` had already
+passed as of the service date (a missing expiry is active), or when the
+frozen `technicianName` above disagrees with the technician currently
+joined (report-identity-snapshot.js withholds the id rather than print it
+beside a name it may not match). The project report's GET
+`/api/reports/project/:token/data` carries the same field, judged against
+the report's own `projectDate` (the WDO last-filing date when one exists).
+Records
 completed before the snapshot shipped carry none and keep the live
 customers / scheduled_services / technicians / products_catalog joins; a
 snapshot leg that could not be frozen (missing customer or technician row)

@@ -209,17 +209,51 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
   });
 
   it('prints no Poison Control line on a visit that applied nothing', () => {
-    const stationCheck = {
+    const termiteCheck = {
       id: 'st-1',
       method: 'station_check',
-      product: { name: 'Rodent Bait Station', product_type: 'rodent bait station' },
+      product: { name: 'Trelona ATBS Termite Bait Station', category: 'termite bait' },
     };
-    for (const applications of [[], [stationCheck]]) {
+    for (const applications of [[], [termiteCheck]]) {
       const { container, unmount } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications }} token="tok123" />);
       expect(container.textContent).not.toContain('Poison Control');
       expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
       unmount();
     }
+  });
+
+  it('prints Poison Control on its own for a rodent bait-station visit or a productless treatment', () => {
+    // a station device row: servicing it is not an application, but the
+    // station holds rodenticide
+    const rodentCheck = {
+      id: 'st-2',
+      method: 'station_check',
+      product: { name: 'Protecta Rodent Bait Station' },
+    };
+    for (const data of [
+      { ...BASE_DATA, applications: [rodentCheck] },
+      { ...BASE_DATA, applications: [], typedReport: { ...BASE_DATA.typedReport, type: 'rodent_bait_station' } },
+      { ...BASE_DATA, applications: [], applicationMade: true },
+    ]) {
+      const { container, unmount } = render(<ServiceReportDocument data={data} token="tok123" />);
+      expect(screen.queryByText('Products applied')).toBeNull();
+      expect(screen.getByText('Poison Control')).toBeInTheDocument();
+      const block = screen.getByTestId('doc-poison-control');
+      expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+      // no product list on the page, so the line never points at one
+      expect(block.textContent).not.toMatch(/names each product/);
+      unmount();
+    }
+  });
+
+  it('prints the applicator FDACS ID card number beside Poison Control when the server sends one', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('Applicator: Adam · FDACS ID card #JE000001');
+  });
+
+  it('prints no applicator line when the server withholds the number', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: null }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
   });
 
   it('does not claim treatment areas on a visit with no applications', () => {

@@ -446,4 +446,80 @@ describe('public project reports', () => {
       expect(JSON.stringify(body)).not.toContain('12:00:00');
     });
   });
+
+  // FDACS applicator identification card number (F.S. 482.2265(1)(b), owner
+  // ruling 2026-09-26) — same withholding rules as the service report.
+  test('applicatorFdacsId reflects the technician license status judged against the project date', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-fdacs-1',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: 'earlier',
+        project_type: 'pre_treatment_termite_certificate',
+        status: 'sent',
+        first_name: 'Pat',
+        last_name: 'Customer',
+        project_date: '2026-06-11',
+        technician_name: 'Alex Benson',
+        technician_fdacs_id: 'JB1234567',
+        technician_license_expiry: '2026-12-31',
+        findings: {},
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectRead;
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.applicatorFdacsId).toBe('JB1234567');
+    });
+  });
+
+  test("applicatorFdacsId is null when the license expired before the WDO's archived filing date", async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-fdacs-2',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: 'earlier',
+        project_type: 'wdo_inspection',
+        status: 'sent',
+        first_name: 'Pat',
+        last_name: 'Customer',
+        project_date: '2026-01-01',
+        technician_fdacs_id: 'JB1234567',
+        technician_license_expiry: '2026-03-01',
+        findings: { wdo_finding: 'No visible signs of WDO observed' },
+        // viewerProjectDate is overridden to the archived filing's own
+        // project_date, which the license had already lapsed by — the
+        // bare project_date above (before expiry) must NOT be what decides.
+        wdo_sent_filings: JSON.stringify([{
+          s3_key: 'wdo/filing.pdf',
+          project_date: '2026-06-11',
+          findings: { wdo_finding: 'No visible signs of WDO observed' },
+        }]),
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectRead;
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.projectDate).toBe('2026-06-11');
+      expect(body.applicatorFdacsId).toBeNull();
+    });
+  });
 });

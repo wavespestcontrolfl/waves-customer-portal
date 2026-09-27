@@ -20,7 +20,7 @@ import ProjectFindingFieldInput, {
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
 import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
-import PoisonControlCopy, { POISON_CONTROL_PROJECT_TYPES } from "../../components/report/PoisonControlCopy";
+import PoisonControlCopy, { projectAppliedProduct } from "../../components/report/PoisonControlCopy";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 
 const {
@@ -1159,7 +1159,7 @@ function CustomerProjectReportPreview({
           )}
 
           {/* Same type gate as the public page (preview == final). */}
-          {POISON_CONTROL_PROJECT_TYPES.has(project.project_type) && (
+          {projectAppliedProduct(project.project_type, findings, project.followup_findings) && (
             <div data-testid="preview-poison-control" style={{ marginTop: 12 }}>
               <div
                 style={{

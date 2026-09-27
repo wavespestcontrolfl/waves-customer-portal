@@ -330,6 +330,26 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// FDACS applicator identification card number for a customer-facing report
+// (owner ruling 2026-09-26 — F.S. 482.2265(1)(b) lets a customer request "the
+// identification card number of the person applying the pesticide"; it's
+// already public record and prints on the public pre-construction
+// certificate). Null when blank on file, or when the license had already
+// expired by the date of the VISIT being documented (never "today" — a report
+// is a historical record). Date-only compare, mirroring the technician-
+// license judgment in closeout-status.js and the applicator picker in
+// admin-projects.js: a MISSING expiry is active by design (seed
+// 20260703000004) rather than a failure, so a blank expiry never withholds
+// the id. Shared by the service-report and project-report payloads.
+function resolveApplicatorFdacsId(fdacsId, licenseExpiry, visitDate) {
+  const id = String(fdacsId == null ? '' : fdacsId).trim();
+  if (!id) return null;
+  const expiry = licenseExpiry ? String(licenseExpiry).slice(0, 10) : null;
+  const visitDay = visitDate ? String(visitDate).slice(0, 10) : null;
+  if (expiry && visitDay && expiry < visitDay) return null;
+  return id;
+}
+
 function firstNumber(...values) {
   for (const value of values) {
     const n = numberOrNull(value);
@@ -4257,6 +4277,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     first_name: service.technician_first_name,
     last_name: service.technician_last_name,
   });
+  // Withheld (not just left null upstream) when the identity snapshot froze a
+  // different technician name than the one currently joined — see
+  // applyReportIdentitySnapshot, which nulls technician_fdacs_id itself in
+  // that case so every caller of this builder gets the same withholding.
+  const applicatorFdacsId = resolveApplicatorFdacsId(
+    service.technician_fdacs_id,
+    service.technician_license_expiry,
+    service.service_date,
+  );
   const technicianPhotoUrl = await resolveTechPhotoUrl(
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
@@ -5268,6 +5297,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     treatmentPerformed: treatmentPerformedVerdict,
     coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
+    // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+    // see resolveApplicatorFdacsId above for the withholding rules.
+    applicatorFdacsId,
     technician: {
       name: technicianName,
       photoUrl: technicianPhotoUrl,
@@ -5611,6 +5643,7 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 module.exports = {
   buildReportV1Data,
   termiteStationPinsFlag,
+  resolveApplicatorFdacsId,
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,

@@ -712,6 +712,32 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(link).toHaveAttribute('href', 'tel:+18002221222');
     expect(note.textContent).toMatch(/names each product applied/);
     expect(container.querySelectorAll('a[href="tel:+18002221222"]')).toHaveLength(1);
+    // the fixture carries no applicator number, so no applicator line
+    expect(note.textContent).not.toMatch(/FDACS ID/);
+  });
+
+  it('prints the applicator FDACS ID card number in the Poison Control note', async () => {
+    const { container } = renderReport({ ...legacyLawnReport, applicatorFdacsId: 'JE000001' });
+    await screen.findByText('Visit Summary');
+    const note = within(container.querySelector('#products-applied')).getByTestId('poison-control-note');
+    expect(note.textContent).toMatch(/FDACS ID card #JE000001/);
+  });
+
+  it('a productless treatment or rodent bait visit gets Poison Control on its own', async () => {
+    const rodentBait = { id: 'rb-1', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    for (const payload of [
+      { ...legacyLawnReport, applications: [], applicationMade: true },
+      { ...legacyLawnReport, applications: [rodentBait], applicationMade: false },
+    ]) {
+      const { container, unmount } = renderReport(payload);
+      await screen.findByText('Visit Summary');
+      expect(container.querySelector('#products-applied')).toBeNull();
+      const section = container.querySelector('#poison-control');
+      expect(section).not.toBeNull();
+      expect(within(section).getByRole('link', { name: '1-800-222-1222' })).toHaveAttribute('href', 'tel:+18002221222');
+      expect(section.textContent).not.toMatch(/names each product/);
+      unmount();
+    }
   });
 
   it('omits the lawn trend chart on a first assessment (single data point)', async () => {

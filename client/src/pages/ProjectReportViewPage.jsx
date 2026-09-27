@@ -10,7 +10,7 @@ import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
-import PoisonControlCopy, { POISON_CONTROL_PROJECT_TYPES } from '../components/report/PoisonControlCopy';
+import PoisonControlCopy, { applicatorIdLine, projectAppliedProduct } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -383,6 +383,7 @@ export default function ProjectReportViewPage() {
   // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
+  const applicatorLine = applicatorIdLine(data?.technicianName, data?.applicatorFdacsId);
   const glassActive = !isPaperDocument;
   useGlassSurface(glassActive);
 
@@ -788,7 +789,7 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
-        {POISON_CONTROL_PROJECT_TYPES.has(data.projectType) && (
+        {projectAppliedProduct(data.projectType, data.findings, data.followupFindings) && (
           <div data-glass="card" data-testid="project-poison-control" style={{ ...cardStyle, marginTop: 16 }}>
             <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
               Poison Control
@@ -796,6 +797,11 @@ export default function ProjectReportViewPage() {
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
               <PoisonControlCopy linkStyle={{ color: ESTIMATE_TEXT, fontWeight: 700, whiteSpace: 'nowrap' }} />
             </div>
+            {applicatorLine && (
+              <div data-testid="project-applicator-id" style={{ fontSize: 14, color: ESTIMATE_TEXT, fontWeight: 600, lineHeight: 1.5, marginTop: 8 }}>
+                {applicatorLine}
+              </div>
+            )}
           </div>
         )}
 
