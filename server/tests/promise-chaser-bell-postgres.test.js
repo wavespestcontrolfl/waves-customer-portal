@@ -888,4 +888,35 @@ const OUR_NUMBER = '+19415550100';
     const settled = await mockConn('call_log').where({ id: back.id }).first('metadata');
     expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitmentB.id });
   });
+
+  test("switching targets clears the old promise's delivered-device history atomically, even when THIS attempt defers before it can write anything else", async () => {
+    const earlierA = callRow(300);
+    const commitmentA = commitmentRow(earlierA.id);
+    const earlierB = callRow(200);
+    const commitmentB = commitmentRow(earlierB.id);
+    // `back` already carries a PRIOR completed attempt's history against A.
+    const back = callRow(0, {
+      metadata: { promise_chaser: { status: 'pending', claimed_at: null, commitmentId: commitmentA.id, deliveredSubscriptionIds: ['sub-1'] } },
+    });
+    // A is kept in the meantime — strictly after A's own call, strictly
+    // before B's, so only A (never B) reads as followed up.
+    const reached = callRow(250, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
+    // Another call is ACTIVELY dispatching B right now — `back`'s own
+    // retry (below) will switch to B and then defer on activeElsewhere,
+    // never reaching recordProgress or settle at all.
+    const activelyDispatchingB = callRow(1, {
+      metadata: { promise_chaser: { status: 'pending', claimed_at: new Date(now - 5000).toISOString(), commitmentId: commitmentB.id } },
+    });
+    await mockConn('call_log').insert([earlierA, earlierB, back, reached, activelyDispatchingB]);
+    await mockConn('call_commitments').insert([commitmentA, commitmentB]);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled(); // deferred before ever reaching dispatch
+
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    // stampTarget's own single write already switched to B and cleared
+    // A's stale history — nothing else ran afterward to have done it.
+    expect(row.metadata.promise_chaser.commitmentId).toBe(commitmentB.id);
+    expect(row.metadata.promise_chaser.deliveredSubscriptionIds).toBeUndefined();
+  });
 });

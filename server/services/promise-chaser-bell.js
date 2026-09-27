@@ -210,13 +210,30 @@ async function recordProgress(callId, token, extra) {
 // wholesale replace here would re-wipe deliveredSubscriptionIds a PRIOR
 // attempt on this same row already persisted, the exact bug claimAttempt
 // itself was just fixed for.
+//
+// A retry can legitimately switch which promise it targets (the last one
+// was dismissed or kept since); when it does, deliveredSubscriptionIds
+// belongs to the OLD target and must be cleared in the SAME atomic write
+// — an in-memory "only reuse it for a matching target" check in the
+// caller is not enough on its own: if THIS attempt never reaches
+// recordProgress or settle at all (it defers on cross.activeElsewhere, or
+// throws), the row would otherwise sit with commitmentId already pointing
+// at the NEW promise but deliveredSubscriptionIds still holding the OLD
+// promise's devices — corrupting exactly what the NEXT retry reads back.
+// The CASE below is the single write that can ever change commitmentId,
+// so it is the one place that has to make this atomic.
 async function stampTarget(callId, token, promiseId) {
+  const idText = String(promiseId);
   await db('call_log').where({ id: callId })
     .whereRaw("metadata->'promise_chaser'->>'claimed_at' = ?", [token])
     .update({
       metadata: db.raw(
-        "jsonb_set(COALESCE(metadata,'{}'::jsonb), '{promise_chaser}', COALESCE(metadata->'promise_chaser', '{}'::jsonb) || ?::jsonb, true)",
-        [JSON.stringify({ commitmentId: promiseId })],
+        `jsonb_set(COALESCE(metadata,'{}'::jsonb), '{promise_chaser}',
+          CASE WHEN metadata->'promise_chaser'->>'commitmentId' IS DISTINCT FROM ?
+            THEN (COALESCE(metadata->'promise_chaser','{}'::jsonb) - 'deliveredSubscriptionIds') || jsonb_build_object('commitmentId', ?::text)
+            ELSE COALESCE(metadata->'promise_chaser','{}'::jsonb) || jsonb_build_object('commitmentId', ?::text)
+          END, true)`,
+        [idText, idText, idText],
       ),
     });
 }
