@@ -114,6 +114,25 @@ describeOrSkip('KB AI audit on PostgreSQL', () => {
     expect(again.results.map((r) => r.id)).not.toContain(row.id);
   });
 
+  test('Verify clears a flag but never an archive or a wiki mirror gate', async () => {
+    const flaggedRow = await entry('VerifyFlagged');
+    await KB.flag(flaggedRow.id, 'check');
+    await KB.verify(flaggedRow.id);
+    expect((await reload(flaggedRow.id)).status).toBe('active');
+
+    const archived = await entry('VerifyArchived', { status: 'archived' });
+    await KB.verify(archived.id);
+    expect((await reload(archived.id)).status).toBe('archived');
+
+    const mirror = await entry('VerifyMirror', { source: 'wiki-sync', status: 'flagged' });
+    await db('knowledge_base_audits').insert({ kb_entry_id: mirror.id, audit_type: 'ai-review', result: 'flagged', findings: '{}', audited_by: 'ai-cron' });
+    await KB.verify(mirror.id);
+    await KB.update(mirror.id, { content: 'mirror body v2' });
+    expect((await reload(mirror.id)).status).toBe('flagged');
+    const out = await KB.runAIAudit({ ids, flaggedOnly: true, maxEntries: 10 });
+    expect(out.results.map((r) => r.id)).not.toContain(mirror.id);
+  });
+
   test('an unparsed verdict changes nothing', async () => {
     const row = await entry('Unparsed');
     mockVerdicts.set(row.title, { status: 'looks fine' });

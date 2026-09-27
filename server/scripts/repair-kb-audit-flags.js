@@ -55,7 +55,7 @@ async function main() {
     for (const { id } of rows) {
       n += await db.transaction(async (trx) => {
         const row = await trx('knowledge_base').where({ id }).forUpdate().first();
-        if (!row || row.status !== 'flagged' || !(await flagIsFromAIAudit(id, trx))) return 0;
+        if (!row || row.status !== 'flagged' || !(await flagIsFromAIAudit(row, trx))) return 0;
         await trx('knowledge_base').where({ id }).update({ status: 'active', updated_at: new Date() });
         return 1;
       });

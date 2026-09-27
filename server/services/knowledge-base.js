@@ -6,6 +6,7 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const { createDeepMessage } = require('./llm/deep');
+const { etDateString } = require('../utils/datetime-et');
 
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
@@ -69,25 +70,24 @@ async function uniqueSlug(base) {
 // Auto-sync entries are rebuilt from live data on every sync, so a finding on
 // one is fixed at its source, never in the KB row (the next sync would
 // overwrite the edit). Those rows stay searchable; the finding routes to the
-// source's admin screen instead of hiding the entry.
+// source's admin screen instead of hiding the entry. Wiki mirrors
+// (source='wiki-sync') are the same: agronomic-wiki.js syncKbCopyTrust owns
+// their status, so the audit never hides or restores them.
 function auditSourceFor(entry) {
+  if (entry && entry.source === 'wiki-sync') return { fixIn: 'agronomic_wiki', label: 'Agronomic wiki', link: '/admin/knowledge' };
   if (!entry || entry.source !== 'auto-sync') return null;
   const slug = cleanText(entry.slug);
   if (slug.startsWith('product-')) return { fixIn: 'products_catalog', label: 'Products catalog', link: '/admin/inventory?tab=products' };
-  if (slug.startsWith('cogs-')) return { fixIn: 'service_product_usage', label: 'Service product usage', link: '/admin/inventory?tab=products' };
+  if (slug.startsWith('cogs-')) return { fixIn: 'service_product_usage', label: 'Service product usage', link: '/admin/inventory?tab=protocols' };
   if (slug.startsWith('pricing-')) return { fixIn: 'pricing_config', label: 'Pricing config', link: '/admin/pricing-logic' };
   return { fixIn: 'protocols', label: 'Protocols', link: '/admin/service-library?tab=protocols' };
-}
-
-function todayInEastern(now = new Date()) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
 
 function buildAuditPrompt(entry, now = new Date()) {
   const source = auditSourceFor(entry);
   return `You are auditing a knowledge base entry for a pest control & lawn care company (Waves Pest Control) in Southwest Florida. Review this entry for accuracy.
 
-Today's date: ${todayInEastern(now)}. Timestamps on or before today are not errors — judge the content, not when it was verified.
+Today's date: ${etDateString(now)}. Timestamps on or before today are not errors — judge the content, not when it was verified.
 ${source ? `This entry is generated from the ${source.label} data; a finding means that source record needs fixing.
 ` : ''}
 ENTRY:
@@ -150,9 +150,10 @@ const FLAG_OWNER_SQL = `(SELECT a.audit_type FROM knowledge_base_audits a
 // a content change — the fix — should put it back in search. Callers hold the
 // entry's row lock (every flag write takes it), so the answer cannot move
 // under them.
-async function flagIsFromAIAudit(entryId, conn = db) {
+async function flagIsFromAIAudit(entry, conn = db) {
+  if (!entry || entry.source === 'wiki-sync') return false;
   const latest = await conn('knowledge_base_audits')
-    .where({ kb_entry_id: entryId })
+    .where({ kb_entry_id: entry.id })
     .whereIn('audit_type', ['ai-review', 'manual-flag'])
     .where({ result: 'flagged' })
     .orderBy('created_at', 'desc')
@@ -202,7 +203,13 @@ const KnowledgeBaseService = {
       // fix — it returns to search.
       if (data.content !== undefined && updates.status === undefined
         && current.status === 'flagged' && current.content !== data.content
-        && await flagIsFromAIAudit(id, trx)) {
+        && await flagIsFromAIAudit(current, trx)) {
+        data.status = 'active';
+      }
+      // A person's Verify is the review a flag asks for. It never overrides
+      // a wiki mirror's trust gate or a non-flag status like archived.
+      if (updates.restoreFlag && updates.status === undefined
+        && current.status === 'flagged' && current.source !== 'wiki-sync') {
         data.status = 'active';
       }
       const [entry] = await trx('knowledge_base').where({ id }).update(data).returning('*');
@@ -297,9 +304,7 @@ const KnowledgeBaseService = {
 
   // ── Verify (mark as reviewed) ──
   async verify(id, verifiedBy = 'waves') {
-    // A person verifying the entry is the review a flag asks for — it returns
-    // to search.
-    return this.update(id, { last_verified_at: new Date(), verified_by: verifiedBy, confidence: 'high', status: 'active' });
+    return this.update(id, { last_verified_at: new Date(), verified_by: verifiedBy, confidence: 'high', restoreFlag: true });
   },
 
   // ── Flag ──
@@ -328,7 +333,8 @@ const KnowledgeBaseService = {
     if (Array.isArray(ids)) query = query.whereIn('knowledge_base.id', ids);
     if (flaggedOnly) {
       // Only entries the AI audit hid — a person's flag is a person's call.
-      query = query.where({ status: 'flagged' }).whereRaw(`${FLAG_OWNER_SQL} = 'ai-review'`);
+      query = query.where({ status: 'flagged' }).whereNot({ source: 'wiki-sync' })
+        .whereRaw(`${FLAG_OWNER_SQL} = 'ai-review'`);
     } else {
       query = query.where({ status: 'active' });
       if (!forceAll) {
@@ -389,7 +395,7 @@ const KnowledgeBaseService = {
             });
             return { auditResult: 'stale', updates: {}, findings: parsed, source: null };
           }
-          const flagOwner = current.status === 'flagged' && await flagIsFromAIAudit(entry.id, trx) ? 'ai-review' : null;
+          const flagOwner = current.status === 'flagged' && await flagIsFromAIAudit(current, trx) ? 'ai-review' : null;
           const outcome = planAuditOutcome({ ...current, flag_owner: flagOwner }, parsed);
           await trx('knowledge_base_audits').insert({
             kb_entry_id: entry.id,
@@ -657,24 +663,25 @@ const KnowledgeBaseService = {
         const tagJson = JSON.stringify(safeTags);
         const existingTagJson = JSON.stringify(normalizeTags(existing.tags));
         if (existing.content !== safeContent || existing.title !== safeTitle || existing.path !== safePath || existing.category !== safeCategory || existingTagJson !== tagJson) {
-          await db('knowledge_base').where({ id: existing.id }).update({
-            slug: safeSlug,
-            path: safePath,
-            content: safeContent,
-            title: safeTitle,
-            category: safeCategory,
-            tags: tagJson,
-            last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
-          });
-          // The source changed — that is the fix an AI flag asked for.
-          if (existing.status === 'flagged' && existing.content !== safeContent) {
-            await db.transaction(async (trx) => {
-              const row = await trx('knowledge_base').where({ id: existing.id }).forUpdate().first();
-              if (row && row.status === 'flagged' && await flagIsFromAIAudit(existing.id, trx)) {
-                await trx('knowledge_base').where({ id: existing.id }).update({ status: 'active' });
-              }
+          // One transaction: the content change and the restore it earns land
+          // together, so a crash between them can't strand a fixed entry
+          // hidden (the next sync would see the content as unchanged).
+          await db.transaction(async (trx) => {
+            const row = await trx('knowledge_base').where({ id: existing.id }).forUpdate().first();
+            // The source changed — that is the fix an AI flag asked for.
+            const restore = row && row.status === 'flagged' && row.content !== safeContent
+              && await flagIsFromAIAudit(row, trx);
+            await trx('knowledge_base').where({ id: existing.id }).update({
+              slug: safeSlug,
+              path: safePath,
+              content: safeContent,
+              title: safeTitle,
+              category: safeCategory,
+              tags: tagJson,
+              last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
+              ...(restore ? { status: 'active' } : {}),
             });
-          }
+          });
           updated++;
         } else { skipped++; }
       } else {
@@ -857,4 +864,4 @@ const KnowledgeBaseService = {
 };
 
 module.exports = KnowledgeBaseService;
-module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, todayInEastern, flagIsFromAIAudit };
+module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit };
