@@ -170,6 +170,27 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
     expect(r?.node?.slug).not.toBe('brazilian-free-tailed-bat');
   });
 
+  test.each([
+    ['aedes-mosquito', 'asian-tiger-mosquito'],
+    ['asian-tiger-mosquito', 'aedes-mosquito'],
+  ])('a likely %s versus %s result after approval never asks for skin contact', (first, second) => {
+    const candidates = [cand(first, 0.65), cand(second, 0.3)];
+    const approved = new Map(candidates.map((candidate) => [candidate.slug, candidate.entry]));
+    const getEntry = catalog.getEntry;
+    // Future approval must also be visible to the target-entry lookup that
+    // protects pair prose. Keep the real persisted approval records intact.
+    const lookup = jest.spyOn(catalog, 'getEntry').mockImplementation((slug) => approved.get(slug) || getEntry(slug));
+    try {
+      const built = buildAnswer(ctx(candidates));
+      expect(built.answer).toMatchObject({ level: 'entry', wording: 'likely', node_id: first });
+      expect(built.nextPhoto.ask).toMatch(/wall or another non-contact surface/i);
+      expect(built.nextPhoto.ask).toMatch(/never use skin as a perch/i);
+      expect(built.nextPhoto.ask).not.toMatch(/rests? on skin|on skin or a wall/i);
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
   test('a bare genus never lands on a sign entry (Codex #4974 r8)', () => {
     expect(catalog.resolveName('Rattus')?.node?.kind).not.toBe('sign');
   });

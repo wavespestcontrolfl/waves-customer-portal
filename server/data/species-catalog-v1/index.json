@@ -51,7 +51,7 @@
       "label": "Wildlife",
       "generic": "a wildlife visitor",
       "next_photo": {
-        "ask": "From a safe distance, a clear photo of the whole animal, head and markings included. Never approach or handle it.",
+        "ask": "Use zoom from a safe distance to show the whole animal and markings already visible. Never approach, handle, or disturb any animal, nest, burrow, or shelter.",
         "why": "Head shape, markings and size identify the animal and whether it is protected."
       }
     },
@@ -310,7 +310,7 @@
       "generic": "a wild animal",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A photo from a safe distance showing the whole animal and any digging or damage nearby.",
+        "ask": "Use zoom from a safe distance for the animal and any digging or damage already visible. Never approach, handle, or disturb the animal or its shelter.",
         "why": "Body shape and the damage pattern point to which animal it is."
       }
     },
@@ -346,7 +346,7 @@
       "generic": "a turtle or tortoise",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A wide photo of the shell and the burrow entrance if there is one.",
+        "ask": "Use zoom from a safe distance for the shell and any burrow already visible. Never approach or disturb the animal or its burrow; do not handle or block either.",
         "why": "Shell shape and a burrow nearby point to a protected gopher tortoise versus another turtle."
       }
     },
@@ -366,7 +366,7 @@
       "generic": "a bird",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A photo of the whole bird and any nest, burrow, or damage nearby.",
+        "ask": "Use zoom from a safe distance for the bird and any nest, burrow, or damage already visible. Never approach, handle, or disturb the bird, nest, or burrow.",
         "why": "Body shape plus where it's nesting narrows which bird and whether it's protected."
       }
     }

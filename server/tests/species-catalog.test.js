@@ -733,10 +733,11 @@ describe('loader API surface', () => {
     },
   );
 
-  test('all medically significant or irritating draft fallbacks retain safe-distance photo guidance', () => {
+  test('risky and protected-wildlife draft fallbacks retain conservative photo guidance', () => {
     const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
     const riskyDrafts = catalog.listEntries().filter((entry) => entry.review.status === 'draft'
-      && (['medical', 'irritant'].includes(entry.risk) || entry.safety.venomous || entry.safety.toxic_to_pets));
+      && (['medical', 'irritant'].includes(entry.risk) || entry.safety.venomous
+        || entry.safety.toxic_to_pets || entry.role === 'protected_wildlife'));
     expect(riskyDrafts.length).toBeGreaterThan(30);
     for (const entry of riskyDrafts) {
       const candidate = { ...resolveCandidate({ slug: entry.slug, confidence: 0.95 }), checked: true, verified: true };
@@ -745,6 +746,10 @@ describe('loader API surface', () => {
         slug: entry.slug, ask: expect.stringMatching(/safe distance/i),
       });
       expect(built.nextPhoto.ask).not.toMatch(/close-up|next to a coin|a few feet|several feet|rests? on skin/i);
+      if (entry.role === 'protected_wildlife') {
+        expect(built.entry).toBeNull();
+        expect(built.nextPhoto.ask).toMatch(/never approach.*disturb/i);
+      }
     }
   });
 
