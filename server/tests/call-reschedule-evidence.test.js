@@ -378,6 +378,12 @@ describe('rescheduleAgreementEvidence', () => {
     }
     expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nAgent: You are all set.').ok).toBe(false);
     expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nCaller: Yes.\nAgent: You are all set.').ok).toBe(true);
+    // The agent repeating the slot does not answer its own proposal.
+    expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nAgent: You are all set for Thursday at two.').ok).toBe(false);
+    // "At ten to two" is 1:50, neither ten nor two.
+    for (const target of ['2026-09-24T10:00:00-04:00', '2026-09-24T14:00:00-04:00']) {
+      expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at ten to two.', target).ok).toBe(false);
+    }
     // The answer must accept: a hedge or a question is not an answer.
     expect(evidence('Agent: Would Thursday at two work?\nCaller: Let me think.\nAgent: You are all set.').ok).toBe(false);
     expect(evidence('Agent: Would Thursday at two work?\nCaller: Is that the earliest?\nAgent: You are all set.').ok).toBe(false);

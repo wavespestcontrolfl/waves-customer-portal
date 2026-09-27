@@ -359,11 +359,20 @@ function acceptingAnswer(turns, afterIdx) {
   return idx >= 0 && accepts(turns[idx].ns) ? idx : -1;
 }
 
-// After the slot's final mention the caller answers or closes the call: any
-// caller question ("Is that the earliest?", "can we do three?", "anything
-// else available?") is still on the slot.
-function callerReopensSlot(turns, anchorIdx) {
-  return turns.slice(anchorIdx + 1).some((t) => !t.agent && sentenceSpans(t.raw).some((sentence) => sentence.question));
+// Is the slot still open on the caller's side at the commitment: a caller
+// question after its final mention ("Is that the earliest?", "anything else
+// available?"), or the agent's last proposal of it ("Would Thursday at two
+// work for you?") with no accepting caller answer before the commitment,
+// however the agent then repeats it ("You are all set for Thursday at two")?
+function callerLeavesSlotOpen(turns, refs, slot, anchorIdx, affirmIdx) {
+  if (turns.slice(anchorIdx + 1).some((t) => !t.agent && sentenceSpans(t.raw).some((sentence) => sentence.question))) return true;
+  const proposes = (t, idx) => {
+    const mentions = refs.filter((m) => m.turnIdx === idx);
+    return t.agent && idx < affirmIdx && mentions.length > 0 && mentions.every((m) => namesSlot(m, slot))
+      && sentenceSpans(t.raw).some((sentence) => sentence.question);
+  };
+  const lastProposal = turns.map((t, idx) => (proposes(t, idx) ? idx : -1)).reduce((a, b) => Math.max(a, b), -1);
+  return lastProposal >= 0 && !turns.slice(lastProposal + 1, affirmIdx).some((t) => !t.agent && accepts(t.ns));
 }
 
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you
@@ -514,7 +523,8 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
     ? t.ns.replace(/^(?:no|nope|nah)\b/, '') : t.ns));
   if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord), slot.hour24)
     || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord), slot.hour24)
-    || [slotClauses[2], ...callerMeanwhile, ...laterTurns].some((ns) => hasNegation(ns) || talksOtherTime(ns, slot.hour24)) || callerReopensSlot(turns, anchorIdx)) {
+    || [slotClauses[2], ...callerMeanwhile, ...laterTurns].some((ns) => hasNegation(ns) || talksOtherTime(ns, slot.hour24))
+    || callerLeavesSlotOpen(turns, [...dayRefs, ...hourRefs], slot, anchorIdx, affirmIdx)) {
     return failAt('slot_refused', affirmIdx);
   }
 

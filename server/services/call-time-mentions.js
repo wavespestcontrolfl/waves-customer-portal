@@ -262,9 +262,14 @@ function minuteTokensAfter(toks, i) {
 // "Two to four", "2 pm to 4 pm", "between two and four": a range whose start
 // is the hour at `i`, its minutes ending at `after`. The index of its end, or
 // -1.
+// Minute counts said before "to" an hour ("at ten to two" is 1:50).
+const MINUTES_TO = new Set(['five', 'ten', 'twenty', 'quarter', '5', '10', '20', '25']);
+
 function rangeEndAfter(toks, i, after) {
   let j = after;
   while (HOUR_FILLER.has(toks[j])) j += 1;
+  // "At ten to two" is a time a few minutes before two, not a range from ten.
+  if (toks[j] === 'to' && toks[i - 1] === 'at' && MINUTES_TO.has(toks[i])) return -1;
   const joined = toks[j] === 'to' || toks[j] === 'through' || (toks[j] === 'and' && toks[i - 1] === 'between');
   return joined && hourNumber(toks[j + 1]) != null ? j + 1 : -1;
 }
