@@ -91,8 +91,8 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 
-  test('explicitPushOnly + null recipient: a push failure is reported as an app-side outcome, never a Twilio send', async () => {
-    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' });
+  test.each(['no_fresh_device', 'app_event_already_visible'])('explicitPushOnly + null recipient: %s stays an app-side outcome', async (reason) => {
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason });
 
     const result = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
       explicitPushOnly: true,
@@ -103,7 +103,7 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
     });
 
     expect(mockAttemptPushFirst).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ success: false, appUnavailable: true });
+    expect(result).toMatchObject({ success: false, appUnavailable: true, error: reason });
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 

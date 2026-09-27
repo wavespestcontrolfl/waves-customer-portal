@@ -187,7 +187,6 @@ describe('customer notification native push dispatch', () => {
     expect(result).toMatchObject({ deduped, push: { error: 'dispatch_failed' } });
     expect(result.body).toBe('Current quoted balance');
     expect(notifQ.insert).toHaveBeenCalledTimes(deduped ? 0 : 1);
-    expect(require('../services/messaging/push-channel-routing').bellReachedThisAttempt(result)).toBe(!deduped);
   });
 
   test.each([
@@ -206,7 +205,6 @@ describe('customer notification native push dispatch', () => {
     } });
     expect(PushService.sendToCustomer).not.toHaveBeenCalled();
     expect(notifQ.insert).not.toHaveBeenCalled();
-    expect(require('../services/messaging/push-channel-routing').bellReachedThisAttempt(result)).toBe(false);
   });
 
   test('a changed quote after lost bell commit acknowledgement cannot reuse the old event for native delivery', async () => {

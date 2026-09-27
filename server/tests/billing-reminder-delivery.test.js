@@ -238,6 +238,17 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
   });
 
+  test('a lost bell acknowledgement is repaired without counting the changed retry as a new delivery', async () => {
+    const send = jest.fn()
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' })
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible' });
+    await expect(deliver(['push'], send)).resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    await expect(deliver(['push'], send)).resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    await expect(deliver(['push'], send)).resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(rows[0].metadata.delivered).toBe(true);
+  });
+
   test('accepted Text is not repeated while failed Email is retried', async () => {
     const send = jest.fn(async (channel) => {
       if (channel === 'email' && send.mock.calls.length === 1) return { sent: false, deliveryOutcome: 'not_sent', code: 'EMAIL_FAILED' };

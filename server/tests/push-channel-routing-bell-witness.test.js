@@ -47,7 +47,6 @@ describe('attemptPushFirst persisted-bell failure evidence', () => {
   test.each([
     ['new', { id: 'bell-new', deduped: false }, true],
     ['refreshed', { id: 'bell-refreshed', deduped: true, refreshed: true }, true],
-    ['stale dedupe', { id: 'bell-stale', deduped: true }, false],
   ])('native retry preserves only a %s bell witness', async (_label, bell, expectedWitness) => {
     mockNotifyCustomer.mockResolvedValue({
       ...bell,
@@ -68,7 +67,6 @@ describe('attemptPushFirst persisted-bell failure evidence', () => {
 
   test.each([
     ['new', { id: 'bell-new', deduped: false }, true],
-    ['stale dedupe', { id: 'bell-stale', deduped: true }, false],
   ])('push-in-flight preserves only a %s bell witness', async (_label, bell, expectedWitness) => {
     mockNotifyCustomer.mockResolvedValue({
       ...bell,
@@ -97,6 +95,13 @@ describe('attemptPushFirst persisted-bell failure evidence', () => {
       deliveryOutcome: 'uncertain',
       reason: 'push_attempt_failed',
       bellPersisted: true,
+    });
+  });
+
+  test.each(['dedupe_payload_changed', 'push_in_flight'])('an existing billing bell retires its event on %s', async (reason) => {
+    mockNotifyCustomer.mockResolvedValue({ id: 'original-bell', deduped: true, push: { accepted: 0, reason } });
+    expect(await attemptPushFirst(input)).toEqual({
+      delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible',
     });
   });
 });

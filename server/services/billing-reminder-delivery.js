@@ -108,22 +108,22 @@ async function sendLeg(send, channel, entry) {
   }
 }
 
-// Stamps one leg's provider outcome on its reservation and returns the state
-// it reached: 'delivered', 'resolved' (terminal Email refusal, never counted
-// as delivered), or null while it stays pending. An uncertain outcome keeps
-// the reservation held; only a definite non-send becomes retryable.
+function deliveredLegState(channel, { deliveryOutcome, ok, bellPersisted, reason } = {}) {
+  // An old bell settles its original event, never a new copy or native send.
+  if (channel === 'push' && deliveryOutcome === 'not_sent' && reason === 'app_event_already_visible') return 'deduped';
+  if (deliveryOutcome === 'accepted') return 'delivered';
+  if (channel === 'email' && ok === true && deliveryOutcome === undefined) return 'delivered';
+  // A newly committed bell is visible even if native delivery fails.
+  return channel === 'push' && bellPersisted === true ? 'delivered' : null;
+}
+
+// Stamp delivery, including repaired earlier delivery, or resolve a terminal
+// Email refusal. Uncertain outcomes remain held; definite non-sends can retry.
 async function recordLegOutcome(entry, channel, result, results) {
-  const { deliveryOutcome, ok, bellPersisted, held, deliveryHeld, code, reason } = result || {};
-  const accepted = deliveryOutcome === 'accepted'
-    || (channel === 'email' && ok === true && deliveryOutcome === undefined)
-    // App delivery has two customer-visible surfaces. push-channel-routing
-    // sets this witness only when this attempt created or refreshed a real,
-    // unsuppressed in-app bell. A device-level not_sent therefore still
-    // settles the App leg; it must not turn the reservation retryable and
-    // re-notify the customer tomorrow.
-    || (channel === 'push' && bellPersisted === true);
-  if (accepted) {
-    if (await ContactLedger.markDelivered(entry)) return 'delivered';
+  const { deliveryOutcome, held, deliveryHeld, code, reason } = result || {};
+  const delivered = deliveredLegState(channel, result || {});
+  if (delivered) {
+    if (await ContactLedger.markDelivered(entry)) return delivered;
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
     return null;
   }
@@ -212,9 +212,9 @@ async function sendReminderChannels({
     const result = await sendLeg(send, channel, entry);
     results[channel] = result;
     const state = await recordLegOutcome(entry, channel, result, results);
-    if (state === 'delivered') {
+    if (state === 'delivered' || state === 'deduped') {
       delivered.add(channel);
-      if (!result.deduped) deliveredNow.push(channel);
+      if (state === 'delivered' && !result.deduped) deliveredNow.push(channel);
     } else if (state === 'resolved') resolved.add(channel);
   }
   const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);
