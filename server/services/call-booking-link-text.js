@@ -75,6 +75,11 @@ const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-s
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { phoneIdentityKey } = require('../utils/phone');
+const { lockSmsPhone } = require('../utils/customer-comms-lock');
+const {
+  computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV,
+  suppressUnsupportedModelFlags, BLOCKING_TRIAGE_FLAGS,
+} = require('./call-triage-flags');
 
 const GATE = 'callBookingLinkText';
 const METADATA_KEY = 'call_booking_link_text';
@@ -507,6 +512,33 @@ function managedLineForCall(call) {
   return candidate;
 }
 
+// Mirrors the canonical pipeline's own final-flags derivation
+// (call-recording-processor.js's enforce-mode pass) verbatim (codex #5018
+// r11 P1) — never reinvented. extraction.triage_flags alone is the MODEL's
+// raw self-report; computeDeterministicTriageFlags' output (
+// low_extraction_confidence, address_unverified, caller_phone_missing, …)
+// is derived fresh every time the processor runs and is merged into its
+// OWN route_decisions row, never written back onto the persisted
+// ai_extraction_enriched.triage_flags — so reading that field alone (as
+// this lane used to) silently misses every deterministic-only flag,
+// including a low-confidence extraction the model flagged nothing on.
+// contactPhone matters: computeDeterministicTriageFlags treats a caller
+// who never restated their number as unreachable (caller_phone_missing)
+// UNLESS the ANI is dialable — omitting it here would false-block nearly
+// every ordinary call, the same trap the processor's own comment warns
+// about at its own call site.
+function finalTriageFlagsFor(call, extraction) {
+  const { resolveCallContactPhone } = require('./call-recording-processor');
+  const addressValidation = call.ai_address_validation;
+  const modelFlags = suppressAddressFlagsForAV(
+    suppressUnsupportedModelFlags(extraction.triage_flags, extraction), addressValidation,
+  );
+  const deterministicFlags = computeDeterministicTriageFlags(extraction, {
+    addressValidation, contactPhone: resolveCallContactPhone(call, null),
+  });
+  return mergeTriageFlags(modelFlags, deterministicFlags);
+}
+
 // Table-driven "never" rules (CLAUDE.md rule 20: table-drive repeated
 // conditionals rather than one long if-chain). Each entry is independent and
 // named by the reason it returns; order matches the owner's own rule list
@@ -527,13 +559,14 @@ const STAGING_CHECKS = [
   // row carrying only recording_duration_seconds).
   (call) => (conversationSeconds(call) < MIN_CONVERSATION_SECONDS ? 'call_too_short' : null),
   (call, extraction) => (NON_CONVERSATION_DISPOSITIONS.has(extraction.recommended_disposition) ? 'not_a_conversation' : null),
-  (call, extraction) => {
-    const flags = new Set(Array.isArray(extraction.triage_flags) ? extraction.triage_flags : []);
-    for (const flag of EXCLUDED_TRIAGE_FLAGS) {
-      if (flags.has(flag)) return `triage_flag_${flag}`;
-    }
-    return null;
-  },
+  // Duration alone proves the clock ran, never that the caller and Waves
+  // actually spoke (codex #5018 r11 P2) — a call that connected and dropped
+  // in the first few seconds can still carry enough ring/hold time to clear
+  // conversationSeconds above. hasRealTwoWayConversation (PR #5012) requires
+  // several exchanged turns across at least two distinct raw speaker
+  // labels — reused via its production promotion on CallRecordingProcessor
+  // (see that file's own comment) rather than reimplemented.
+  (call) => (require('./call-recording-processor').hasRealTwoWayConversation(call.transcription) ? null : 'not_two_way_conversation'),
   (call, extraction) => {
     const relationship = extraction.caller?.relationship_to_property;
     return relationship && THIRD_PARTY_RELATIONSHIPS.has(relationship) ? 'third_party_caller' : null;
@@ -570,6 +603,26 @@ const STAGING_CHECKS = [
   (call, extraction) => {
     const leadQuality = extraction.sentiment_and_lead?.lead_quality;
     return ['wrong_number', 'spam_or_solicitation', 'out_of_service_area'].includes(leadQuality) ? `lead_quality_${leadQuality}` : null;
+  },
+  // Safety net, checked LAST (codex #5018 r11 P1): the canonical merge
+  // (model + deterministic flags, mirroring the pipeline's own
+  // finalTriageFlagsFor exactly) reaches several of the SAME conditions
+  // several checks above already name more specifically — quote_promised,
+  // callback_number_needed (via caller_id_disclaimed), commercial_requires_quote
+  // (via not_residential), do_not_contact_requested, spam_or_wrong_number
+  // (via lead_quality) — and those earlier, narrower checks are deliberately
+  // left to claim their own specific reason first. This entry's real job is
+  // catching what NONE of them name at all: low_extraction_confidence,
+  // address-derived flags (missing_service_address, address_unverified, …),
+  // caller_phone_missing, ambiguous_scheduling, and the rest of
+  // BLOCKING_TRIAGE_FLAGS/EXCLUDED_TRIAGE_FLAGS — a call the canonical
+  // pipeline itself would hold for review is never eligible for an
+  // automated follow-up text either, whatever the model's own raw
+  // triage_flags said.
+  (call, extraction) => {
+    const flags = finalTriageFlagsFor(call, extraction);
+    const hit = flags.find((f) => EXCLUDED_TRIAGE_FLAGS.has(f) || BLOCKING_TRIAGE_FLAGS.has(f));
+    return hit ? `triage_flag_${hit}` : null;
   },
 ];
 
@@ -660,7 +713,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
     // from_phone / to_phone / source: resolveCallContactPhone needs them to
     // find an outbound call's dialed number for the prior-contact check
     // (pre-push P1). Without them every outbound call read as cold.
-    .select('id', 'customer_id', 'direction', 'source', 'from_phone', 'to_phone', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_address_validation');
+    .select('id', 'customer_id', 'direction', 'source', 'from_phone', 'to_phone', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_address_validation', 'transcription');
   let staged = 0;
   let ineligible = 0;
   for (const call of calls) {
@@ -955,9 +1008,13 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
       if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
       // Stamped HERE, on THIS connection (dbi), as the LAST thing before
-      // returning ok — the true provider-start boundary for a caller with
-      // no withSmsHandoff transaction of its own (codex r8 P2). Moved out
-      // of dispatchClaimedCall's own body, which used to stamp this before
+      // returning ok — the true provider-start boundary (codex r8 P2). dbi
+      // is now the phone-locked transaction the lane's own withSmsHandoff
+      // opens (codex #5018 r11 P1), the same one send-customer-message.js's
+      // suppression/consent reload and Twilio's own request run on, so this
+      // stamp, those rereads, and the SDK call all commit or roll back
+      // together. Moved out of dispatchClaimedCall's own body, which used to
+      // stamp this before
       // ever calling sendCustomerMessage at all: that function still does
       // its OWN fallible pre-provider work first (acquiring the provider
       // handoff reservation, a fresh suppression/consent read) — a throw
@@ -1129,6 +1186,22 @@ async function dispatchClaimedCall(conn, call, now) {
     entryPoint: 'call_booking_link_text',
     metadata: { original_message_type: MESSAGE_TYPE, call_log_id: call.id, lead_id: lead.id, ...(managedLine ? { fromNumber: managedLine } : {}) },
     providerPreSendCheck: neverSendRecheck(call, leadId, destinationPhone),
+    // codex #5018 r11 P1: without a locked handoff, a STOP committed after
+    // send-customer-message.js's FIRST suppression/consent read (well before
+    // this call even reaches the provider) and before this hook's own
+    // request is never re-caught — neverSendRecheck re-derives this lane's
+    // OWN never-send conditions, not suppression/consent, and the provider
+    // handoff has no transaction of its own to reload them on. Locking the
+    // phone (the SAME key the inbound STOP writer takes, applyInboundOptout
+    // via lockSmsPhone) serializes this send against a concurrent STOP
+    // commit; the generic wrapper send-customer-message.js builds around
+    // whatever transaction this opens is what actually reloads suppression
+    // and consent before handing off to neverSendRecheck and then Twilio —
+    // nothing lane-specific needs re-checking here, only the lock.
+    withSmsHandoff: (handoff) => conn.transaction(async (trx) => {
+      await lockSmsPhone(trx, destinationPhone);
+      return handoff(trx);
+    }),
   }).catch((err) => (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) ? err.providerOutcome : Promise.reject(err));
 
   return recordSendOutcome(conn, call, entry, leadId, now, result);

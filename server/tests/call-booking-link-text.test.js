@@ -258,14 +258,33 @@ describe('managedLineForCall', () => {
 
 // ── stagingIneligibleReason — every "never" rule + the happy path ────────
 describe('stagingIneligibleReason', () => {
-  const baseCall = { customer_id: null, duration_seconds: 90, ai_address_validation: { inServiceArea: true } };
+  // A genuine 4-turn, 2-speaker exchange — every case in this describe is
+  // otherwise-eligible by default, so hasRealTwoWayConversation (codex
+  // #5018 r11 P2) must not false-block them the way a blank/one-speaker
+  // fixture transcript would (never true of a real completed call).
+  const TWO_WAY_TRANSCRIPT = 'Caller: Hi, I have a bug problem.\nAgent: Sure, let me help with that.\nCaller: Can someone come out this week?\nAgent: Let me check the schedule.';
+  // direction/from_phone/to_phone (codex #5018 r11 P1): every real call_log
+  // row has a dialable ANI — resolveCallContactPhone(baseCall, null) needs
+  // one so the canonical merge's own caller_phone_missing check (fed
+  // contactPhone) doesn't false-block every case in this suite the way an
+  // ANI-less test fixture would (never true of a real row).
+  const baseCall = {
+    customer_id: null, duration_seconds: 90, ai_address_validation: { status: 'validated_accept', inServiceArea: true },
+    direction: 'inbound', from_phone: '+19415550100', to_phone: '+19415550199', transcription: TWO_WAY_TRANSCRIPT,
+  };
   const baseExtraction = () => ({
     meta: { is_voicemail: false, is_spam: false },
     call_nature: 'new_lead',
     recommended_disposition: 'lead_response_flow_triggered',
     triage_flags: [],
     caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
-    property: { property_type: 'single_family' },
+    // A populated service_address (codex #5018 r11 P1): computeDeterministicTriageFlags'
+    // OWN address branch (fed through the canonical merge) treats a
+    // genuinely blank address as missing_service_address whenever AV isn't
+    // decisive — real new-lead extractions always carry the caller's
+    // stated address, so an empty one here is a test-fixture gap, not a
+    // realistic call.
+    property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
     service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
     scheduling: { status: 'requested' },
     consent: { do_not_contact_request: false, sms_consent_given: true },
@@ -312,7 +331,6 @@ describe('stagingIneligibleReason', () => {
     ['existing-customer call nature', { call_nature: 'existing_customer_service' }, 'not_new_lead_call'],
     ['vendor call nature', { call_nature: 'vendor_or_partner' }, 'not_new_lead_call'],
     ['a voicemail disposition', { recommended_disposition: 'voicemail_processed' }, 'not_a_conversation'],
-    ['out of service area (triage flag)', { triage_flags: ['out_of_service_area'] }, 'triage_flag_out_of_service_area'],
     ['commercial requires quote (triage flag)', { triage_flags: ['commercial_requires_quote'] }, 'triage_flag_commercial_requires_quote'],
     ['do-not-contact (triage flag)', { triage_flags: ['do_not_contact_requested'] }, 'triage_flag_do_not_contact_requested'],
     ['a quote was already promised (triage flag)', { triage_flags: ['quote_promised'] }, 'triage_flag_quote_promised'],
@@ -344,6 +362,11 @@ describe('stagingIneligibleReason', () => {
     ['caller prefers a phone call', { caller: { preferred_contact_method: 'phone' } }, 'prefers_phone_contact'],
     ['wrong-number lead quality', { sentiment_and_lead: { lead_quality: 'wrong_number' } }, 'lead_quality_wrong_number'],
     ['spam/solicitation lead quality', { sentiment_and_lead: { lead_quality: 'spam_or_solicitation' } }, 'lead_quality_spam_or_solicitation'],
+    // codex #5018 r11 P1: computeDeterministicTriageFlags derives
+    // low_extraction_confidence from confidence.overall alone — the model
+    // reported NO triage_flags of its own (triage_flags stays []), so only
+    // the canonical merge this fix adds catches it.
+    ['low overall extraction confidence, with the model reporting no flags of its own', { confidence: { overall: 0.2 } }, 'triage_flag_low_extraction_confidence'],
   ])('%s → %s', (_label, patch, expected) => {
     const extraction = { ...baseExtraction(), ...patch };
     // Deep-merge the one level these patches touch so unrelated fields keep
@@ -356,6 +379,46 @@ describe('stagingIneligibleReason', () => {
       extraction[key] = isPlainObject ? { ...baseExtraction()[key], ...value } : value;
     }
     expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBe(expected);
+  });
+
+  // codex #5018 r11 P1: the canonical merge (model + deterministic flags)
+  // must not introduce a false block on an otherwise perfectly normal call
+  // — high confidence, a dialable ANI, nothing address-related to flag.
+  test('a normal, high-confidence extraction proceeds despite the new canonical-flags merge', () => {
+    const extraction = { ...baseExtraction(), confidence: { overall: 0.92 } };
+    expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
+  });
+
+  // codex #5018 r11 P1: the model's own raw out_of_service_area triage flag
+  // still blocks via the canonical-merge safety net — moved out of the
+  // shared test.each above because baseCall's AV (validated_accept,
+  // in area) makes suppressAddressFlagsForAV correctly treat a model claim
+  // of out_of_service_area as STALE and drop it (AV is authoritative over a
+  // contradicting model guess — the same suppression the canonical pipeline
+  // itself applies) — this scenario needs an AV verdict that is decisive
+  // enough not to trip the earlier not_in_service_area check on its own
+  // (inServiceArea: true) but NOT validated_accept/corrected, so the model's
+  // flag is never suppressed.
+  test('the model\'s own out_of_service_area triage flag blocks, when AV has not decisively accepted the address', () => {
+    const call = { ...baseCall, ai_address_validation: { status: 'confirm_needed', inServiceArea: true } };
+    const extraction = { ...baseExtraction(), triage_flags: ['out_of_service_area'] };
+    expect(stagingIneligibleReason(call, extraction, leadId)).toBe('triage_flag_out_of_service_area');
+  });
+
+  // codex #5018 r11 P2: duration alone (conversationSeconds/call_too_short
+  // above) proves the clock ran, never that both parties actually spoke.
+  test('a one-speaker 45-second transcript (no real back-and-forth) is skipped', () => {
+    const oneSided = { ...baseCall, duration_seconds: 45, transcription: 'Caller: Hi, is anyone there? Hello? I have a bug problem, please call me back.' };
+    expect(stagingIneligibleReason(oneSided, baseExtraction(), leadId)).toBe('not_two_way_conversation');
+  });
+
+  test('a real two-way exchange proceeds', () => {
+    expect(stagingIneligibleReason({ ...baseCall, transcription: TWO_WAY_TRANSCRIPT }, baseExtraction(), leadId)).toBeNull();
+  });
+
+  test('the raw, unattributed "Speaker 1:"/"Speaker 2:" diarization form still proceeds', () => {
+    const raw = 'Speaker 1: Hi, I have a bug problem.\nSpeaker 2: Sure, let me help with that.\nSpeaker 1: Can someone come out this week?\nSpeaker 2: Let me check the schedule.';
+    expect(stagingIneligibleReason({ ...baseCall, transcription: raw }, baseExtraction(), leadId)).toBeNull();
   });
 
   test('a call too short to be a real conversation is skipped', () => {
@@ -483,6 +546,14 @@ describe('activationBoundary / persistedActivationBoundary', () => {
 
 // ── stage — a grace period before ever judging a fresh call ──────────────
 describe('stage', () => {
+  // codex #5018 r11 P1/P2: every real call_log row has a dialable ANI and,
+  // once transcribed, a real transcript — the "otherwise fully eligible"
+  // fixtures below need both so the canonical triage-flags merge
+  // (caller_phone_missing) and hasRealTwoWayConversation don't false-block
+  // them ahead of whatever this test itself is actually proving.
+  const STAGE_FROM_PHONE = '+19415550100';
+  const STAGE_TWO_WAY_TRANSCRIPT = 'Caller: Hi, I have a bug problem.\nAgent: Sure, let me help with that.\nCaller: Can someone come out this week?\nAgent: Let me check the schedule.';
+
   function spyingConn() {
     const wheres = [];
     const whereNulls = [];
@@ -533,7 +604,8 @@ describe('stage', () => {
     });
     conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
-      id: 'call-recovered', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 999999999,
+      id: 'call-recovered', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date(now.getTime() - 60000), duration_seconds: 999999999,
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
       metadata: { lead_id: 'lead-1' },
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -543,7 +615,7 @@ describe('stage', () => {
         scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
-      ai_address_validation: { inServiceArea: true },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
     };
     const decided = await stageOne(conn, call, now);
     expect(decided).toBe('pending');
@@ -568,7 +640,8 @@ describe('stage', () => {
     });
     conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
-      id: 'call-555pm', direction: 'inbound', created_at: new Date('2026-09-26T21:55:00Z'), duration_seconds: 300, // 5:55 PM ET, 5 min
+      id: 'call-555pm', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date('2026-09-26T21:55:00Z'), duration_seconds: 300, // 5:55 PM ET, 5 min
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
       metadata: { lead_id: 'lead-1', source: 'status_callback', inserted_on_status: 'completed' }, // post-call row
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -578,7 +651,7 @@ describe('stage', () => {
         scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
-      ai_address_validation: { inServiceArea: true },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
     };
     const decided = await stageOne(conn, call, now);
     expect(decided).toBe('pending');
@@ -603,7 +676,8 @@ describe('stage', () => {
     });
     conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
-      id: 'call-fresh-lead', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      id: 'call-fresh-lead', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
       metadata: {}, twilio_call_sid: 'CAxxx', // no lead_id stamp — SID-only linkage
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -613,7 +687,7 @@ describe('stage', () => {
         scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
-      ai_address_validation: { inServiceArea: true },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
     };
     const decided = await stageOne(conn, call, now);
     expect(decided).toBe('pending');
@@ -655,7 +729,8 @@ describe('stage', () => {
     });
     conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
-      id: 'call-fresh-2', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      id: 'call-fresh-2', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
       metadata: {}, twilio_call_sid: 'CAyyy',
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -665,7 +740,7 @@ describe('stage', () => {
         scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
-      ai_address_validation: { inServiceArea: true },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
     };
     const decided = await stageOne(conn, call, now, boundary);
     expect(decided).toBe('pending');
@@ -698,7 +773,8 @@ describe('stage', () => {
     expect(boundary.getTime()).toBe(MODULE_LOAD_AT.getTime());
 
     const call = {
-      id: 'call-boot-gap', direction: 'inbound', created_at: new Date(MODULE_LOAD_AT.getTime() + 60 * 1000), duration_seconds: 90,
+      id: 'call-boot-gap', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date(MODULE_LOAD_AT.getTime() + 60 * 1000), duration_seconds: 90,
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
       metadata: { lead_id: 'lead-1' }, // isolates the boundary check from lead-linkage resolution
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -708,7 +784,7 @@ describe('stage', () => {
         scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
-      ai_address_validation: { inServiceArea: true },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
     };
     const decided = await stageOne(conn, call, now, boundary);
     expect(decided).toBe('pending'); // NOT skipped as pre_activation
@@ -727,7 +803,8 @@ describe('stage', () => {
     const rawBindings = [];
     conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
-      id: 'call-off-period', direction: 'inbound', created_at: new Date('2026-09-26T13:00:00Z'), duration_seconds: 90, // ended ~5h before `now`
+      id: 'call-off-period', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date('2026-09-26T13:00:00Z'), duration_seconds: 90, // ended ~5h before `now`
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
       metadata: { lead_id: 'lead-1' },
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -737,7 +814,7 @@ describe('stage', () => {
         scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
-      ai_address_validation: { inServiceArea: true },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
     };
     const decided = await stageOne(conn, call, now, new Date('2020-01-01')); // long-past boundary — never blocks
     expect(decided).toBe('skipped');
@@ -750,7 +827,8 @@ describe('stage', () => {
     const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
     conn.raw = jest.fn(() => 'RAW');
     const call = {
-      id: 'call-short-gap', direction: 'inbound', created_at: new Date('2026-09-26T15:50:00Z'), duration_seconds: 90, // 2h delay elapsed only ~8.5 min ago
+      id: 'call-short-gap', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date('2026-09-26T15:50:00Z'), duration_seconds: 90, // 2h delay elapsed only ~8.5 min ago
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
       metadata: { lead_id: 'lead-1' },
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -760,7 +838,7 @@ describe('stage', () => {
         scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
-      ai_address_validation: { inServiceArea: true },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
     };
     const decided = await stageOne(conn, call, now, new Date('2020-01-01'));
     expect(decided).toBe('pending'); // sent on schedule, nothing lost to the cap
@@ -1132,6 +1210,11 @@ describe('dispatchClaimedCall', () => {
   const NOW = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET — inside the window
   const CALL = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), duration_seconds: 90,
     direction: 'inbound', from_phone: '+19415550100', // the ANI — matches OPEN_LEAD.phone below by default
+    // A genuine 4-turn, 2-speaker exchange (codex #5018 r11 P2) — every
+    // dispatchClaimedCall test in this describe is otherwise-eligible by
+    // default, and hasRealTwoWayConversation is re-run at dispatch through
+    // DISPATCH_CHECKS' own stagingIneligibleReason recheck.
+    transcription: 'Caller: Hi, I have a bug problem.\nAgent: Sure, let me help with that.\nCaller: Can someone come out this week?\nAgent: Let me check the schedule.',
     v2_extraction_status: 'valid', processing_token: null,
     metadata: { lead_id: 'lead-1', call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString() } },
     ai_extraction_enriched: {
@@ -1142,7 +1225,7 @@ describe('dispatchClaimedCall', () => {
       scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
       sentiment_and_lead: { lead_quality: 'warm' },
     },
-    ai_address_validation: { inServiceArea: true } };
+    ai_address_validation: { status: 'validated_accept', inServiceArea: true } };
   const OPEN_LEAD = { id: 'lead-1', status: 'new', converted_at: null, phone: '+19415550100', first_name: 'Jamie',
     customer_id: null, estimate_id: null, is_commercial: false, deleted_at: null };
 
@@ -1178,6 +1261,11 @@ describe('dispatchClaimedCall', () => {
       return chain;
     });
     conn.raw = jest.fn(() => 'RAW_FRAGMENT');
+    // codex #5018 r11 P1: dispatchClaimedCall's withSmsHandoff opens
+    // conn.transaction — mirrors a real knex instance closely enough
+    // (calling the passed-in callback with the same connection as its
+    // "trx") for lockSmsPhone's own trx.raw call above to work unmocked.
+    conn.transaction = jest.fn(async (fn) => fn(conn));
     return conn;
   }
 
@@ -1467,6 +1555,33 @@ describe('dispatchClaimedCall', () => {
     // And it actually re-derives the SAME never-send verdict this dispatch
     // itself just cleared — not a stub.
     await expect(sendInput.providerPreSendCheck({ dbi: makeDb() })).resolves.toEqual({ ok: true });
+  });
+
+  // codex #5018 r11 P1: without a locked handoff, a STOP committed after
+  // send-customer-message.js's FIRST suppression/consent read and before
+  // the provider request is never re-caught for this lane — neverSendRecheck
+  // re-derives only this lane's own never-send conditions, not suppression
+  // or consent. withSmsHandoff supplies the missing lock, matching the
+  // inbound STOP writer's own lockSmsPhone key (proven against a real
+  // Postgres advisory lock in call-booking-link-text-postgres.test.js —
+  // a mocked knex cannot prove a lock is actually held).
+  test('sendCustomerMessage receives a withSmsHandoff that locks the destination phone, then runs the caller-supplied handoff on that same connection', async () => {
+    const conn = makeDb();
+    await dispatchClaimedCall(conn, CALL, NOW);
+    const sendInput = sendCustomerMessage.mock.calls[0][0];
+    expect(typeof sendInput.withSmsHandoff).toBe('function');
+
+    const handoff = jest.fn(async (trx) => ({ ok: true, trx }));
+    const verdict = await sendInput.withSmsHandoff(handoff);
+
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    // lockSmsPhone's own pg_advisory_xact_lock call, on the SAME
+    // destination phone the actual send targets.
+    expect(conn.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), [OPEN_LEAD.phone]);
+    // The caller's handoff ran on the transaction's own connection (the
+    // mock's stand-in for a real trx), not a second, unlocked one.
+    expect(handoff).toHaveBeenCalledWith(conn);
+    expect(verdict).toEqual({ ok: true, trx: conn });
   });
 
   test('a policy-blocked send (e.g. opted out since the call) is recorded as skipped, not sent', async () => {

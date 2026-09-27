@@ -20927,5 +20927,15 @@ CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
 // a second time (CLAUDE.md rule 15).
 CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCustomerId;
 
+// Production contract for call-booking-link-text.js's own staging check
+// (codex #5018 r11 P2): duration_seconds/conversationSeconds prove only that
+// the clock ran, never that the caller and Waves actually spoke — a call
+// that connected and dropped in the first few seconds can still carry
+// enough ring/hold time to clear call_too_short. hasRealTwoWayConversation
+// (PR #5012) already exists for exactly this and lived only under `_test`,
+// same reason as the two promotions above — promoted rather than
+// reimplemented (CLAUDE.md rule 15).
+CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
+
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

@@ -61,6 +61,11 @@ const NOW = new Date('2027-01-15T18:00:00.000Z');
 // Every STAGING_CHECKS entry that isn't the one thing a given test is
 // exercising must read as eligible — this is the minimal extraction shape
 // that clears every one of them (see call-booking-link-text.js's own table).
+// codex #5018 r11 P1: a populated service_address so
+// computeDeterministicTriageFlags' address branch (fed through the
+// canonical merge) never reads a real new-lead extraction's blank address
+// as missing_service_address — real extractions always carry the caller's
+// stated address.
 function eligibleExtraction() {
   return {
     meta: {},
@@ -68,13 +73,18 @@ function eligibleExtraction() {
     recommended_disposition: 'callback_needed',
     triage_flags: [],
     caller: {},
-    property: { property_type: 'single_family' },
+    property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
     service_request: { service_intent: 'inspection_only' },
     scheduling: {},
     consent: {},
     sentiment_and_lead: {},
   };
 }
+
+// A genuine 4-turn, 2-speaker exchange (codex #5018 r11 P2) — every
+// insertCall row below is otherwise-eligible by default, and
+// hasRealTwoWayConversation must not false-block them.
+const TWO_WAY_TRANSCRIPT = 'Caller: Hi, I have a bug problem.\nAgent: Sure, let me help with that.\nCaller: Can someone come out this week?\nAgent: Let me check the schedule.';
 
 async function insertLead(conn, overrides = {}) {
   const id = overrides.id || randomUUID();
@@ -89,10 +99,17 @@ async function insertCall(conn, overrides = {}) {
   await conn('call_log').insert({
     id,
     direction: 'inbound',
+    // from_phone/transcription (codex #5018 r11 P1/P2): every real call_log
+    // row has a dialable ANI and, once transcribed, a real transcript — the
+    // canonical triage-flags merge's caller_phone_missing check and
+    // hasRealTwoWayConversation both need them so an otherwise-eligible
+    // fixture below isn't false-blocked ahead of whatever it's proving.
+    from_phone: '+15555550100',
+    transcription: TWO_WAY_TRANSCRIPT,
     duration_seconds: 120,
     v2_extraction_status: 'valid',
     processing_token: null,
-    ai_address_validation: JSON.stringify({ inServiceArea: true }),
+    ai_address_validation: JSON.stringify({ status: 'validated_accept', inServiceArea: true }),
     ai_extraction_enriched: JSON.stringify(eligibleExtraction()),
     metadata: JSON.stringify({}),
     created_at: NOW,
@@ -270,6 +287,48 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     const activity = await mockPg('activity_log').where({ action: 'call_booking_link_text_sent' });
     expect(activity).toHaveLength(1);
     expect(activity[0].metadata).toMatchObject({ call_log_id: callId, lead_id: leadId });
+  });
+
+  // codex #5018 r11 P1: dispatchClaimedCall's own withSmsHandoff must
+  // acquire the SAME per-phone advisory lock the inbound STOP writer takes
+  // (applyInboundOptout via lockSmsPhone) and hold it through the whole
+  // handoff — proof a mocked knex cannot give, since pg_advisory_xact_lock
+  // is a real Postgres primitive. sendCustomerMessage is mocked, so this
+  // drives the mock to actually invoke the lane's withSmsHandoff (exactly
+  // as send-customer-message.js's own wrapper does) with a dispatch that
+  // probes the same lock key from a second real connection with a short
+  // lock_timeout — a concurrent STOP write to this phone would collide the
+  // same way.
+  test('dispatchClaimedCall\'s withSmsHandoff holds the real per-phone lock the inbound STOP writer takes, through the whole handoff', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550333' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550333',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-2', line: 'Pick a time.\n\n', phone: '+15555550333' });
+    let concurrentLockErrorCode = null;
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff }) => {
+      expect(typeof withSmsHandoff).toBe('function');
+      const verdict = await withSmsHandoff(async () => {
+        // A second connection racing for the SAME phone key (the shape
+        // applyInboundOptout's own lockSmsPhone call takes) must wait —
+        // proving the handoff's transaction genuinely holds it, not just
+        // reads a fresh row.
+        await mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await require('../utils/customer-comms-lock').lockSmsPhone(trx, '+15555550333');
+        }).catch((err) => { concurrentLockErrorCode = err.code; });
+        return { ok: true };
+      });
+      return verdict.ok ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000003' } : { sent: false, ...verdict };
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: true, providerMessageId: 'SMtest0000000000000000000000003' });
+    expect(concurrentLockErrorCode).toBe('55P03'); // lock_timeout — the real advisory lock was held
   });
 
   test('dispatchClaimedCall skips booked_since_call against a real scheduled_services row created after the call', async () => {

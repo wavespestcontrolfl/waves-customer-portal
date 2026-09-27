@@ -400,6 +400,15 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'sms_auto_send_executor'
       && input.metadata?.original_message_type === 'ai_gratitude'
       && Boolean(input.metadata?.agentDecisionId)
+      && typeof providerPreSendCheck === 'function')
+    // The delayed booking-link follow-up (call-booking-link-text.js, codex
+    // #5018 r11 P1): a lead with no customer row yet, so there is no
+    // customer-comms lock to hold — only the phone-lock leg (matching the
+    // STOP writer's own lockSmsPhone) applies. Suppression/consent reload
+    // under that lock, then the lane's own providerPreSendCheck (its mutable
+    // never-send checks) re-runs on the SAME held connection right after.
+    || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
+      && input.entryPoint === 'call_booking_link_text'
       && typeof providerPreSendCheck === 'function');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
