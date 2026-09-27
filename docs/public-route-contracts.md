@@ -368,8 +368,8 @@ returned. The page renders "Last name" (required client-side) and "Email (for
 your service reports and receipts)" (optional) above Accept for whichever is
 true, and blocks Accept on a typed-but-malformed email.
 `PUT /api/estimates/:token/accept` accepts optional `contactLastName`
-(trimmed, whitespace-collapsed, ≤80 chars) and `contactEmail` (lowercased,
-≤254 chars, `EMAIL_RE`). A malformed non-empty value answers 400
+(trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
+≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
 `{ error, code: 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
 any mutation; a blank or absent value is never an error (a tab loaded before
 this shipped still accepts). Values fill GAPS only and never overwrite: the

@@ -9091,7 +9091,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const estimateContactPatch = {};
         if (sanitizedContactLastName && contactFillGaps.lastName) {
           const firstToken = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean)[0] || 'Customer';
-          estimateContactPatch.customer_name = `${firstToken} ${sanitizedContactLastName}`;
+          // estimates.customer_name is varchar(100).
+          estimateContactPatch.customer_name = `${firstToken} ${sanitizedContactLastName}`.slice(0, 100);
         }
         if (sanitizedContactEmail && contactFillGaps.email) {
           estimateContactPatch.customer_email = sanitizedContactEmail;

@@ -3746,7 +3746,7 @@ export function ContactGapFields({
             onChange={(e) => onLastNameChange?.(e.target.value)}
             onBlur={onLastNameBlur}
             autoComplete="family-name"
-            maxLength={80}
+            maxLength={50}
             disabled={disabled}
             aria-required="true"
             aria-invalid={lastNameMissing || undefined}
@@ -3769,7 +3769,7 @@ export function ContactGapFields({
             aria-invalid={emailInvalid || undefined}
             autoComplete="email"
             inputMode="email"
-            maxLength={254}
+            maxLength={150}
             disabled={disabled}
             placeholder="you@example.com (optional)"
             style={{ ...softExitInputStyle, ...(emailInvalid ? { borderColor: W.red } : {}) }}

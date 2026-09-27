@@ -11,8 +11,11 @@
 const { collapseWhitespace } = require('../utils/contact-normalize');
 const { EMAIL_RE } = require('../utils/intake-normalize');
 
-const CONTACT_LAST_NAME_MAX = 80;
-const CONTACT_EMAIL_MAX = 254;
+// Match the destination columns: customers.last_name and
+// customer_accounts.last_name are varchar(50); both email columns are
+// varchar(150). A longer value would pass here and then fail the insert.
+const CONTACT_LAST_NAME_MAX = 50;
+const CONTACT_EMAIL_MAX = 150;
 
 const CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 
