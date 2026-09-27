@@ -155,7 +155,7 @@ function spanishCoordinatedSubject(beforeClaim) {
   if (!conjunction) return null;
   const clause = beforeClaim.slice(0, conjunction.index).split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
   const subject = clause.match(SPANISH_CLAUSE_SUBJECT_RE)?.[1]
-    || clause.match(new RegExp(`^\\s*(${SPANISH_PROPER_NAME})\\b`))?.[1];
+    || clause.match(new RegExp(`^\\s*(${SPANISH_PROPER_NAME})\\b`, 'i'))?.[1];
   if (!subject) return null;
   if (SPANISH_STAFF_CLAUSE_SUBJECT_RE.test(subject)) return 'staff';
   return SPANISH_CALLER_CLAUSE_SUBJECT_RE.test(subject) ? 'caller' : 'other';
