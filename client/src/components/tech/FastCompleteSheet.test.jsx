@@ -128,6 +128,8 @@ describe('FastCompleteSheet', () => {
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'oz', applicationMethod: 'spot_treatment' });
     expect(taurus.targets).toEqual(['Ants', 'Roaches']);
+    // Where rides each product row for the application record.
+    expect(taurus.applicationArea).toBe('Inside');
     const surfactant = body.products.find((p) => p.productId === 'surfactant');
     expect(surfactant.totalAmount).toBe(0.25);
 
@@ -139,40 +141,60 @@ describe('FastCompleteSheet', () => {
     expect(onCompleted).toHaveBeenCalled();
   });
 
-  test.each([
-    ['a definitive rejection (422) gets a fresh key for the corrected resubmit', 422, true],
-    ['an uncertain failure (503) keeps the key so a retry can replay or resume', 503, false],
-  ])('%s', async (_name, status, expectFreshKey) => {
-    const request = makeRequest();
-    let failures = 0;
+  function failFirstComplete(request, status) {
     const base = request.getMockImplementation();
+    let failed = false;
     request.mockImplementation(async (path, options) => {
-      if (path.endsWith('/complete') && failures === 0) {
-        failures += 1;
+      if (path.endsWith('/complete') && !failed) {
+        failed = true;
         request.calls.push({ path, options });
-        throw Object.assign(new Error('Completion failed'), { status });
+        throw Object.assign(new Error('Completion failed.'), { status });
       }
       return base(path, options);
     });
+  }
+  const completeBodies = (request) => request.calls
+    .filter((c) => c.path.endsWith('/complete'))
+    .map((c) => JSON.parse(c.options.body));
+
+  test('a definitive rejection (422) lets the tech correct the form and resubmit under a fresh key', async () => {
+    const request = makeRequest();
+    failFirstComplete(request, 422);
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
-    expect(await screen.findByText('Completion failed')).toBeTruthy();
+    expect(await screen.findByText('Completion failed.')).toBeTruthy();
 
-    // The tech corrects the visit and submits again.
     fireEvent.click(screen.getByRole('button', { name: 'Roaches' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
-    await waitFor(() => {
-      expect(request.calls.filter((c) => c.path.endsWith('/complete'))).toHaveLength(2);
-    });
-    const [first, second] = request.calls
-      .filter((c) => c.path.endsWith('/complete'))
-      .map((c) => JSON.parse(c.options.body).idempotencyKey);
-    if (expectFreshKey) expect(second).not.toBe(first);
-    else expect(second).toBe(first);
+    await waitFor(() => expect(completeBodies(request)).toHaveLength(2));
+    const [first, second] = completeBodies(request);
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    expect(second.products[0].targets).toEqual(['Ants', 'Roaches']);
+  });
+
+  test('an uncertain failure (503) locks the form and Retry resends the identical body and key', async () => {
+    const request = makeRequest();
+    failFirstComplete(request, 503);
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    expect(await screen.findByText(/couldn't confirm it saved/)).toBeTruthy();
+
+    // Edits are locked until the attempt resolves.
+    const roaches = screen.getByRole('button', { name: 'Roaches' });
+    expect(roaches.disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(completeBodies(request)).toHaveLength(2));
+    const [first, second] = completeBodies(request);
+    expect(second).toEqual(first);
+    expect(await screen.findByText('Re-service complete')).toBeTruthy();
   });
 
   test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {

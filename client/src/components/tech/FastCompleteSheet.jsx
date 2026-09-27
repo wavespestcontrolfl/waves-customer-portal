@@ -70,7 +70,7 @@ function toggleInSet(set, value) {
 // One tile, shared by every section (products / pests / where / activity /
 // the add-product picker) — a real button, aria-pressed, 44px min touch
 // target via the shared Button component's `touch` density.
-function Chip({ label, pressed, onClick, className }) {
+function Chip({ label, pressed, onClick, className, disabled }) {
   return (
     <Button
       type="button"
@@ -78,6 +78,7 @@ function Chip({ label, pressed, onClick, className }) {
       className={cn('tech-visit-action tech-visit-product', className)}
       {...(pressed != null ? { 'aria-pressed': pressed } : {})}
       onClick={onClick}
+      disabled={disabled}
     >
       {label}
     </Button>
@@ -117,6 +118,11 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   const [error, setError] = useState('');
   const [done, setDone] = useState(null);
   const submitInFlight = useRef(false);
+  // The exact body of an attempt whose outcome is unknown (network drop,
+  // 5xx). The server refuses a reused key with a changed payload, so until
+  // that attempt resolves the form locks and Retry resends this body as-is.
+  const pendingBodyRef = useRef(null);
+  const [retryPending, setRetryPending] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -185,44 +191,64 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   closeRef.current = close;
 
   const handleSubmit = useCallback(async () => {
-    if (submitInFlight.current || missingReason) return;
+    if (submitInFlight.current || (missingReason && !pendingBodyRef.current)) return;
     submitInFlight.current = true;
     setSubmitting(true);
     setError('');
+    const targets = [...pests];
+    // Where is recorded on each product row too: service_products'
+    // application_area comes only from the row (the full form sends the same
+    // comma-joined string), so the application record keeps the location.
+    const applicationArea = [...areas].join(', ');
+    const body = pendingBodyRef.current || {
+      idempotencyKey: idempotencyKeyRef.current,
+      visitOutcome: 'completed',
+      products: activeProducts.map((row) => ({
+        productId: row.productId,
+        applicationMethod: SUBMIT_APPLICATION_METHOD,
+        targets,
+        totalAmount: Number(row.totalAmount),
+        amountUnit: row.amountUnit,
+        ...(applicationArea ? { applicationArea } : {}),
+      })),
+      areasServiced: [...areas],
+      clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === activity)?.rating ?? null,
+      technicianNotes: note.trim(),
+      // The customer recap text ships in a later Fast Complete PR; until
+      // then this path sends none. No review ask on a re-service (adopted
+      // 2026-09-26), and a free callback never carries a pay link.
+      sendCompletionSms: false,
+      requestReview: false,
+      includePayLink: false,
+    };
     try {
-      const targets = [...pests];
-      const body = {
-        idempotencyKey: idempotencyKeyRef.current,
-        visitOutcome: 'completed',
-        products: activeProducts.map((row) => ({
-          productId: row.productId,
-          applicationMethod: SUBMIT_APPLICATION_METHOD,
-          targets,
-          totalAmount: Number(row.totalAmount),
-          amountUnit: row.amountUnit,
-        })),
-        areasServiced: [...areas],
-        clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === activity)?.rating ?? null,
-        technicianNotes: note.trim(),
-        // The customer recap text ships in a later Fast Complete PR; until
-        // then this path sends none. No review ask on a re-service (adopted
-        // 2026-09-26), and a free callback never carries a pay link.
-        sendCompletionSms: false,
-        requestReview: false,
-        includePayLink: false,
-      };
       await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      setDone({ summary: `${activeProducts.map((p) => p.name).join(', ')} · ${targets.join(', ')}` });
+      pendingBodyRef.current = null;
+      setRetryPending(false);
+      const productNames = activeProducts.map((p) => p.name).join(', ');
+      setDone({ summary: `${productNames} · ${targets.join(', ')}` });
     } catch (err) {
-      // A definitive rejection gets a fresh key so the corrected resubmit
-      // isn't refused as idempotency_key_mismatch; an uncertain outcome
-      // (network, 5xx) keeps it so a same-payload retry can replay/resume.
-      if (shouldResetCompletionIdempotencyKey(err)) idempotencyKeyRef.current = genIdempotencyKey();
-      setError(err?.message || 'Completion failed');
+      if (shouldResetCompletionIdempotencyKey(err)) {
+        // A definitive rejection: the tech corrects the form and the
+        // resubmit starts a new attempt under a fresh key.
+        idempotencyKeyRef.current = genIdempotencyKey();
+        pendingBodyRef.current = null;
+        setRetryPending(false);
+        setError(err?.message || 'Completion failed');
+      } else {
+        // Outcome unknown: keep the key AND the body so Retry replays or
+        // resumes the same attempt instead of tripping the payload check.
+        pendingBodyRef.current = body;
+        setRetryPending(true);
+        setError(`${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`);
+      }
       setSubmitting(false);
       submitInFlight.current = false;
     }
   }, [base, request, missingReason, activeProducts, pests, areas, activity, note]);
+
+  // Nothing is editable while a save is in flight or its outcome is unknown.
+  const locked = retryPending || submitting;
 
   return createPortal(
     <UiSurface
@@ -277,6 +303,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         ) : (
           <>
             <div className="tech-visit-body">
+              <fieldset className="tech-visit-form" disabled={locked}>
               <div className="tech-visit-section-head">
                 <h3 className="tech-visit-section-title">Products used</h3>
                 <Button type="button" variant="ghost" className="tech-visit-action" aria-pressed={editAmounts} onClick={() => setEditAmounts((on) => !on)}>
@@ -285,7 +312,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
               </div>
               <div className="tech-visit-tile-grid">
                 {productRows.map((row) => (
-                  <Chip
+                  <Chip disabled={locked}
                     key={row.productId}
                     label={hasAmount(row) ? `${row.name} — ${row.totalAmount} ${unitLabel(row.amountUnit)}` : `${row.name} — amount?`}
                     pressed={row.active}
@@ -293,7 +320,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
                     className={!row.active ? 'tech-visit-product--off' : undefined}
                   />
                 ))}
-                <Chip label="+ Add product" onClick={() => setShowAddProduct(true)} />
+                <Chip disabled={locked} label="+ Add product" onClick={() => setShowAddProduct(true)} />
               </div>
               {editAmounts && activeProducts.map((row) => (
                 <AmountRow key={row.productId} row={row} onChange={(patch) => updateRow(row.productId, patch)} />
@@ -302,41 +329,42 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
               <h3 className="tech-visit-section-title">Pests targeted</h3>
               <div className="tech-visit-tile-grid">
                 {PEST_CHIPS.map((label) => (
-                  <Chip key={label} label={label} pressed={pests.has(label)} onClick={() => togglePest(label)} />
+                  <Chip disabled={locked} key={label} label={label} pressed={pests.has(label)} onClick={() => togglePest(label)} />
                 ))}
                 {showMorePests
                   ? PEST_CHIPS_MORE.map((label) => (
-                    <Chip key={label} label={label} pressed={pests.has(label)} onClick={() => togglePest(label)} />
+                    <Chip disabled={locked} key={label} label={label} pressed={pests.has(label)} onClick={() => togglePest(label)} />
                   ))
-                  : <Chip label="More" onClick={() => setShowMorePests(true)} />}
+                  : <Chip disabled={locked} label="More" onClick={() => setShowMorePests(true)} />}
               </div>
 
               <h3 className="tech-visit-section-title">Where</h3>
               <div className="tech-visit-tile-grid">
                 {AREA_CHIPS.map((label) => (
-                  <Chip key={label} label={label} pressed={areas.has(label)} onClick={() => toggleArea(label)} />
+                  <Chip disabled={locked} key={label} label={label} pressed={areas.has(label)} onClick={() => toggleArea(label)} />
                 ))}
               </div>
 
               <h3 className="tech-visit-section-title">Activity seen</h3>
               <div className="tech-visit-tile-grid">
                 {ACTIVITY_LEVELS.map((level) => (
-                  <Chip key={level.value} label={level.label} pressed={activity === level.value} onClick={() => setActivity(level.value)} />
+                  <Chip disabled={locked} key={level.value} label={level.label} pressed={activity === level.value} onClick={() => setActivity(level.value)} />
                 ))}
               </div>
 
               <Field label="Note (optional)" className="tech-visit-field">
                 <Input className="tech-visit-control" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anything for the next visit" />
               </Field>
+              </fieldset>
 
-              {submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
+              {submitting &&<ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
             </div>
             <footer className="tech-visit-footer">
               {error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{error}</ActionFeedback>}
-              {missingReason && <p className="tech-visit-muted" role="status">{missingReason}</p>}
+              {missingReason && !retryPending && <p className="tech-visit-muted" role="status">{missingReason}</p>}
               <div className="tech-visit-actions">
-                <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={handleSubmit} loading={submitting} disabled={!!missingReason}>
-                  Complete re-service
+                <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={handleSubmit} loading={submitting} disabled={!!missingReason && !retryPending}>
+                  {retryPending ? 'Retry' : 'Complete re-service'}
                 </Button>
               </div>
             </footer>
