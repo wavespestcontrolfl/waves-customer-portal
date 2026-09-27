@@ -164,6 +164,7 @@ describe('rescheduleAgreementEvidence', () => {
     // A condition on the commitment itself leaves the slot open; one in
     // another sentence does not.
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you then if a slot opens up.').ok).toBe(false);
+    expect(evidence('Caller: Can we move my visit to Thursday at two?\nAgent: I will put you down on the waiting list.').ok).toBe(false);
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you then. If you need anything, give us a call.').ok).toBe(true);
     expect(evidence('Caller: Can we move it to Thursday?\nAgent: We will see you Thursday at quarter past noon.', '2026-09-24T12:00:00-04:00').ok).toBe(false);
     for (const reply of ['We will do that, two o clock then.', 'Okay, you are all set for Thursday at two.', 'Great, I will put you down.']) {

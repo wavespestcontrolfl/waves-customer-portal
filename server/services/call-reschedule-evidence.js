@@ -85,6 +85,8 @@ const HEDGE_MARKERS = [
   ' see if i have ', ' see if we have ', ' check the schedule ', ' look at the schedule ',
   // The caller deferring to someone or to later ("I need to ask my husband").
   ' need to ask ', ' have to ask ', ' let me ask ', ' check with my ', ' talk to my ', ' think about it ',
+  // A place in line is not an appointment ("I'll put you down on the waiting list").
+  ' waiting list ', ' wait list ', ' waitlist ', ' standby ', ' cancellation list ',
 ];
 
 // An explicit refusal or withdrawal after the agreement ("that won't work",
