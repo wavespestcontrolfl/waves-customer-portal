@@ -598,13 +598,21 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         {
           recipientEmail: correctedEmail,
           authorityRecipientEmail: bouncedMessage.recipient_email_snapshot,
-          providerBoundaryCheck: async ({ database }) => (await correctedAddressOwnedByOther(
-            correctedEmail, ownCustomerId, database || db,
-          ) ? {
+          providerBoundaryCheck: async ({ database }) => {
+            try {
+              await require('../utils/customer-comms-lock').lockEmailOwnershipForSend(database, correctedEmail);
+            } catch (err) {
+              const busy = err?.code === 'EMAIL_OWNERSHIP_CHECK_BUSY';
+              return { ok: false, retryable: true,
+                code: busy ? 'EMAIL_OWNERSHIP_CHECK_BUSY' : 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE',
+                reason: busy ? 'Email ownership assignment in progress' : 'Email ownership check temporarily unavailable' };
+            }
+            return await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, database) ? {
               ok: false,
               code: 'CORRECTED_EMAIL_OWNED_BY_OTHER',
               reason: 'corrected_owned_by_other',
-            } : { ok: true }),
+            } : { ok: true };
+          },
         },
       );
       // Bounce recovery is one-shot and excluded from provider retries. An

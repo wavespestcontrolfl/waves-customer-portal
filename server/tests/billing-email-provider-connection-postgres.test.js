@@ -27,8 +27,9 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { claimDueRetries, recoverStaleClaims, retryOne } = require('../services/transactional-email-provider-retry');
 const { recordSuppression } = require('../services/messaging/validators/suppression');
 const { runBillingEmailProviderReplayHandoff } = require('../services/billing-email-provider-replay');
-const { correctedAddressOwnedByOther } = require('../services/email-bounce-recovery');
-const { lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { correctedAddressOwnedByOther, dispatchRecoveryMessage } = require('../services/email-bounce-recovery');
+const ownershipMigration = require('../models/migrations/20260927000150_billing_email_ownership_assignment_locks');
+const { lockEmailOwnershipForSend } = require('../utils/customer-comms-lock');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `billing_provider_connection_${randomUUID().replaceAll('-', '')}`;
@@ -85,7 +86,7 @@ postgres('billing Email provider preparation on its held connection', () => {
       for (const column of ['service_contact_email', 'service_contact2_email', 'service_contact3_email']) table.text(column);
     });
     await mockPg.schema.createTable('notification_prefs', (table) => {
-      table.uuid('customer_id').primary(); table.boolean('email_enabled');
+      table.uuid('customer_id').primary().references('id').inTable('customers'); table.boolean('email_enabled');
       table.specificType('billing_channels', 'text[]');
       table.text('billing_email');
     });
@@ -95,7 +96,8 @@ postgres('billing Email provider preparation on its held connection', () => {
     });
     await mockPg.schema.createTable('estimates', (table) => {
       table.uuid('id').primary(); table.text('token'); table.jsonb('estimate_data');
-      for (const column of ['status', 'expires_at', 'customer_id', 'property_id', 'estimate_group_id',
+      table.uuid('customer_id').references('id').inTable('customers');
+      for (const column of ['status', 'expires_at', 'property_id', 'estimate_group_id',
         'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total',
         'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier',
         'service_interest', 'category', 'source']) table.text(column);
@@ -113,6 +115,7 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.boolean('has_attachments').notNullable().defaultTo(false);
       for (const key of ['sent_at', 'queued_at', 'updated_at', 'provider_retry_next_at', 'provider_retry_exhausted_at']) table.timestamp(key);
     });
+    await ownershipMigration.up(mockPg);
     await mockPg.raw('CREATE TABLE retry_commit_guard (message_id uuid REFERENCES email_messages(id) DEFERRABLE INITIALLY DEFERRED)');
     await mockPg('customers').insert({ id: customerId, email: 'qa@example.invalid' });
     await mockPg('notification_prefs').insert({ customer_id: customerId,
@@ -140,6 +143,7 @@ postgres('billing Email provider preparation on its held connection', () => {
     else process.env.SENDGRID_API_KEY = originalApiKey;
   });
   afterAll(async () => {
+    if (mockPg) await ownershipMigration.down(mockPg);
     await mockMarkerPg?.destroy();
     await mockPg?.destroy();
     await writer?.destroy();
@@ -257,6 +261,60 @@ postgres('billing Email provider preparation on its held connection', () => {
     expect(global.fetch).toHaveBeenCalledTimes(2);
   }, 15000);
 
+  test.each([false, true])('the actual billing bounce callback fences raw assignments and phantom inserts (busy=%s)', async (busy) => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    const corrected = 'qa.billing-boundary@gmail.com';
+    const alias = 'qabilling-boundary+owner@googlemail.com';
+    const original = 'qa.billing-boundary@gmial.com';
+    const otherId = randomUUID();
+    const insertionOwner = randomUUID();
+    const estimateId = randomUUID();
+    const leadId = randomUUID();
+    const message = { id: randomUUID(), status: 'queued', subject_snapshot: 'Synthetic recovery', send_attempt_token: randomUUID() };
+    await mockPg('customers').where({ id: customerId }).update({ email: original, phone: null, active: true,
+      autopay_enabled: true, monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: true, billing_channels: ['email'] });
+    await mockPg('customers').insert([{ id: otherId, email: 'qa-other@example.invalid' }, { id: insertionOwner }]);
+    await mockPg('notification_prefs').insert({ customer_id: otherId, billing_email: 'qa-other@example.invalid' });
+    await mockPg('estimates').insert({ id: estimateId, customer_id: otherId, customer_email: 'qa-other@example.invalid' });
+    await mockPg('leads').insert({ id: leadId, customer_id: otherId, email: 'qa-other@example.invalid' });
+    await mockPg('email_messages').insert({ id: message.id, status: 'queued' });
+    const assignment = busy ? await writer.transaction() : null;
+    if (assignment) await assignment('leads').where({ id: leadId }).update({ email: alias });
+    const sources = [['customers', 'email', 'id', otherId], ['notification_prefs', 'billing_email', 'customer_id', otherId],
+      ['estimates', 'customer_email', 'id', estimateId], ['leads', 'email', 'id', leadId]];
+    global.fetch.mockImplementation(async (_url, options) => {
+      expect(JSON.parse(options.body).personalizations[0].to[0].email).toBe(corrected);
+      for (const [table, column, key, id] of sources) {
+        for (const address of [corrected, alias]) {
+          await expect(writer.transaction(async trx => {
+            await trx.raw("SET LOCAL lock_timeout = '100ms'");
+            await trx.raw('UPDATE ?? SET ?? = ? WHERE ?? = ?', [table, column, address, key, id]);
+          })).rejects.toMatchObject({ code: '55P03' });
+          await expect(writer.transaction(async trx => {
+            await trx.raw("SET LOCAL lock_timeout = '100ms'");
+            await trx(table).insert({ [key]: key === 'customer_id' ? insertionOwner : randomUUID(),
+              ...(table !== 'customers' && key !== 'customer_id' ? { customer_id: insertionOwner } : {}), [column]: address });
+          })).rejects.toMatchObject({ code: '55P03' });
+        }
+      }
+      return { ok: true, headers: { get: () => 'synthetic-billing-bounce-id' } };
+    });
+    try {
+      await expect(dispatchRecoveryMessage({ message, categories: [], correctedEmail: corrected, ownCustomerId: customerId,
+        bouncedMessage: billingReplayRow(chargeDate, { recipient_email_snapshot: original }) }))
+        .resolves.toEqual(busy ? { ok: false, error: 'Email ownership assignment in progress' } : { ok: true, messageRowId: message.id });
+      expect(global.fetch).toHaveBeenCalledTimes(busy ? 0 : 1);
+    } finally {
+      if (assignment && !assignment.isCompleted()) await assignment.rollback();
+      await mockPg('notification_prefs').where({ customer_id: otherId }).del();
+      await mockPg('estimates').where({ id: estimateId }).del();
+      await mockPg('leads').where({ id: leadId }).del();
+      await mockPg('customers').whereIn('id', [otherId, insertionOwner]).del();
+      await mockPg('customers').where({ id: customerId }).update({ email: 'qa@example.invalid' });
+    }
+  }, 20000);
+
   test.each(['available', 'other-owner', 'gmail-alias', 'original-changed'])(
     'corrected billing bounce destination remains authorized at actual HTTP: %s', async (condition) => {
       const chargeDate = etDateString(addETDays(new Date(), 1));
@@ -275,9 +333,11 @@ postgres('billing Email provider preparation on its held connection', () => {
       await mockPg('customers').insert({ id: otherId, email: condition === 'other-owner' ? corrected
         : condition === 'gmail-alias' ? alias : 'qa-other@example.invalid' });
       const stored = billingReplayRow(chargeDate, { recipient_email_snapshot: ` ${original.toUpperCase()} ` });
-      const ownershipCheck = jest.fn(async ({ database }) => (await correctedAddressOwnedByOther(
-        corrected, customerId, database,
-      ) ? { ok: false, code: 'CORRECTED_EMAIL_OWNED_BY_OTHER', reason: 'corrected_owned_by_other' } : { ok: true }));
+      const ownershipCheck = jest.fn(async ({ database }) => {
+        await lockEmailOwnershipForSend(database, corrected);
+        return await correctedAddressOwnedByOther(corrected, customerId, database)
+          ? { ok: false, code: 'CORRECTED_EMAIL_OWNED_BY_OTHER', reason: 'corrected_owned_by_other' } : { ok: true };
+      });
       global.fetch.mockImplementation(async (_url, options) => {
         expect(JSON.parse(options.body).personalizations[0].to[0].email).toBe(corrected);
         // The original recipient cannot change and neither an exact nor a
@@ -289,9 +349,7 @@ postgres('billing Email provider preparation on its held connection', () => {
         for (const address of [corrected, alias]) {
           await expect(writer.transaction(async (trx) => {
             await trx.raw("SET LOCAL lock_timeout = '100ms'");
-            await trx('customers').where({ id: otherId }).forUpdate().first();
-            await lockCustomerEmail(trx, address);
-            await trx('customers').where({ id: otherId }).update({ email: address });
+            await trx.raw('UPDATE customers SET email = ? WHERE id = ?', [address, otherId]);
           })).rejects.toMatchObject({ code: '55P03' });
         }
         return { ok: true, headers: { get: () => 'synthetic-bounce-id' } };

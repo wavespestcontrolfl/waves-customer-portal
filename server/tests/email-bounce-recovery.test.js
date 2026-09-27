@@ -991,6 +991,32 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     );
   });
 
+  test.each([true, false])('billing ownership contention/query failure uses its manual failure alert (busy=%s)', async busy => {
+    const messageRow = { id: 'msg-billing-ownership', status: 'queued', subject_snapshot: 'Billing update' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    const reason = busy ? 'Email ownership assignment in progress' : 'Email ownership check temporarily unavailable';
+    billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (_original, _dispatch, options) => {
+      const trx = mockOwnershipTrx();
+      if (busy) trx.raw.mockResolvedValue({ rows: [{ locked: false }] });
+      else trx.raw.mockRejectedValue(new Error('SQL binding private-owner@example.invalid'));
+      const verdict = await options.providerBoundaryCheck({ database: trx });
+      expect(verdict).toMatchObject({ ok: false, retryable: true, reason });
+      return { handled: true, allowed: false, ...verdict };
+    });
+    await expect(recovery.attemptRecovery({
+      id: 'orig-billing-ownership', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      payload_snapshot: { __billing_replay_context: {} }, html_snapshot: '<p>Billing</p>',
+    }, { event: 'bounce', type: 'bounce' })).resolves.toEqual({ error: reason });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockDb._calls)).not.toContain('private-owner');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'send_failed' }) }));
+  });
+
   test('a billing provider rejection retains its status without leaking its response body', async () => {
     const messageRow = { id: 'msg-billing-private', status: 'queued', subject_snapshot: 'Billing update' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
