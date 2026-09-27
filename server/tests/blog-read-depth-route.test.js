@@ -406,14 +406,26 @@ describe('only posts the site actually publishes count', () => {
 
   test('no sitemap yet: dropped, and not refetched until the retry window passes', async () => {
     const { isLivePath } = require('../routes/public-blog-read-depth')._private;
-    mockFetchSitemapPaths.mockResolvedValueOnce(null);
+    mockFetchSitemapPaths.mockResolvedValue(null); // both the index and /sitemap.xml missing
     const t0 = 1000000;
     expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0)).toBe(false);
-    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 60 * 1000)).toBe(false);
-    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(1);
-    mockFetchSitemapPaths.mockResolvedValueOnce(new Set([POST_PATH]));
-    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 5 * 60 * 1000)).toBe(true);
     expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(2);
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 60 * 1000)).toBe(false);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(2);
+    mockFetchSitemapPaths.mockResolvedValue(new Set([POST_PATH]));
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 5 * 60 * 1000)).toBe(true);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(3);
+  });
+
+  test('falls back to /sitemap.xml when the site has no sitemap-index.xml', async () => {
+    const { isLivePath } = require('../routes/public-blog-read-depth')._private;
+    mockFetchSitemapPaths.mockImplementation(async ({ sitemapUrl }) => (
+      sitemapUrl.endsWith('/sitemap.xml') ? new Set([POST_PATH]) : null));
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, 4000000)).toBe(true);
+    expect(mockFetchSitemapPaths.mock.calls.map(([arg]) => arg.sitemapUrl)).toEqual([
+      'https://wavespestcontrol.com/sitemap-index.xml',
+      'https://wavespestcontrol.com/sitemap.xml',
+    ]);
   });
 
   test('a failed refresh keeps the last good list', async () => {
@@ -421,9 +433,9 @@ describe('only posts the site actually publishes count', () => {
     mockFetchSitemapPaths.mockResolvedValueOnce(new Set([POST_PATH]));
     const t0 = 2000000;
     expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0)).toBe(true);
-    mockFetchSitemapPaths.mockRejectedValueOnce(new Error('network'));
+    mockFetchSitemapPaths.mockRejectedValue(new Error('network')); // index and fallback both fail
     expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 6 * 60 * 60 * 1000)).toBe(true);
-    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(2);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(3);
   });
 
   test('concurrent beacons for one site share a single sitemap fetch', async () => {

@@ -39,7 +39,7 @@
  * every public route carries (codex P1 r2 withdrew the per-source daily
  * dedupe for exactly that reason). Instead:
  *  - a beacon counts only for a path the claimed site's OWN sitemap lists
- *    (sitemap-index.xml, read with the tested content-registry helper,
+ *    (sitemap-index.xml, else sitemap.xml, read with the tested content-registry helper,
  *    cached 6 h per site; a failed refresh keeps the last good list and is
  *    retried after 5 min; no list yet means dropped), so invented slugs never
  *    create rows (codex P1 r2) — today every blog post is hub-only, so spoke
@@ -86,9 +86,22 @@ const MILESTONES = new Set(['25', '50', '75', '100', 'next']);
 const DAILY_BUCKET_CAP = 2000;
 
 const LIVE_PATHS_TTL_MS = 6 * 60 * 60 * 1000;
+// @astrojs/sitemap writes /sitemap-index.xml on every fleet site (live
+// 2026-09-27: 200 on the hub and the spokes). /sitemap.xml exists only on
+// the hub, as a redirect to that index (spokes 404), so it is the fallback,
+// not the default (codex P1 r3 on #5022).
+const SITEMAP_PATHS = ['/sitemap-index.xml', '/sitemap.xml'];
 const LIVE_PATHS_RETRY_MS = 5 * 60 * 1000;
 // site -> { paths: Set|null, ok: bool, checkedAt: ms, pending: Promise|null }
 let livePathCache = new Map();
+
+async function fetchSiteSitemap(site) {
+  for (const path of SITEMAP_PATHS) {
+    const paths = await fetchSitemapPaths({ sitemapUrl: `https://${site}${path}` }).catch(() => null);
+    if (paths) return paths;
+  }
+  return null;
+}
 
 // The claimed site's own sitemap, as normalized content URLs (a bare path
 // for the hub, an absolute URL for a spoke — normalizeContentUrl decides
@@ -102,8 +115,7 @@ function livePaths(site, now) {
   }
   if (entry.pending) return entry.pending;
   if (now - entry.checkedAt < (entry.ok ? LIVE_PATHS_TTL_MS : LIVE_PATHS_RETRY_MS)) return Promise.resolve(entry.paths);
-  entry.pending = fetchSitemapPaths({ sitemapUrl: `https://${site}/sitemap-index.xml` })
-    .catch(() => null)
+  entry.pending = fetchSiteSitemap(site)
     .then((paths) => {
       entry.checkedAt = now;
       entry.ok = !!paths;

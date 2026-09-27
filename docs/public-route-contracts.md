@@ -3125,7 +3125,9 @@ authenticated without the identifier the owner's E2 scope rules out (no
 cookies, no IDs), so no per-source state is kept beyond the one-minute
 per-IP limiter every public route carries. What bounds a forged beacon
 instead: it counts only for a path the claimed site's OWN sitemap lists
-(`https://{site}/sitemap-index.xml`, read with content-registry-live-status's
+(`https://{site}/sitemap-index.xml` — what @astrojs/sitemap writes on every
+fleet site — falling back to `/sitemap.xml`, which only the hub serves, as a
+redirect to that index; read with content-registry-live-status's
 `fetchSitemapPaths` and compared with `normalizeContentUrl`, cached 6 h per
 site; a failed refresh keeps the last good list and retries after 5 min; no
 list yet means the beacon is dropped), so invented slugs never create rows —
