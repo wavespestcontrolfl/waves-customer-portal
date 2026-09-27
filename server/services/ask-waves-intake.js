@@ -174,12 +174,25 @@ const CHOKING_RE = new RegExp(`\\b(?:chok(?:e|ed|es|ing)|gag(?:s|ged|ging)?)\\s+
 // A person pronoun right before the verb is the patient whatever came
 // earlier ("He didn't swallow it but he choked on the bait").
 const PERSON_SUBJECT_END_RE = /\b(?:i|he|she|we|you|yo|[ée]l|ella|nosotros)\s*$/i;
+// A verb joined by "and" / "then" / a comma shares its clause's subject, so
+// the subject decides, not the words just before the verb: "My child saw
+// ants and choked on the bait" reads "My child"; "The rats found it and ate
+// the bait" and "It ran off and ate the bait" read the rats / it. A leading
+// clause can hide the subject ("After the ants swarmed, my son got scared
+// and ate the bait"), so the subject after the last comma counts too.
+const COORDINATED_VERB_RE = /(?:\b(?:and|then|but|so|y|luego|pero)|,)\s*$/i;
+const LEADING_CONNECTIVE_RE = /^(?:(?:and|but|so|then|also|y|pero|luego)\b[\s,]*)+/i;
+const subjectOf = (text) => text.trim().replace(LEADING_CONNECTIVE_RE, '').split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
 function anyPatientExposure(turn) {
   const before = (clause, m) => clause.slice(0, m.index).trim().split(/\s+/).slice(-3).join(' ');
   const patient = (words) => PERSON_SUBJECT_END_RE.test(words) || !NON_PATIENT_WORD_RE.test(words);
+  const clauseSubjects = (prefix) => [subjectOf(prefix), prefix.split(',').map(subjectOf).filter(Boolean).pop()].filter(Boolean);
+  const patientAt = (clause, m) => (COORDINATED_VERB_RE.test(clause.slice(0, m.index))
+    ? clauseSubjects(clause.slice(0, m.index)).some(patient)
+    : patient(before(clause, m)));
   return String(turn || '').split(/(?<=[.!?;])\s+|\n+/).some((clause) => [...clause.matchAll(ANY_PATIENT_EXPOSURE_RE)]
-    .some((m) => patient(before(clause, m)) && !PASSIVE_END_RE.test(before(clause, m)))
-    || [...clause.matchAll(CHOKING_RE)].some((m) => patient(before(clause, m))));
+    .some((m) => patientAt(clause, m) && !PASSIVE_END_RE.test(before(clause, m)))
+    || [...clause.matchAll(CHOKING_RE)].some((m) => patientAt(clause, m)));
 }
 
 // A product in someone's eyes, mouth or on their skin is an exposure
