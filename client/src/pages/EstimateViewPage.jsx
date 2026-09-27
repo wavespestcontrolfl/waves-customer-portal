@@ -1574,7 +1574,10 @@ export function oneTimePriceCopy(breakdown = {}, { noGuarantee = false } = {}) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const germanRoachItem = items.find(isGermanRoachCleanoutBreakdownItem);
   if (germanRoachItem) {
-    return `${germanRoachVisitPhrase(germanRoachItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule. 100% guaranteed with the Waves Guarantee.`;
+    const visitTerms = `${germanRoachVisitPhrase(germanRoachItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`;
+    // This card prices every one-time row, so on a noGuaranteeClaims
+    // estimate (termite work beside the cleanout) it makes no guarantee.
+    return noGuarantee ? visitTerms : `${visitTerms} 100% guaranteed with the Waves Guarantee.`;
   }
   const fleaItems = items.filter(isFleaBreakdownItem);
   if (fleaItems.length > 0) {

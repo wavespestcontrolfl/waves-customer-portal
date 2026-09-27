@@ -966,6 +966,19 @@ describe('oneTimePriceCopy', () => {
     expect(neutral).toMatch(/pay on service day/);
   });
 
+  it('drops the Waves Guarantee from a German roach cleanout on a noGuaranteeClaims estimate', () => {
+    // The one-time card prices every one-time row: a cleanout quoted beside
+    // termite trenching must not read as a guarantee on the whole charge.
+    const breakdown = { total: 1600, items: [
+      { service: 'german_roach', label: 'German Roach Cleanout', amount: 400, visits: 3 },
+      { service: 'termite_trenching', label: 'Termite Trenching', amount: 1200 },
+    ] };
+    expect(oneTimePriceCopy(breakdown)).toMatch(/100% guaranteed/);
+    const noGuarantee = oneTimePriceCopy(breakdown, { noGuarantee: true });
+    expect(noGuarantee).not.toMatch(/guarantee/i);
+    expect(noGuarantee).toMatch(/break the breeding cycle/);
+  });
+
   it('returns Bora-Care wood-treatment copy without the pest callback line', () => {
     const copy = oneTimePriceCopy({ total: 1051, items: [{ service: 'bora_care', label: 'Bora-Care', amount: 1051 }] });
     expect(copy).toMatch(/borate wood treatment/i);
