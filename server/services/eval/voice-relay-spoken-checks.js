@@ -119,7 +119,7 @@ const ID_NOUNS = 'invoice|bill|factura';
 // one of several", "the price for a 2,000 square foot home".
 const NOT_AN_AMOUNT = 'of|details?|accounts?|records?|items?|things?|options?|visits?|treatments?|applications?|services?|invoices?|bills?|payments?|charges?|days?|weeks?|months?|years?|hours?|minutes?|times|people|customers?|technicians?|techs?|calls?|more|other|percent|%|reasons?|steps?|ways?|questions?|numbers?|digits?|plans?|programs?|properties|homes?|houses?|yards?|acres?|sq|square|feet|foot|ft';
 const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
-const PRICE_VERB = '(?:cobran?|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
+const PRICE_VERB = '(?:cobr(?:o|as|a|amos|an)|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
 const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
@@ -189,9 +189,9 @@ const SERVICE_BILLING_UNIT = '(?:applications?|treatments?|visits?|services?|apl
 const PERIOD_BILLING_UNIT = '(?:months?|weeks?|quarters?|mes(?:es)?|semanas?|trimestres?)';
 const YEAR_BILLING_UNIT = '(?:years?|a[nñ]os?)';
 const BARE_BILLED_NUMBER = '(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?(?![\\d/-])';
-// Codex r13 on #4946: before YEAR a bare 10–24 is an application count, not
-// a price ("doce por año" / "12 per year" = twelve applications a year), so
-// the shared isBareAnnualCount predicate filters these candidates. Month,
+// Codex r13 on #4946: before YEAR a bare integer 10–24 is an application
+// count, not a price ("doce por año" / "12 per year" = twelve applications
+// a year), so the shared isBareAnnualCount predicate filters these candidates. Month,
 // week and quarter keep the two-digit rule — nothing is applied ten times a month, so "veinte al mes"
 // is a price (PR review). A "$" or currency word always is.
 const BARE_YEAR_NUMBER = `(?:${PRICE_NUMBER}|\\b${NUMBER_RUN_ES})`;
@@ -367,7 +367,7 @@ const TIME_ANYWHERE_RES = Object.freeze([
   /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
   // Codex r14 on #4946: catch ordinary Spanish ETA prepositions while keeping
   // "a las dos personas del equipo" as a count rather than a clock time.
-  new RegExp(`\\b(?:a|sobre|cerca\\s+de|antes\\s+de)\\s+las?\\s+(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
+  new RegExp(`\\b(?:a|sobre|cerca\\s+de|alrededor\\s+de|hacia|antes\\s+de|despu[eé]s\\s+de)\\s+las?\\s+(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:${HOUR_WORDS}|${HOUR_WORDS_ES})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
   // Codex round-5 P1: a spoken "oh/zero/cero" minute prefix with no colon and
   // no meridiem ("three oh five", "3 oh 5", "las tres cero cinco") is still
@@ -2482,7 +2482,7 @@ const ENGLISH_EVIDENCE_WORDS = [
   'cancel', 'cancelled', 'canceled', 'update', 'updated', 'pending', 'available', 'unavailable',
   // Codex r14: English tool acknowledgements ("Request received.", "Lead captured.").
   'request', 'requests', 'requested', 'received', 'recorded', 'logged', 'filed', 'queued', 'placed',
-  'processed', 'entered', 'created', 'captured', 'reservice',
+  'processed', 'entered', 'created', 'captured', 'reservice', 'reservation', 'successful', 'successfully',
   // Contractions ("Don't worry.", "It's done.") and short replies.
   "don't", "can't", "won't", "it's", "i'm", "i'll", "i've", "i'd", "you're", "you'll", "you've",
   "you'd", "we're", "we'll", "we've", "we'd", "they're", "they'll", "they've", "that's",

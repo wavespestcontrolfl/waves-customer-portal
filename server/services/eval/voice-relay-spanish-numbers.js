@@ -171,11 +171,12 @@ function convertDigitStrings(text) {
 // count before its noun ("nueve aplicaciones al año") never matches at all.
 // Codex r13: before YEAR ("al año", "por año") a figure under 25 is an
 // application count, not a price ("doce por año" = twelve applications a
-// year), so only 25+ converts there. Every other unit needs 10+ — "veinte al
-// mes" is a price (PR review): nothing is applied ten times a month.
+// year), so only integer 0–24 stays exempt there. A decimal is a price even
+// below 25. Every other unit needs 10+ — "veinte al mes" is a price (PR
+// review): nothing is applied ten times a month.
 const BILLING_UNIT_AHEAD_ES = '(?=(?:por|cada|al|a\\s+la)\\s+(?:(aplicaci[oó]n(?:es)?|tratamientos?|visitas?|servicios?|mes(?:es)?|semanas?|trimestres?)|(a[ñn]os?))(?![a-záéíóúñ]))';
 const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(?:(d[oó]lares?|pesos?)\\b|${BILLING_UNIT_AHEAD_ES})`, 'gi');
-const PRICE_VERB_ES = '(?:cuestan?|costar[íi]an?|costar[áa]n?|valen?|salen?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a))';
+const PRICE_VERB_ES = '(?:cobr(?:o|as|a|amos|an)|cuestan?|costar[íi]an?|costar[áa]n?|valen?|salen?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a))';
 const PRICE_VERB_WORD_RUN_RE = new RegExp(`(\\b${PRICE_VERB_ES}\\s+(?:de\\s+)?)(${NUMBER_RUN_RE_SRC})`, 'gi');
 
 // Codex r10 on #4946: "ciento diecinueve con noventa y nueve por aplicación"
@@ -196,11 +197,12 @@ function convertWholeAndCents(text) {
   });
 }
 
-// Bare annual figures below 25 describe application frequency. Currency
-// markers and price verbs establish a price separately; they never use this
-// exemption. Share the rule with both disclosure and unit grading.
+// Bare annual whole numbers below 25 describe application frequency. A
+// decimal cannot be an application count. Currency markers and price verbs
+// establish a price separately; they never use this exemption. Share the
+// rule with both disclosure and unit grading.
 function isBareAnnualCount(amount) {
-  return Number.isFinite(amount) && amount >= 0 && amount < 25;
+  return Number.isInteger(amount) && amount >= 0 && amount < 25;
 }
 
 function convertPriceWordRuns(text) {

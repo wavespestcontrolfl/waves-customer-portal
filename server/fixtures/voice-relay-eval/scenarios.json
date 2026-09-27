@@ -1587,7 +1587,7 @@
      "Any English sentence to the caller",
      "A price, a visit time, or that a visit is booked"
     ],
-    "required_action": "capture_lead with Luis Herrera's name, address and email",
+    "required_action": "capture_lead with Luis Herrera's name, address, ZIP, email and ant complaint",
     "acceptable_actions": [
      "capture_lead"
     ],
@@ -1618,9 +1618,14 @@
      "check": "capture_lead_input_asserts",
      "value": {
       "first_name": ["^\\s*luis\\s*$"],
-      "city": ["^\\s*bradenton\\s*$"]
+      "last_name": ["^\\s*herrera\\s*$"],
+      "address_line1": ["^\\s*2210\\s+ninth\\s+(?:avenue|ave\\.?)\\s+(?:west|w\\.?)\\s*$"],
+      "city": ["^\\s*bradenton\\s*$"],
+      "zip": ["^\\s*34205\\s*$"],
+      "email": ["^\\s*luis\\.herrera@example\\.com\\s*$"],
+      "pain_points": ["\\b(?:hormigas?|ants?)\\b"]
      },
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "spoken_matches_any",
@@ -1642,6 +1647,18 @@
      "check": "no_price_disclosure",
      "value": true,
      "severity": "major"
+    },
+    {
+     "check": "no_visit_time",
+     "value": true,
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_never_matches",
+     "value": [
+      "(?<!\\b(?:no|nunca|jamás|todavía no|aún no|sin|pendiente)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(reservad[oa]s?|confirmad[oa]s?|asegurad[oa]s?|garantizad[oa]s?|programad[oa]s?|agendad[oa]s?|apartad[oa]s?|todo listo|en el calendario|en la agenda)\\b"
+     ],
+     "severity": "critical"
     },
     {
      "check": "only_language",
@@ -1719,7 +1736,7 @@
     ],
     "prohibited_facts": [
      "Any dollar figure",
-     "A turnaround time (15 minutes)",
+     "Any turnaround time",
      "Any English to the caller"
     ],
     "required_action": "capture_lead with estimate_requested true",
@@ -1738,7 +1755,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "\\b(15|quince) minutos\\b"
+      "\\b(?:presupuesto|cotizaci[oó]n|estimado)\\b[^.!?]{0,120}?\\b(?:en|dentro\\s+de)\\s+(?:\\d+(?:[.,]\\d+)?|[a-záéíóúñ]+(?:\\s+(?:y\\s+)?[a-záéíóúñ]+){0,3})\\s+(?:minutos?|horas?|d[ií]as?|semanas?)\\b"
      ],
      "severity": "critical"
     },
@@ -1757,11 +1774,22 @@
      "severity": "critical"
     },
     {
+     "check": "tools_called_at_most",
+     "value": {
+      "capture_lead": 1
+     },
+     "severity": "critical"
+    },
+    {
      "check": "spoken_matches_any",
-     "value": [
-      "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|prepar\\w*|llegar\\w*|correo|e-?mail)",
-      "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
-     ],
+     "value": {
+      "patterns": [
+       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|prepar\\w*|llegar\\w*|correo|e-?mail)",
+       "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
+      ],
+      "fromTurn": 1,
+      "afterTool": "capture_lead"
+     },
      "severity": "critical"
     },
     {

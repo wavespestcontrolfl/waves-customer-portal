@@ -5,7 +5,7 @@
  * digit strings — and against the article/quantity uses it must NEVER touch.
  */
 
-const { normalizeSpanishSpokenText, parseSpanishCardinal } = require('../services/eval/voice-relay-spanish-numbers');
+const { normalizeSpanishSpokenText, parseSpanishCardinal, isBareAnnualCount } = require('../services/eval/voice-relay-spanish-numbers');
 
 describe('parseSpanishCardinal', () => {
   test.each([
@@ -59,6 +59,7 @@ describe('normalizeSpanishSpokenText — prices (a number-word run immediately b
     // r13: before YEAR a figure under 25 is an application count and stays
     // words; every other unit converts from 10 (PR review: "veinte al mes").
     ['noventa y nueve por aplicación, doce por año', '99 por aplicación, doce por año'],
+    ['doce con noventa y nueve al año', '12.99 al año'],
     ['veinte al mes', '20 al mes'],
     ['treinta al año', '30 al año'],
   ])('%s -> %s', (input, expected) => {
@@ -112,6 +113,8 @@ describe('normalizeSpanishSpokenText — spelled prices in every price context',
     ['el premium cuesta noventa y nueve.', 'el premium cuesta 99.'],
     ['son noventa y nueve por tratamiento', 'son 99 por tratamiento'],
     ['vale ciento diecinueve', 'vale 119'],
+    ['cobramos ciento cincuenta', 'cobramos 150'],
+    ['cobro ciento cincuenta', 'cobro 150'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });
@@ -122,6 +125,12 @@ describe('normalizeSpanishSpokenText — spelled prices in every price context',
     'El plan incluye doce aplicaciones al año.',
   ])('leaves counts and non-prices alone: %s', (input) => {
     expect(normalizeSpanishSpokenText(input)).toBe(input);
+  });
+});
+
+describe('isBareAnnualCount', () => {
+  test.each([[0, true], [12, true], [24, true], [12.99, false], [24.5, false], [25, false], [NaN, false]])('%s -> %s', (amount, expected) => {
+    expect(isBareAnnualCount(amount)).toBe(expected);
   });
 });
 

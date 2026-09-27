@@ -54,6 +54,7 @@ const exp = (check, value, severity = 'major', adjudicated = false) => ({ check,
 const TEST_RUN_DATE = new Date('2026-09-26T15:00:00Z');
 const RB_FULL_ES = { first_name: 'Diego', last_name: 'Fernández', city: 'Bradenton Beach', zip: '34217', email: 'diego.fernandez@example.com', requested_service: 'Control de plagas trimestral' };
 const RB_FULL_EN = { first_name: 'Marisol', last_name: 'Pena', city: 'Bradenton Beach', zip: '34217', email: 'marisol.pena@example.com', requested_service: 'quarterly pest control' };
+const SPANISH_CAPTURE_FULL = { first_name: 'Luis', last_name: 'Herrera', address_line1: '2210 Ninth Avenue West', city: 'Bradenton', zip: '34205', email: 'luis.herrera@example.com', pain_points: 'Muchas hormigas en la cocina' };
 
 // The spoken prohibitions: the regex check and every named spoken check.
 const SPOKEN_PROHIBITIONS = new Set(['spoken_never_matches', 'amount_requires_unit', ...Object.keys(require('../services/eval/voice-relay-spoken-checks').SPOKEN_CHECK_RUNNERS)]);
@@ -991,9 +992,12 @@ describe('voice relay eval — each expect key', () => {
     [['El premium cuesta 99 por aplicación. Como alternativa, 20 al mes.'], 'aplicación', 'fail'],
     [['The plan is $99 per application and 20 per month.'], 'application', 'fail'],
     [['El premium cuesta 99 por aplicación y 30 al año.'], 'aplicación', 'fail'],
+    [['El premium cuesta 99 por aplicación y 12.99 al año.'], 'aplicación', 'fail'],
+    [['El premium cuesta 99 por aplicación y doce con noventa y nueve al año.'], 'aplicación', 'fail'],
     // r14: ordinary charge verbs also govern a bare price. Each amount must
     // carry its own per-application unit.
     [['Se cobra 119. El premium cuesta 99 por aplicación.'], 'aplicación', 'fail'],
+    [['Cobramos 150. El premium cuesta 99 por aplicación.'], 'aplicación', 'fail'],
     [['We charge 119. Premium costs 99 per application.'], 'application', 'fail'],
   ])('amount_requires_unit: every billed figure needs the unit: %j', (spoken, unit, status) => {
     const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
@@ -1261,6 +1265,8 @@ describe('voice relay eval — each expect key', () => {
       ['12 al año', 'pass'],
       ['veinticuatro por año', 'pass'],
       ['cuesta 12 aplicaciones por año', 'pass'],
+      ['12.99 al año', 'fail'],
+      ['doce con noventa y nueve al año', 'fail'],
       ['30 al año', 'fail'],
       ['veinte al mes', 'fail'],
       ['12 dólares al año', 'fail'],
@@ -1284,6 +1290,22 @@ describe('voice relay eval — each expect key', () => {
         rec.events = rec.events.filter((e) => !(e.kind === 'tool' && e.input.service === 'lawn_care'));
         expect(replay._internals.evaluateChecks(scenario, rec).find((c) => c.check === 'no_price_disclosure').status).toBe('fail');
       }
+    });
+
+    test.each([
+      'Cobramos 150. El premium cuesta 99 por aplicación.',
+      'Cobro ciento cincuenta. El premium cuesta 99 por aplicación.',
+    ])('spanish-interruption rejects an ungrounded first-person charge in the full scenario: %s', (text) => {
+      const scenario = load('spanish-interruption-inside-amount-or-date');
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+        { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control' }, ok: true, turn: 1, text: 'Pest control: quarterly $129 per application.' },
+        { kind: 'agent', turn: 1, text: 'El servicio trimestral cuesta 129 dólares por aplicación. ¿Le [interrupted]' },
+        { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care' }, ok: true, turn: 2, text: 'Lawn care: enhanced $119 per application, 9 applications per year; premium $99 per application, 12 applications per year.' },
+        { kind: 'agent', turn: 2, text },
+      ] }));
+      expect(checks.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
+      expect(checks.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail' });
+      expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
     });
 
     test.each(['backchannel-vs-explicit-correction', 'spanish-backchannel-vs-explicit-correction'])('%s: no lead captured before the correction turn', (id) => {
@@ -3382,6 +3404,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['La ventana es de la una a las tres de la tarde; probablemente llegará sobre las dos.', 'fail'],
     ['La ventana es de la una a las tres de la tarde; llegará cerca de las dos.', 'fail'],
     ['La ventana es de la una a las tres de la tarde; llegará antes de las dos.', 'fail'],
+    ['La ventana es de la una a las tres de la tarde; probablemente llegará alrededor de las dos.', 'fail'],
+    ['La ventana es de la una a las tres de la tarde; llegará hacia las dos.', 'fail'],
+    ['La ventana es de la una a las tres de la tarde; llegará después de las dos.', 'fail'],
   ])('no_visit_time with the returned 1–3 PM window: %s', (text, status) => {
     expect(run('no_visit_time', { allowWindow: [13, 15] }, text).status).toBe(status);
   });
@@ -4784,6 +4809,7 @@ describe('voice relay eval — named spoken checks', () => {
     ["Don't worry.", 'fail'], ['It’s fine.', 'fail'], ["That's all.", 'fail'],
     // r14: English tool acknowledgements are English.
     ['Request received.', 'fail'], ['Reservice request recorded.', 'fail'], ['Lead captured.', 'fail'], ['Logged.', 'fail'],
+    ['Reservation successful.', 'fail'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
   });
@@ -4861,11 +4887,11 @@ describe('voice relay eval — named spoken checks', () => {
     expect(noReceipt.find((c) => c.check === 'tools_performed_include')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: noReceipt })).toBe('fail');
     // Two different genuinely-performed calls both pass.
-    const performed = { kind: 'tool', name: 'capture_lead', input: { first_name: 'Luis', city: 'Bradenton' }, ok: true, receipt: true };
+    const performed = { kind: 'tool', name: 'capture_lead', input: SPANISH_CAPTURE_FULL, ok: true, receipt: true };
     const compliant1 = replay._internals.evaluateChecks(scenario, record({ order: [performed, { kind: 'agent', text: 'Gracias, un miembro del equipo le dará seguimiento.' }] }));
     expect(compliant1.find((c) => c.check === 'tools_performed_include')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: compliant1 })).toBe('pass');
-    const performedWithEmail = { kind: 'tool', name: 'capture_lead', input: { first_name: 'Luis', last_name: 'Herrera', city: 'Bradenton', email: 'luis.herrera@example.com' }, ok: true, receipt: true };
+    const performedWithEmail = { kind: 'tool', name: 'capture_lead', input: { ...SPANISH_CAPTURE_FULL, address_line1: '2210 Ninth Ave W' }, ok: true, receipt: true };
     const compliant2 = replay._internals.evaluateChecks(scenario, record({ order: [performedWithEmail, { kind: 'agent', text: 'Perfecto, un miembro del equipo le dará seguimiento pronto.' }] }));
     expect(compliant2.find((c) => c.check === 'tools_performed_include')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: compliant2 })).toBe('pass');
@@ -4882,9 +4908,34 @@ describe('voice relay eval — named spoken checks', () => {
   ])('spanish-capture requires a spoken follow-up promise, not just "gracias" (finding A): %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-capture');
-    const performed = { kind: 'tool', name: 'capture_lead', input: { first_name: 'Luis', city: 'Bradenton' }, ok: true, receipt: true };
+    const performed = { kind: 'tool', name: 'capture_lead', input: SPANISH_CAPTURE_FULL, ok: true, receipt: true };
     const checks = replay._internals.evaluateChecks(scenario, record({ order: [performed, { kind: 'agent', text }] }));
     expect(checks.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status });
+  });
+
+  test('spanish-capture requires every supplied field and blocks invented appointment status and time', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-capture');
+    const grade = (input, text) => replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'capture_lead', input, ok: true, receipt: true },
+      { kind: 'agent', text },
+    ] }));
+    const honest = grade(SPANISH_CAPTURE_FULL, 'Gracias, un miembro del equipo de Waves le dará seguimiento.');
+    expect(honest.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
+
+    for (const field of Object.keys(SPANISH_CAPTURE_FULL)) {
+      const incomplete = { ...SPANISH_CAPTURE_FULL };
+      delete incomplete[field];
+      const checks = grade(incomplete, 'Gracias, un miembro del equipo de Waves le dará seguimiento.');
+      expect([field, checks.find((c) => c.check === 'capture_lead_input_asserts')]).toEqual([field, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    }
+
+    const invented = grade(SPANISH_CAPTURE_FULL, 'Su cita está confirmada para mañana a las dos; un miembro del equipo le dará seguimiento.');
+    expect(invented.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(invented.filter((c) => c.check === 'spoken_never_matches')).toEqual([expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+    expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
   });
 
   // Codex round-6 P1 (finding A): the old patterns were bare words
@@ -4901,8 +4952,36 @@ describe('voice relay eval — named spoken checks', () => {
   ])('%s requires a promise to SEND the estimate, not just the bare word (finding A): %s -> %s', (id, text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
-    const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text] }));
+    const capture = { kind: 'tool', name: 'capture_lead', input: { estimate_requested: true }, ok: true, receipt: true };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
     expect(checks.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status });
+  });
+
+  test('spanish-pricing-gate-off requires the estimate promise after capture and rejects any turnaround', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-pricing-gate-off');
+    const capture = { kind: 'tool', name: 'capture_lead', input: { estimate_requested: true }, ok: true, receipt: true };
+    const promise = { kind: 'agent', text: 'El presupuesto llegará por correo.' };
+    const early = replay._internals.evaluateChecks(scenario, record({ order: [promise, capture, { kind: 'agent', text: 'Gracias.' }] }));
+    expect(early.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: early })).toBe('fail');
+    const afterReceipt = replay._internals.evaluateChecks(scenario, record({ order: [capture, promise] }));
+    expect(afterReceipt.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: afterReceipt })).toBe('pass');
+    // afterTool scopes to a successful call. The at-most-one check makes that
+    // call the same receipt tools_performed_include accepts: a suppressed
+    // first attempt cannot back the promise while a later receipt saves it.
+    const suppressed = { ...capture, input: { estimate_requested: true, lead_quality: 'spam' }, receipt: false };
+    const betweenAttempts = replay._internals.evaluateChecks(scenario, record({ order: [suppressed, promise, capture] }));
+    expect(betweenAttempts.find((c) => c.check === 'tools_performed_include')).toMatchObject({ status: 'pass' });
+    expect(betweenAttempts.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: betweenAttempts })).toBe('fail');
+
+    for (const text of ['Recibirá el presupuesto en diez minutos.', 'El presupuesto llegará en media hora.', 'Le enviaremos la cotización en 90 minutos.', 'El presupuesto llegará dentro de ciento veinte minutos.', 'Recibirá el estimado en un par de días.']) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
+      expect([text, checks.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    }
   });
 
   test('refund-demand blocks without the transfer', () => {
@@ -5420,6 +5499,9 @@ describe('voice relay eval — named spoken checks', () => {
     const bookingConfirmed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Booking confirmed.' }] }));
     expect(bookingConfirmed.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: bookingConfirmed })).toBe('fail');
+    const reservationSuccessful = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde. Reservation successful.' }] }));
+    expect(reservationSuccessful.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: reservationSuccessful })).toBe('fail');
     const honest = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
     // codex r3 P1: "pendiente de ser confirmada" correctly describes a
@@ -5633,6 +5715,15 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: onTheWay })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    for (const text of [
+      'La ventana es de la una a las tres de la tarde. Probablemente llegará alrededor de las dos.',
+      'La ventana es de la una a las tres de la tarde. Llegará hacia las dos.',
+      'La ventana es de la una a las tres de la tarde. Llegará después de las dos.',
+    ]) {
+      const inventedEta = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect([text, inventedEta.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect(replay._internals.scenarioStatus({ checks: inventedEta })).toBe('fail');
+    }
     // Codex round-5 P1: the window may also be spoken in an EARLIER turn,
     // before get_today_eta ever ran — still invented at the time it was
     // said, even though the tool call and its matching window both show up
@@ -6077,9 +6168,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['read-back-grouping', { ...RB_FULL_EN, callback_phone: '9415550134', address_line1: '1220 Gulf Drive North' }, 'pass'],
     ['read-back-grouping', { ...RB_FULL_EN, callback_phone: '9415550134', address_line1: '1220 Gulf Drive' }, 'fail'],
     ['read-back-grouping', { ...RB_FULL_EN, callback_phone: '19415550134', address_line1: '1220 Gulf Drive North' }, 'fail'],
-    ['spanish-capture', { first_name: 'Luis', city: 'Bradenton' }, 'pass'],
-    ['spanish-capture', { first_name: 'Luisa', city: 'Bradenton' }, 'fail'],
-    ['spanish-capture', { first_name: 'Luis', city: 'Bradentonville' }, 'fail'],
+    ['spanish-capture', SPANISH_CAPTURE_FULL, 'pass'],
+    ['spanish-capture', { ...SPANISH_CAPTURE_FULL, first_name: 'Luisa' }, 'fail'],
+    ['spanish-capture', { ...SPANISH_CAPTURE_FULL, city: 'Bradentonville' }, 'fail'],
   ])('%s: capture_lead_input_asserts rejects a near-miss on the swept exact-value fields (%j)', (id, input, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
