@@ -81,6 +81,23 @@ describe('groundRescheduleAgreement', () => {
     ] }))).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
   });
 
+  // Codex #5092 r6: the sentences a quote sits in are screened with the
+  // booking check's negation/hedge and condition screens.
+  test('a quote from a negated, hedged or conditional sentence does not ground', () => {
+    const said = (agentLine, callerLine, { commit = 'see you Thursday at two in the afternoon', accept = 'Thursday at two works for me' } = {}) => ground(v2({ evidence: [
+      quote('/scheduling/agent_committed_booking', 'agent', commit),
+      quote('/scheduling/confirmed_start_at', 'agent', commit),
+      quote('/scheduling/caller_accepted_slot', 'caller', accept),
+    ] }), `Caller: Can we move my visit?\nAgent: ${agentLine}\nCaller: ${callerLine}`);
+    const OK_CALLER = 'Thursday at two works for me.';
+    expect(said('We will not see you Thursday at two in the afternoon.', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
+    expect(said('If the tech is free we will see you Thursday at two in the afternoon.', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
+    expect(said('We will see you Thursday at two in the afternoon.', 'Thursday at two works for me, but actually no it does not.'))
+      .toMatchObject({ ok: false, reason: 'caller_acceptance_ungrounded' });
+    // Another sentence of the turn is not screened: "No worries." does not void it.
+    expect(said('No worries. We will see you Thursday at two in the afternoon.', `Great. ${OK_CALLER}`).ok).toBe(true);
+  });
+
   test('a quote under three words must be the whole turn, never a fragment of a longer one', () => {
     const shortYes = (callerLine) => ground(v2({ evidence: [
       quote('/scheduling/agent_committed_booking', 'agent', COMMIT),
@@ -149,7 +166,7 @@ describe('groundRescheduleAgreement', () => {
   });
 
   test('the moved appointment must be named by its recorded words in a grounded quote, and a same-day change needs no day words', () => {
-    const SAME_DAY = 'We will see you at two in the afternoon instead.';
+    const SAME_DAY = 'We will see you at two in the afternoon then.';
     const moved = (movedQuote, movedWords, { callerOpening = `Can you move ${movedQuote}?`, movedDate = '2026-09-24' } = {}) => ground(v2({
       scheduling: { moved_appointment_date: movedDate, moved_appointment_words: movedWords, agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' } },
       evidence: [

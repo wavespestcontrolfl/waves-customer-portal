@@ -15,7 +15,9 @@
  *   - the agent's commitment (/scheduling/agent_committed_booking, speaker
  *     "agent") and the caller's acceptance (/scheduling/caller_accepted_slot,
  *     speaker "caller") each appear word for word in one turn of that
- *     speaker;
+ *     speaker, in sentences free of negation, hedges and open conditions
+ *     (the booking check's own screens, call-triage-flags.js — a quote cut
+ *     from "We will not see you Thursday" does not ground);
  *   - an agreed-slot quote (/scheduling/confirmed_start_at) appears word for
  *     word in one turn and contains every recorded slot word; the hour word
  *     is one hour ("two", "2", "noon") and is the slot's; the period words
@@ -37,7 +39,7 @@
  */
 'use strict';
 
-const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
+const { etWallClockOfConfirmedStart, turnHasNegationOrHedge, turnHasUnresolvedConditional } = require('./call-triage-flags');
 const { statedDateComponents } = require('./reschedule-date-evidence');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -58,11 +60,11 @@ function padded(s) { return ` ${s} `; }
 // Lowercase words, punctuation dropped, with "a.m." / "p.m." kept as one
 // word ("am") so a quote matches its turn however either was punctuated
 // and the period words read the same whichever way they were written.
+function joinMeridiem(s) {
+  return String(s || '').replace(/\b([ap])\.\s?m\b\.?/gi, '$1m').replace(/(\d)([ap]m)\b/gi, '$1 $2');
+}
 function normalize(s) {
-  return String(s || '')
-    .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
-    .replace(/(\d)([ap]m)\b/gi, '$1 $2')
-    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return joinMeridiem(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 // The transcript's turns ({ agent, ns }); null on any unlabeled line, where
@@ -73,7 +75,9 @@ function parseTurns(transcript) {
     if (!line.trim()) continue;
     const m = line.match(/^\s*(agent|caller)\s*:\s*(.*)$/i);
     if (!m) return null;
-    turns.push({ agent: m[1].toLowerCase() === 'agent', ns: normalize(m[2]) });
+    // Sentences (on . ! ?) with their normalized text, for the screen below.
+    const sentences = joinMeridiem(m[2]).split(/[.!?]+/).map(normalize).filter(Boolean);
+    turns.push({ agent: m[1].toLowerCase() === 'agent', ns: normalize(m[2]), sentences });
   }
   return turns;
 }
@@ -85,6 +89,35 @@ function turnsHolding(turns, quote, speaker) {
   if (!ns) return [];
   const whole = ns.split(' ').length < MIN_FRAGMENT_WORDS;
   return turns.filter((t) => t.agent === (speaker === 'agent') && (whole ? t.ns === ns : padded(t.ns).includes(padded(ns))));
+}
+
+// The sentences of this turn the quote touches, joined: a fragment quoted
+// from "We will not see you Thursday at two" is read with its "not".
+function sentencesAround(turn, quote) {
+  const qt = normalize(quote).split(' ');
+  const starts = [];
+  let at = 0;
+  for (const sentence of turn.sentences) { starts.push(at); at += sentence.split(' ').length; }
+  const tt = turn.ns.split(' ');
+  const hits = [];
+  for (let i = 0; i + qt.length <= tt.length; i += 1) {
+    if (qt.every((w, k) => tt[i + k] === w)) hits.push([i, i + qt.length]);
+  }
+  return turn.sentences.filter((sentence, n) => {
+    const from = starts[n];
+    const to = from + sentence.split(' ').length;
+    return hits.some(([a, b]) => a < to && b > from);
+  }).join(' ');
+}
+
+// Does the extraction's reading of this quote stand against the words said
+// around it? The sentences it sits in must carry no negation, hedge or open
+// condition — the booking check's own screens (call-triage-flags.js), applied
+// to the quote's sentences rather than its whole turn so an unrelated "No
+// worries." earlier in the turn does not void a real commitment.
+function plainlySaid(turn, quote) {
+  const around = sentencesAround(turn, quote);
+  return Boolean(around) && !turnHasNegationOrHedge(around) && !turnHasUnresolvedConditional(around);
 }
 
 // Does this quote hold these recorded words, word for word?
@@ -149,6 +182,13 @@ function movedAppointmentGrounded(scheduling, quotes, started) {
     && quotes.some((q) => holds(q, words));
 }
 
+const SCREENED_FIELDS = new Set([
+  '/scheduling/agent_committed_booking', '/scheduling/caller_accepted_slot', '/scheduling/confirmed_start_at',
+]);
+function isPlain(holding, quote, fieldPath) {
+  return holding.length > 0 && (!SCREENED_FIELDS.has(fieldPath) || holding.every((turn) => plainlySaid(turn, quote)));
+}
+
 /**
  * Pure function. See file header for contract.
  */
@@ -166,10 +206,11 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return fail('unparseable_transcript');
 
   // The quotes pinned to one field that appear word for word in a turn of
-  // their stated speaker (and, when given, only that speaker's).
+  // their stated speaker (and, when given, only that speaker's) — for the
+  // commitment, acceptance and slot, plainly said wherever they appear.
   const grounded = (fieldPath, speaker = null) => (Array.isArray(v2.evidence) ? v2.evidence : [])
     .filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker)
-      && turnsHolding(turns, e.quote, e.speaker).length > 0)
+      && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath))
     .map((e) => e.quote);
   if (!grounded('/scheduling/agent_committed_booking', 'agent').length) return fail('agent_commitment_ungrounded');
   if (!grounded('/scheduling/caller_accepted_slot', 'caller').length) return fail('caller_acceptance_ungrounded');
