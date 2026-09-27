@@ -335,4 +335,60 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
       expect(routeSource).not.toMatch(/taxRate:/);
     });
   });
+
+  // Codex round-6 P1: two sibling visits under the SAME estimate, charged
+  // at the same moment while neither has an invoice, could both run
+  // recheckInTrx's sibling lookup (lockRows: true — FOR UPDATE OF i locks
+  // nothing when no row matches), both see 'none', and both mint a
+  // collectible base invoice for the same trip. The estimate-scoped ledger
+  // lock (the ONE key every estimate-scoped writer already shares) must be
+  // taken BEFORE recheckInTrx so only one mint per estimate can even reach
+  // the recheck at a time — the loser's recheck (or resolver snapshot) then
+  // sees the winner's freshly committed invoice and refuses instead of
+  // minting beside it.
+  describe('estimate ledger lock precedes the caller recheck', () => {
+    it('acquires the estimate-scoped ledger lock BEFORE calling recheckInTrx', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+      const order = [];
+      mockLedgerLock.mockImplementationOnce(async () => { order.push('ledger_lock'); });
+      const recheckInTrx = jest.fn(async () => { order.push('recheck'); });
+
+      await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, recheckInTrx });
+
+      expect(order).toEqual(['ledger_lock', 'recheck']);
+    });
+
+    it('still runs recheckInTrx when the visit has no source estimate (no ledger lock to take)', async () => {
+      programTransactions(makeTrx({ sourceEstimateId: null }));
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+      const recheckInTrx = jest.fn(async () => {});
+
+      await mintScheduledServiceInvoiceWithDeposit({
+        svc: { ...svc, source_estimate_id: null }, buildCreateParams, recheckInTrx,
+      });
+
+      expect(mockLedgerLock).not.toHaveBeenCalled();
+      expect(recheckInTrx).toHaveBeenCalledTimes(1);
+    });
+
+    it('a recheckInTrx refusal still throws AFTER the ledger lock was taken, never before — proves the order under a failure too', async () => {
+      programTransactions(makeTrx());
+      const order = [];
+      mockLedgerLock.mockImplementationOnce(async () => { order.push('ledger_lock'); });
+      const recheckInTrx = jest.fn(async () => {
+        order.push('recheck');
+        const e = new Error('sibling coverage changed while charging');
+        e.status = 409;
+        e.code = 'SIBLING_COVERAGE_CHANGED';
+        throw e;
+      });
+
+      await expect(mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, recheckInTrx }))
+        .rejects.toMatchObject({ code: 'SIBLING_COVERAGE_CHANGED' });
+      expect(order).toEqual(['ledger_lock', 'recheck']);
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+  });
 });

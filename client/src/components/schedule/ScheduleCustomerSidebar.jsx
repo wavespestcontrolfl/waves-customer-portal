@@ -167,6 +167,15 @@ export default function ScheduleCustomerSidebar({
   // fix — codex pre-push P1).
   const rawPrice = service?.estimatedPrice != null ? Number(service.estimatedPrice) : null;
   const hasOwnPrice = rawPrice != null && rawPrice > 0;
+  // Codex round-6 P2: 'sibling_needs_review' (billing-lane.js
+  // siblingCoveredCompletionPrediction) carries a null amount — the mint
+  // resolver (resolveScheduledServiceCharge, admin-schedule.js) refuses to
+  // charge this visit at all until the combined-trip invoice is reconciled.
+  // `Number(null) || 0` alone renders an ordinary $0.00 Total with no
+  // explanation, which reads as "nothing to collect" rather than "go
+  // resolve this" — surface the review state explicitly (mirrors
+  // MobileAppointmentDetailSheet / MobileCheckoutSheet / BillingLaneCard).
+  const siblingNeedsReview = service?.billingLane?.prediction?.kind === 'sibling_needs_review';
   const basePrice = hasOwnPrice
     ? rawPrice
     : service?.billingLane
@@ -424,6 +433,11 @@ export default function ScheduleCustomerSidebar({
               <div className="text-14 font-medium text-zinc-900">Total</div>
               <div className="u-nums text-14 font-medium text-zinc-900">{money(total)}</div>
             </div>
+            {siblingNeedsReview && (
+              <div className="text-13 mt-1" style={{ color: '#92400E' }}>
+                Combined-trip invoice needs review — resolve on Customer 360 before charging.
+              </div>
+            )}
             <a
               href={`/admin/invoices?customer=${encodeURIComponent(service.customerId)}`}
               className="mt-4 inline-flex h-10 w-full items-center justify-center rounded-sm bg-zinc-900 px-4 text-13 font-medium uppercase tracking-label text-white no-underline u-focus-ring"

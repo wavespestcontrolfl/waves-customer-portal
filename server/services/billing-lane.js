@@ -830,6 +830,37 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
 //   { status: 'error' }                                        — the lookup itself failed
 //   { status: 'none' }                                         — no relevant match at all
 //
+// The ONE shape predicate every sibling-coverage caller shares (codex P1):
+// "could a same-estimate, same-day sibling's invoice be covering THIS
+// visit?" is a question about the VISIT'S OWN shape — unpriced, tied to an
+// estimate, not a callback, not an always-free type — never about the
+// customer's CURRENT billing lane. A customer can accept per_application,
+// get a combined first-application invoice on a sibling that leaves this
+// row deliberately unpriced (estimate-converter.js
+// reservedAcceptPerVisitSplit), and later move to monthly/legacy-null dues
+// — the old acceptance invoice still covers this trip regardless. Schedule
+// enrichment (siblingCoveredCompletionPrediction's caller,
+// admin-schedule.js ~5228-5251) and completion itself
+// (complete-scheduled-service.js, findFirstApplicationInvoiceForEstimateService)
+// already ask this question unconditionally, keyed on the SAME shape; the
+// mint resolver below (resolveScheduledServiceCharge) is the one caller
+// this predicate exists to fix — gating it on `billingMode === 'per_application'`
+// let a lane-changed customer's Charge Now fall through to monthly_rate and
+// mint a second collectible base charge beside the sibling's live invoice.
+// Takes the caller's OWN resolved shape (not a raw DB row) so it agrees
+// byte-for-byte with whatever `estimatedPrice`/`isCallback`/`serviceType`
+// values that caller already derived (e.g. resolveScheduledServiceCharge's
+// provenance-aware `hasOwnPrice`, which also credits hasAuthoritativeZeroPrice)
+// — never a second, independent re-read of svc's columns that could drift
+// from them. `sourceEstimateId` missing (a pure unit-test fixture with no
+// svc at all) reads as ineligible, never as a false positive.
+function isSiblingCoverageEligibleVisit({ sourceEstimateId, hasOwnPrice, isCallback, serviceType }) {
+  if (!sourceEstimateId) return false;
+  if (isCallback) return false;
+  if (isAlwaysFreeServiceType(serviceType)) return false;
+  return !hasOwnPrice;
+}
+
 // `lockRows` (codex pre-push P1, round 3): a transactional MINT recheck
 // passes this so the underlying lookup's FOR UPDATE OF i (see
 // findFirstApplicationInvoiceForEstimateService) holds the matched invoice
@@ -1062,6 +1093,7 @@ module.exports = {
   siblingCoveredCompletionPrediction,
   coveringSiblingInvoice,
   siblingInvoiceCoverageVerdict,
+  isSiblingCoverageEligibleVisit,
   sameTripFirstApplicationBreakdown,
   verifyExtendedCompletionAnchor,
   attachedInvoiceAutoChargeLikely,

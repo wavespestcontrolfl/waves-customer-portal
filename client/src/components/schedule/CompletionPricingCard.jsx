@@ -147,15 +147,27 @@ function EstimateSourceDialog({ data, onClose, returnFocusRef }) {
 
 function JobCharge({ service, data, apply }) {
   const billing = visitMoneySummary(service);
-  const covered = ["prepaid", "covered_membership", "covered_annual"].includes(billing.kind);
+  // 'covered_sibling_invoice': a same-day sibling's first-application
+  // invoice already bills this trip — reads as covered, same as prepaid/
+  // membership/annual coverage (Codex round-6 P2).
+  const covered = ["prepaid", "covered_membership", "covered_annual", "covered_sibling_invoice"].includes(billing.kind);
+  // 'sibling_needs_review': the sibling lookup came back needs_review/error
+  // (billing-lane.js siblingCoveredCompletionPrediction) — the server's own
+  // mint resolver (resolveScheduledServiceCharge, admin-schedule.js)
+  // refuses to charge this visit for EITHER reason, so this card must never
+  // fall back to `data.proposedAmount`/`data.currentAmount` (a positive
+  // acceptance-fee charge for a trip whose real coverage is unresolved) —
+  // it must show the review state and read as $0, matching the sidebar /
+  // detail sheet / checkout sheet (Codex round-6 P2).
+  const siblingNeedsReview = billing.kind === "sibling_needs_review";
   const noCharge = billing.kind === "no_charge" && ["callback", "always_free_service_type", "annual_renewal_owned"]
     .includes(service.billingLane?.prediction?.reason);
-  const amount = covered || noCharge ? 0 : apply ? data.proposedAmount : data.currentAmount;
-  const label = data.alreadyInvoiced ? "Recorded service price" : data.completedPrice ? "Completed application price" : noCharge ? "No charge for this application" : covered ? "Covered application" : "Charge for this application";
-  const note = data.alreadyInvoiced ? "Already invoiced · Check job billing" : covered || noCharge ? billing.headline : "Before applicable tax or payment fees";
+  const amount = covered || noCharge || siblingNeedsReview ? 0 : apply ? data.proposedAmount : data.currentAmount;
+  const label = data.alreadyInvoiced ? "Recorded service price" : data.completedPrice ? "Completed application price" : siblingNeedsReview ? "Needs review before charging" : noCharge ? "No charge for this application" : covered ? "Covered application" : "Charge for this application";
+  const note = data.alreadyInvoiced ? "Already invoiced · Check job billing" : siblingNeedsReview ? "Combined-trip invoice needs review — resolve on Customer 360" : covered || noCharge ? billing.headline : "Before applicable tax or payment fees";
   const paymentNotes = { payer: "Billed to the payer", auto_charge: "Invoice then Auto Pay · Nothing charged yet" };
   return <div style={{ ...rowStyle, padding: "14px 16px", background: "#f4f4f5", alignItems: "center" }}>
-    <div><span style={{ fontWeight: 500 }}>{label}</span><div style={{ color: muted, marginTop: 3 }}>{note}</div>
+    <div><span style={{ fontWeight: 500, color: siblingNeedsReview ? "#92400E" : ink }}>{label}</span><div style={{ color: siblingNeedsReview ? "#92400E" : muted, marginTop: 3 }}>{note}</div>
       {paymentNotes[billing.kind] && <div style={{ color: muted, marginTop: 3 }}>{paymentNotes[billing.kind]}</div>}
     </div>
     <span style={{ ...moneyStyle, fontSize: 26, fontWeight: 500 }}>{fmt(amount)}</span>

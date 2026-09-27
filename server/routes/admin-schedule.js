@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -15739,14 +15739,23 @@ async function resolveScheduledServiceCharge({
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
     || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
-  // Codex round 5 P2: a callback's base charge is always zeroed by
-  // completionInvoiceAmount below (isCallback short-circuits to 0 before
-  // perApplicationBilling is even consulted), so this lookup can never
-  // change what a callback bills — it can only 409 a legitimate positive
-  // checkout extra because an UNRELATED old acceptance invoice (for the
-  // trip the callback can never rebill) comes back needs_review. Exclude
-  // callbacks the same way always-free service types already are.
-  if (perApplicationBilling && !isCallback && !hasOwnPrice && svc && dbConn) {
+  // Codex P1 (round 6): this used to gate on `perApplicationBilling` — the
+  // CUSTOMER'S CURRENT billing mode — so a combined pay-per-application
+  // trip that already has its first-application invoice on a sibling, whose
+  // customer later moves to a monthly or legacy-null lane, skipped this
+  // lookup entirely and fell through to `monthly_rate` below, minting a
+  // second collectible base charge beside the sibling's live invoice. Gate
+  // on the VISIT'S OWN SHAPE instead (isSiblingCoverageEligibleVisit,
+  // billing-lane.js — unpriced, estimate-linked, not a callback, not an
+  // always-free type) — the SAME shape schedule enrichment
+  // (siblingCoveredCompletionPrediction's caller, ~5228-5251) and
+  // completion (findFirstApplicationInvoiceForEstimateService) already ask
+  // unconditionally, so all three can never disagree about whether a
+  // sibling COULD be covering this trip. `svc` absent (pure/unit-test
+  // callers) reads as ineligible — byte-identical to before for them.
+  if (isSiblingCoverageEligibleVisit({
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType,
+  }) && svc && dbConn) {
     let verdict;
     try {
       verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);

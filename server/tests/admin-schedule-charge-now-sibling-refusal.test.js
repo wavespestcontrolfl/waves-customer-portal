@@ -177,6 +177,54 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     expect(next).toHaveBeenCalledTimes(1);
   });
 
+  // Codex round-6 P1: this gate used to be `perApplicationBilling &&
+  // !isCallback && !hasOwnPrice` — the CUSTOMER'S CURRENT billing mode. A
+  // combined pay-per-application accept leaves the PROMOTED row unpriced
+  // and its first-application invoice on the RESERVED sibling; if the
+  // customer is later moved to monthly/legacy-null dues (a lane change),
+  // the old gate skipped the sibling lookup entirely and fell through to
+  // `monthly_rate`, minting a SECOND collectible base charge beside the
+  // sibling's still-live invoice. The fix gates on the visit's own shape
+  // (isSiblingCoverageEligibleVisit, billing-lane.js) instead, so the
+  // lookup still runs — and the mint still refuses the double charge —
+  // no matter what lane the customer is on today.
+  test('a lane-changed customer (per_application → monthly) still runs the sibling lookup off the visit\'s own shape, not the current billing mode', async () => {
+    mockDb.__svcRow = { ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    const { req, res, next } = makeReqRes({});
+    await handler(req, res, next);
+
+    // The lookup ran despite `cust_billing_mode` no longer being
+    // 'per_application' — proving the gate reads the visit's shape, not
+    // the mutable lane.
+    expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalled();
+    // 'covered' resolves the base to 0; with no checkout extras the route's
+    // existing "nothing chargeable" gate refuses outright — the pre-fix
+    // regression instead fell through to the $74.70 monthly rate and
+    // minted it, a real second charge beside the sibling's invoice.
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.body.error).toMatch(/no chargeable amount/i);
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  test('a lane-changed customer with an unresolved sibling verdict (needs_review) still refuses instead of charging the monthly rate', async () => {
+    mockDb.__svcRow = { ...SVC_ROW, cust_billing_mode: null, cust_monthly_rate: 74.7 };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
+      liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+    });
+    const { req, res, next } = makeReqRes({});
+    await handler(req, res, next);
+
+    expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.body.error).toMatch(/manual review/i);
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
   // Codex pre-push P1 (round 3): resolveScheduledServiceCharge's verdict is
   // read on a plain connection BEFORE mintScheduledServiceInvoiceWithDeposit
   // opens its locked transaction — a concurrent refund/restoration can

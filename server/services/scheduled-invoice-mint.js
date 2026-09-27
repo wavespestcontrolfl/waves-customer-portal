@@ -230,8 +230,46 @@ async function mintScheduledServiceInvoiceWithDeposit({
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
         }
-        if (recheckInTrx) await recheckInTrx(trx);
+        // Codex round-6 P1: the estimate-scoped ledger lock used to be taken
+        // AFTER recheckInTrx. siblingCoverageRecheckInTrx's own lookup
+        // (siblingInvoiceCoverageVerdict, lockRows: true → FOR UPDATE OF i)
+        // locks nothing when NO invoice row exists yet for the estimate —
+        // so two sibling visits under the SAME estimate, charged at the same
+        // moment while neither has an invoice, could both run the recheck,
+        // both see 'none' (nothing to lock, matching the pre-transaction
+        // snapshot), and both fall through to mint a collectible base
+        // invoice for the same trip. Acquiring the SAME estimate.deposit.
+        // ledger advisory lock (the ONE lock key every estimate-scoped
+        // writer already shares — see acquireEstimateDepositLedgerLock's own
+        // header) BEFORE the recheck serializes the two mints on the
+        // estimate itself: only one holds the lock at a time, so the second
+        // one's recheck (or its own pre-transaction resolver snapshot) sees
+        // the FIRST one's freshly committed invoice and refuses on the
+        // status change (SIBLING_COVERAGE_CHANGED) instead of minting
+        // beside it. Reuses acquireEstimateDepositLedgerLock verbatim —
+        // never a second, parallel lock key for the same purpose.
+        //
+        // Lock order, and why it can't deadlock against the OTHER advisory
+        // lock in this chain: acquireScheduledMintLockChain above already
+        // took [1] the SERVICE-scoped mint lock (['schedule.invoice.mint',
+        // svc.id], keyed by THIS visit) and [2] the customer KEY SHARE and
+        // [3] the visit row FOR UPDATE, all before this point. This lock is
+        // [4] the ESTIMATE-scoped ledger lock, keyed by source_estimate_id —
+        // a DIFFERENT key namespace ('estimate.deposit.ledger' vs
+        // 'schedule.invoice.mint'), so a mint for a DIFFERENT sibling visit
+        // under the same estimate never contends with [1] here at all (each
+        // visit has its own service-scoped key) and can only contend with
+        // [4] — a single lock, no second party to form a cycle with. Every
+        // other estimate-ledger-lock caller (invoice.js createFromService,
+        // estimate-converter.js's converter locks, visit-completion-invoice.js's
+        // packet path) takes [1]/mint-lock and the visit/customer locks
+        // FIRST and this ledger lock LAST too, so the relative order between
+        // the mint lock and the ledger lock is consistent everywhere — only
+        // the position of THIS caller's own recheckInTrx (which may itself
+        // take further invoice-row locks, e.g. sibling rows) moved, relative
+        // to a lock this transaction already owns exclusively by then.
         if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
+        if (recheckInTrx) await recheckInTrx(trx);
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;

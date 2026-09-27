@@ -62,7 +62,7 @@ describe('visitMoneySummary', () => {
   it('collect-needed ONLY for kind invoice with a positive amount', () => {
     expect(visitMoneySummary(withPrediction('invoice', 95)).collectNeeded).toBe(true);
     expect(visitMoneySummary(withPrediction('invoice', 0)).collectNeeded).toBe(false);
-    for (const kind of ['auto_charge', 'payer', 'prepaid', 'covered_membership', 'covered_annual', 'no_charge']) {
+    for (const kind of ['auto_charge', 'payer', 'prepaid', 'covered_membership', 'covered_annual', 'no_charge', 'covered_sibling_invoice', 'sibling_needs_review']) {
       expect(visitMoneySummary(withPrediction(kind, 95)).collectNeeded).toBe(false);
     }
   });
@@ -76,6 +76,18 @@ describe('visitMoneySummary', () => {
     expect(visitMoneySummary(withPrediction('covered_membership', 0)).headline).toBe('Covered by plan — nothing to collect');
     expect(visitMoneySummary(withPrediction('covered_annual', 0)).headline).toBe('Covered by annual plan — nothing to collect');
     expect(visitMoneySummary(withPrediction('no_charge', 0)).headline).toBe('No charge');
+  });
+
+  // Codex round-6 P2: a same-day combined per-application trip (a sibling's
+  // first-application invoice already covers this visit) or an unresolved
+  // sibling lookup (needs_review/error, amount null) used to have no
+  // PREDICTION_COPY entry at all — headline fell through to null and the
+  // brief dropped the billing row entirely instead of saying anything.
+  it('covers the two sibling-coverage prediction kinds (never a dropped billing row)', () => {
+    expect(visitMoneySummary(withPrediction('covered_sibling_invoice', null)).headline)
+      .toBe('Covered by sibling invoice — nothing to collect');
+    expect(visitMoneySummary(withPrediction('sibling_needs_review', null)).headline)
+      .toBe('Combined-trip invoice needs review — do not collect');
   });
 
   it('missing billingLane (older payload) fails toward NOT flagging', () => {

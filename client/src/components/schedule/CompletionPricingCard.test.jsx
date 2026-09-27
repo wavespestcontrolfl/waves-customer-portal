@@ -59,6 +59,35 @@ it('shows an accepted discount once when the same net is already stamped on the 
   expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 });
 
+// Codex round-6 P2: a same-day combined per-application trip whose sibling
+// lookup couldn't confirm coverage ('sibling_needs_review' — billing-lane.js
+// siblingCoveredCompletionPrediction) used to fall through to
+// `data.currentAmount`/`data.proposedAmount` here — a real positive
+// acceptance-fee charge — since neither `covered` nor `noCharge` recognized
+// the kind. The server's own mint resolver refuses to charge this visit
+// either way, so this card must show the review state and read as $0, not
+// offer a chargeable fee.
+it('never falls back to a positive fee charge for a sibling-needs-review prediction — shows review copy and $0', async () => {
+  const reviewSvc = { id: 'job-review', serviceType: 'Every 6 Weeks Lawn Care', estimatedPrice: null,
+    billingLane: { prediction: { kind: 'sibling_needs_review', amount: null } } };
+  const reviewData = { ...data, serviceId: reviewSvc.id, currentAmount: 97.2, proposedAmount: 97.2, canApply: false, lines: [] };
+  render(<CompletionPricingCard service={reviewSvc} adminFetch={vi.fn().mockResolvedValue({ completionPricing: reviewData })} onReviewChange={vi.fn()} />);
+  expect(await screen.findByText('Needs review before charging')).toBeInTheDocument();
+  expect(screen.getByText('Combined-trip invoice needs review — resolve on Customer 360')).toBeInTheDocument();
+  expect(screen.getByText('$0.00')).toBeInTheDocument();
+  expect(screen.queryByText('$97.20')).not.toBeInTheDocument();
+});
+
+it('reads a covered_sibling_invoice prediction as covered — no charge', async () => {
+  const coveredSvc = { id: 'job-covered', serviceType: 'Every 6 Weeks Lawn Care', estimatedPrice: null,
+    billingLane: { prediction: { kind: 'covered_sibling_invoice', amount: null } } };
+  const coveredData = { ...data, serviceId: coveredSvc.id, currentAmount: 97.2, proposedAmount: 97.2, canApply: false, lines: [] };
+  render(<CompletionPricingCard service={coveredSvc} adminFetch={vi.fn().mockResolvedValue({ completionPricing: coveredData })} onReviewChange={vi.fn()} />);
+  expect(await screen.findByText('Covered application')).toBeInTheDocument();
+  expect(screen.getByText('Covered by sibling invoice — nothing to collect')).toBeInTheDocument();
+  expect(screen.getByText('$0.00')).toBeInTheDocument();
+});
+
 it('remains unready during loading and failure, then becomes ready after retry', async () => {
   let rejectRead;
   const fetch = vi.fn().mockImplementationOnce(() => new Promise((resolve, reject) => { rejectRead = reject; }))

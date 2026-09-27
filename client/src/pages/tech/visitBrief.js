@@ -57,8 +57,9 @@ export function smsHref(phone) {
 
 // Per-kind copy for billingLane.prediction — the kinds the server emits
 // (billing-lane.js / predictionFromAttachedInvoice): invoice, auto_charge,
-// payer, prepaid, covered_membership, covered_annual, no_charge. Only
-// `invoice` with a positive amount means money changes hands at the door.
+// payer, prepaid, covered_membership, covered_annual, no_charge,
+// covered_sibling_invoice, sibling_needs_review. Only `invoice` with a
+// positive amount means money changes hands at the door.
 const PREDICTION_COPY = {
   invoice: (amt) => (amt > 0 ? `Collect ${fmtMoney(amt)} today` : 'No charge today'),
   auto_charge: (amt) => (amt > 0 ? `${fmtMoney(amt)} auto-charges on completion` : 'Nothing to charge'),
@@ -67,6 +68,17 @@ const PREDICTION_COPY = {
   covered_membership: () => 'Covered by plan — nothing to collect',
   covered_annual: () => 'Covered by annual plan — nothing to collect',
   no_charge: () => 'No charge',
+  // Same-day combined per-application trip — a sibling visit's
+  // first-application invoice already bills it (billing-lane.js
+  // siblingCoveredCompletionPrediction). Without an entry here the kind
+  // fell through `copy ? copy(amount) : null` to a silent headline: null,
+  // dropping the billing row from the brief entirely (codex round-6 P2).
+  covered_sibling_invoice: () => 'Covered by sibling invoice — nothing to collect',
+  // The sibling lookup came back needs_review/error — the mint resolver
+  // refuses to charge this visit either way, so the brief must say "go
+  // resolve it," never stay silent (codex round-6 P2, mirrors
+  // BillingLaneCard's own copy for this kind).
+  sibling_needs_review: () => 'Combined-trip invoice needs review — do not collect',
 };
 
 /**
