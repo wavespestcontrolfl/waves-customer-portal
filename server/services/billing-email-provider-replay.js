@@ -58,6 +58,7 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
       },
     },
     recipientEmail: clean(message.recipient_email_snapshot).toLowerCase(),
+    templateKey: clean(message.template_key),
     preSendCheck: async ({ database }) => {
       const verdict = await billingEmailReplayEligible(context, database);
       return verdict?.eligible === true ? { ok: true } : {
