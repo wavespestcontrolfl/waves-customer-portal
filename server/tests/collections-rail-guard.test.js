@@ -72,6 +72,16 @@ describe('gate on', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: '41' })).resolves.toBe(true);
   });
 
+  test('a frozen aggregate requires every quoted invoice in one policy verdict', async () => {
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-2'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceIds: ['inv-1', 'inv-2'], detail: true }))
+      .resolves.toEqual({ allowed: false, durable: false });
+    expect(ContactPolicy.evaluate).toHaveBeenCalledTimes(1);
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1', 'inv-2'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceIds: ['inv-1', 'inv-2'] })).resolves.toBe(true);
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceIds: [] })).resolves.toBe(true);
+  });
+
   test('invoiceId null skips membership — aggregate rails need only the channel allow', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: [], denialReasons: [] });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: null })).resolves.toBe(true);

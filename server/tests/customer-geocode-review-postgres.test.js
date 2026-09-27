@@ -9,6 +9,7 @@ jest.mock('../services/geocoder', () => ({ buildAddress: c => [c.address_line1, 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const migration = require('../models/migrations/20260926000030_customer_geocode_reviews');
+const normalizedGuardMigration = require('../models/migrations/20260927000000_normalize_customer_verified_pin_guard');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { saveReview, getReviewDetail, listReviewQueue, attemptReviewedGeocode, excludeReviewedAddresses,
   excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId } = require('../services/customer-geocode-review');
@@ -53,6 +54,7 @@ postgres('durable customer geocode review in PostgreSQL', () => {
       t.uuid('id').primary(); t.uuid('customer_id'); t.string('status'); t.date('scheduled_date');
     });
     await migration.up(mockConnection);
+    await normalizedGuardMigration.up(mockConnection);
     await mockConnection('customers').insert({ id: CUSTOMER, first_name: 'Synthetic', last_name: 'Fixture',
       address_line1: '100 Fixture Way', city: 'Bradenton', state: 'FL', zip: '34205' });
     await mockConnection('customer_properties').insert({ id: PRIMARY, customer_id: CUSTOMER, is_primary: true, active: true,
@@ -188,6 +190,21 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     expect(onCoordinatesCommitted).not.toHaveBeenCalled();
     expect((await customer()).latitude).toBeNull();
     expect((await mockConnection('customer_properties').first()).latitude).toBeNull();
+  });
+  test('verified pins survive null and blank unit normalization by coordinate writers', async () => {
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ address_line2: '' });
+    const current = await customer();
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ latitude: PIN.lat, longitude: PIN.lng });
+    await saveReview(mockConnection, { ...current, address_line2: null }, {
+      status: 'verified', reason: 'staff_verified', reviewed_by: ACTOR,
+      source: 'county_records', evidence: 'Synthetic parcel check', latitude: PIN.lat, longitude: PIN.lng,
+    });
+
+    await mockConnection('customers').where({ id: CUSTOMER }).update({
+      address_line2: null, latitude: null, longitude: null,
+    });
+    expect(Number((await customer()).latitude)).toBe(PIN.lat);
+    expect(Number((await customer()).longitude)).toBe(PIN.lng);
   });
   test('verified pins survive coordinate writers and no-op address saves even with the gate disabled', async () => {
     await verify();

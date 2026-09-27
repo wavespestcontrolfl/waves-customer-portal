@@ -449,6 +449,12 @@ async function loadServiceRecord(recordId) {
       db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
       db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
       'technicians.name as technician_name',
+      // Feeds buildReportV1Data's applicatorFdacsId the same as every other
+      // report-data caller (F.S. 482.2265(1)(b)); this email path doesn't
+      // render it itself today, but the payload should stay consistent
+      // wherever buildReportV1Data is called from a joined row.
+      'technicians.fl_applicator_license as technician_fdacs_id',
+      'technicians.license_expiry as technician_license_expiry',
     )
     .first()
     // Frozen identity overlays the join so the email's greeting, "at City,

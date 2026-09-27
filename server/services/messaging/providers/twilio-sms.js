@@ -93,7 +93,19 @@ function providerMediaUrls(input) {
   return urls;
 }
 
-async function sendViaTwilio(input, {
+// Explicit billing Text legs (metadata.billingDeliveryLeg === 'sms') get an
+// idempotency check before they reach Twilio at all — see
+// billing-text-leg-dedupe.js for why (Email/App already dedupe an explicit
+// billing leg on the same notificationEventKey; Text had no such guard).
+// Every other caller (legacy SMS with no billingDeliveryLeg, non-billing
+// sends, the push leg) short-circuits withBillingTextLegLock's own guard
+// and reaches sendViaTwilioOnce completely unchanged.
+async function sendViaTwilio(input, hooks = {}) {
+  const { withBillingTextLegLock } = require('../billing-text-leg-dedupe');
+  return withBillingTextLegLock(input, () => sendViaTwilioOnce(input, hooks));
+}
+
+async function sendViaTwilioOnce(input, {
   preSendCheck, providerPreSendCheck, withSmsHandoff, providerHandoffReservation,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
@@ -128,6 +140,11 @@ async function sendViaTwilio(input, {
       skipPushRouting: Boolean(input.metadata?.appFallbackReason || input.metadata?.billingDeliveryLeg),
       notificationEventKey: input.metadata?.notificationEventKey,
       invoiceId: input.invoiceId,
+      // Persisted on the accepted sms_log row (services/twilio.js) so a
+      // later replay's dedupe lookup (billing-text-leg-dedupe.js) can scope
+      // its notificationEventKey match to an explicit billing Text leg —
+      // never a legacy send or another producer's own unrelated key.
+      billingDeliveryLeg: input.metadata?.billingDeliveryLeg || undefined,
       billingDeliveryCategory: input.metadata?.billingDeliveryLeg
         ? require('../billing-channel-routing').billingDeliveryCategory(input) : undefined,
       requestNotification: input.metadata?.appOnly ? { id: input.metadata.service_request_id,
