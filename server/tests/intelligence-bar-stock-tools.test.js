@@ -846,5 +846,46 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       });
       expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
+
+    test.each([
+      'We bought Taurus SC: 20%, add 12 oz',
+      'We bought Taurus SC (20%), add 12 oz',
+      'We bought "Taurus SC" 20%, add 12 oz',
+      'We bought 20%: Taurus SC, add 12 oz',
+    ])('a qualifier across colons, quotes or parentheses still conflicts (%s)', async (prompt) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt,
+        preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test.each([
+      'Add notes for this customer: Request 2 lb of Taurus SC',
+      'Text the customer saying we restocked Taurus SC',
+      'Save a note with the text Taurus SC is out',
+    ])('a product named only inside a note or message body never grounds (%s)', async (prompt) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt,
+        preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a prior turn that names the product only inside a note body never grounds a bare follow-up', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+      IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['Add a note for this customer: Taurus SC was applied today']);
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: '1 bottle',
+        preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        actorId: 'actor-1', threadId: THREAD_ID,
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
   });
 });

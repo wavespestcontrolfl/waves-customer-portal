@@ -980,14 +980,16 @@ const FORMULATION_CODES = ['SC', 'SE', 'EC', 'EW', 'CS', 'WG', 'WDG', 'WSG', 'WP
   'SG', 'SL', 'SP', 'DF', 'DG', 'GR', 'TC', 'RTU']
   .sort((a, b) => b.length - a.length);
 const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
-// A qualifier immediately follows a match when only whitespace, commas,
-// hyphens or periods sit between them (checked in both directions — see
-// qualifiersFollowing/qualifiersPreceding). A bare number with no '%' is
-// never a concentration ("Taurus 78 ounces").
-const QUALIFIER_AFTER_RE = new RegExp(`^[\\s,\\-.]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)`, 'i');
+// A qualifier is adjacent to a match when only punctuation or whitespace
+// (any non-alphanumeric run: commas, colons, quotes, parentheses, ...) sits
+// between them, checked in both directions (qualifiersFollowing /
+// qualifiersPreceding). "Taurus SC: 20%" and "Taurus SC (20%)" both carry
+// the qualifier. A bare number with no '%' is never a concentration
+// ("Taurus 78 ounces").
+const QUALIFIER_AFTER_RE = new RegExp(`^[^a-zA-Z0-9]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)`, 'i');
 // Reading backward, a qualifier must also START on a word boundary: the
 // code "SE" must not be read out of "Please", nor "1.5%" out of "21.5%".
-const QUALIFIER_BEFORE_RE = new RegExp(`(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*%|\\b(${FORMULATION_CODE_ALT})\\b)[\\s,\\-.]*$`, 'i');
+const QUALIFIER_BEFORE_RE = new RegExp(`(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*%|\\b(${FORMULATION_CODE_ALT})\\b)[^a-zA-Z0-9]*$`, 'i');
 
 function escapeRegExpLiteral(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1169,7 +1171,13 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
     const [id] = named;
     return id === preview.product.id ? { productId: id } : { mismatch: true };
   };
-  const current = await productsNamedIn(normalizeForMatch(prompt), prompt);
+  // Naming comes only from the operator's action clause (targetClause, the
+  // same split that keeps message/note bodies from selecting a customer):
+  // "Add notes for this customer: Request 2 lb of Taurus SC" names nothing.
+  // Qualifier conflicts are checked across the whole raw text, so a
+  // concentration after a colon ("Taurus SC: 20%") still refuses.
+  const { targetClause } = require('./task-context');
+  const current = await productsNamedIn(normalizeForMatch(targetClause(prompt)), prompt);
   // A qualifier conflict ("Taurus 20% SC" against a "Taurus 10% SC" catalog
   // row) never grounds, on this text or any other — never fall back either.
   if (current.conflict) return null;
@@ -1181,8 +1189,8 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
   if (!IbThreads.threadsEnabled() || !actorId || !UUID_RE_THREAD.test(String(threadId || ''))) return null;
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30 });
   if (!turns.length) return null;
-  const priorText = turns.join(' ');
-  const prior = await productsNamedIn(normalizeForMatch(priorText), priorText);
+  const priorClauses = turns.map((turn) => targetClause(turn)).join('\n');
+  const prior = await productsNamedIn(normalizeForMatch(priorClauses), turns.join('\n'));
   if (prior.conflict) return null; // a conflict found while scanning prior turns also refuses
   return decide(prior.named);
 }
