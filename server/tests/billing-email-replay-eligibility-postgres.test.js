@@ -172,6 +172,13 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
 
     await mockPg.transaction(async (held) => {
       await expect(check({ database: held })).resolves.toEqual({ ok: true });
+      process.env.GATE_COLLECTIONS_POLICY = 'true';
+      const policy = jest.spyOn(require('../services/collections/contact-policy'), 'evaluate')
+        .mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: [], balanceIncomplete: 'payer resolve failed' });
+      collectionsChannelPermitted.mockImplementationOnce(jest.requireActual('../services/collections/rail-guard').collectionsChannelPermitted);
+      await expect(check({ database: held })).resolves.toMatchObject({ ok: false, retryable: true });
+      policy.mockRestore();
+      delete process.env.GATE_COLLECTIONS_POLICY;
       for (const [table, id] of [['invoices', invoiceId], ['annual_prepay_terms', termId]]) {
         await expect(mockPg.transaction(async (contender) => {
           await contender.raw("SET LOCAL lock_timeout = '100ms'");

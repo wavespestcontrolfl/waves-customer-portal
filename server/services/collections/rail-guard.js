@@ -90,7 +90,7 @@ async function collectionsChannelPermitted({
   database,
 }) {
   const answer = (allowed, durable = false, balanceIncomplete = false) => (detail
-    ? { allowed, durable, ...(balanceIncomplete ? { balanceIncomplete: true } : {}) }
+    ? { allowed, durable, ...(balanceIncomplete ? { balanceIncomplete } : {}) }
     : allowed);
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return answer(true);
   let verdict;
@@ -111,9 +111,9 @@ async function collectionsChannelPermitted({
     const why = !verdict.allowed ? verdict.denialReasons.join(', ') : 'invoice_not_eligible';
     logger.info(`[${logTag}] collections policy denied ${channel} for customer ${customerId}${invoiceId ? ` invoice ${invoiceId}` : ''}: ${why}`);
     return answer(false, !verdict.allowed && verdict.denialReasons.some(isDurableDenial),
-      verdict.balanceIncomplete === true);
+      verdict.balanceIncomplete);
   }
-  return answer(true, false, verdict.balanceIncomplete === true);
+  return answer(true, false, verdict.balanceIncomplete);
 }
 
 // A denial that will not lift on its own schedule: an operator flag, a
