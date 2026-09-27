@@ -984,6 +984,17 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
       staged = await trx.transaction(async (sp) => {
         const resolved = await resolveTargetProduct(sp, { line, vendor, decision });
         if (!resolved.ok) throw new StagedStop(resolved.stop);
+        // An unmatched title is re-read BEFORE the alias exists: a product
+        // added meanwhile that now matches it must win, and after the alias
+        // the matcher would only ever confirm the agent's own choice. A
+        // different match throws: the whole transaction rolls back and the
+        // attempt counts.
+        if (!line.product_id) {
+          const before = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, sp);
+          if (before.productId && before.productId !== resolved.productId) {
+            throw new Error(`the catalog now resolves "${line.raw_title}" to a different product`);
+          }
+        }
         const createdAliasId = await createAgentAlias(sp, { line, productId: resolved.productId });
         const hold = await findIdentityOrDuplicateHold(sp, { line, email, decision, productId: resolved.productId });
         if (hold) throw new StagedStop({ hold });
@@ -1195,6 +1206,12 @@ const DRAIN_BATCH_LIMIT = 25;
  * the caller already decided that.
  */
 async function drainAgentQueue({ conn = db, notifyAdmin, limit = DRAIN_BATCH_LIMIT } = {}) {
+  // The receipt cutoff governs the drain as it governs the agent: without
+  // one nothing runs, and a queued line received before it (a physical
+  // count since then already includes it) closes quietly instead of asking
+  // staff to log it by hand.
+  const since = gateEnvTimestamp(SINCE_ENV);
+  if (!since) return { skipped: 'no_since' };
   const { HELD_REASONS } = require('./sweep');
   const notify = notifyAdmin || ((...args) => require('../notification-service').notifyAdmin(...args));
   const lines = await conn('purchase_receipt_lines').where({ status: 'agent_pending' }).orderBy('created_at', 'asc').limit(limit);
@@ -1207,6 +1224,13 @@ async function drainAgentQueue({ conn = db, notifyAdmin, limit = DRAIN_BATCH_LIM
         // As in applyDecision: under the shipment lock, a shipment already
         // handed to a person closes quietly; restoring its status would give
         // staff a second instruction for the same delivery.
+        const email = locked.email_id && await trx('emails').where({ id: locked.email_id }).first('received_at');
+        if (email && new Date(email.received_at) < since) {
+          await trx('purchase_receipt_lines').where({ id: locked.id }).update({
+            status: 'skipped', agent_decision: { ...(locked.agent_decision || {}), reason: 'received_before_cutoff' }, agent_decided_at: new Date(),
+          });
+          return { status: 'skipped' };
+        }
         await lockShipment(trx, locked.vendor, locked.shipment_key);
         if (await shipmentHandedOff(trx, locked.vendor, locked.shipment_key, locked.email_id)) {
           await trx('purchase_receipt_lines').where({ id: locked.id }).update({

@@ -610,6 +610,43 @@ jest.setTimeout(30000);
     expect(await bellsFor(line.id)).toHaveLength(0);
   });
 
+  test('a product added meanwhile that now matches an unmatched title wins: no alias for the stale choice', async () => {
+    const [bifenXts] = await mockConn('products_catalog').insert({
+      name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const title = 'Bifen Insecticide Concentrate 96 oz';
+    const line = await pendingLine({ raw_title: title, quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'looks like Bifen XTS', product_id: bifenXts.id, new_product: null,
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    // Staff add a product whose name the title contains while the model decides.
+    const llm = async () => {
+      await mockConn('products_catalog').insert({
+        name: 'Bifen Insecticide Concentrate', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+      });
+      return { ok: true, json: decision };
+    };
+    await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(await mockConn('product_aliases').where({ alias_name: title })).toHaveLength(0);
+    expect(await stockOf(bifenXts.id)).toBe(0);
+  });
+
+  test('draining a line received before the current cutoff closes it quietly (a count since then includes it)', async () => {
+    const line = await pendingLine();
+    await mockConn('purchase_receipt_lines').where({ id: line.id }).update({ agent_decision: { handoffFrom: 'needs_size' } });
+    process.env.PURCHASE_RECEIPT_SINCE = new Date(RECEIVED_AT.getTime() + HOUR).toISOString();
+    process.env.GATE_INVENTORY_AGENT = 'false';
+    const { drainAgentQueue } = require('../services/purchase-receipts/inventory-agent');
+    await drainAgentQueue({ conn: mockConn, notifyAdmin });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.status).toBe('skipped');
+    expect(saved.agent_decision).toMatchObject({ reason: 'received_before_cutoff' });
+    expect(await bellsFor(line.id)).toHaveLength(0);
+  });
+
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
     const [bare] = await mockConn('products_catalog').insert({
       name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,
