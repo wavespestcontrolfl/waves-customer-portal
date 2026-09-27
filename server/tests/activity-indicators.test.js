@@ -123,7 +123,7 @@ describe('gauge/findings merge (owner ruling 2026-09-26)', () => {
     }
     // Tech-set-only indicators serve no deriveField — the client keeps
     // their gauge visible.
-    for (const [type, cfg] of Object.entries(ACTIVITY_INDICATORS).filter(([, c]) => !c.derive)) {
+    for (const [type] of Object.entries(ACTIVITY_INDICATORS).filter(([, c]) => !c.derive)) {
       expect(findingsSchemaForType(type).activity.deriveField).toBeNull();
     }
   });
