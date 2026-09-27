@@ -1783,14 +1783,22 @@ function confirmedStartOnTheHour(confirmedStartAt) {
 // trail. Never out_of_service_area — a hard block. Confirmed bookings are
 // deliberately NOT touched here: they keep the gated fail-open contract in
 // canAutoRoute, including its advisory read-back card.
+// A COMPLETE on-file address: street AND ZIP, the same evidence the
+// auto-resolver's address_moot rule demands — hasAddress alone is derived
+// from address_line1 (codex r3 P2). Every path that lets the saved address
+// stand in for one the caller did not state (on-file satisfaction, the
+// confirmed-booking fail-open, dispatchesToOnFileAddress) asks this one
+// predicate, so a legacy row with a street but no ZIP never dispatches — on
+// an inbound or an outbound call.
+function hasCompleteOnFileAddress(known) {
+  return !!(known && known.hasAddress && String(known.addressLine1 || '').trim() && String(known.addressZip || '').trim());
+}
+
 function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   const list = Array.isArray(flags) ? flags : [];
   const none = { flags: list, satisfied: [] };
   const known = opts.knownCustomer;
-  // A COMPLETE on-file address: street AND ZIP, the same evidence the
-  // auto-resolver's address_moot rule demands — hasAddress alone is derived
-  // from address_line1 (codex r3 P2).
-  if (!known || !known.hasAddress || !String(known.addressLine1 || '').trim() || !String(known.addressZip || '').trim()) return none;
+  if (!hasCompleteOnFileAddress(known)) return none;
   if (statesNewAddress(extraction, known)) return none;
   const rec = opts.canonicalRecord;
   if (rec && statesNewAddress({ property: { service_address: {
@@ -1861,7 +1869,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // Hoisted: the auto-route exit below also needs to know whether this booking
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
-  const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
+  const knownCustomerHasAddress = hasCompleteOnFileAddress(opts.knownCustomer);
   const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
@@ -2695,11 +2703,12 @@ function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = n
  */
 function dispatchesToOnFileAddress(extraction, opts = {}) {
   return !!(opts.failOpen
-    && opts.knownCustomer && opts.knownCustomer.hasAddress
+    && hasCompleteOnFileAddress(opts.knownCustomer)
     && !statesNewAddress(extraction, opts.knownCustomer));
 }
 
 module.exports = {
+  hasCompleteOnFileAddress,
   onFileHouseNumberConflict,
   sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,

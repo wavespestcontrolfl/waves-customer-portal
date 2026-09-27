@@ -36,6 +36,20 @@ test('accepted delivery stamps only the fully bound Email reservation', async ()
   );
 });
 
+test('invoice follow-up replay matches the producer ledger source', async () => {
+  const database = jest.fn();
+  readStoredBillingReplayContext.mockReturnValueOnce({
+    ...context,
+    source_entry_point: 'invoice_followup_sequence',
+  });
+  await expect(Reservation.markBillingEmailReservationDelivered({ sent_at: new Date() }, database))
+    .resolves.toBe(true);
+  expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+    { id: 'email-ledger-1' },
+    { database, match: expect.objectContaining({ source: 'invoice_followups' }) },
+  );
+});
+
 test('terminal refusal resolves the Email reservation without claiming delivery', async () => {
   const database = jest.fn();
   await expect(Reservation.resolveBillingEmailReservationRefusal({ id: 'message-1' }, database))
@@ -71,4 +85,24 @@ test.each([
   [{ delivered_at: new Date() }, true],
 ])('accepted evidence excludes provider identity and phase alone', (message, expected) => {
   expect(Reservation.hasAcceptedEvidence(message)).toBe(expected);
+});
+
+test('a repaired terminal refusal is reflected in the rows the current pass loaded', async () => {
+  const row = { id: 'email-ledger-1', channel: 'email',
+    metadata: JSON.stringify({ notificationEventKey: context.notificationEventKey }) };
+  const refused = { id: 'message-1', status: 'blocked', provider_retry_exhausted_at: new Date(),
+    error_message: `${Reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}Suppressed: bounce` };
+  const database = jest.fn(() => ({ whereIn: jest.fn(async () => [refused]) }));
+  const repaired = await Reservation.repairAcceptedBillingEmailReservations([row], database);
+  expect(repaired.size).toBe(0); // never counted as delivered
+  expect(row.metadata).toMatchObject({ send_failed: true, resolved: true, resolution: 'email_terminal_refusal' });
+});
+
+test('an unwritten refusal repair leaves the loaded row pending', async () => {
+  ContactLedger.markSendFailed.mockResolvedValueOnce(false);
+  const row = { id: 'email-ledger-1', channel: 'email', metadata: { notificationEventKey: context.notificationEventKey } };
+  const refused = { id: 'message-1', status: 'blocked', provider_retry_exhausted_at: new Date(),
+    error_message: `${Reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}Suppressed: bounce` };
+  await Reservation.repairAcceptedBillingEmailReservations([row], jest.fn(() => ({ whereIn: jest.fn(async () => [refused]) })));
+  expect(row.metadata.resolved).toBeUndefined();
 });

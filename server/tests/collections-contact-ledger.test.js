@@ -153,6 +153,8 @@ test('keyed delivery attempts distinguish fresh, accepted and ambiguous reservat
   await expect(claimAttempt({ id: 'led-1', metadata: {} })).resolves.toEqual({ allowed: true });
   await expect(claimAttempt({ id: 'led-1', reused: true, metadata: { delivered: true } }))
     .resolves.toEqual({ allowed: false, delivered: true });
+  await expect(claimAttempt({ id: 'led-1', reused: true, metadata: { send_failed: true, resolved: true } }))
+    .resolves.toEqual({ allowed: false, resolved: true });
   await expect(claimAttempt({ id: 'led-1', reused: true, metadata: {} }))
     .resolves.toEqual({ allowed: false, held: true });
   expect(db).not.toHaveBeenCalled();
@@ -166,7 +168,7 @@ test('a confirmed failure is cleared atomically before retry and only one retry 
   await expect(claimAttempt(entry)).resolves.toEqual({ allowed: true });
   await expect(claimAttempt(entry)).resolves.toEqual({ allowed: false, held: true });
   expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('AND NOT'), [
-    JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }),
+    JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
   ]);
   expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('||'), [JSON.stringify({ send_failed: false })]);
   // If the accepted retry cannot stamp delivery, its cleared reservation is

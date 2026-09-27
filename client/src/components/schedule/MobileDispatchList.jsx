@@ -90,15 +90,54 @@ function formatWindow(svc) {
   return `${formatTimeLabel(svc.windowStart)} – ${formatTimeLabel(svc.windowEnd)}`;
 }
 
-function sortByWindow(services) {
-  return [...services].sort((a, b) => {
-    const ax = parseHHMM(a.windowStart);
-    const bx = parseHHMM(b.windowStart);
-    if (ax == null && bx == null) return 0;
-    if (ax == null) return 1;
-    if (bx == null) return -1;
-    return ax - bx;
+// Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
+// `displayOrder` is a 0-based index within ONE technician's day. This list
+// can mix techs, so a pairwise "use displayOrder if same tech" comparator
+// would be non-transitive. Instead each stop gets one fixed key: walking a
+// tech's stops in displayOrder, its effective start is the max of its own
+// windowStart and the previous stop's effective start. That key never
+// decreases along a tech's order, so sorting by (effective start, then
+// displayOrder) keeps each tech's proximity order and interleaves techs by
+// time. Absent displayOrder (gate off) = plain windowStart order.
+function effectiveStarts(services) {
+  const eff = new Map();
+  const byTech = new Map();
+  services.forEach((s) => {
+    if (!s.technicianId || s.displayOrder == null || parseHHMM(s.windowStart) == null) return;
+    if (!byTech.has(s.technicianId)) byTech.set(s.technicianId, []);
+    byTech.get(s.technicianId).push(s);
   });
+  byTech.forEach((list) => {
+    let prev = -Infinity;
+    [...list].sort((a, b) => a.displayOrder - b.displayOrder).forEach((s) => {
+      prev = Math.max(prev, parseHHMM(s.windowStart));
+      eff.set(s, prev);
+    });
+  });
+  return eff;
+}
+
+// Full lexicographic key (start, displayOrder, original index): a total
+// order, so another tech's equal-time row sitting between two of one tech's
+// stops can't shield that pair from being put in displayOrder.
+function sortByWindow(services) {
+  const eff = effectiveStarts(services);
+  return services
+    .map((s, i) => ({
+      s,
+      i,
+      start: eff.has(s) ? eff.get(s) : parseHHMM(s.windowStart),
+      order: eff.has(s) ? s.displayOrder : Infinity,
+    }))
+    .sort((a, b) => {
+      if (a.start == null && b.start == null) return a.i - b.i;
+      if (a.start == null) return 1;
+      if (b.start == null) return -1;
+      if (a.start !== b.start) return a.start - b.start;
+      if (a.order !== b.order) return a.order < b.order ? -1 : 1;
+      return a.i - b.i;
+    })
+    .map((x) => x.s);
 }
 
 function canMarkEnRoute(service) {

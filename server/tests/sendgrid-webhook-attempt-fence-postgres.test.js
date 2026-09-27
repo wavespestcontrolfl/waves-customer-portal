@@ -65,7 +65,8 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
     await mockPg.schema.createTable('email_messages', (t) => {
       t.uuid('id').primary();
       ['provider_message_id', 'template_key', 'send_attempt_token', 'status', 'recipient_email_snapshot',
-        'subject_snapshot', 'suppression_group_key_snapshot', 'error_message'].forEach((name) => t.string(name));
+        'subject_snapshot', 'suppression_group_key_snapshot', 'error_message',
+        'provider_handoff_phase', 'provider_handoff_attempt_token'].forEach((name) => t.string(name));
       t.integer('provider_retry_count').notNullable().defaultTo(0);
       t.boolean('has_attachments').notNullable().defaultTo(false);
       ['updated_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at', 'complained_at',
@@ -103,6 +104,7 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
       provider_message_id: 'provider-old',
       template_key: 'billing.notice',
       send_attempt_token: 'attempt-old',
+      provider_handoff_phase: 'started', provider_handoff_attempt_token: 'attempt-old',
       status: 'sent',
       recipient_email_snapshot: 'old@example.com',
       subject_snapshot: 'Billing notice',
@@ -124,6 +126,7 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
     const resolved = await mockPg('email_messages').where({ id: messageId }).first();
     await mockPg('email_messages').where({ id: messageId }).update({
       provider_message_id: 'provider-new', send_attempt_token: 'attempt-new', status: 'sent',
+      provider_handoff_phase: 'started', provider_handoff_attempt_token: 'attempt-new',
     });
 
     await expect(mockPg.transaction((trx) => handleEmailMessageEvent({
@@ -134,11 +137,13 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
     expect(await mockPg('email_messages').where({ id: messageId }).first()).toMatchObject({
       status: 'sent', provider_message_id: 'provider-new', send_attempt_token: 'attempt-new',
       provider_retry_next_at: null,
+      provider_handoff_phase: 'started', provider_handoff_attempt_token: 'attempt-new',
     });
     expect(await mockPg('email_message_events').where({ provider_event_id: 'stale-block' })).toHaveLength(1);
   });
 
-  test('a same-attempt blocked event retains normal mutation', async () => {
+  test.each([false, true])('a same-attempt block records rejection with attachments=%s', async (hasAttachments) => {
+    await mockPg('email_messages').where({ id: messageId }).update({ has_attachments: hasAttachments });
     const resolved = await mockPg('email_messages').where({ id: messageId }).first();
     await expect(mockPg.transaction((trx) => handleEmailMessageEvent({
       event: 'blocked', email: 'old@example.com', response: 'provider reputation block',
@@ -146,7 +151,8 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
     }, resolved, trx))).resolves.toBe(true);
     expect(await mockPg('email_messages').where({ id: messageId }).first()).toMatchObject({
       status: 'failed', send_attempt_token: 'attempt-old', provider_retry_next_at: null,
-      provider_retry_exhausted_at: expect.any(Date),
+      provider_retry_exhausted_at: hasAttachments ? null : expect.any(Date),
+      provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'attempt-old',
     });
   });
 

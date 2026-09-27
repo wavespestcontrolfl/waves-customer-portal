@@ -89,6 +89,88 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const mount = () => render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={submit} />);
 
+it.each([false, true])('requires visit facts beyond a typed treatment target: companion=%s', async (companion) => {
+  const targetKey = companion ? 'treatment_target' : 'target_pest';
+  const schema = { type: 'one_time_pest_treatment', fields: [
+    { key: targetKey, label: 'Target pest', type: 'text', placeholder: 'Synthetic target' },
+    { key: 'work_completed', label: 'Work completed', type: 'text', placeholder: 'Synthetic work' },
+  ], nextStepChips: [] };
+  render(<CompletionPanel service={{ ...service, serviceType: 'One-Time Pest Treatment', waveguardTier: null,
+    completionProfile: { serviceKey: 'one_time_pest_treatment', requiresProducts: false, ...(!companion && { findingsType: schema.type }) },
+    ...(companion ? { companionSchemas: [schema] } : { findingsSchema: schema }),
+  }} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.change((await screen.findAllByPlaceholderText('Synthetic target'))[0], { target: { value: 'Ants' } });
+  const generate = () => screen.getAllByRole('button', { name: /generate ai/i });
+  fireEvent.click(generate()[0]);
+  expect(alert).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(false);
+  fireEvent.change(screen.getAllByPlaceholderText('Synthetic work')[0], { target: { value: 'Inspected the kitchen.' } });
+  fireEvent.click(generate()[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  const request = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(companion ? request.companionFindings[0].values : request.structuredFindings.values)
+    .toEqual({ [targetKey]: 'Ants', work_completed: 'Inspected the kitchen.' });
+});
+
+it('sends the recorded application method, scope and edited measurement to Generate', async () => {
+  defaultsEnabled = true;
+  mount();
+  await waitFor(() => expect(screen.getByPlaceholderText('Sq ft').value).toBe('5000'));
+  fireEvent.change(screen.getByPlaceholderText('Sq ft'), { target: { value: '4000' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  const request = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(request.products).toEqual([expect.objectContaining({
+    productId: 'test-k',
+    applicationMethod: 'broadcast_spray',
+    applicationArea: 'Front yard, Back yard, Side yards',
+    areaValue: '4000',
+    areaUnit: 'sqft',
+  })]);
+});
+
+it.each(['after generation', 'during generation', 'with a recorded measurement'])('reconciles a delayed treatment trace %s', async (timing) => {
+  const visit = { ...service, serviceType: 'Quarterly Pest Control Service', waveguardTier: null,
+    completionProfile: { serviceKey: 'pest_recurring', requiresProducts: true } };
+  const originalNotes = 'Inspected and treated the exterior perimeter.';
+  const report = 'WHAT WE DID:\nTreated the exterior perimeter.\nWHAT WE FOUND:\nRecorded the visit conditions.';
+  const measured = timing === 'with a recorded measurement';
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id, savedAt: Date.now(), notes: originalNotes,
+    selectedProducts: [{ productId: 'test-k', name: products[0].name, rate: 3, rateUnit: 'fl_oz',
+      totalAmount: 3, amountUnit: 'fl_oz', applicationMethod: 'perimeter_spray',
+      areaValue: measured ? 100 : '', areaUnit: 'linear_ft' }],
+  }));
+  let releaseTrace;
+  let releaseReport;
+  const trace = new Promise((resolve) => { releaseTrace = resolve; });
+  const generated = new Promise((resolve) => { releaseReport = resolve; });
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation((url, options) => {
+    if (url.includes('treatment-zone')) return Promise.resolve({ ok: true, json: () => trace });
+    if (url.includes('generate-report')) return Promise.resolve({ ok: true, json: () => generated });
+    return originalFetch(url, options);
+  });
+  render(<CompletionPanel service={visit} products={products} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toBe(originalNotes));
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  if (timing === 'during generation') {
+    await act(async () => releaseTrace({ treatmentZone: { linear_ft: 240 } }));
+    await waitFor(() => expect(screen.getByPlaceholderText('Linear ft').value).toBe('240'));
+    await act(async () => releaseReport({ report }));
+  } else {
+    await act(async () => releaseReport({ report }));
+    await waitFor(() => expect(notes.value).toBe(report));
+    await act(async () => releaseTrace({ treatmentZone: { linear_ft: 240 } }));
+  }
+  await waitFor(() => expect(screen.getByPlaceholderText('Linear ft').value).toBe(measured ? '100' : '240'));
+  await waitFor(() => expect(notes.value).toBe(measured ? report : originalNotes));
+  if (!measured) expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy();
+}, 15000);
+
 it('prefills the engine mix and submits findings and inspection actions once, with edited quantities', async () => {
   mount();
   await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe('15'));
