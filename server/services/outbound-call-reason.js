@@ -113,6 +113,22 @@ function last10(phone) {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
+// hasPriorContact's evidence probes match a STORED column against a NANP
+// identityKey by last-10 suffix — codex pre-push r7 P1 (second finding):
+// the last-10 suffix alone lets a stored INTERNATIONAL number whose full
+// digit string merely ENDS in the same 10 digits as identityKey pass, the
+// exact shared-suffix collision phoneIdentityKey exists to prevent (codex
+// #4213), just on the stored side instead of the requested side. Requiring
+// the stored column's own full digit string to be NANP-shaped too (bare 10
+// digits, or 11 starting with 1) closes that — an international row can
+// never satisfy it, whatever its suffix. This is an ADDED AND'd condition
+// on the SAME `right(regexp_replace(...),10) = ?` expression migration
+// 20260927000006's indexes were built for, so those indexes are still used
+// for the equality half; no new migration is required.
+function nanpStoredPhoneClause(column) {
+  return `right(regexp_replace(${column}, '\\D', '', 'g'), 10) = ? AND regexp_replace(${column}, '\\D', '', 'g') ~ '^1?\\d{10}$'`;
+}
+
 function parseMetadata(metadata) {
   if (metadata && typeof metadata === 'object') return metadata;
   if (typeof metadata === 'string' && metadata) {
@@ -244,7 +260,7 @@ async function anyLeadRecord({ phoneLast10, before }) {
   return db('leads')
     .whereNull('deleted_at')
     .where('created_at', '<', before)
-    .whereRaw("right(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    .whereRaw(nanpStoredPhoneClause('phone'), [phoneLast10])
     // Customer-originated AND non-call-derived (codex pre-push r4 P1 + r5
     // P1): a lead this module counted before included 'manual' /
     // 'field_observation' / 'lawn_diagnostic' rows (staffer typed a
@@ -299,7 +315,7 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
   const row = await whereNotSandboxCall(db('call_log')
     .where('direction', 'inbound')
     .where('created_at', '<', before))
-    .whereRaw("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    .whereRaw(nanpStoredPhoneClause('from_phone'), [phoneLast10])
     // v2_extraction_status = 'valid' (codex pre-push r7 P1): a row the V2
     // pipeline never classified — no run yet, a parse failure, or a
     // pre-V2 legacy row with only call_outcome / processing_status /
@@ -326,7 +342,7 @@ async function existsQualifyingInboundText({ phoneLast10, before }) {
   const rows = await db('sms_log')
     .where('direction', 'inbound')
     .where('created_at', '<', before)
-    .whereRaw("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    .whereRaw(nanpStoredPhoneClause('from_phone'), [phoneLast10])
     // NOT IN excludes NULL rows entirely (SQL's three-valued logic) —
     // message_type is nullable, and isSubstantiveText's own JS check
     // (IGNORED_TEXT_TYPES.has(String(row.message_type || ''))) treats a
@@ -552,5 +568,6 @@ module.exports = {
   hasPriorContact,
   _private: {
     last10, callNature, parseMetadata, existsQualifyingInboundCall, existsQualifyingInboundText,
+    nanpStoredPhoneClause,
   },
 };

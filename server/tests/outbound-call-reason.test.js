@@ -501,6 +501,33 @@ describe('hasPriorContact', () => {
     }
   });
 
+  // Codex pre-push r7 P1 (second finding, on push): the NANP check above
+  // only validates the REQUESTED phone. Without ALSO requiring the STORED
+  // column's full digit string to be NANP-shaped, an international number
+  // whose full digits merely END in the same 10 digits as a NANP
+  // identityKey would still pass the last-10 equality — the same
+  // shared-suffix collision codex #4213 already fixed on the requested
+  // side, reopened here on the stored side. The mock can't evaluate SQL
+  // regexes itself, so this asserts the QUERY the code built, not a row
+  // result — real Postgres applies `~ '^1?\d{10}$'`.
+  test('every hasPriorContact probe requires the STORED phone column to be NANP-shaped too, not just suffix-equal (codex pre-push r7 P1)', async () => {
+    installDb({
+      call_log: [{ id: 'c1', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }],
+      sms_log: [{ id: 's1', message_body: 'Can you come look at the ants?' }],
+      leads: [{ id: 'l1', first_contact_channel: 'web', status: 'new' }],
+    });
+    await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
+    const callQ = state.queries.find((q) => q.table === 'call_log');
+    const smsQ = state.queries.find((q) => q.table === 'sms_log');
+    const leadsQ = state.queries.find((q) => q.table === 'leads');
+    for (const [q, column] of [[callQ, 'from_phone'], [smsQ, 'from_phone'], [leadsQ, 'phone']]) {
+      const clause = q.raws.find((r) => String(r[0]).includes('regexp_replace'));
+      expect(clause[0]).toBe(_private.nanpStoredPhoneClause(column));
+      expect(clause[0]).toContain("~ '^1?\\d{10}$'");
+      expect(clause[1]).toEqual(['9415550101']);
+    }
+  });
+
   test('a job_applicant-only call history does NOT count as prior contact (codex pre-push r5 P1)', async () => {
     installDb({ call_log: [{ id: 'in-applicant', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'job_applicant' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
