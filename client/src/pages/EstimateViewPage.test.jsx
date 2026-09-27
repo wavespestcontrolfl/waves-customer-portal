@@ -1571,6 +1571,13 @@ describe('ContactGapFields — missing-contact capture on accept', () => {
     expect(onLastNameChange).toHaveBeenCalledWith('Sample');
     expect(onEmailChange).toHaveBeenCalledWith('sample@example.com');
   });
+  it('shows the email format error only when the caller flags it invalid', () => {
+    const { rerender } = render(<ContactGapFields gaps={{ lastName: false, email: true }} email="sample@" onEmailChange={noop} />);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ lastName: false, email: true }} email="sample@" onEmailChange={noop} emailInvalid />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Please check your email address, or leave it blank.');
+    expect(screen.getByPlaceholderText('you@example.com (optional)')).toHaveAttribute('aria-invalid', 'true');
+  });
 });
 
 describe('ReviewPhase — missing-contact capture wiring', () => {

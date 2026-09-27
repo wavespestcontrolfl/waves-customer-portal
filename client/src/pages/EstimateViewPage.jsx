@@ -3729,6 +3729,8 @@ export function ContactGapFields({
   lastNameTouched = false,
   email = '',
   onEmailChange,
+  onEmailBlur,
+  emailInvalid = false,
   disabled = false,
 }) {
   if (!gaps || (!gaps.lastName && !gaps.email)) return null;
@@ -3763,13 +3765,18 @@ export function ContactGapFields({
             type="email"
             value={email}
             onChange={(e) => onEmailChange?.(e.target.value)}
+            onBlur={onEmailBlur}
+            aria-invalid={emailInvalid || undefined}
             autoComplete="email"
             inputMode="email"
             maxLength={254}
             disabled={disabled}
             placeholder="you@example.com (optional)"
-            style={softExitInputStyle}
+            style={{ ...softExitInputStyle, ...(emailInvalid ? { borderColor: W.red } : {}) }}
           />
+          {emailInvalid ? (
+            <span role="alert" style={{ fontSize: 13, color: W.red }}>Please check your email address, or leave it blank.</span>
+          ) : null}
         </label>
       ) : null}
     </div>
@@ -5566,6 +5573,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
   const [contactLastName, setContactLastName] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [contactLastNameTouched, setContactLastNameTouched] = useState(false);
+  const [contactEmailTouched, setContactEmailTouched] = useState(false);
   // Acceptance deposit (flat $49/$99). depositIntent holds the live
   // POST /deposit-intent response while the Payment Element modal is open;
   // the ref carries the paid PI id into accept (server live-verifies it —
@@ -6890,6 +6898,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
   const contactLastNameGap = !!data?.contactGaps?.lastName;
   const contactEmailGap = !!data?.contactGaps?.email;
   const contactLastNameMissing = contactLastNameGap && !contactLastName.trim();
+  // A typed-but-malformed email blocks Accept HERE, before handleConfirm can
+  // mint a card hold / prepay charge — the server's 400 would otherwise land
+  // after that step. Same shape as the server's EMAIL_RE; blank stays fine.
+  const contactEmailInvalid = contactEmailGap && !!contactEmail.trim()
+    && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(contactEmail.trim());
 
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
@@ -8995,6 +9008,8 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 lastNameTouched={contactLastNameTouched}
                 email={contactEmail}
                 onEmailChange={setContactEmail}
+                onEmailBlur={() => setContactEmailTouched(true)}
+                emailInvalid={contactEmailTouched && contactEmailInvalid}
                 disabled={ctaPhase === 'submitting'}
               />
             ) : null}
@@ -9009,6 +9024,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
               // a plain confirm can't race the payment authorization
               // (pre-push Codex P0 r2).
               || contactLastNameMissing
+              || contactEmailInvalid
               || (inlineAutoPayActive && inlineCardIntent
                 ? !(inlineCardState.ready && inlineCardState.agreed)
                 : false)}
