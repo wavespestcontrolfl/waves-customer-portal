@@ -113,6 +113,14 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
       .toContain(UNNAMED_SAFETY_CLAUSES.irritant);
   });
 
+  // Pre-push audit on Codex #5106 r2: CDC — unnoticed bat contact (waking
+  // with a bat in the room) needs assessment even without a visible bite.
+  test('a draft bat keeps the unnoticed-contact guidance', () => {
+    const line = answerFor('brazilian-free-tailed-bat', { approved: false }).genericSafetyLine;
+    expect(line).toContain(UNNAMED_SAFETY_CLAUSES.bat);
+    expect(line).toMatch(/wakes up with a bat in the room/);
+  });
+
   test('a draft raccoon keeps rabies guidance', () => {
     expect(answerFor('raccoon', { approved: false }).genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.rabies);
   });

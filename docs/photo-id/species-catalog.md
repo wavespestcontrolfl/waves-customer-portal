@@ -49,7 +49,7 @@ when nothing was identified at all), one safety line assembled from fixed
 `UNNAMED_SAFETY_CLAUSES`. The line is triaged for the node's worst member: a
 venomous biter anywhere under it (snakes, widows, recluse) makes a bite an
 emergency-care instruction, and every other hazard flag a member carries
-(irritant, allergen, disease vector, toxic to pets, protected, or a biting
+(irritant, allergen, disease vector, toxic to pets, protected, a bat's unnoticed-contact risk, or a biting
 wild mammal's rabies risk) adds its own fixed clause (`HAZARD_CLAUSES`), so
 withholding a draft's prose never withholds its first aid. It carries no referral: the next step is the team,
 or an inspection for a node whose every entry is inspection-first (termites,

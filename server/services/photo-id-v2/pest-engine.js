@@ -129,6 +129,8 @@ const UNNAMED_SAFETY_CLAUSES = Object.freeze({
   general: 'If anyone is bitten, stung or scratched, wash the area and call a doctor; call 911 for trouble breathing or a severe reaction.',
   // Wild mammals that bite (raccoons, bats, squirrels, opossums).
   rabies: 'Wild mammals can carry rabies: if one bites or scratches anyone, wash the wound with soap and water and see a doctor or call the health department right away.',
+  // CDC: a bat bite can go unnoticed, so possible contact needs assessment.
+  bat: 'A bat bite can be too small to notice: if anyone wakes up with a bat in the room or may have touched one, call a doctor or the health department right away, even without a visible bite.',
   irritant: 'If it touches bare skin or anything from it gets in the eyes, wash the skin with soap and water or rinse the eyes with clean water right away, and call a doctor if pain, redness or vision trouble lasts.',
   allergen: 'People with allergies or asthma can react more strongly; call 911 for trouble breathing.',
   vector: 'Wash your hands after any contact, and if anyone gets sick after a bite or contact, tell their doctor about it.',
@@ -175,6 +177,7 @@ function isRabiesRisk(entry) {
 // draft entry's own prose would have covered goes unanswered.
 const HAZARD_CLAUSES = [
   ['rabies', isRabiesRisk],
+  ['bat', (entry) => catalog.lineage(entry.slug).some((rung) => rung.id === 'bats')],
   ['irritant', (entry) => !!entry.safety?.irritant],
   ['allergen', (entry) => !!entry.safety?.allergen],
   ['vector', (entry) => !!entry.safety?.disease_vector],
