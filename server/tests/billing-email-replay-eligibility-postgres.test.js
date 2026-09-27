@@ -4,13 +4,18 @@ jest.mock('../models/db', () => (...args) => mockPg(...args));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({
   invoiceStillCollectible: jest.fn(async () => ({ eligible: true })),
 }));
-jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: () => async () => ({ ok: true }) }));
-jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn(async () => ({ allowed: true, durable: false })) }));
+jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'), selfPayAtDispatch: () => async () => ({ ok: true }),
+}));
+jest.mock('../services/collections/rail-guard', () => ({
+  collectionsChannelPermitted: jest.fn(async () => ({ allowed: true, durable: false })),
+  collectionsChannelVerdict: jest.fn(async () => ({ permitted: true, eligibleInvoiceIds: null })),
+}));
 
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
-const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
+const { collectionsChannelPermitted, collectionsChannelVerdict } = require('../services/collections/rail-guard');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
@@ -37,11 +42,31 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
     await mockPg.schema.createTable('collections_contact_ledger', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
-      table.text('source').notNullable(); table.jsonb('metadata');
+      table.text('source').notNullable(); table.jsonb('metadata'); table.text('channel');
     });
     await mockPg.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
-      table.text('status'); table.date('scheduled_date'); table.text('service_type');
+      table.text('status'); table.date('scheduled_date'); table.text('service_type'); table.boolean('is_recurring');
+      table.integer('payer_id'); table.text('po_number'); table.boolean('self_pay_override');
+    });
+    await mockPg.schema.createTable('customers', (table) => {
+      table.uuid('id').primary(); table.integer('payer_id'); table.text('billing_mode');
+      table.text('waveguard_tier'); table.decimal('monthly_rate'); table.integer('billing_day');
+    });
+    await mockPg.schema.createTable('payers', (table) => {
+      table.integer('id').primary(); table.boolean('active');
+    });
+    await mockPg.schema.createTable('invoices', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id'); table.integer('payer_id');
+      table.text('status'); table.decimal('total'); table.decimal('credit_applied');
+      table.uuid('scheduled_service_id'); table.date('due_date'); table.timestamp('created_at');
+      table.timestamp('last_reminder_at'); table.text('scheduled_send_error');
+    });
+    await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
+      table.uuid('invoice_id'); table.text('status'); table.timestamp('last_touch_at');
+    });
+    await mockPg.schema.createTable('activity_log', (table) => {
+      table.uuid('customer_id'); table.text('action'); table.timestamp('created_at'); table.jsonb('metadata');
     });
   }, 30000);
 
@@ -50,6 +75,11 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     await mockPg('collections_contact_ledger').delete();
     await mockPg('scheduled_services').delete();
+    await mockPg('customers').delete();
+    await mockPg('payers').delete();
+    await mockPg('invoices').delete();
+    await mockPg('invoice_followup_sequences').delete();
+    await mockPg('activity_log').delete();
   });
 
   afterAll(async () => {
@@ -112,5 +142,54 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await expect(billingEmailReplayEligible(meta)).resolves.toEqual({ eligible: true });
     await mockPg('scheduled_services').where({ id: visitId }).update(change);
     await expect(billingEmailReplayEligible(meta)).resolves.toMatchObject({ eligible: false, retryable: false });
+  });
+
+  test('previsit replay uses the held database, excludes its episode, and rejects a newly eligible invoice', async () => {
+    const invoiceIds = [randomUUID(), randomUUID()];
+    const siblingId = randomUUID();
+    const date = etDateString(addETDays(new Date(), 1));
+    const previsitEventKey = `previsit-balance:${visitId}`;
+    await mockPg('customers').insert({ id: customerId, billing_mode: 'per_visit' });
+    await mockPg('scheduled_services').insert({
+      id: visitId, customer_id: customerId, status: 'confirmed', scheduled_date: date,
+      service_type: 'Pest Control', is_recurring: true,
+    });
+    await mockPg('invoices').insert(invoiceIds.map((id, index) => ({
+      id, customer_id: customerId, status: 'sent', total: index ? '60.00' : '40.00', credit_applied: '0.00',
+      scheduled_service_id: visitId, due_date: etDateString(addETDays(new Date(), -8)),
+    })));
+    await mockPg('collections_contact_ledger').insert([
+      { id: ownId, customer_id: customerId, source: 'previsit_balance_reminder', channel: 'email',
+        metadata: { notificationEventKey: previsitEventKey } },
+      { id: siblingId, customer_id: customerId, source: 'previsit_balance_reminder', channel: 'push',
+        metadata: { notificationEventKey: previsitEventKey } },
+    ]);
+    const meta = {
+      customer_id: customerId,
+      source_entry_point: 'previsit_balance_reminder',
+      notificationEventKey: previsitEventKey,
+      collections_ledger_id: ownId,
+      appointment_id: visitId,
+      appointment_date: date,
+      appointment_service_type: 'Pest Control',
+      appointment_rendered_on: etDateString(),
+      rendered_amount: '100.00',
+      invoice_ids: invoiceIds,
+    };
+
+    await mockPg.transaction(async (trx) => {
+      await expect(billingEmailReplayEligible(meta, trx)).resolves.toEqual({ eligible: true });
+      expect(collectionsChannelVerdict).toHaveBeenLastCalledWith(expect.objectContaining({
+        customerId, channel: 'email', database: trx,
+        excludeLedgerIds: expect.arrayContaining([ownId, siblingId]),
+      }));
+    });
+
+    await mockPg('invoices').insert({
+      id: randomUUID(), customer_id: customerId, status: 'sent', total: '25.00', credit_applied: '0.00',
+      scheduled_service_id: visitId, due_date: etDateString(addETDays(new Date(), -8)),
+    });
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toEqual({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
   });
 });

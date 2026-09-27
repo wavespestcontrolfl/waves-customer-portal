@@ -5,8 +5,18 @@ jest.mock('../services/autopay-eligibility', () => ({
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ getCardExpiryExemptions: jest.fn() }));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({ invoiceStillCollectible: jest.fn() }));
-jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: jest.fn() }));
-jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
+jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'),
+  selfPayAtDispatch: jest.fn(),
+}));
+jest.mock('../services/collections/rail-guard', () => ({
+  collectionsChannelPermitted: jest.fn(),
+  collectionsChannelVerdict: jest.fn(),
+}));
+jest.mock('../services/previsit-balance-reminder', () => ({
+  currentEligiblePrevisitBalance: jest.fn(),
+}));
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn() }));
 
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
@@ -14,6 +24,8 @@ const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals'
 const { invoiceStillCollectible } = require('../services/messaging/deferred-replay-registry');
 const { selfPayAtDispatch } = require('../services/invoice-helpers');
 const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
+const { currentEligiblePrevisitBalance } = require('../services/previsit-balance-reminder');
+const { resolveForInvoice } = require('../services/payer');
 const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
 
 const customerId = '11111111-1111-4111-8111-111111111111';
@@ -81,6 +93,16 @@ beforeEach(() => {
   invoiceStillCollectible.mockResolvedValue({ eligible: true });
   selfPayAtDispatch.mockReturnValue(async () => ({ ok: true }));
   collectionsChannelPermitted.mockResolvedValue({ allowed: true, durable: false });
+  currentEligiblePrevisitBalance.mockResolvedValue({
+    permitted: true,
+    invoices: [
+      { id: 'invoice-1', customer_id: customerId, status: 'sent', total: '40.00' },
+      { id: 'invoice-2', customer_id: customerId, status: 'sent', total: '60.00' },
+    ],
+    duesCents: 0,
+    excludeLedgerIds: ['own-email'],
+  });
+  resolveForInvoice.mockResolvedValue({ payerId: null });
 });
 
 afterAll(() => jest.useRealTimers());
@@ -198,6 +220,105 @@ describe('balance-reminder visit identity', () => {
       scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'General Pest Control' };
     await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
       .resolves.toEqual({ eligible: true });
+  });
+});
+
+describe('previsit aggregate replay eligibility', () => {
+  const eventKey = 'previsit-balance:visit-1';
+  const meta = {
+    customer_id: customerId,
+    source_entry_point: 'previsit_balance_reminder',
+    notificationEventKey: eventKey,
+    collections_ledger_id: 'own-email',
+    appointment_id: 'visit-1',
+    appointment_date: '2026-09-28',
+    appointment_service_type: 'Pest Control',
+    appointment_rendered_on: '2026-09-26',
+    rendered_amount: '100.00',
+    invoice_ids: ['invoice-1', 'invoice-2'],
+  };
+  const visit = {
+    id: 'visit-1', customer_id: customerId, status: 'confirmed',
+    scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'Pest Control', is_recurring: true,
+  };
+  const reservation = {
+    id: 'own-email', customer_id: customerId, source: 'previsit_balance_reminder', channel: 'email',
+    metadata: { notificationEventKey: eventKey },
+  };
+  const database = (overrides = {}) => databaseWith({
+    scheduled_services: [visit], collections_contact_ledger: [reservation], ...overrides,
+  });
+
+  test('accepts the exact current eligible debt set and uses the held database', async () => {
+    const connection = database();
+    await expect(billingEmailReplayEligible(meta, connection)).resolves.toEqual({ eligible: true });
+    expect(currentEligiblePrevisitBalance).toHaveBeenCalledWith({
+      customerId,
+      channel: 'email',
+      eventKey,
+      database: connection,
+      now: expect.any(Date),
+    });
+    expect(resolveForInvoice).toHaveBeenCalledWith({
+      database: connection, customerId, scheduledServiceId: 'visit-1', throwOnError: true,
+    });
+  });
+
+  test.each([
+    ['no longer recurring', { visit: { is_recurring: false } }, 'previsit-visit-no-longer-recurring'],
+    ['payer billed', { payerId: 'payer-1' }, 'previsit-visit-payer-billed'],
+  ])('refuses a visit that is %s', async (_label, change, reason) => {
+    if (change.payerId) resolveForInvoice.mockResolvedValueOnce({ payerId: change.payerId });
+    const rows = change.visit ? [{ ...visit, ...change.visit }] : [visit];
+    await expect(billingEmailReplayEligible(meta, database({ scheduled_services: rows })))
+      .resolves.toMatchObject({ eligible: false, reason });
+  });
+
+  test.each([
+    ['a newly eligible invoice', ['invoice-1', 'invoice-2', 'invoice-3'], 12500],
+    ['an invoice after a dues-only quote', ['invoice-1'], 8900],
+  ])('refuses %s', async (_label, ids, totalCents) => {
+    currentEligiblePrevisitBalance.mockResolvedValueOnce({
+      permitted: true,
+      invoices: ids.map((id, index) => ({ id, total: ((totalCents / ids.length) / 100).toFixed(2), index })),
+      duesCents: 0,
+      excludeLedgerIds: ['own-email'],
+    });
+    const frozen = ids.length === 1 ? { ...meta, invoice_ids: [], rendered_amount: '49.00' } : meta;
+    await expect(billingEmailReplayEligible(frozen, database()))
+      .resolves.toEqual({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+  });
+
+  test('refuses when recomputed dues change the rendered aggregate total', async () => {
+    currentEligiblePrevisitBalance.mockResolvedValueOnce({
+      permitted: true,
+      invoices: [{ id: 'invoice-1', total: '40.00' }, { id: 'invoice-2', total: '60.00' }],
+      duesCents: 4900,
+      excludeLedgerIds: ['own-email'],
+    });
+    await expect(billingEmailReplayEligible(meta, database()))
+      .resolves.toEqual({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+  });
+
+  test('classifies a current collections hold using the selector episode exclusions', async () => {
+    currentEligiblePrevisitBalance.mockResolvedValueOnce({
+      permitted: false, invoices: [], duesCents: 4900, excludeLedgerIds: ['own-email', 'sibling-push'],
+    });
+    collectionsChannelPermitted.mockResolvedValueOnce({ allowed: false, durable: false });
+    const connection = database();
+    await expect(billingEmailReplayEligible(meta, connection))
+      .resolves.toEqual({ eligible: false, reason: 'collections-policy-denied', retryable: true });
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
+      customerId, invoiceId: null, invoiceIds: meta.invoice_ids, channel: 'email',
+      offLedgerBalanceCents: 4900, excludeLedgerIds: ['own-email', 'sibling-push'], database: connection,
+    }));
+  });
+
+  test('refuses missing or unbound aggregate quote evidence', async () => {
+    await expect(billingEmailReplayEligible({ ...meta, invoice_ids: undefined }, database()))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-missing' });
+    await expect(billingEmailReplayEligible(meta, database({ collections_contact_ledger: [] })))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-missing' });
   });
 });
 

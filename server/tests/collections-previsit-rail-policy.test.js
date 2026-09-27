@@ -20,6 +20,8 @@ jest.mock('../services/billing-lane', () => ({
 }));
 jest.mock('../services/invoice-helpers', () => ({
   invoiceAmountDue: jest.fn((inv) => Number(inv.total)),
+  isInvoiceCollectibleStatus: jest.fn((status) => !['paid', 'void'].includes(status)),
+  invoiceWithdrawnFromCustomer: jest.fn(() => false),
 }));
 jest.mock('../services/payer', () => ({
   resolveForInvoice: jest.fn(async () => ({ payerId: null })),
