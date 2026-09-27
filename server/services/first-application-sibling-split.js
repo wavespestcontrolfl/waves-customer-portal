@@ -273,7 +273,15 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
   }
 
   const updatedLineItems = lineItems.slice();
-  updatedLineItems[lineIndex] = { ...updatedLineItems[lineIndex], unit_price: remaining, amount: remaining };
+  // `remaining` is a LINE TOTAL, not a per-unit price — quantity must be
+  // pinned to 1 alongside it. calculateUpdateFinancials's own
+  // normalizeInvoiceLineItems always recomputes amount as
+  // quantity * unit_price and ignores whatever `amount` is passed in, so
+  // keeping the ORIGINAL quantity (e.g. 2) here would double the reduced
+  // total on this line — never trust the passed amount field, always
+  // write the line as (quantity: 1, unit_price: remaining) (Codex
+  // pre-push P0).
+  updatedLineItems[lineIndex] = { ...updatedLineItems[lineIndex], quantity: 1, unit_price: remaining, amount: remaining };
 
   const customer = await trx('customers').where({ id: invoice.customer_id }).first('property_type');
   const financials = await InvoiceService._internals.calculateUpdateFinancials({

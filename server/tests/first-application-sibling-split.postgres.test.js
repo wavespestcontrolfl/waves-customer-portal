@@ -118,6 +118,33 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(splitFromSharedInvoiceId(state.pest)).toBeNull();
   }));
 
+  test('an edited line with quantity > 1 is reset to quantity 1 — the remaining figure is a LINE TOTAL, never doubled by a stale quantity', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // A staff edit (or a differently-shaped mint) can leave the base
+    // application line as quantity 2 / unit_price 76.80 / amount 153.60 —
+    // same total, non-unit quantity.
+    await trx('invoices').where({ id: ids.invoiceId }).update({
+      line_items: JSON.stringify([
+        { description: 'First service application', quantity: 2, unit_price: 76.80, amount: 153.60 },
+      ]),
+    });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('split');
+
+    const state = await readState(trx, ids);
+    // calculateUpdateFinancials always recomputes amount as
+    // quantity * unit_price — a stale quantity of 2 would have doubled
+    // $97.20 into $194.40 instead of leaving it at $97.20.
+    const line = state.lineItems.find((li) => li.description === 'First service application');
+    expect(Number(line.quantity)).toBe(1);
+    expect(Number(line.unit_price)).toBe(97.2);
+    expect(Number(line.amount)).toBe(97.2);
+    expect(Number(state.invoice.total)).toBe(97.2);
+    expect(Number(state.pest.estimated_price)).toBe(97.2);
+    expect(Number(state.lawn.estimated_price)).toBe(56.4);
+  }));
+
   test('the invoice-holding (reserved) row moves instead → same split, from the other direction', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.pestId }).update({ scheduled_date: '2026-10-05' });
