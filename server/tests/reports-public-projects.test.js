@@ -620,6 +620,29 @@ describe('public project reports', () => {
       });
     });
 
+    test.each([
+      ['service_record_id', { service_record_id: 'sr-1' }],
+      ['scheduled_service_id', { scheduled_service_id: 'ss-1' }],
+    ])('a project linked by %s to a row with no technician prints no applicator — never the creator', async (_link, links) => {
+      const projectRead = chain({ first: jest.fn().mockResolvedValue(baseProjectRow(links)) });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return projectRead;
+        if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+        if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ technician_id: null }) });
+        if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue({ technician_id: null }) });
+        if (table === 'technicians') throw new Error('no technician resolves from the link, so the creator must not be looked up');
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.applicatorName).toBeNull();
+        expect(body.applicatorFdacsId).toBeNull();
+      });
+    });
+
     test('falls back to created_by_tech_id only for a genuinely unlinked project', async () => {
       const projectRead = chain({ first: jest.fn().mockResolvedValue(baseProjectRow()) });
       const technicianRead = chain({

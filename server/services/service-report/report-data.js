@@ -389,7 +389,12 @@ async function resolveProjectApplicatorTechnician(project, knex = db) {
     const row = await knex('scheduled_services').where({ id: project.scheduled_service_id }).first('technician_id');
     technicianId = row?.technician_id || null;
   }
-  if (!technicianId) technicianId = project?.created_by_tech_id || null;
+  // The creator stands in ONLY for a genuinely unlinked project: a linked
+  // visit whose row names no technician leaves the applicator unknown —
+  // never the office staffer who typed the project up (codex pre-push P1).
+  if (!technicianId && !project?.service_record_id && !project?.scheduled_service_id) {
+    technicianId = project?.created_by_tech_id || null;
+  }
   if (!technicianId) return null;
   return knex('technicians').where({ id: technicianId }).first('id', 'name', 'fl_applicator_license', 'license_expiry');
 }
