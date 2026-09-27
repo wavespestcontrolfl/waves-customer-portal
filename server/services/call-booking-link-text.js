@@ -28,9 +28,17 @@
  * already staged and deferred at dispatch time keeps its own send_at and
  * the separate 24h original_send_at bound.
  *
- * Mechanism (no new table): the decision and its timer both live on the
- * call's own `call_log.metadata.call_booking_link_text` — set once, at most,
- * per call:
+ * Mechanism: the decision and its timer both live on the call's own
+ * `call_log.metadata.call_booking_link_text` — set once, at most, per call:
+ * The one exception is the durable pre-provider handoff marker (codex
+ * #5018 r13 P1) — a separate, purpose-built table,
+ * `call_booking_link_text_handoffs` (migration 20260927160000), keyed by
+ * `call_log_id`. It exists ONLY because neverSendRecheck ALSO locks the
+ * call_log row FOR UPDATE through the actual provider request (closing a
+ * forced-reprocess race), and a marker written to call_log itself from a
+ * separate connection would deadlock against that same lock — see
+ * neverSendRecheck's own doc comment for the full reasoning. Nothing else
+ * in this lane uses a table of its own.
  *   { status: 'skipped', reason, staged_at }                — never eligible
  *   { status: 'pending', lead_id, send_at, original_send_at, staged_at } — waiting out the delay
  *     (original_send_at is set once at staging and never rewritten by a
@@ -85,6 +93,14 @@ const {
 const GATE = 'callBookingLinkText';
 const METADATA_KEY = 'call_booking_link_text';
 const MESSAGE_TYPE = 'call_booking_link_text';
+// Durable pre-provider marker table (codex #5018 r13 P1; migration
+// 20260927160000_call_booking_link_text_handoffs.js) — see neverSendRecheck's
+// own doc comment for exactly why this moved off call_log.metadata.
+const HANDOFF_MARKER_TABLE = 'call_booking_link_text_handoffs';
+// Housekeeping retention for that table — any row this old has long since
+// resolved through recoverAbandonedClaim/recoverStaleClaims (both bounded
+// well under a day), so it is never read again; the live sweep prunes it.
+const HANDOFF_MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Bounds how far back the staging pass looks for never-yet-evaluated calls —
 // extraction normally lands within minutes, so a call still unevaluated
@@ -1024,35 +1040,92 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       // the same last-moment-before-the-provider-request discipline every
       // other check on this hook already follows.
       if (!consentedDestination(call, extractionOf(call), destinationPhone)) return { ok: false, code: 'destination_not_consented' };
+      // Reload + lock call_log too (codex #5018 r13 P1): everything above
+      // re-verifies the LEAD, but a forced reprocess can claim
+      // call_log.processing_token AFTER dispatchIneligibleReason ran and
+      // rewrite the extraction or lead linkage while THIS handoff is
+      // already in flight — the `call` this function closes over goes
+      // stale the moment that claim lands, and the checks worth repeating
+      // on a fresh read are readiness, lead linkage, and the extraction-
+      // derived never-send predicates.
+      //
+      // LOCK ORDER: leads BEFORE call_log — taken in that order here too,
+      // verified against the call processor's OWN established order for a
+      // writer that locks both inside one transaction (never guessed, per
+      // the review's own instruction):
+      //   - call-recording-processor.js finalization, ~line 19477-19479:
+      //     "Keep the established leads -> call_log lock order." —
+      //     `if (liveLeadConversation) await trx('leads')…forUpdate()`
+      //     runs BEFORE the `trx('call_log')…update(...)` that clears
+      //     processing_token.
+      //   - call-recording-processor.js's lead-stamp reconciliation,
+      //     ~line 4334-4341: "[the lead lock is] acquired BEFORE the
+      //     call_log clear so every stamp writer follows one lock order
+      //     (leads → call_log) and two transactions can never deadlock."
+      // Both sites are explicit and consistent: the established order is
+      // leads THEN call_log — the opposite of "call_log then leads." This
+      // function already takes the lead lock first (above); the call_log
+      // lock below preserves that same relative order.
+      //
+      // Also checked (per the review's own instruction): the processor's
+      // OWN processing_token CLAIM — server/services/call-recording-
+      // processor.js:7946-8086 — runs inside a real `db.transaction()`,
+      // never a bare autocommit UPDATE, but that transaction's own lock
+      // set is `customers` (forUpdate, conditional on call.customer_id,
+      // line 7948) THEN the `call_log` claim UPDATE itself (lines 7970 and
+      // 8042) — it never touches `leads` at all (grepped its exact
+      // extent). No shared pair of resources can be locked in opposite
+      // orders by the claim and this handoff, so no deadlock risk between
+      // them either.
+      const freshCall = await dbi('call_log').where({ id: call.id }).forUpdate().first();
+      if (!freshCall) return { ok: false, code: 'call_not_found' };
+      // An in-flight reprocess ('wait') is retryable, never a permanent
+      // block — the same principle as dispatchClaimedCall's own pre-
+      // handoff readiness check; any other truthy reason (the reprocess
+      // already ended non-valid) is terminal, matching that check's own
+      // non-wait branch.
+      const freshEntry = parseMetadata(freshCall)[METADATA_KEY] || {};
+      const readiness = sendReadiness(freshCall, freshEntry, new Date());
+      if (readiness === 'wait') return { ok: false, retryable: true, code: 'call_reprocessing' };
+      if (readiness) return { ok: false, code: readiness };
+      // The lead linkage itself, re-derived exactly like staging did — an
+      // attribution correction/merge landing in this same gap must skip
+      // rather than send under a linkage this dispatch was never judged
+      // against (mirrors dispatchClaimedCall's own pre-handoff check).
+      if ((await resolveLeadId(dbi, freshCall)) !== leadId) return { ok: false, code: 'lead_linkage_changed' };
+      // Every extraction-derived never-send predicate, re-run fresh —
+      // stagingIneligibleReason's own last entry already folds in the
+      // canonical merge (finalTriageFlagsFor: low_extraction_confidence,
+      // address flags, caller_phone_missing, …), so a call a reprocess just
+      // reclassified as low-confidence, commercial, unauthorized, or
+      // explicitly non-consenting is caught here too, never reinvented.
+      const staleReason = stagingIneligibleReason(freshCall, extractionOf(freshCall), leadId);
+      if (staleReason) return { ok: false, code: staleReason };
       const callStart = callStartedAt(call) || new Date(call.created_at);
       if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
       if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
-      // Stamped HERE, as the LAST thing before returning ok — the true
-      // provider-start boundary (codex r8 P2). NOT on dbi (codex #5018 r11
-      // pre-push P1): dbi is now the phone-locked transaction the lane's
-      // own withSmsHandoff opens, the SAME one Twilio's own request runs
-      // on — a timeout/thrown error from messages.create() itself rolls
-      // that whole transaction back, discarding this stamp right along
-      // with it even though Twilio may already have the request. That
-      // would make recoverStaleClaims/recoverAbandonedClaim misread a
-      // genuinely ambiguous send as a safe-to-retry pre-provider failure
-      // and text the lead twice. markerDb() (models/marker-db.js) is the
-      // SAME dedicated single-statement connection outside the root pool
-      // that visit-completion-summary.js's own claimDispatchThroughHandoff
-      // uses for exactly this "durable marker from inside a held handoff"
-      // need (CLAUDE.md rule 15) — this UPDATE commits immediately and
-      // independently, so it survives whatever dbi/Twilio do next. Every
-      // check above this line still reads dbi (the freshest, lock-
-      // consistent view) — only this one write moves. Every one of
-      // sendCustomerMessage's own earlier pre-provider steps (acquiring the
-      // handoff reservation, its first suppression/consent read) still
-      // fails or throws BEFORE this write — flowing to
-      // recoverAbandonedClaim's ordinary retry rail — and only a failure in
-      // the narrow window AFTER this (the callback_number_needed check, the
-      // final isStillValid recheck, or messages.create() itself) is still,
-      // correctly, terminal-ambiguous, now durably so.
-      const entry = parseMetadata(call)[METADATA_KEY] || {};
-      await recordDecision(markerDb(), call, { ...entry, status: 'claimed', handoff_started_at: new Date().toISOString() }, { logActivity: false });
+      // Marked HERE, as the LAST thing before returning ok — the true
+      // provider-start boundary (codex r8 P2). On its OWN table (codex
+      // #5018 r13 P1), never call_log — dbi now holds call_log FOR UPDATE
+      // (above) for the rest of this handoff, through Twilio's own
+      // request; a SEPARATE-connection write to call_log's OWN row (the
+      // original r11 design, markerDb() writing call_log.metadata) would
+      // have to wait on that SAME lock, which dbi cannot release until
+      // AFTER this write returns — a hard self-deadlock, not a timing
+      // artifact. call_booking_link_text_handoffs (migration
+      // 20260927160000) never touches call_log at all, so markerDb()'s
+      // INSERT here commits immediately and independently of dbi/call_log's
+      // lock, and — unchanged from r11's own guarantee — independently of
+      // whatever dbi/Twilio do next: a timeout/thrown error from
+      // messages.create() rolls dbi back, but this row survives, so
+      // recoverStaleClaims/recoverAbandonedClaim (now reading this table
+      // instead of call_log.metadata.handoff_started_at) still correctly
+      // read a genuinely ambiguous send as ambiguous, never retried.
+      // ON CONFLICT DO NOTHING: this hook can in principle run more than
+      // once for the same call_log_id across retries of the SAME claimed
+      // row (a claim is per-dispatch-tick, not per-call) — the FIRST
+      // handoff's timestamp is the one that matters; never overwritten.
+      await markerDb()(HANDOFF_MARKER_TABLE).insert({ call_log_id: call.id, handoff_started_at: new Date() }).onConflict('call_log_id').ignore();
       return { ok: true };
     } catch (err) {
       // A DB read failing here is an infrastructure hiccup, not a
@@ -1189,14 +1262,15 @@ async function dispatchClaimedCall(conn, call, now) {
   const destinationPhone = built.phone || lead.phone;
   if (!consentedDestination(call, extractionOf(call), destinationPhone)) return skip('destination_not_consented');
 
-  // handoff_started_at is stamped inside neverSendRecheck itself (codex r8
-  // P2), not here — sendCustomerMessage still does its OWN fallible
-  // pre-provider work (acquiring the provider handoff reservation, a fresh
-  // suppression/consent read) before it ever reaches that hook, and
-  // stamping this row 'claimed'+handoff_started_at before any of that ran
-  // left a throw in that gap permanently ambiguous even though Twilio was
-  // never contacted. See neverSendRecheck's own doc comment for exactly
-  // where the boundary now sits.
+  // The handoff marker (call_booking_link_text_handoffs, codex #5018 r13
+  // P1 — moved off call_log.metadata's own handoff_started_at field) is
+  // written inside neverSendRecheck itself (codex r8 P2), not here —
+  // sendCustomerMessage still does its OWN fallible pre-provider work
+  // (acquiring the provider handoff reservation, a fresh suppression/
+  // consent read) before it ever reaches that hook, and marking this row
+  // before any of that ran left a throw in that gap permanently ambiguous
+  // even though Twilio was never contacted. See neverSendRecheck's own doc
+  // comment for exactly where the boundary now sits.
   const managedLine = managedLineForCall(call);
   const result = await sendCustomerMessage({
     to: destinationPhone,
@@ -1302,11 +1376,15 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
 // synchronous claim-then-dispatch could still legitimately be in flight
 // (staleClaimRecovery below, after STALE_CLAIM_MS — the previous worker
 // most likely died mid-dispatch and never got to run any catch at all).
-// Both callers share this one decision: handoff_started_at (stamped inside
-// neverSendRecheck itself, as the actual provider-start boundary — see its
-// own doc comment) is the ONE fact that says whether resending is safe.
-// Absent, the failure happened strictly before any network attempt, so
-// this is exactly as safe to requeue as any other retryable send outcome —
+// Both callers share this one decision: a row in call_booking_link_text_
+// handoffs (written inside neverSendRecheck itself, as the actual
+// provider-start boundary — see its own doc comment; migration
+// 20260927160000, codex #5018 r13 P1 — moved off call_log.metadata's own
+// handoff_started_at field, which would have deadlocked against that same
+// row's now-held FOR UPDATE lock) is the ONE fact that says whether
+// resending is safe. Absent, the failure happened strictly before any
+// network attempt, so this is exactly as safe to requeue as any other
+// retryable send outcome —
 // through the SAME bounded rail (original_send_at's own 24h deadline, then
 // the ordinary backoff) recordSendOutcome already owns for that case.
 // Present, the provider may already have this exact attempt — moved to
@@ -1324,7 +1402,11 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
 // once IT goes stale enough for a stale-claim sweep to find it too).
 async function recoverAbandonedClaim(conn, call, now) {
   const entry = parseMetadata(call)[METADATA_KEY] || {};
-  if (entry.handoff_started_at) {
+  // Read via `conn` (never markerDb() — this always runs AFTER the handoff
+  // transaction that might have written this row has already settled, so
+  // there is no row lock left to contend with; codex #5018 r13 P1).
+  const handoff = await conn(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).first('call_log_id');
+  if (handoff) {
     await recordDecision(conn, call, { ...entry, status: 'ambiguous', reason: 'ambiguous_provider_outcome' });
     return { ambiguous: true };
   }
@@ -1374,6 +1456,23 @@ async function recoverStaleClaims(conn, now) {
   return recovered;
 }
 
+// Housekeeping for the handoff marker table (codex #5018 r13 P1): every
+// row here has already resolved through recoverAbandonedClaim/
+// recoverStaleClaims (both bounded well under a day) long before it turns
+// HANDOFF_MARKER_RETENTION_MS old, so it is never read again — one bounded
+// DELETE, capped at DISPATCH_BATCH rows per call like every other bounded
+// operation in this lane, via the same subquery-limit shape (DELETE has no
+// direct LIMIT in Postgres). A named function, not inlined into sweep(),
+// so it can be exercised directly against a real Postgres connection —
+// sweep() itself is gate-guarded and cannot be driven from a test that
+// does not also mock feature-gates.
+async function pruneHandoffMarkers(conn, now) {
+  const stale = conn(HANDOFF_MARKER_TABLE)
+    .where('handoff_started_at', '<', new Date(now.getTime() - HANDOFF_MARKER_RETENTION_MS))
+    .limit(DISPATCH_BATCH).select('call_log_id');
+  return conn(HANDOFF_MARKER_TABLE).whereIn('call_log_id', stale).del();
+}
+
 async function sweep(conn = db, { now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
   const { staged, ineligible } = await stage(conn, { now });
@@ -1396,11 +1495,11 @@ async function sweep(conn = db, { now = new Date() } = {}) {
       // A row left 'claimed' after a genuine failure would never be
       // revisited by the 'pending'-only query above, so it must reach a
       // terminal status here — but NEVER a blind worker_error the way this
-      // used to (codex r3 P2): recoverAbandonedClaim reads handoff_started_at
-      // off the row itself to decide whether the provider might already
-      // have this exact attempt (never resend) or whether it is safe to
-      // requeue through the ordinary retry rail instead of giving up
-      // outright on a failure that never reached Twilio at all.
+      // used to (codex r3 P2): recoverAbandonedClaim reads the handoff
+      // marker table (codex #5018 r13 P1) to decide whether the provider
+      // might already have this exact attempt (never resend) or whether
+      // it is safe to requeue through the ordinary retry rail instead of
+      // giving up outright on a failure that never reached Twilio at all.
       const failedCall = await conn('call_log').where({ id: row.id }).first().catch(() => null);
       const outcome = failedCall ? await recoverAbandonedClaim(conn, failedCall, now).catch(() => null) : null;
       if (!outcome || !outcome.ambiguous) dispatchSkipped += 1;
@@ -1415,6 +1514,15 @@ async function sweep(conn = db, { now = new Date() } = {}) {
     staleClaimsRecovered = await recoverStaleClaims(conn, now);
   } catch (err) {
     logger.warn(`[call-booking-link-text] stale-claim recovery sweep failed (${err.code || err.name || 'error'})`);
+  }
+  // Housekeeping (codex #5018 r13 P1): every row here has already resolved
+  // through recoverAbandonedClaim/recoverStaleClaims (both bounded well
+  // under a day) long before it turns 7 days old, so it is never read
+  // again.
+  try {
+    await pruneHandoffMarkers(conn, now);
+  } catch (err) {
+    logger.warn(`[call-booking-link-text] handoff marker housekeeping failed (${err.code || err.name || 'error'})`);
   }
   return { staged, ineligible, sent, dispatchSkipped, staleClaimsRecovered };
 }
@@ -1450,6 +1558,10 @@ module.exports = {
   recoverAbandonedClaim,
   recoverStaleClaims,
   STALE_CLAIM_MS,
+  DISPATCH_BATCH,
+  HANDOFF_MARKER_TABLE,
+  HANDOFF_MARKER_RETENTION_MS,
+  pruneHandoffMarkers,
   sweep,
   _private: { leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently },
 };

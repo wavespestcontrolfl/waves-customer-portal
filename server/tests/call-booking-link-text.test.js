@@ -62,6 +62,9 @@ const {
   STAGING_GRACE_MINUTES,
   STAGING_STALE_MS,
   QUEUE_SCAN_LOOKBACK_MS,
+  HANDOFF_MARKER_TABLE,
+  HANDOFF_MARKER_RETENTION_MS,
+  DISPATCH_BATCH,
 } = require('../services/call-booking-link-text');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
@@ -475,9 +478,10 @@ test('sweep\'s own due-row query bounds created_at to QUEUE_SCAN_LOOKBACK_MS', a
   const wheres = [];
   const conn = jest.fn(() => {
     const chain = {};
-    ['whereRaw', 'whereNull', 'orderBy', 'limit'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    ['whereRaw', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { chain[m] = jest.fn(() => chain); });
     chain.where = jest.fn((...args) => { wheres.push(args); return chain; });
     chain.select = jest.fn(async () => []);
+    chain.del = jest.fn(async () => 0); // housekeeping's own bounded DELETE (codex #5018 r13 P1)
     // activationBoundary's own system_settings read/insert, reached via
     // stage() before the due-query this test cares about ever runs —
     // pinned to the epoch so pre_activation never trips.
@@ -489,6 +493,33 @@ test('sweep\'s own due-row query bounds created_at to QUEUE_SCAN_LOOKBACK_MS', a
   await sweep(conn, { now });
   const bound = wheres.find(([col, op, value]) => col === 'created_at' && op === '>=' && now.getTime() - value.getTime() === QUEUE_SCAN_LOOKBACK_MS);
   expect(bound).toBeTruthy();
+});
+
+// codex #5018 r13 P1: housekeeping — every handoff marker row this old has
+// long since resolved through recoverAbandonedClaim/recoverStaleClaims, so
+// it is never read again; the live sweep prunes it in one bounded DELETE.
+test('sweep\'s own housekeeping deletes handoff marker rows older than HANDOFF_MARKER_RETENTION_MS, bounded at DISPATCH_BATCH', async () => {
+  const now = new Date('2026-09-26T18:00:00Z');
+  const marker = { wheres: [], selectLimit: null, whereInArg: null, deleted: false };
+  const conn = jest.fn((table) => {
+    const chain = {};
+    ['whereRaw', 'whereNull', 'orderBy'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.where = jest.fn((...args) => { if (table === HANDOFF_MARKER_TABLE) marker.wheres.push(args); return chain; });
+    chain.limit = jest.fn((n) => { if (table === HANDOFF_MARKER_TABLE) marker.selectLimit = n; return chain; });
+    chain.select = jest.fn(async () => []);
+    chain.whereIn = jest.fn((col, sub) => { if (table === HANDOFF_MARKER_TABLE) marker.whereInArg = { col, sub }; return chain; });
+    chain.del = jest.fn(async () => { marker.deleted = true; return 0; });
+    chain.first = jest.fn(async () => ({ value: '1970-01-01T00:00:00.000Z' }));
+    chain.insert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
+    return chain;
+  });
+  conn.raw = jest.fn();
+  await sweep(conn, { now });
+  const bound = marker.wheres.find(([col, op, value]) => col === 'handoff_started_at' && op === '<' && now.getTime() - value.getTime() === HANDOFF_MARKER_RETENTION_MS);
+  expect(bound).toBeTruthy();
+  expect(marker.selectLimit).toBe(DISPATCH_BATCH);
+  expect(marker.whereInArg.col).toBe('call_log_id');
+  expect(marker.deleted).toBe(true);
 });
 
 // ── activationBoundary / persistedActivationBoundary ──────────────────────
@@ -1071,8 +1102,28 @@ describe('neverSendRecheck', () => {
   const CALL_FOR_RECHECK = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), direction: 'inbound', from_phone: '+19415550100' };
   const DESTINATION = '+19415550100'; // matches CALL_FOR_RECHECK's own ANI — consent isolated from these tests' own concerns
   const OPEN = { id: 'lead-1', status: 'new', converted_at: null, estimate_id: null, customer_id: null, deleted_at: null, phone: DESTINATION };
+  // codex #5018 r13 P1: neverSendRecheck now reloads + locks call_log too —
+  // a fully eligible default row (dialable ANI, a real two-way transcript,
+  // a populated address, not mid-reprocess, linked to the SAME lead every
+  // test here uses) so every test not specifically exercising THAT reload
+  // still resolves { ok: true } same as before.
+  const FRESH_TRANSCRIPT = 'Caller: Hi, I have a bug problem.\nAgent: Sure, let me help with that.\nCaller: Can someone come out this week?\nAgent: Let me check the schedule.';
+  const FRESH_CALL_LOG = {
+    id: 'call-1', direction: 'inbound', from_phone: '+19415550100', duration_seconds: 90,
+    processing_token: null, v2_extraction_status: 'valid', transcription: FRESH_TRANSCRIPT,
+    metadata: { lead_id: 'lead-1' },
+    ai_address_validation: { status: 'validated_accept', inServiceArea: true },
+    ai_extraction_enriched: {
+      meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+      caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+      property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
+      service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+      sentiment_and_lead: { lead_quality: 'warm' },
+    },
+  };
 
-  function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null } = {}) {
+  function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
       ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
@@ -1081,16 +1132,20 @@ describe('neverSendRecheck', () => {
         if (table === 'leads') return lead;
         if (table === 'scheduled_services') return bookedSince;
         if (table === 'sms_log') return smsWithLink;
+        if (table === 'call_log') return freshCall;
         return undefined;
       });
       chain.pluck = jest.fn(async () => []);
       chain.update = jest.fn(async () => 1);
+      // The handoff marker (codex #5018 r13 P1) is an INSERT ... ON
+      // CONFLICT DO NOTHING on its own table, never an UPDATE on call_log.
+      chain.insert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
       return chain;
     });
     conn.raw = jest.fn(() => 'RAW');
-    // The handoff_started_at stamp (codex r8 P2) writes through markerDb()
-    // (codex #5018 r11 pre-push P1), never dbi itself — pointed at this
-    // SAME conn so it still lands somewhere these tests can observe.
+    // The handoff marker (codex #5018 r13 P1, migration 20260927160000)
+    // writes through markerDb(), never dbi/call_log itself — pointed at
+    // this SAME conn so it still lands somewhere these tests can observe.
     markerDb.mockReturnValue(conn);
     return conn;
   }
@@ -1114,6 +1169,20 @@ describe('neverSendRecheck', () => {
     const leadsCallIndex = conn.mock.calls.findIndex(([table]) => table === 'leads');
     expect(leadsCallIndex).toBeGreaterThanOrEqual(0);
     expect(conn.mock.results[leadsCallIndex].value.forUpdate).toHaveBeenCalled();
+  });
+
+  // codex #5018 r13 P1: call_log gets the SAME treatment, LOCKED AFTER
+  // leads — the established processor order (see the service file's own
+  // doc comment for the file:line evidence), never reversed.
+  test('the call_log read is ALSO locked FOR UPDATE, taken AFTER the leads lock', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi();
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
+    const leadsCallIndex = conn.mock.calls.findIndex(([table]) => table === 'leads');
+    const callLogCallIndex = conn.mock.calls.findIndex(([table]) => table === 'call_log');
+    expect(leadsCallIndex).toBeGreaterThanOrEqual(0);
+    expect(callLogCallIndex).toBeGreaterThan(leadsCallIndex); // leads BEFORE call_log
+    expect(conn.mock.results[callLogCallIndex].value.forUpdate).toHaveBeenCalled();
   });
 
   test('a lead closed since dispatchIneligibleReason ran blocks the send', async () => {
@@ -1191,11 +1260,68 @@ describe('neverSendRecheck', () => {
       const chain = {};
       ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
-      chain.first = jest.fn(async () => (table === 'leads' ? OPEN : (table === 'sms_log' ? { id: 'sms-1' } : undefined)));
+      chain.first = jest.fn(async () => {
+        if (table === 'leads') return OPEN;
+        if (table === 'sms_log') return { id: 'sms-1' };
+        if (table === 'call_log') return FRESH_CALL_LOG;
+        return undefined;
+      });
       chain.pluck = jest.fn(async () => (table === 'short_codes' ? ['abcd'] : []));
       return chain;
     });
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'link_sent_recently' });
+  });
+
+  // codex #5018 r13 P1: a forced reprocess can claim call_log.processing_token
+  // AFTER dispatchIneligibleReason ran, while this handoff is already in
+  // flight — an in-flight reprocess is a reason to WAIT (retryable), never
+  // a permanent block, mirroring dispatchClaimedCall's own pre-handoff
+  // readiness check.
+  test('a reprocess claim (processing_token set) between dispatch and handoff blocks the send, retryably', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi({ freshCall: { ...FRESH_CALL_LOG, processing_token: 'reprocess-tok' } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, retryable: true, code: 'call_reprocessing' });
+  });
+
+  test('a reprocess reset (v2_extraction_status null) between dispatch and handoff blocks the send, retryably', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi({ freshCall: { ...FRESH_CALL_LOG, v2_extraction_status: null } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, retryable: true, code: 'call_reprocessing' });
+  });
+
+  // codex #5018 r13 P1: a completed reprocess whose extraction now reads
+  // low-confidence, commercial, or any other blocking/excluded flag must
+  // still catch the send — the canonical merge (finalTriageFlagsFor, folded
+  // into stagingIneligibleReason's own last entry) is re-run against the
+  // FRESH row, not the stale one dispatchIneligibleReason already cleared.
+  test('a fresh extraction now low-confidence (no model flags) blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const reclassified = {
+      ...FRESH_CALL_LOG,
+      ai_extraction_enriched: { ...FRESH_CALL_LOG.ai_extraction_enriched, confidence: { overall: 0.2 } },
+    };
+    const conn = dbi({ freshCall: reclassified });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'triage_flag_low_extraction_confidence' });
+  });
+
+  test('a fresh extraction now commercial blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const reclassified = {
+      ...FRESH_CALL_LOG,
+      ai_extraction_enriched: { ...FRESH_CALL_LOG.ai_extraction_enriched, property: { property_type: 'commercial' } },
+    };
+    const conn = dbi({ freshCall: reclassified });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'not_residential' });
+  });
+
+  // codex #5018 r13 P1: an attribution correction/merge landing in the same
+  // gap must skip rather than send under a linkage this dispatch was never
+  // judged against (mirrors dispatchClaimedCall's own pre-handoff check).
+  test('the lead linkage rewritten on the fresh call_log row between dispatch and handoff blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const relinked = { ...FRESH_CALL_LOG, metadata: { lead_id: 'lead-2' } };
+    const conn = dbi({ freshCall: relinked });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'lead_linkage_changed' });
   });
 
   // codex r3 P1: an UNCAUGHT throw here (a transient DB failure, not a
@@ -1212,36 +1338,42 @@ describe('neverSendRecheck', () => {
     });
   });
 
-  // codex #5018 r11 pre-push P1: the final handoff_started_at stamp must
-  // write through markerDb(), NEVER dbi itself — dbi is the SAME
-  // transaction Twilio's own request runs on and rolls back with on a
-  // timeout, which would silently discard a stamp written there even
-  // though Twilio may already have the request. Proven here by making
-  // dbi's OWN update() throw if it's ever called at all: the check must
-  // still succeed, because the real write never touches dbi for this step.
-  test('the handoff_started_at stamp writes through markerDb(), never through dbi itself', async () => {
+  // codex #5018 r13 P1: the handoff marker must INSERT into its own table
+  // (call_booking_link_text_handoffs) through markerDb(), NEVER touch
+  // call_log at all — dbi now holds call_log FOR UPDATE for the rest of
+  // this handoff, so a marker written to call_log's OWN row from a
+  // separate connection (markerDb()) would deadlock against that lock (see
+  // the service file's own doc comment). Proven here by making dbi's OWN
+  // update() throw if it's ever called at all: the check must still
+  // succeed, because the real write never touches dbi/call_log for this
+  // step.
+  test('the handoff marker INSERTs into its own table through markerDb(), never touching call_log', async () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const readOnlyDbi = jest.fn((table) => {
       const chain = {};
       ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
-      chain.first = jest.fn(async () => (table === 'leads' ? OPEN : undefined));
+      chain.first = jest.fn(async () => {
+        if (table === 'leads') return OPEN;
+        if (table === 'call_log') return FRESH_CALL_LOG;
+        return undefined;
+      });
       chain.pluck = jest.fn(async () => []);
-      chain.update = jest.fn(() => { throw new Error('dbi must never be written to for this stamp'); });
+      chain.update = jest.fn(() => { throw new Error('dbi/call_log must never be written to for this marker'); });
       return chain;
     });
     readOnlyDbi.raw = jest.fn(() => 'RAW');
 
-    const markerChain = {};
-    markerChain.where = jest.fn(() => markerChain);
-    markerChain.update = jest.fn(async () => 1);
+    const markerInsert = jest.fn((row) => ({ onConflict: jest.fn((col) => ({ ignore: jest.fn(async () => { markerInsert.lastRow = row; markerInsert.lastConflictCol = col; }) })) }));
+    const markerChain = { insert: markerInsert };
     const markerConn = jest.fn(() => markerChain);
     markerConn.raw = jest.fn(() => 'RAW');
     markerDb.mockReturnValue(markerConn);
 
     await expect(check({ dbi: readOnlyDbi })).resolves.toEqual({ ok: true });
-    expect(markerConn).toHaveBeenCalledWith('call_log');
-    expect(markerChain.update).toHaveBeenCalled();
+    expect(markerConn).toHaveBeenCalledWith(HANDOFF_MARKER_TABLE);
+    expect(markerInsert).toHaveBeenCalledWith(expect.objectContaining({ call_log_id: 'call-1' }));
+    expect(markerInsert.lastConflictCol).toBe('call_log_id');
   });
 });
 
@@ -1288,8 +1420,13 @@ describe('dispatchClaimedCall', () => {
   // is callStartedAt(call) and not some other instant. `bookedSince` (a
   // canned row/null) still works for tests that don't care about the exact
   // bound.
+  // codex #5018 r13 P1: neverSendRecheck now reloads + locks call_log too —
+  // CALL itself is already a fully eligible default row, so reloading it
+  // unchanged keeps every test below resolving exactly as before unless it
+  // explicitly overrides `freshCall`.
   function makeDb({ lead = OPEN_LEAD, bookedSince = null, visitCreatedAt = null, consultationCodes = [], smsWithLink = null,
-    callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {} } = {}) {
+    callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {}, freshCall = CALL,
+    markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
       ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
@@ -1305,11 +1442,15 @@ describe('dispatchClaimedCall', () => {
           return bookedSince;
         }
         if (table === 'sms_log') return smsWithLink;
+        if (table === 'call_log') return freshCall;
         return undefined;
       });
       chain.pluck = jest.fn(async () => (table === 'short_codes' ? consultationCodes : []));
       chain.update = table === 'call_log' ? callLogUpdate : jest.fn(async () => 1);
-      chain.insert = table === 'activity_log' ? activityInsert : jest.fn(async () => {});
+      // The handoff marker (codex #5018 r13 P1) INSERTs into its own table,
+      // never call_log — activity_log keeps its own dedicated insert stub.
+      chain.insert = table === 'activity_log' ? activityInsert
+        : (table === HANDOFF_MARKER_TABLE ? markerInsert : jest.fn(async () => {}));
       return chain;
     });
     conn.raw = jest.fn(() => 'RAW_FRAGMENT');
@@ -1318,11 +1459,11 @@ describe('dispatchClaimedCall', () => {
     // (calling the passed-in callback with the same connection as its
     // "trx") for lockSmsPhone's own trx.raw call above to work unmocked.
     conn.transaction = jest.fn(async (fn) => fn(conn));
-    // The handoff_started_at stamp (codex r8 P2) writes through markerDb()
-    // (codex #5018 r11 pre-push P1), never dbi/conn itself — pointed at
-    // this SAME conn by default so every ordinary test here still observes
-    // it via conn.raw. Tests that need to prove the marker's OWN
-    // independence from a rolled-back dbi override this explicitly.
+    // The handoff marker (codex #5018 r13 P1, migration 20260927160000)
+    // INSERTs through markerDb(), never dbi/conn/call_log itself — pointed
+    // at this SAME conn by default so every ordinary test here still
+    // observes it via markerInsert. Tests that need to prove the marker's
+    // OWN independence from a rolled-back dbi override this explicitly.
     markerDb.mockReturnValue(conn);
     return conn;
   }
@@ -1832,17 +1973,14 @@ describe('dispatchClaimedCall', () => {
   // ── handoff_started_at — the fact that decides safe-to-retry vs
   // leave-for-review after a failure (codex r3 P2) ────────────────────────
   describe('handoff_started_at is stamped right before the provider call', () => {
-    function lastMetadataPatch(conn) {
-      const call = [...conn.raw.mock.calls].reverse().find(([sql, bindings]) => sql.includes('jsonb') && Array.isArray(bindings) && typeof bindings[0] === 'string');
-      return call ? JSON.parse(call[1][0]).call_booking_link_text : null;
-    }
-    // codex #5018 r11 pre-push P1: the stamp write now goes through
-    // markerDb() (a connection OUTSIDE dbi's own transaction), never dbi
-    // itself — a timeout/throw from messages.create() rolls dbi's
-    // transaction back, and a stamp written ON that transaction would roll
-    // back with it even though Twilio may already have the request.
-    // makeDb() already points markerDb() at its own conn by default, so
-    // lastMetadataPatch(conn) below keeps observing the real write site.
+    // codex #5018 r13 P1: the marker is now an INSERT into its own table
+    // (call_booking_link_text_handoffs) via markerDb() — a connection
+    // OUTSIDE dbi's own transaction — never an UPDATE on call_log itself.
+    // A timeout/throw from messages.create() rolls dbi's transaction back;
+    // a marker written on THAT transaction would roll back with it even
+    // though Twilio may already have the request. makeDb() already points
+    // markerDb() at its own conn by default, so a custom `markerInsert`
+    // spy below keeps observing the real write site.
 
     // codex r8 P2: the stamp used to land in dispatchClaimedCall's own body,
     // BEFORE sendCustomerMessage was ever called at all — but that function
@@ -1856,39 +1994,54 @@ describe('dispatchClaimedCall', () => {
     // returning ok. These tests invoke providerPreSendCheck explicitly,
     // the way twilio.js's real dispatch() does, since the mock otherwise
     // never calls it at all.
-    test('the stamp lands inside providerPreSendCheck, as the LAST thing before it returns ok — never before sendCustomerMessage\'s own earlier pre-provider work', async () => {
-      const conn = makeDb();
-      let stampedBeforePreProviderWork;
-      let stampedAfterCheckReturnedOk;
+    test('the marker is inserted inside providerPreSendCheck, as the LAST thing before it returns ok — never before sendCustomerMessage\'s own earlier pre-provider work', async () => {
+      const markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
+      const conn = makeDb({ markerInsert });
+      let insertedBeforePreProviderWork;
+      let insertedAfterCheckReturnedOk;
       sendCustomerMessage.mockImplementation(async (opts) => {
         // Simulates sendCustomerMessage's OWN reservation/suppression/
         // consent work running BEFORE providerPreSendCheck is ever called.
-        stampedBeforePreProviderWork = lastMetadataPatch(conn);
+        insertedBeforePreProviderWork = markerInsert.mock.calls.length;
         const verdict = await opts.providerPreSendCheck({ dbi: conn });
         expect(verdict).toEqual({ ok: true });
-        stampedAfterCheckReturnedOk = lastMetadataPatch(conn);
+        insertedAfterCheckReturnedOk = markerInsert.mock.calls.length;
         return { sent: true, providerMessageId: 'SM_test_sid', deliveryOutcome: 'accepted' };
       });
       const result = await dispatchClaimedCall(conn, CALL, NOW);
       expect(result.sent).toBe(true);
-      expect(stampedBeforePreProviderWork).toBeNull(); // not stamped before providerPreSendCheck even ran
-      expect(stampedAfterCheckReturnedOk).toMatchObject({ status: 'claimed' });
-      expect(stampedAfterCheckReturnedOk.handoff_started_at).toBeTruthy();
+      expect(insertedBeforePreProviderWork).toBe(0); // not inserted before providerPreSendCheck even ran
+      expect(insertedAfterCheckReturnedOk).toBe(1);
+      expect(markerInsert).toHaveBeenCalledWith(expect.objectContaining({ call_log_id: CALL.id }));
     });
 
-    test('a throw AFTER providerPreSendCheck stamps the row leaves handoff_started_at set — recoverAbandonedClaim then treats it as ambiguous, never resent', async () => {
-      const conn = makeDb();
+    test('a throw AFTER providerPreSendCheck inserts the marker leaves it in place — recoverAbandonedClaim then treats it as ambiguous, never resent', async () => {
+      let markerInserted = false;
+      const markerInsert = jest.fn(() => {
+        markerInserted = true;
+        return { onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) };
+      });
+      const conn = makeDb({ markerInsert });
       sendCustomerMessage.mockImplementation(async (opts) => {
         const verdict = await opts.providerPreSendCheck({ dbi: conn });
         expect(verdict).toEqual({ ok: true });
-        throw new Error('provider timeout, no result'); // messages.create() itself failed AFTER the stamp
+        throw new Error('provider timeout, no result'); // messages.create() itself failed AFTER the marker insert
       });
       await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('provider timeout, no result');
-      const patch = lastMetadataPatch(conn);
-      expect(patch.handoff_started_at).toBeTruthy(); // the stamp survived the throw
+      expect(markerInserted).toBe(true); // the marker survived the throw
 
-      const stampedCall = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: patch } };
-      const outcome = await recoverAbandonedClaim(conn, stampedCall, NOW);
+      // recoverAbandonedClaim reads the marker table fresh, on this SAME
+      // conn — reconfigure it to reflect the row the insert above created.
+      conn.mockImplementation((table) => {
+        const chain = {};
+        ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'where']
+          .forEach((m) => { chain[m] = jest.fn(() => chain); });
+        chain.first = jest.fn(async () => (table === HANDOFF_MARKER_TABLE ? { call_log_id: CALL.id } : undefined));
+        chain.update = jest.fn(async () => 1);
+        chain.insert = jest.fn(async () => {});
+        return chain;
+      });
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW);
       expect(outcome).toEqual({ ambiguous: true });
     });
 
@@ -1896,28 +2049,28 @@ describe('dispatchClaimedCall', () => {
     // pre-provider work — before it ever reaches providerPreSendCheck —
     // must leave NO handoff_started_at at all, unlike the old behavior
     // (stamped unconditionally before sendCustomerMessage was even called).
-    test('a throw from sendCustomerMessage\'s OWN pre-provider work, before providerPreSendCheck is ever called, leaves no handoff_started_at — safe to requeue', async () => {
-      const conn = makeDb();
+    test('a throw from sendCustomerMessage\'s OWN pre-provider work, before providerPreSendCheck is ever called, leaves no marker row — safe to requeue', async () => {
+      const markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
+      const conn = makeDb({ markerInsert });
       sendCustomerMessage.mockImplementation(async () => {
         throw new Error('reservation acquisition failed'); // never invokes providerPreSendCheck at all
       });
       await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('reservation acquisition failed');
-      const patch = lastMetadataPatch(conn);
-      expect(patch).toBeNull(); // no stamp write happened — providerPreSendCheck never ran
+      expect(markerInsert).not.toHaveBeenCalled(); // no marker written — providerPreSendCheck never ran
 
-      const outcome = await recoverAbandonedClaim(conn, CALL, NOW); // CALL's own metadata never carried handoff_started_at
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW); // makeDb()'s default marker lookup finds no row
       expect(outcome.ambiguous).toBe(false);
     });
 
-    test('a throw BEFORE the stamp (the link builder itself throws) leaves no handoff_started_at — safe for recoverAbandonedClaim to requeue', async () => {
+    test('a throw BEFORE the marker insert (the link builder itself throws) leaves no marker row — safe for recoverAbandonedClaim to requeue', async () => {
       buildLeadConsultationSmsLine.mockRejectedValue(new Error('db hiccup'));
-      const conn = makeDb();
+      const markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
+      const conn = makeDb({ markerInsert });
       await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('db hiccup');
       expect(sendCustomerMessage).not.toHaveBeenCalled();
-      const patch = lastMetadataPatch(conn);
-      expect(patch).toBeNull(); // the stamp write never happened at all
+      expect(markerInsert).not.toHaveBeenCalled(); // the marker insert never happened at all
 
-      const outcome = await recoverAbandonedClaim(conn, CALL, NOW); // CALL's own metadata never carried handoff_started_at
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW); // makeDb()'s default marker lookup finds no row
       expect(outcome.ambiguous).toBe(false);
     });
   });
@@ -1927,12 +2080,16 @@ describe('dispatchClaimedCall', () => {
 describe('recoverAbandonedClaim', () => {
   const NOW = new Date('2026-09-26T18:00:00Z');
 
-  function rawCapturingConn() {
+  // codex #5018 r13 P1: recoverAbandonedClaim now reads the handoff marker
+  // TABLE (call_booking_link_text_handoffs), never call_log.metadata's own
+  // handoff_started_at field — `hasHandoff` stands in for whether a row
+  // exists there.
+  function rawCapturingConn(hasHandoff = false) {
     const chain = {};
     ['where', 'whereNull', 'whereRaw', 'orderBy', 'limit', 'select'].forEach((m) => { chain[m] = jest.fn(() => chain); });
     chain.update = jest.fn(async () => 1);
     chain.insert = jest.fn(async () => {});
-    chain.first = jest.fn(async () => undefined);
+    chain.first = jest.fn(async () => (hasHandoff ? { call_log_id: 'call-1' } : undefined));
     const conn = jest.fn(() => chain);
     conn.raw = jest.fn((sql, bindings) => { conn.raw.captured = conn.raw.captured || []; conn.raw.captured.push(bindings); return 'RAW'; });
     return conn;
@@ -1976,13 +2133,13 @@ describe('recoverAbandonedClaim', () => {
   // 'pending', never 'claimed') so a future stale-claim sweep never
   // selects it again — see recoverStaleClaims' own "60 ambiguous rows"
   // test for the actual starvation this fixes.
-  test('handoff_started_at present: moves the row to its own terminal ambiguous status, logged — the provider may already have this attempt', async () => {
-    const conn = rawCapturingConn();
-    const entry = { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(), handoff_started_at: NOW.toISOString() };
+  test('a handoff marker row present: moves the call to its own terminal ambiguous status, logged — the provider may already have this attempt', async () => {
+    const conn = rawCapturingConn(true);
+    const entry = { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString() };
     const outcome = await recoverAbandonedClaim(conn, { id: 'call-1', metadata: { call_booking_link_text: entry } }, NOW);
     expect(outcome).toEqual({ ambiguous: true });
     const patch = lastPatch(conn);
-    expect(patch).toMatchObject({ status: 'ambiguous', handoff_started_at: NOW.toISOString(), lead_id: 'lead-1' });
+    expect(patch).toMatchObject({ status: 'ambiguous', lead_id: 'lead-1' });
   });
 });
 
@@ -1991,14 +2148,26 @@ describe('recoverAbandonedClaim', () => {
 describe('recoverStaleClaims', () => {
   const NOW = new Date('2026-09-26T18:00:00Z');
 
+  // codex #5018 r13 P1: recoverAbandonedClaim (called from inside
+  // recoverStaleClaims) now reads the handoff marker TABLE, not call_log's
+  // own metadata — `row`'s own `handoff_started_at` field is kept ONLY as
+  // this mock's stand-in signal for "a marker row exists," to avoid
+  // rewriting every existing fixture below.
   function connFor(row) {
     const chain = {};
     ['whereRaw', 'orderBy', 'limit', 'where'].forEach((m) => { chain[m] = jest.fn(() => chain); });
     chain.select = jest.fn(async () => (row ? [{ id: row.id }] : []));
-    chain.first = jest.fn(async () => row);
     chain.update = jest.fn(async () => 1);
     chain.insert = jest.fn(async () => {});
-    const conn = jest.fn(() => chain);
+    const conn = jest.fn((table) => {
+      chain.first = jest.fn(async () => {
+        if (table === HANDOFF_MARKER_TABLE) {
+          return row?.metadata?.call_booking_link_text?.handoff_started_at ? { call_log_id: row.id } : undefined;
+        }
+        return row;
+      });
+      return chain;
+    });
     conn.raw = jest.fn((sql, bindings) => { conn.raw.captured = conn.raw.captured || []; conn.raw.captured.push(bindings); return 'RAW'; });
     return conn;
   }
@@ -2093,10 +2262,20 @@ describe('recoverStaleClaims', () => {
       .sort((a, b) => a.createdAt - b.createdAt)
       .slice(0, chain._limit)
       .map((r) => ({ id: r.id })));
-    chain.first = jest.fn(async () => (pendingId && rows.has(pendingId) ? { id: pendingId, metadata: rows.get(pendingId).metadata } : undefined));
+    // Table-aware (codex #5018 r13 P1): recoverAbandonedClaim's own handoff
+    // marker lookup shares this SAME chain/pendingId — the pending row's
+    // OWN (still-named) handoff_started_at field stands in for "a marker
+    // row exists," so nothing about the rows Map above needed rewriting.
+    chain.first = jest.fn(async () => {
+      if (!pendingId || !rows.has(pendingId)) return undefined;
+      if (chain._table === HANDOFF_MARKER_TABLE) {
+        return rows.get(pendingId).metadata.call_booking_link_text.handoff_started_at ? { call_log_id: pendingId } : undefined;
+      }
+      return { id: pendingId, metadata: rows.get(pendingId).metadata };
+    });
     chain.update = jest.fn(async () => 1);
     chain.insert = jest.fn(async () => {}); // the ambiguous write's own activity_log row
-    const conn = jest.fn(() => chain);
+    const conn = jest.fn((table) => { chain._table = table; return chain; });
     conn.raw = jest.fn((sql, bindings) => {
       const patchValue = JSON.parse(bindings[0]).call_booking_link_text;
       if (pendingId && rows.has(pendingId)) rows.get(pendingId).metadata = { call_booking_link_text: patchValue };

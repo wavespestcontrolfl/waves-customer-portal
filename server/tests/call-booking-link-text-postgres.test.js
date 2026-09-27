@@ -55,7 +55,12 @@ const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-
 const connection = process.env.CALL_BOOKING_LINK_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `call_booking_link_${randomUUID().replaceAll('-', '')}`;
-const TABLES = ['customers', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log'];
+// call_booking_link_text_handoffs (codex #5018 r13 P1, migration
+// 20260927160000) is the ONE table this lane adds — the throwaway database
+// this file runs against must be FULLY migrated (never the possibly-stale
+// waves_test template alone) for it to exist in `public` before the clone
+// below runs.
+const TABLES = ['customers', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -142,9 +147,11 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 5 } });
     // Clone the MIGRATED public schema, never application records — catches
-    // real column/type/CHECK drift instead of a hand-written stand-in. This
-    // lane adds no new table and no new column to any of these, so no
-    // trailing migration needs to be replayed forward into the clone.
+    // real column/type/CHECK drift instead of a hand-written stand-in.
+    // call_booking_link_text_handoffs (codex #5018 r13 P1) is this lane's
+    // one new table — every other table here needs no trailing migration
+    // replayed forward into the clone, but the CONNECTION database itself
+    // must already be fully migrated for that one to exist in `public`.
     for (const table of TABLES) {
       await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
@@ -340,15 +347,19 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(concurrentLockErrorCode).toBe('55P03'); // lock_timeout — the real advisory lock was held
   });
 
-  // codex #5018 r11 pre-push P1: the real proof a mocked knex cannot give —
-  // the withSmsHandoff transaction (dbi) genuinely ROLLS BACK on a thrown
-  // error (simulating messages.create() timing out), yet the
-  // handoff_started_at stamp survives, because neverSendRecheck writes it
-  // through markerDb() (mocked to mockPg here, but via a call OUTSIDE the
-  // handoff's own trx, on its own committed statement) rather than through
-  // dbi/trx itself. Before this fix the stamp lived on dbi and the ROLLBACK
-  // would have discarded it right along with the throw.
-  test('a thrown error inside the real withSmsHandoff transaction rolls that transaction back, but the handoff_started_at stamp — written through markerDb(), never dbi — survives', async () => {
+  // codex #5018 r13 P1: the real proof a mocked knex cannot give — the
+  // withSmsHandoff transaction (dbi) genuinely ROLLS BACK on a thrown error
+  // (simulating messages.create() timing out), and dbi ALSO holds call_log
+  // FOR UPDATE for the whole handoff, yet the handoff marker survives —
+  // because it lives on its OWN table (call_booking_link_text_handoffs),
+  // written through markerDb() (mocked to mockPg here, but via a call
+  // OUTSIDE the handoff's own trx, on its own committed statement, and on
+  // a DIFFERENT table than the one dbi/trx has locked). Before this fix
+  // the marker lived on call_log.metadata itself and the ROLLBACK would
+  // have discarded it right along with the throw; before THIS round's
+  // fix, writing it to call_log at all — even via a separate connection —
+  // would have deadlocked against dbi's own FOR UPDATE lock on that row.
+  test('a thrown error inside the real withSmsHandoff transaction rolls that transaction back, but the handoff marker — on its own table, never call_log — survives', async () => {
     const leadId = await insertLead(mockPg, { phone: '+15555550444' });
     const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
     const callId = await insertCall(mockPg, {
@@ -358,7 +369,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-4', line: 'Pick a time.\n\n', phone: '+15555550444' });
     // Mirrors twilio.js's own real dispatch(): providerPreSendCheck runs
     // INSIDE the held handoff transaction, then the (simulated) SDK request
-    // fails — a genuine post-stamp throw, exactly like a provider timeout.
+    // fails — a genuine post-marker throw, exactly like a provider timeout.
     sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => withSmsHandoff(async (trx) => {
       const verdict = await providerPreSendCheck({ dbi: trx });
       if (!verdict.ok) return verdict;
@@ -370,11 +381,47 @@ postgres('call-booking-link-text against PostgreSQL', () => {
 
     const row = await mockPg('call_log').where({ id: callId }).first('metadata');
     expect(row.metadata.call_booking_link_text.status).toBe('claimed');
-    expect(row.metadata.call_booking_link_text.handoff_started_at).toBeTruthy(); // survived the rollback
+    expect(row.metadata.call_booking_link_text.handoff_started_at).toBeUndefined(); // never written to call_log at all
+    const marker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: callId }).first();
+    expect(marker).toBeTruthy(); // the marker row survived the rollback
 
     const outcome = await callBookingLinkText.recoverAbandonedClaim(mockPg, { ...call, metadata: row.metadata }, NOW);
-    expect(outcome).toEqual({ ambiguous: true }); // never resent, exactly the contract this stamp exists to prove
+    expect(outcome).toEqual({ ambiguous: true }); // never resent, exactly the contract this marker exists to prove
   });
+
+  // codex #5018 r13 P1: the deadlock a mocked knex could not prove — dbi
+  // holds call_log FOR UPDATE for the whole handoff, and the marker INSERT
+  // (via markerDb(), a genuinely separate connection) must still complete
+  // immediately, because it targets a DIFFERENT table with no lock on it.
+  // Bounded jest timeout below: a regression that reintroduces the
+  // call_log-targeting marker (or any other lock on the SAME row from a
+  // second connection) would hang this test instead of failing it, so the
+  // timeout itself is the safety net.
+  test('the marker INSERT via markerDb() does not block while dbi holds call_log locked', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550777' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550777',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-7', line: 'Pick a time.\n\n', phone: '+15555550777' });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
+      const verdict = await withSmsHandoff(async (trx) => providerPreSendCheck({ dbi: trx }));
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000007' }
+        : { sent: false, ...verdict };
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await Promise.race([
+      callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW),
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error('TIMED OUT — the marker insert deadlocked against call_log\'s own FOR UPDATE lock')), 5000)),
+    ]);
+
+    expect(result).toEqual({ sent: true, providerMessageId: 'SMtest0000000000000000000000007' });
+    const marker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: callId }).first();
+    expect(marker).toBeTruthy();
+  }, 10000);
 
   // codex #5018 r12 P1: neverSendRecheck's lead read must be locked FOR
   // UPDATE, on dbi — the SAME connection the phone-locked handoff holds —
@@ -418,6 +465,46 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(concurrentUpdateErrorCode).toBe('55P03'); // lock_timeout — the real FOR UPDATE lock was held
     const lead = await mockPg('leads').where({ id: leadId }).first('phone');
     expect(lead.phone).toBe('+15555550555'); // the concurrent write never landed
+  });
+
+  // codex #5018 r13 P1: call_log gets the SAME treatment, taken AFTER
+  // leads (the established processor order — see the service file's own
+  // doc comment for the file:line evidence). A concurrent reprocessor
+  // claim UPDATE (call-recording-processor.js's own shape:
+  // processing_token/processing_status) on the SAME row must wait until
+  // this whole handoff finishes.
+  test('neverSendRecheck\'s FOR UPDATE call_log lock blocks a concurrent reprocessor claim UPDATE until the handoff finishes', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550666' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550666',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-6', line: 'Pick a time.\n\n', phone: '+15555550666' });
+    let concurrentClaimErrorCode = null;
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const check = await providerPreSendCheck({ dbi: trx });
+        if (!check.ok) return check;
+        await mockPg.transaction(async (trx2) => {
+          await trx2.raw("SET LOCAL lock_timeout = '200ms'");
+          await trx2('call_log').where({ id: callId }).update({ processing_token: 'reprocess-tok', processing_status: 'processing' });
+        }).catch((err) => { concurrentClaimErrorCode = err.code; });
+        return { ok: true };
+      });
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000006' }
+        : { sent: false, ...verdict };
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: true, providerMessageId: 'SMtest0000000000000000000000006' });
+    expect(concurrentClaimErrorCode).toBe('55P03'); // lock_timeout — the real FOR UPDATE call_log lock was held
+    const row = await mockPg('call_log').where({ id: callId }).first('metadata', 'processing_token');
+    expect(row.metadata.call_booking_link_text.status).toBe('sent'); // sent normally
+    expect(row.processing_token).toBeNull(); // the concurrent reprocess claim never landed during the handoff
   });
 
   test('dispatchClaimedCall skips booked_since_call against a real scheduled_services row created after the call', async () => {
@@ -535,13 +622,16 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       // row below — oldest-first ORDER BY puts every one of these ahead of
       // it, the worst case for the starvation this fixes.
       const createdAt = new Date(NOW.getTime() - 3 * 60 * 60 * 1000 + i * 1000);
-      await insertCall(mockPg, {
+      const ambiguousCallId = await insertCall(mockPg, {
         created_at: createdAt, updated_at: createdAt,
         metadata: {
           lead_id: leadId,
-          call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: staleClaimedAt.toISOString(), handoff_started_at: staleClaimedAt.toISOString() },
+          call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: staleClaimedAt.toISOString() },
         },
       });
+      // codex #5018 r13 P1: "already-ambiguous" now means a marker row
+      // exists, not a call_log.metadata field.
+      await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).insert({ call_log_id: ambiguousCallId, handoff_started_at: staleClaimedAt });
     }
     const recoverableCreatedAt = new Date(NOW.getTime() - 3 * 60 * 60 * 1000 + 60 * 1000); // the newest — sorts LAST
     const recoverableCallId = await insertCall(mockPg, {
@@ -590,5 +680,25 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(ancientRow.metadata.call_booking_link_text.status).toBe('claimed'); // untouched — never even scanned
     const recentRow = await mockPg('call_log').where({ id: recentCallId }).first('metadata');
     expect(recentRow.metadata.call_booking_link_text.status).toBe('pending'); // recovered normally
+  });
+
+  // codex #5018 r13 P1: housekeeping — a real Postgres proof that the
+  // bounded DELETE prunes only rows past HANDOFF_MARKER_RETENTION_MS,
+  // leaving a recent marker (still meaningful to recoverAbandonedClaim)
+  // untouched.
+  test('pruneHandoffMarkers deletes only handoff marker rows older than HANDOFF_MARKER_RETENTION_MS', async () => {
+    const oldCallId = await insertCall(mockPg);
+    const recentCallId = await insertCall(mockPg);
+    const oldStamp = new Date(NOW.getTime() - callBookingLinkText.HANDOFF_MARKER_RETENTION_MS - 60 * 60 * 1000); // a day-ish past retention
+    const recentStamp = new Date(NOW.getTime() - 60 * 60 * 1000); // well within retention
+    await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).insert({ call_log_id: oldCallId, handoff_started_at: oldStamp });
+    await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).insert({ call_log_id: recentCallId, handoff_started_at: recentStamp });
+
+    const deleted = await callBookingLinkText.pruneHandoffMarkers(mockPg, NOW);
+    expect(deleted).toBe(1);
+    const oldMarker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: oldCallId }).first();
+    expect(oldMarker).toBeUndefined(); // pruned
+    const recentMarker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: recentCallId }).first();
+    expect(recentMarker).toBeTruthy(); // kept — still meaningful to recoverAbandonedClaim
   });
 });
