@@ -1206,7 +1206,8 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
 }
 
 /** PR closed without merge: terminal failure, never retried (both lanes). */
-async function finalizeClosed(run, prNumber) {
+async function finalizeClosed(run, pr, gh) {
+  const prNumber = pr.number;
   // Retire the remediation row at the FIRST closed observation — the PR can
   // never re-enter remediation regardless of what happens to the run below
   // (supersede, already-finalized, crash between writes), and stamping after
@@ -1222,6 +1223,17 @@ async function finalizeClosed(run, prNumber) {
   // requeued the opportunity mid-tick has already re-routed the work — the
   // old run gets annotated out of selection, not marked failed.
   const { parked, row: queueRow } = await queueRowParkedState(run);
+  if (!parked && queueRow && sameQueueClaim(queueRow, run)
+    && queueRow.bucket === 'citability_backfill'
+    && queueRow.status === 'pending_review'
+    && queueRow.skip_reason === pendingSkipReasonForRun(run)) {
+    const queue = require('./opportunity-queue')._internals;
+    if (queue.pageEditSuperseded(queueRow)) {
+      return finalizeSupersededCitabilityRetirement(
+        run, pr, gh, queue, pendingSkipReasonForRun(run)
+      );
+    }
+  }
   if (!parked) return supersedeRun(run, queueRow);
 
   const now = new Date();
@@ -2003,7 +2015,7 @@ async function pollRun(run, { allowMerge = true } = {}) {
           autoMerged: false, mergeSha: result.pr.merge_commit_sha || null, mergedAt: result.pr.merged_at || null,
         });
       }
-      return await finalizeClosed(run, prNumber);
+      return await finalizeClosed(run, { ...pr, number: prNumber }, gh);
     }
 
     if (!autoMergeEnabled(run.action_type)) return { pending: true, reason: 'auto_merge_disabled' };

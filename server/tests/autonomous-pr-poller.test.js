@@ -2544,6 +2544,43 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
   });
 
+  test('page supersession landing during closed-PR finalization retires the current-claim citability park', async () => {
+    const run = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-a' });
+    const parked = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: 'claim-a',
+      bucket: 'citability_backfill', signal_metadata: {},
+    };
+    const superseded = {
+      ...parked,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:race' } },
+    };
+    const updates = setupDb({
+      pending: [run],
+      queue: [parked],
+      queueFirst: (read) => (read === 0 ? parked : superseded),
+    });
+    gh.getPr.mockResolvedValue({
+      head: { ref: 'content/closed-test', sha: 'closed-head' },
+      number: 42, state: 'closed', merged: false,
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({
+      skipped: true, retired: true, reason: 'citability_backfill_superseded',
+    });
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/closed-test');
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    expect(updates.find((u) => u.updates && u.updates.outcome === 'failed')).toBeUndefined();
+  });
+
   test('requeue→re-park cycle: a NEWER run for the same opportunity supersedes this one even though the queue state matches', async () => {
     // operator requeued, a new run re-parked the same opportunity at the
     // exact same pending_review/skip_reason — status+skip_reason alone
