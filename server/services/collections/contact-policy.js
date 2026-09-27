@@ -248,6 +248,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     eligibleInvoiceIds: [],
     eligibleBalanceCents: 0,
     eligibleInvoiceCents: {}, // per-invoice remainder, keyed by id
+    balanceIncomplete: null,
     eligibleAccountTier: null, // dunning tier of the OLDEST-due eligible invoice (the register)
     eligibleAnchorDueDate: null, // its ET due day
     nextEligibleAt: null,
@@ -257,6 +258,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
   };
   const deny = (reason) => {
     if (!result.denialReasons.includes(reason)) result.denialReasons.push(reason);
+  };
+  const markBalanceIncomplete = (reason) => {
+    if (!result.balanceIncomplete) result.balanceIncomplete = reason;
   };
   const proposeNextEligible = (at) => {
     if (!at) return;
@@ -301,10 +305,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // 'processing', which the loader above already excludes (it admits only
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
-    let balanceIncomplete = null;
     const eligible = await loadEligibleInvoices(customerId, {
       database,
-      onIncomplete: (reason) => { balanceIncomplete = reason; },
+      onIncomplete: markBalanceIncomplete,
     });
     // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
     // extracted so dial-time disclosure shares the SAME authority, codex
@@ -512,7 +515,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
         // An account read that dropped an unprovable row or hit the bound is
         // not "the total" — the call would disclose a partial balance as the
         // whole. Fail closed (gh r1).
-        if (balanceIncomplete) deny('balance_read_incomplete');
+        if (result.balanceIncomplete) deny('balance_read_incomplete');
         // ACCOUNT-LEVEL (owner ruling 2026-08-28): every open self-pay invoice
         // is collected as ONE balance; the clock is the OLDEST unpaid
         // invoice's due date. (The single-invoice pilot rule is gone.)
@@ -594,6 +597,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
   } catch (err) {
     logger.error(`[contact-policy] evaluation failed for customer ${customerId}: ${err.message}`);
     // FAIL CLOSED — an error is never "allowed".
+    markBalanceIncomplete('policy evaluation failed');
     result.allowed = false;
     deny('policy_evaluation_error');
     return result;
