@@ -9,6 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { loadCustomerGrassContext, irrigationTypeHasSystem } = require('./lawn-grass-context');
+const { resolvePropertyCoordinates } = require('./property-coordinates');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -455,7 +456,8 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate, applicationM
     const weatherIncomplete = !weather
       || weather.temp_f == null || weather.humidity_pct == null || weather.rainfall_in == null;
     if (weatherIncomplete && etCalendarDayOf(treatmentDate) === etDateString()) {
-      const fawn = await require('./fawn-weather').getCurrent();
+      const coordinates = await resolvePropertyCoordinates(post.customer_id, post.property_id);
+      const fawn = coordinates ? await require('./fawn-weather').getCurrent(coordinates) : null;
       // Same ≤6h bound as the persisted-snapshot path above. The
       // STATION's observation_time is authoritative when present
       // (naive strings are ET wall-clock — parseETDateTime handles

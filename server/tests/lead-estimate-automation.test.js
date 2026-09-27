@@ -109,7 +109,7 @@ describe('lead estimate automation gate', () => {
     });
   });
 
-  test('generates draft estimate data for a ready lead without sending it', () => {
+  test('generates draft estimate data for a ready lead without sending it', async () => {
     const readiness = evaluateLeadEstimateAutomationReadiness({
       phone: '+19415550199',
       intake: {
@@ -124,7 +124,7 @@ describe('lead estimate automation gate', () => {
       },
     });
 
-    const draft = buildAutomatedLeadDraftEstimate({
+    const draft = await buildAutomatedLeadDraftEstimate({
       readiness,
       intake: {
         serviceInterest: 'Recurring Mosquito Control',
@@ -176,7 +176,7 @@ describe('lead estimate automation gate', () => {
     }
   });
 
-  test('rodent bait lead drafts keep the new-model provenance (perApplicationBilled / stations / pricingBasis) — codex #3591 r9 P0', () => {
+  test('rodent bait lead drafts keep the new-model provenance (perApplicationBilled / stations / pricingBasis) — codex #3591 r9 P0', async () => {
     const readiness = evaluateLeadEstimateAutomationReadiness({
       phone: '+19415550199',
       intake: {
@@ -185,7 +185,7 @@ describe('lead estimate automation gate', () => {
         normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' },
       },
     });
-    const draft = buildAutomatedLeadDraftEstimate({
+    const draft = await buildAutomatedLeadDraftEstimate({
       readiness,
       intake: { serviceInterest: 'Rodent bait station service', fullAddress: '123 Main St, Venice, FL 34285' },
       body: { homeSqFt: 2200, lotSqFt: 9000 },
@@ -216,11 +216,11 @@ describe('lead estimate automation gate', () => {
     try {
       constants.RODENT.tierQualifier = false;
       constants.RODENT.excludeFromPctDiscount = true;
-      const frozen = buildAutomatedLeadDraftEstimate({
+      const frozen = (await buildAutomatedLeadDraftEstimate({
         readiness,
         intake: { serviceInterest: 'Rodent bait station service', fullAddress: '123 Main St, Venice, FL 34285' },
         body: { homeSqFt: 2200, lotSqFt: 9000 },
-      }).estimateData.engineResult.lineItems.find((l) => l.service === 'rodent_bait');
+      })).estimateData.engineResult.lineItems.find((l) => l.service === 'rodent_bait');
       expect(frozen).toEqual(expect.objectContaining({
         perApplicationBilled: true, tierQualifier: false, countsTowardWaveGuardTier: false,
         excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false,
@@ -231,7 +231,7 @@ describe('lead estimate automation gate', () => {
     }
   });
 
-  test('keeps unsupported scoped services in manual review draft state', () => {
+  test('keeps unsupported scoped services in manual review draft state', async () => {
     const readiness = evaluateLeadEstimateAutomationReadiness({
       phone: '+19415550199',
       intake: {
@@ -246,7 +246,7 @@ describe('lead estimate automation gate', () => {
       },
     });
 
-    const draft = buildAutomatedLeadDraftEstimate({
+    const draft = await buildAutomatedLeadDraftEstimate({
       readiness,
       intake: { serviceInterest: 'One-Time Termite Treatment' },
     });
@@ -260,7 +260,7 @@ describe('lead estimate automation gate', () => {
     expect(draft.estimateData.automation.draftEstimateAutomation.status).toBe('manual_review_required');
   });
 
-  test('prices a realistic wavespestcontrol.com webhook payload into a generated draft', () => {
+  test('prices a realistic wavespestcontrol.com webhook payload into a generated draft', async () => {
     const intake = buildLeadWebhookIntake({
       firstName: 'maria',
       lastName: 'garcia',
@@ -278,7 +278,7 @@ describe('lead estimate automation gate', () => {
       phone: '+19415550101',
       serviceInterest: intake.serviceInterest,
     });
-    const draft = buildAutomatedLeadDraftEstimate({
+    const draft = await buildAutomatedLeadDraftEstimate({
       intake,
       body: { homeSqFt: 2100, lotSqFt: 9500 },
       readiness,
@@ -303,7 +303,7 @@ describe('lead estimate automation gate', () => {
     expect(draft.monthly).toBeGreaterThan(0);
   });
 
-  test('spoke-domain termite treatment payload stays draft manual review', () => {
+  test('spoke-domain termite treatment payload stays draft manual review', async () => {
     const intake = buildLeadWebhookIntake({
       name: 'Terry Termite',
       email: 'terry@example.com',
@@ -320,7 +320,7 @@ describe('lead estimate automation gate', () => {
       phone: '+19415550102',
       serviceInterest: intake.serviceInterest,
     });
-    const draft = buildAutomatedLeadDraftEstimate({
+    const draft = await buildAutomatedLeadDraftEstimate({
       intake,
       body: { homeSqFt: 1800, lotSqFt: 7200 },
       readiness,
@@ -341,7 +341,7 @@ describe('lead estimate automation gate', () => {
     expect(draft.monthly).toBeUndefined();
   });
 
-  test('triage service-interest changes regenerate draft pricing from the new service', () => {
+  test('triage service-interest changes regenerate draft pricing from the new service', async () => {
     const intake = buildLeadWebhookIntake({
       name: 'Casey Change',
       email: 'casey@example.com',
@@ -357,7 +357,7 @@ describe('lead estimate automation gate', () => {
       phone: '+19415550105',
       serviceInterest: intake.serviceInterest,
     });
-    const initialDraft = buildAutomatedLeadDraftEstimate({
+    const initialDraft = await buildAutomatedLeadDraftEstimate({
       intake,
       body: { homeSqFt: 2000, lotSqFt: 8000 },
       readiness: initialReadiness,
@@ -373,7 +373,7 @@ describe('lead estimate automation gate', () => {
       phone: '+19415550105',
       serviceInterest: triagedServiceInterest,
     });
-    const triageDraft = buildAutomatedLeadDraftEstimate({
+    const triageDraft = await buildAutomatedLeadDraftEstimate({
       intake: triageIntake,
       body: { homeSqFt: 2000, lotSqFt: 8000 },
       readiness: triageReadiness,
@@ -484,7 +484,7 @@ describe('service-interest mapper hardening', () => {
     expect(mapped.review).toContain('bed_bug_defaults_used');
   });
 
-  test('automated bed-bug lead now survives engine generation end to end', () => {
+  test('automated bed-bug lead now survives engine generation end to end', async () => {
     const readiness = evaluateLeadEstimateAutomationReadiness({
       phone: '+19415550199',
       serviceInterest: 'Bed bug treatment',
@@ -494,7 +494,7 @@ describe('service-interest mapper hardening', () => {
         normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' },
       },
     });
-    const draft = buildAutomatedLeadDraftEstimate({
+    const draft = await buildAutomatedLeadDraftEstimate({
       intake: { serviceInterest: 'Bed bug treatment', fullAddress: '123 Main St, Venice, FL 34285' },
       body: { homeSqFt: 1800, lotSqFt: 7000 },
       readiness,
@@ -511,15 +511,15 @@ describe('keyed leads (C2): the draft prices the canonical product, never a labe
     phone: '+19415550199',
     intake: { email: 'lead@example.com', serviceInterest, normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' } },
   });
-  test('mosquito_seasonal drafts the seasonal9 tier (the label alone would have priced monthly)', () => {
+  test('mosquito_seasonal drafts the seasonal9 tier (the label alone would have priced monthly)', async () => {
     const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: 'mosquito_seasonal', serviceKeyInstant: true };
-    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    const draft = await buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.automation).toMatchObject({ status: 'generated', generated: true });
     expect(draft.estimateData.services).toEqual({ mosquito: { tier: 'seasonal9' } });
   });
-  test('flea_tick drafts the two-visit package — the only flea offer (owner ruling 2026-09-03)', () => {
+  test('flea_tick drafts the two-visit package — the only flea offer (owner ruling 2026-09-03)', async () => {
     const readiness = { ...readinessFor('Flea Control Service'), serviceKey: 'flea_tick', serviceKeyInstant: true };
-    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Flea Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    const draft = await buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Flea Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.estimateData.services).toEqual({ flea: {} });
     // The draft carries the legacy-mapped line shape (visits, no warranty
     // metadata) — the package identity + visit count are what the copy
@@ -530,36 +530,87 @@ describe('keyed leads (C2): the draft prices the canonical product, never a labe
     const compact = draft.estimateData.engineResult.lineItems.find((l) => l.service === 'flea_package');
     // The compact projection keeps the sold-scope flags the copy pack reads.
     expect(compact).toMatchObject({ visits: 2, warrantyType: 'conditional_retreat', guaranteeWindowDaysAfterFollowUp: 30, maxIncludedRetreats: 1, exteriorStatus: 'not_included' });
+    expect(compact).not.toHaveProperty('includedFollowUps');
+    expect(compact).not.toHaveProperty('unlimitedCallbacks');
+    expect(compact).not.toHaveProperty('additionalCheckPrice');
   });
-  test('a selectable key with no instant request is quote-on-request — no automated draft', () => {
+  test('rodent_trapping drafts use the authoritative catalog price and persist finite-check copy scope', async () => {
+    const bridge = require('../services/pricing-engine/db-bridge');
+    const { RODENT } = require('../services/pricing-engine/constants');
+    const oneTimeCopy = require('../services/estimate-one-time-copy');
+    const originalPrice = RODENT.trapping.additionalCheckPrice;
+    const readCatalog = jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog')
+      .mockResolvedValue(110.25);
+
+    try {
+      // Simulates this process retaining the old singleton after another
+      // process changed the admin catalog price.
+      RODENT.trapping.additionalCheckPrice = 95;
+      const readiness = {
+        ...readinessFor('Rodent Trapping Service'),
+        serviceKey: 'rodent_trapping',
+        serviceKeyInstant: true,
+      };
+      const draft = await buildAutomatedLeadDraftEstimate({
+        readiness,
+        intake: { serviceInterest: 'Rodent Trapping Service', fullAddress: '123 Main St, Venice, FL 34285' },
+        body: { homeSqFt: 2200, lotSqFt: 9000 },
+      });
+
+      expect(readCatalog).toHaveBeenCalledTimes(1);
+      expect(draft.estimateData.services).toEqual({ rodentTrapping: {} });
+      expect(draft.automation.engineInput).not.toHaveProperty('catalogPricing');
+      const trapping = draft.estimateData.engineResult.lineItems
+        .find((line) => line.service === 'rodent_trapping');
+      expect(trapping).toMatchObject({
+        includedFollowUps: 1,
+        includedCallbacks: 1,
+        unlimitedCallbacks: false,
+        additionalCheckPrice: 110.25,
+        pricingBasis: { includedFollowUps: 1, additionalCheckPrice: 110.25 },
+      });
+      // Exercise the same persisted compact row consumed by the public copy
+      // renderer. It must describe the finite allowance, not the legacy
+      // open-ended "until activity stops" scope.
+      expect(oneTimeCopy.resolveOneTimeServiceCopy(trapping).includes)
+        .toContain('Setup visit plus 1 trap-check visit — additional checks are billed separately if the job needs them');
+      const pageCopy = oneTimeCopy.oneTimeOnlyIntelligenceCopy([trapping]);
+      expect(pageCopy.aiBody).toMatch(/the setup visit and one trap check for/);
+      expect(pageCopy.hero.sub).not.toMatch(/until the activity stops/);
+    } finally {
+      RODENT.trapping.additionalCheckPrice = originalPrice;
+      readCatalog.mockRestore();
+    }
+  });
+  test('a selectable key with no instant request is quote-on-request — no automated draft', async () => {
     const readiness = { ...readinessFor('WDO Inspection Service'), serviceKey: 'wdo_inspection', serviceKeyInstant: false };
-    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'WDO Inspection Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    const draft = await buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'WDO Inspection Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.automation.generated).toBe(false);
     expect(draft.automation.unsupportedReason).toBe('quote_on_request');
   });
-  test('an instant-mapped key whose LIVE catalog verdict is not instant is quote-on-request (cadence drift / termite rental gate off)', () => {
+  test('an instant-mapped key whose LIVE catalog verdict is not instant is quote-on-request (cadence drift / termite rental gate off)', async () => {
     // termite_bait has a canonical request, but the rental gate or an admin
     // cadence edit can turn the row off instant after the map was written;
     // the draft must follow the catalog verdict, never the static map.
     const readiness = { ...readinessFor('Termite Bait Station Service'), serviceKey: 'termite_bait', serviceKeyInstant: false };
-    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Termite Bait Station Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    const draft = await buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Termite Bait Station Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.automation.generated).toBe(false);
     expect(draft.automation.unsupportedReason).toBe('quote_on_request');
     expect(draft.estimateData.services).toBeUndefined();
   });
-  test('a submitted key that could not be verified parks — never falls back to label inference', () => {
+  test('a submitted key that could not be verified parks — never falls back to label inference', async () => {
     // publicSelectableService returned null (catalog read failed / not
     // selectable): the label alone would have drafted mosquito as monthly.
     const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: null, serviceKeyInstant: null, serviceKeyUnverified: true };
-    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    const draft = await buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.automation.generated).toBe(false);
     expect(draft.automation.status).toBe('manual_review_required');
     expect(draft.automation.unsupportedReason).toBe('quote_on_request');
     expect(draft.automation.services).toEqual({});
   });
-  test('a keyed lead with NO live verdict fails closed to quote-on-request', () => {
+  test('a keyed lead with NO live verdict fails closed to quote-on-request', async () => {
     const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: 'mosquito_seasonal' };
-    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    const draft = await buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.automation.generated).toBe(false);
     expect(draft.automation.unsupportedReason).toBe('quote_on_request');
   });

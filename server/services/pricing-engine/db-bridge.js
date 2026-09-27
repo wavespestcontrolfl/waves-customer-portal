@@ -17,6 +17,7 @@ const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.
 // Pristine code defaults for the rodent bracket ladder (codex #3591 r54
 // P1): a DB row that disappears or invalidates after a prior sync must
 // fall back to these, not keep the stale process-global values.
+const RODENT_ADDITIONAL_CHECK_DEFAULT = constants.RODENT.trapping.additionalCheckPrice;
 const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
   baitBrackets: constants.RODENT.baitBrackets,
   baitBracketExtension: constants.RODENT.baitBracketExtension,
@@ -27,6 +28,23 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
 }));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
+
+async function readRodentAdditionalCheckPriceFromCatalog(dbInstance) {
+  const db = dbInstance || require('../../models/db');
+  try {
+    if (!(await db.schema.hasTable('services'))) return RODENT_ADDITIONAL_CHECK_DEFAULT;
+    const extraCheck = await db('services')
+      .where({ service_key: 'rodent_trap_check_additional', is_active: true })
+      .first('base_price');
+    const price = Number(extraCheck?.base_price);
+    return Number.isFinite(price) && price > 0
+      ? money(price)
+      : RODENT_ADDITIONAL_CHECK_DEFAULT;
+  } catch (err) {
+    console.warn('[pricing-engine] rodent extra-check catalog price read skipped:', err.message);
+    return RODENT_ADDITIONAL_CHECK_DEFAULT;
+  }
+}
 
 function readFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return undefined;
@@ -1194,7 +1212,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // out-of-range value therefore degrades to NEUTRAL (fail-safe toward
     // "no adjustment"), never to whatever loaded before it.
     constants.TREE_SHRUB.densityFactors = { light: 1, moderate: 1, heavy: 1 };
-    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0 };
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 };
     constants.TREE_SHRUB.callbackReservePerVisit = 0;
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
@@ -1239,6 +1257,10 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         // 0–10 min/palm/visit; beyond that a 12-palm property books 2h of
         // palm time per visit.
         if (perPalmMin >= 0 && perPalmMin <= 10) reserve.minutesPerPalmVisit = perPalmMin;
+        const largeFactor = Number(rates.palm_large_factor);
+        // 1–5x: a large palm prices at least like a regular one, and past 5
+        // regular palms' worth is a typo, not a canopy.
+        if (largeFactor >= 1 && largeFactor <= 5) reserve.largePalmFactor = largeFactor;
       }
       const callbackReserve = Number(rates.callback_reserve_per_visit);
       if (callbackReserve >= 0 && callbackReserve <= 50) {
@@ -1509,8 +1531,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
             ? 'unlimited'
             : Number(t.included_followups);
       }
-      // additional_followup_rate is retired (callbacks are unlimited on the
-      // Standard plan, owner 2026-08-26) — deliberately not mapped.
+      // additional_followup_rate is deliberately not mapped: the $95 extra
+      // check (owner ruling 2026-09-26) is billed by the office-booked
+      // "Rodent Trap Check - Additional" catalog row, whose base_price is
+      // the booking authority. additionalCheckPrice (customer copy) is
+      // overlaid from that row below, so copy and invoice never drift.
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
       if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
       if (Array.isArray(t.home_size_adjustments)) {
@@ -2117,6 +2142,14 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
     }
 
+    // ── Rodent extra trap check: catalog base_price is the authority ──
+    // (owner ruling 2026-09-26). Reset to the code default first so a
+    // removed/inactive row never leaves a stale overlay behind.
+    // A failed catalog read keeps the code default rather than failing the
+    // whole pricing sync — this number only feeds customer copy; booking
+    // stamps the catalog price itself.
+    constants.RODENT.trapping.additionalCheckPrice = await readRodentAdditionalCheckPriceFromCatalog(db);
+
     // ── Lawn Care Brackets (all 4 grass tracks) ──────────────
     // Table: lawn_pricing_brackets (grass_track, sqft_bracket, tier, monthly_price)
     // Edited via Pricing Logic UI → GET/PUT /admin/pricing-config/lawn-brackets
@@ -2185,6 +2218,7 @@ module.exports = {
   getLastSyncAt,
   isSyncInFlight,
   syncConstantsFromDB,
+  readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,
   validatePestPricingConfig,

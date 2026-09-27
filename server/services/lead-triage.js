@@ -3,6 +3,7 @@ const MODELS = require('../config/models');
 const { dispatch, rejectCall } = require('./llm/call');
 const { stripThinkingBlocks } = require('./llm/deep');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
+const { stripTrailingSignature } = require('./messaging/sms-signoff');
 
 // Structured-output contract for the live (dispatcher) leg. The direct-SDK
 // Claude fallback below has no schema path, so the prompt keeps its field
@@ -24,7 +25,7 @@ const TRIAGE_SCHEMA = {
         propertyType: { type: ['string', 'null'], description: '"residential", "commercial", or null' },
       },
     },
-    suggestedReply: { type: 'string', description: 'A warm, personalized SMS reply under 300 characters signed "Adam, Waves Pest Control"' },
+    suggestedReply: { type: 'string', description: 'A warm, personalized SMS reply under 300 characters, never signed — no name, sign-off or company name at the end' },
   },
 };
 
@@ -47,6 +48,21 @@ function triageMatchesSchema(t) {
     && strOrNull(x.pestType) && strOrNull(x.location) && strOrNull(x.propertyType);
 }
 
+// Owner ruling 2026-09-26: customer texts are never signed. The prompt says
+// so, and the suggestion is stripped deterministically anyway because models
+// add sign-offs on their own; the lead's first name keeps a reply addressed
+// to a customer who shares the signer's name intact. Stripping runs BEFORE
+// triageMatchesSchema, so a suggestion that was only a signature ("— Adam")
+// is a blank reply there — a failed answer that falls back — instead of a
+// successful triage with no reply (Codex r1 on #4975).
+function unsignedTriage(parsed, firstName) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.suggestedReply !== 'string') return parsed;
+  // anySigner: the reply is written from an arbitrary public lead message, so
+  // a dash sign-off by any name goes too, not only the Waves signers' (Codex
+  // r2 + r3 on #4975 — extended in the shared stripper, not duplicated here).
+  return { ...parsed, suggestedReply: stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName, anySigner: true }) };
+}
+
 function mapTriage(parsed) {
   return {
     serviceInterest: parsed.serviceInterest || null,
@@ -63,6 +79,7 @@ function mapTriage(parsed) {
  */
 async function aiTriageLead({ name, phone, message, address, pageUrl, formName }) {
   if (!message) return null;
+  const firstName = String(name || '').trim().split(/\s+/)[0] || undefined;
 
   const prompt = `You are a lead triage assistant for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
 
@@ -82,7 +99,7 @@ Return a JSON object with:
    - "pestType" — specific pest mentioned if any (e.g. "ants", "roaches", "rats", "mosquitoes") or null
    - "location" — area/neighborhood if identifiable from address or message, or null
    - "propertyType" — "residential" or "commercial" or null
-4. "suggestedReply" — a warm, personalized SMS reply (under 300 chars) signed "Adam, Waves Pest Control". Reference their specific concern. Be friendly and professional.
+4. "suggestedReply" — a warm, personalized SMS reply (under 300 chars). Reference their specific concern. Be friendly and professional. NEVER sign it — no name, sign-off or company name at the end; the text just ends.
 
 Return ONLY valid JSON, no markdown.`;
 
@@ -93,7 +110,8 @@ Return ONLY valid JSON, no markdown.`;
       // The structured-output schema cannot forbid blank strings, so the
       // primary gets the same check as the fallback; a miss fails its row
       // and Claude gets a turn.
-      if (triageMatchesSchema(r.json)) return mapTriage(r.json);
+      const primary = unsignedTriage(r.json, firstName);
+      if (triageMatchesSchema(primary)) return mapTriage(primary);
       rejectCall(r, 'schema_invalid');
     }
   }
@@ -116,6 +134,7 @@ Return ONLY valid JSON, no markdown.`;
     const text = stripThinkingBlocks(response).content?.[0]?.text || '';
     let triage;
     try { triage = JSON.parse(text); } catch (err) { ledgerCallRejected(response, 'invalid_json'); throw err; }
+    triage = unsignedTriage(triage, firstName);
     // An off-schema answer (e.g. urgency "critical") is a failed triage, not
     // one to map: its values used to be written onto the lead anyway while
     // only the ledger row said it failed (review on #4884). Same null the

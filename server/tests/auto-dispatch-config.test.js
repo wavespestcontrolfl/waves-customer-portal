@@ -33,6 +33,25 @@ describe('auto-dispatch config apply gate', () => {
   });
 });
 
+// guardMode is the single source of truth apply.js's grouped-member guard
+// reads off the SAME config object index.js resolves — pin its precedence
+// here directly (Codex pre-push P1) rather than only through the
+// orchestrator's own integration tests.
+describe('guardMode — the resolved day-move guard, flex over tiers over legacy', () => {
+  test('neither gate ⇒ legacy', () => {
+    expect(getAutoDispatchConfig({ routeTiersEnabled: false, flexTierEnabled: false }).guardMode).toBe('legacy');
+  });
+  test('routeTiersEnabled alone ⇒ tiers', () => {
+    expect(getAutoDispatchConfig({ routeTiersEnabled: true, flexTierEnabled: false }).guardMode).toBe('tiers');
+  });
+  test('flexTierEnabled alone ⇒ flex', () => {
+    expect(getAutoDispatchConfig({ routeTiersEnabled: false, flexTierEnabled: true }).guardMode).toBe('flex');
+  });
+  test('both on ⇒ flex takes precedence', () => {
+    expect(getAutoDispatchConfig({ routeTiersEnabled: true, flexTierEnabled: true }).guardMode).toBe('flex');
+  });
+});
+
 describe('customer recurring handoff prerequisites', () => {
   const { gates } = require('../config/feature-gates');
   const savedEnv = { ...process.env };
