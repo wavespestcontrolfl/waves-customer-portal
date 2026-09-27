@@ -81,13 +81,13 @@ function input(overrides = {}) {
 // dispatch off to the authority under its locks. Tests assert on the
 // resulting `state` (boundary block / handoff semantics) and `outcome`
 // rather than a template-send result, since sending is the adapter's job.
-async function runAuthority(overrides = {}, { preSendCheck, dispatch = jest.fn(async () => {}) } = {}) {
+async function runAuthority(overrides = {}, { preSendCheck, dispatch = jest.fn(async () => {}), templateKey } = {}) {
   const requestInput = input(overrides);
   const context = await loadBillingEmailContext(requestInput);
   if (context.error) return { context, outcome: { ok: false }, state: null, dispatch };
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   const outcome = await dispatchUnderBillingEmailAuthority({
-    input: requestInput, recipientEmail: context.recipientEmail, preSendCheck, dispatch, state,
+    input: requestInput, recipientEmail: context.recipientEmail, templateKey, preSendCheck, dispatch, state,
   });
   return { context, outcome, state, dispatch };
 }
@@ -132,6 +132,21 @@ describe('billing channel email authority', () => {
       // dead end.
       blocked: true, code: 'BILLING_PREFERENCES_CHANGED', deliveryOutcome: 'not_sent', deferred: true, retryable: true,
     });
+  });
+
+  // Owner ruling 2026-09-27: the shared check serves every billing email
+  // sender, so a customer who never chose a billing channel keeps Email, as
+  // those senders always did. Only an explicit choice without Email refuses.
+  test.each([
+    ['no explicit choice for the category', { customer_id: 'cust-1', invoice_channels: ['sms'] }],
+    ['no notification_prefs row', undefined],
+  ])('%s keeps Email, at the first read and at the locked recheck', async (_label, prefs) => {
+    rows.notification_prefs = prefs;
+    const { context, outcome, dispatch } = await runAuthority();
+    expect(context.error).toBeUndefined();
+    expect(context.recipientEmail).toBe('casey@example.com');
+    expect(outcome).toEqual({ ok: true });
+    expect(dispatch).toHaveBeenCalledWith(mockDb);
   });
 
   test('passes the authority transaction to provider preparation', async () => {
@@ -253,6 +268,12 @@ describe('billing channel email authority', () => {
     const { outcome } = await runAuthority();
     expect(outcome.ok).toBe(true);
     expect(mockLoadTemplateByKey).toHaveBeenCalledWith('billing.notice', mockDb);
+  });
+
+  test("the locked suppression recheck loads the sender's own template when it names one", async () => {
+    const { outcome } = await runAuthority({}, { templateKey: 'invoice.followup_3_day' });
+    expect(outcome.ok).toBe(true);
+    expect(mockLoadTemplateByKey).toHaveBeenCalledWith('invoice.followup_3_day', mockDb);
   });
 
   test('the locked suppression recheck loads billing.receipt_notice for the payment_receipt category', async () => {
