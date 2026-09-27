@@ -1401,7 +1401,8 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
   // resolveEligibility's own docblock.
   const eligibility = await resolveEligibility(trx, freshLead, matched, { includeRescheduleUrl: false });
   if (eligibility.state !== 'ok') return { eligibility };
-  const reviewed = await require('../services/customer-geocode-review').reviewedCustomerLocation(matched, trx);
+  const review = require('../services/customer-geocode-review');
+  const reviewed = await review.reviewedCustomerLocation(matched, trx);
   if (reviewed.latitude != null && reviewed.longitude != null) {
     return { customer: reviewed, location: { lat: parseFloat(reviewed.latitude), lng: parseFloat(reviewed.longitude) } };
   }
@@ -1419,18 +1420,33 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
     logger.warn(`[inspection-public] comms fence busy for ${matched.id}; coordinates not persisted`);
     return { customer: matched, location: resolved.location };
   }
-  // Re-read under the fence (Codex #4737 r9 pre-push P1): an address edit
-  // that committed between matching and this lock must not receive the old
-  // address's coordinates — a changed (or archived) profile is a retry.
-  const fresh = await trx('customers').where({ id: matched.id }).whereNull('deleted_at')
-    .first('id', 'account_id', ...STORED_ADDRESS_FIELDS);
-  const unchanged = fresh
-    && String(fresh.account_id || '') === String(matched.account_id || '')
-    && STORED_ADDRESS_FIELDS.every((f) => (fresh[f] ?? null) === (matched[f] ?? null));
-  if (!unchanged) return { locationFailure: 'address_unresolved' };
-  const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
-  await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
-  return { customer: { ...matched, ...after }, location: resolved.location };
+  try {
+    return await review.withCustomerReviewWriteFence(matched.id, trx, async (fencedTrx) => {
+      // Re-read after both the customer and primary property are locked. A
+      // concurrent address edit or geocode decision must win rather than
+      // receiving the provider result computed before this transaction.
+      const fresh = await fencedTrx('customers').where({ id: matched.id }).whereNull('deleted_at')
+        .first('id', 'account_id', ...STORED_ADDRESS_FIELDS);
+      const unchanged = fresh
+        && String(fresh.account_id || '') === String(matched.account_id || '')
+        && STORED_ADDRESS_FIELDS.every((f) => (fresh[f] ?? null) === (matched[f] ?? null));
+      if (!unchanged) return { locationFailure: 'address_unresolved' };
+      const freshReviewed = await review.reviewedCustomerLocation(fresh, fencedTrx);
+      if (freshReviewed.geocode_review_blocked) return { locationFailure: 'address_unresolved' };
+      if (freshReviewed.latitude != null && freshReviewed.longitude != null) {
+        return {
+          customer: freshReviewed,
+          location: { lat: parseFloat(freshReviewed.latitude), lng: parseFloat(freshReviewed.longitude) },
+        };
+      }
+      const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
+      await fencedTrx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
+      return { customer: { ...matched, ...after }, location: resolved.location };
+    }, { lockWhenDisabled: true, wait: false });
+  } catch (error) {
+    if (error?.code === '55P03') return { locationFailure: 'address_unresolved' };
+    throw error;
+  }
 }
 
 router.get('/:token', async (req, res, next) => {

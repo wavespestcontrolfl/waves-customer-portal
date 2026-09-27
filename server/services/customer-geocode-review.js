@@ -174,6 +174,24 @@ async function reviewedCustomerLocation(customer, conn = db) {
   return effective;
 }
 
+async function withCustomerReviewWriteFence(customerId, conn = db, write, {
+  lockWhenDisabled = false,
+  wait = true,
+} = {}) {
+  if (!reviewEnabled() && !lockWhenDisabled) return write(conn);
+  return conn.transaction(async (trx) => {
+    const customerQuery = trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate();
+    if (!wait) customerQuery.noWait();
+    const customer = await customerQuery.first('id');
+    if (!customer) return null;
+    const primaryQuery = trx('customer_properties')
+      .where({ customer_id: customerId, active: true, is_primary: true }).orderBy('id').forUpdate();
+    if (!wait) primaryQuery.noWait();
+    await primaryQuery.select('id');
+    return write(trx);
+  });
+}
+
 function blockingPropertyReview(builder, propertyAlias) {
   builder.where('r.status', 'verified').orWhere(function () {
     this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
@@ -311,6 +329,6 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
 
 module.exports = { reviewEnabled, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
   attemptReviewedGeocode, excludeReviewedAddresses, excludeMatchingPrimaryPins, excludeCustomerAutomaticGeocodeForId,
-  reviewedCustomerLocation, effectiveReview, blocksAutomaticGeocode,
+  reviewedCustomerLocation, withCustomerReviewWriteFence, effectiveReview, blocksAutomaticGeocode,
   filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision, serviceReviewContexts,
   excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId };

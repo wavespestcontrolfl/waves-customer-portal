@@ -12598,21 +12598,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (!custCoords) return;
         const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
         if (!(samePlaceMiles <= 0.15)) return;
-        let visitUpdate = db('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNull('lat');
-        visitUpdate = review.excludeCustomerAutomaticGeocodeForId(visitUpdate, customerId);
-        await visitUpdate.update({ lat: estCoords.lat, lng: estCoords.lng });
-        if ((cust.latitude == null || cust.longitude == null)
-          && reviewedCust.latitude == null && reviewedCust.longitude == null) {
-          let customerUpdate = db('customers').where({ id: customerId });
-          customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
-          await customerUpdate.update({
-            latitude: custCoords.lat,
-            longitude: custCoords.lng,
-            updated_at: new Date(),
-          });
-        }
+        await review.withCustomerReviewWriteFence(customerId, db, async (conn) => {
+          let visitUpdate = conn('scheduled_services')
+            .where({ source_estimate_id: estimate.id })
+            .whereNull('lat');
+          visitUpdate = review.excludeCustomerAutomaticGeocodeForId(visitUpdate, customerId);
+          await visitUpdate.update({ lat: estCoords.lat, lng: estCoords.lng });
+          if ((cust.latitude == null || cust.longitude == null)
+            && reviewedCust.latitude == null && reviewedCust.longitude == null) {
+            let customerUpdate = conn('customers').where({ id: customerId }).where(function () {
+              this.whereNull('latitude').orWhereNull('longitude');
+            });
+            customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
+            await customerUpdate.update({
+              latitude: custCoords.lat,
+              longitude: custCoords.lng,
+              updated_at: new Date(),
+            });
+          }
+        });
       })().catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
