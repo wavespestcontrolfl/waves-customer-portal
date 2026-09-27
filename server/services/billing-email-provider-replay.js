@@ -40,7 +40,11 @@ function refusal(block) {
   };
 }
 
-async function runBillingEmailProviderReplayHandoff(message, dispatch, { providerBoundaryCheck = null } = {}) {
+async function runBillingEmailProviderReplayHandoff(message, dispatch, {
+  recipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
+  authorityRecipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
+  providerBoundaryCheck = null,
+} = {}) {
   if (!isBillingEmailProviderReplay(message)) return { handled: false };
   const context = readStoredBillingReplayContext(message);
   if (!context) {
@@ -62,7 +66,8 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, { provide
         notificationEventKey: context.notificationEventKey,
       },
     },
-    recipientEmail: clean(message.recipient_email_snapshot).toLowerCase(),
+    recipientEmail: clean(recipientEmail).toLowerCase(),
+    authorityRecipientEmail: clean(authorityRecipientEmail).toLowerCase(),
     templateKey: clean(message.template_key),
     preSendCheck: async ({ database, providerBoundary }) => {
       const verdict = await billingEmailReplayEligible(context, database);

@@ -102,6 +102,36 @@ test('runs eligibility and provider dispatch on the held authority database', as
   expect(order).toEqual(['eligibility', 'provider-preparation', 'eligibility', 'provider-request']);
 });
 
+test('keeps original recipient authority while sending a corrected bounce destination at the final boundary', async () => {
+  const heldDatabase = jest.fn();
+  const correctedCheck = jest.fn(async () => ({ ok: true }));
+  const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+    expect(database).toBe(heldDatabase);
+    expect(await providerBoundaryCheck({ database })).toEqual({ ok: true });
+  });
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(options.recipientEmail).toBe('casey@example.net');
+    expect(options.authorityRecipientEmail).toBe('casey@example.com');
+    expect(await options.preSendCheck({ database: heldDatabase, providerBoundary: false })).toEqual({ ok: true });
+    const providerBoundaryCheck = async ({ database }) => {
+      const verdict = await options.preSendCheck({ database, providerBoundary: true });
+      options.state.handoffStarted = verdict.ok === true;
+      return verdict;
+    };
+    await options.dispatch(heldDatabase, providerBoundaryCheck);
+    options.state.providerAccepted = true;
+  });
+
+  await expect(runBillingEmailProviderReplayHandoff(message(), dispatch, {
+    recipientEmail: ' Casey@Example.Net ',
+    authorityRecipientEmail: ' Casey@Example.Com ',
+    providerBoundaryCheck: correctedCheck,
+  })).resolves.toEqual({ handled: true, allowed: true });
+  expect(billingEmailReplayEligible).toHaveBeenCalledTimes(2);
+  expect(correctedCheck).toHaveBeenCalledTimes(1);
+  expect(dispatch).toHaveBeenCalledWith(heldDatabase, expect.any(Function));
+});
+
 test('a resendable eligibility refusal carries BILLING_REPLAY_RESENDABLE as its code', async () => {
   const { BILLING_REPLAY_RESENDABLE } = require('../services/billing-email-provider-replay');
   billingEmailReplayEligible.mockResolvedValueOnce({
