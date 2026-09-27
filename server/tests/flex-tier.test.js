@@ -127,12 +127,15 @@ describe('flexTierMoveWindow — ±5 days ∩ destination floor ∩ occurrence g
     expect(w).toBeNull();
   });
 
-  test('a malformed prev between orig and orig+radius still clamps dateFrom past orig (not silently corrected)', () => {
-    // prev one day after orig is invalid data, but the pure clamp still runs:
-    // dateFrom lands past orig, which the caller (index.js) never applies to
-    // a real move because the visit's OWN date is now outside its window.
-    const w = flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-22' } });
-    expect(w).toEqual({ dateFrom: '2026-09-23', dateTo: '2026-09-26' });
+  test('a neighbor on the wrong side of the current date leaves no legal move — never the band past it (Codex #4995 r7 P1)', () => {
+    // prev one day AFTER orig: any day move from 09-21 would cross it.
+    expect(flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-22' } })).toBeNull();
+    // next one day BEFORE orig: the same, mirrored.
+    expect(flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { next: '2026-09-20' } })).toBeNull();
+    // A neighbor ON the current date is not inverted: the visit keeps its
+    // date, and moving away from that neighbor stays legal.
+    expect(flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-21' } }))
+      .toEqual({ dateFrom: '2026-09-21', dateTo: '2026-09-26' });
   });
 
   test('missing inputs return null (fail closed)', () => {
@@ -291,6 +294,27 @@ describe('loadSeriesNeighbors', () => {
     expect(map.get('a')).toEqual({ prev: '2026-11-03', next: '2026-11-13' });
     const w = flexTierMoveWindow({ origDate: '2026-11-10', anchorDate: '2026-11-10', today: '2026-10-01', neighbors: map.get('a') });
     expect(w).toEqual({ dateFrom: '2026-11-05', dateTo: '2026-11-12' });
+  });
+
+  test('a date-exception visit sitting ahead of its previous occurrence\'s slot gets no window at all (Codex #4995 r7 P1)', async () => {
+    // A is on 09-14 by exception (cadence 09-22); its previous occurrence P
+    // holds cadence 09-15 but was moved to 09-20. Bounds: prev 09-15 (the
+    // cadence slot A already sits ahead of), next 09-20 (P's actual date).
+    const db = seriesDbStub({
+      p1: [
+        { id: 'p1', scheduled_date: '2026-09-01' },
+        {
+          id: 'P', scheduled_date: '2026-09-20', date_exception: true, date_exception_cadence_date: '2026-09-15',
+        },
+        {
+          id: 'A', scheduled_date: '2026-09-14', date_exception: true, date_exception_cadence_date: '2026-09-22',
+        },
+      ],
+    });
+    const map = await loadSeriesNeighbors(db, [{ id: 'A', recurring_parent_id: 'p1' }]);
+    expect(map.get('A')).toEqual({ prev: '2026-09-15', next: '2026-09-20' });
+    // Moving A to 09-16..09-19 would cross P's 09-15 slot: nothing is legal.
+    expect(flexTierMoveWindow({ origDate: '2026-09-14', anchorDate: '2026-09-14', today: '2026-09-01', neighbors: map.get('A') })).toBeNull();
   });
 
   test('a NON-adjacent occurrence rescheduled closer than the cadence neighbor bounds it too', async () => {

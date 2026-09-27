@@ -168,13 +168,15 @@ async function loadSeriesNeighbors(db, services, { lock = false } = {}) {
  * series' adjacent occurrence (`neighbors`). The visit's own current date is
  * the one exception (same-day re-time is owner-mandated right up to the
  * freeze, and the freeze alone already keeps the current date safely in the
- * future — see FLEX_TIER_FREEZE_HOURS vs MIN_DESTINATION_DAYS_OUT above),
- * unless an adjacent occurrence itself sits on or past it. It joins the band
- * on its own, never the dates between (Codex #4995 r3/r5): when it sits
- * below or above the band with dates between, `dayMoveFrom` / `dayMoveTo`
- * name the band's edge, and flexWindowAdmits is the one check of a
- * destination. The lookahead horizon is the caller's (candidate-slots.js
- * caps any ctx.tierWindow).
+ * future — see FLEX_TIER_FREEZE_HOURS vs MIN_DESTINATION_DAYS_OUT above). It
+ * joins the band on its own, never the dates between (Codex #4995 r3/r5):
+ * when it sits below or above the band with dates between, `dayMoveFrom` /
+ * `dayMoveTo` name the band's edge, and flexWindowAdmits is the one check of
+ * a destination. A neighbor strictly on the wrong side of the current date —
+ * a date-exception visit sitting ahead of its previous occurrence's slot, or
+ * behind its next one — leaves no legal move at all: every day move would
+ * cross it (Codex #4995 r7 P1). The lookahead horizon is the caller's
+ * (candidate-slots.js caps any ctx.tierWindow).
  * Returns {dateFrom, dateTo[, dayMoveFrom][, dayMoveTo]} — the span to
  * generate candidates in — or null when nothing is legal, or the anchor is
  * unknown (fail closed — never guess a budget).
@@ -184,14 +186,13 @@ function flexTierMoveWindow({ origDate, anchorDate, today, neighbors }) {
   const anchor = toDateStr(anchorDate);
   if (!orig || !anchor || !today) return null;
   const { prev, next } = neighbors || {};
+  if ((prev && prev > orig) || (next && next < orig)) return null;
   const prevFloor = prev ? shiftDateStr(prev, 1) : null;
   const nextCeil = next ? shiftDateStr(next, -1) : null;
   const from = latestDate(shiftDateStr(orig, -FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, -FLEX_TIER_RADIUS_DAYS),
     shiftDateStr(today, MIN_DESTINATION_DAYS_OUT), prevFloor);
   const to = earliestDate(shiftDateStr(orig, FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, FLEX_TIER_RADIUS_DAYS), nextCeil);
-  const band = from <= to;
-  if ((prevFloor && prevFloor > orig) || (nextCeil && nextCeil < orig)) return band ? { dateFrom: from, dateTo: to } : null;
-  if (!band) return { dateFrom: orig, dateTo: orig };
+  if (from > to) return { dateFrom: orig, dateTo: orig };
   const window = { dateFrom: earliestDate(from, orig), dateTo: latestDate(to, orig) };
   if (from > shiftDateStr(orig, 1)) window.dayMoveFrom = from;
   if (to < shiftDateStr(orig, -1)) window.dayMoveTo = to;
