@@ -372,6 +372,37 @@ test.each([
   expect(result.blocked).toBe(false);
 });
 
+test('a later App device hold preserves the bell already shown to the customer', async () => {
+  let quoteCurrent = true;
+  const bellTrx = jest.fn();
+  const quoteCheck = jest.fn(async () => quoteCurrent ? { ok: true }
+    : { ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true });
+  sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+    expect(await hooks.preSendCheck({ database: bellTrx })).toMatchObject({ ok: true });
+    expect(quoteCheck).toHaveBeenLastCalledWith({ channel: 'push', database: bellTrx });
+    expect(require('../services/messaging/validators/consent').loadContactState)
+      .toHaveBeenLastCalledWith(expect.anything(), bellTrx);
+    expect(require('../services/messaging/validators/suppression').loadSuppressionState)
+      .toHaveBeenLastCalledWith(expect.anything(), expect.anything(), bellTrx);
+    // Bell was persisted, then the quoted balance changed before device fan-out.
+    quoteCurrent = false;
+    expect(await hooks.preSendCheck()).toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED' });
+    expect(quoteCheck).toHaveBeenLastCalledWith({ channel: 'push' });
+    return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', bellPersisted: true };
+  });
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT,
+    audience: 'customer',
+    customerId: 'cust-1',
+    purpose: 'billing',
+    metadata: { billingDeliveryLeg: 'push', billingDeliveryCategory: 'billing', appOnly: true },
+    preSendCheck: quoteCheck,
+  })).resolves.toMatchObject({
+    sent: false, blocked: true, deliveryOutcome: 'not_sent',
+    code: 'PREVISIT_QUOTE_CHANGED', bellPersisted: true,
+  });
+});
+
 test('no hook — the legacy pipeline is untouched', async () => {
   const result = await sendCustomerMessage(BASE_INPUT);
   expect(result.sent).toBe(true);
