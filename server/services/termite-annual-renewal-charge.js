@@ -1483,6 +1483,15 @@ const FOLLOW_THROUGH_SENDS_PAY_LINK = new Set(['declined', 'refused']);
 // charge-failed notice goes out on the first run only.
 async function followThroughChargeOutcome(successor, kind, reason, conn, { first = false } = {}) {
   if (first) await recordChargeFollowThroughOwed(successor, kind, reason, conn);
+  // Codex #4971 pre-push P1: a follow-through that owes a pay link asks the
+  // same "may a recovery leg still deliver?" question as leg 7b first — on
+  // leg 7c's retries AND on the first run: that runs right after the charge
+  // released the parent's gate (decideAndCharge), which is exactly when a
+  // cancel or refund that queued behind the charge lands.
+  if (FOLLOW_THROUGH_SENDS_PAY_LINK.has(kind)) {
+    const settled = await followThroughRefusedDelivery(successor, conn);
+    if (settled !== null) return settled;
+  }
   let delivered = true;
   let bellKind = FOLLOW_THROUGH_BELL_KIND[kind] || 'ambiguous';
   if (FOLLOW_THROUGH_SENDS_PAY_LINK.has(kind) && !(await renewalInvoiceAlreadyDelivered(successor, conn))) {
@@ -1502,11 +1511,25 @@ async function followThroughChargeOutcome(successor, kind, reason, conn, { first
   }
   const done = Boolean(belled) && delivered;
   if (done) {
-    await conn('annual_prepay_terms').where({ id: successor.id }).update({ renewal_charge_failure_handled_at: new Date() });
+    await markChargeFollowThroughHandled(successor, conn);
   } else {
     await stampSweepDeferred(successor, conn);
   }
   return done;
+}
+
+// null: the pay link may go out. Otherwise the follow-through's result —
+// true once this leg is done (the successor withdrawn / left to the lapse,
+// marked handled so leg 7c stops), false when it must be retried.
+async function followThroughRefusedDelivery(successor, conn) {
+  const blocked = await refuseRecoveryDelivery(successor, conn, 'the renewal charge did not go through');
+  if (!blocked) return null;
+  if (blocked === 'handled') await markChargeFollowThroughHandled(successor, conn);
+  return blocked === 'handled';
+}
+
+async function markChargeFollowThroughHandled(successor, conn) {
+  await conn('annual_prepay_terms').where({ id: successor.id }).update({ renewal_charge_failure_handled_at: new Date() });
 }
 
 async function recordChargeFollowThroughOwed(successor, kind, reason, conn) {
@@ -2417,6 +2440,35 @@ async function successorRecoveryRefusal(successor, conn) {
   return null;
 }
 
+// "May this recovery leg still deliver a pay link for this successor?" —
+// the ONE answer leg 7b (a claim that never reached Stripe) and every
+// charge follow-through that owes a pay link (its first run and leg 7c)
+// read before any delivery, so the legs can never drift (Codex #4971
+// pre-push P1: 7c used to retry delivery with no eligibility or deadline
+// check, so a renewal whose delivery kept failing past its grace window —
+// unpresented, hence excluded by the lapse scan — could be sent and then
+// voided with a station-retrieval request on the next sweep). Uses
+// successorRecoveryRefusal:
+//   - a DURABLE refusal (the parent durably ineligible, or the grace window
+//     closed) withdraws the successor (withdrawRenewalSuccessor — a
+//     presented renewal past its deadline is left to the grace lapse);
+//   - a TRANSIENT one (the parent's own invoice in dispute) bells
+//     'ineligible' and rotates the row for a later tick.
+// Returns null when delivery may proceed; 'handled' when this leg is done
+// (withdrawn, left to the lapse, or held for manual review — each only
+// once its bell persisted); 'deferred' when the row must be retried later.
+async function refuseRecoveryDelivery(successor, conn, context) {
+  const refusal = await successorRecoveryRefusal(successor, conn);
+  if (!refusal) return null;
+  if (refusal.retire) {
+    const outcome = await withdrawRenewalSuccessor(successor, refusal.reason, conn, { lapseOwnsPresented: refusal.lapseOwnsPresented });
+    return outcome === 'deferred' ? 'deferred' : 'handled';
+  }
+  await ringRenewalBell(successor, 'ineligible', `${context}, and ${refusal.reason} — no invoice sent; it will be re-checked automatically`);
+  await stampSweepDeferred(successor, conn);
+  return 'deferred';
+}
+
 async function stampNeverReachedStripeHandled(successor, conn) {
   await conn('annual_prepay_terms').where({ id: successor.id })
     .whereNull('renewal_charge_never_reached_stripe_belled_at')
@@ -2434,16 +2486,8 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
   // successor (chokepoint C) instead of stamping it handled and leaving it
   // payment_pending forever; a transient one (the parent's own invoice in
   // dispute) is left for a later tick, rotated behind newer rows.
-  const refusal = await successorRecoveryRefusal(successor, conn);
-  if (refusal?.retire) {
-    const retired = await withdrawRenewalSuccessor(successor, refusal.reason, conn, { lapseOwnsPresented: refusal.lapseOwnsPresented });
-    return retired !== 'deferred';
-  }
-  if (refusal) {
-    await ringRenewalBell(successor, 'ineligible', `the renewal charge was claimed but never reached Stripe, and ${refusal.reason} — no invoice sent yet; it will be re-checked automatically`);
-    await stampSweepDeferred(successor, conn);
-    return false;
-  }
+  const blocked = await refuseRecoveryDelivery(successor, conn, 'the renewal charge was claimed but never reached Stripe');
+  if (blocked) return blocked === 'handled';
   const result = await ringRenewalBell(
     successor,
     'ambiguous',
