@@ -150,4 +150,13 @@ describe('detail verdict', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
       .resolves.toEqual({ allowed: false, durable: false });
   });
+
+  test('preserves an incomplete balance snapshot only in the detailed verdict', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [],
+      eligibleInvoiceIds: ['inv-1'], balanceIncomplete: true });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: true, durable: false, balanceIncomplete: true });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
+  });
 });

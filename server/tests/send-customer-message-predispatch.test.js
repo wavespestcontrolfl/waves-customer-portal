@@ -568,6 +568,28 @@ test('promised reschedule link can use the locked SMS handoff only with its deli
   expect(sendViaTwilio).not.toHaveBeenCalled();
 });
 
+test('annual-prepay Text allows only its pinned final-boundary handoff', async () => {
+  const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+  const valid = {
+    ...BASE_INPUT,
+    audience: 'customer',
+    purpose: 'payment_link',
+    entryPoint: 'annual_prepay_payment_reminder',
+    customerId: 'cust-1',
+    invoiceId: 'inv-1',
+    identityTrustLevel: 'phone_matches_customer',
+    metadata: { original_message_type: 'annual_prepay_payment_reminder', annual_prepay_term_id: 'term-1' },
+    providerPreSendCheck,
+    withSmsHandoff: jest.fn(),
+  };
+  expect(await sendCustomerMessage(valid)).toMatchObject({ sent: true });
+  expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ providerPreSendCheck, withSmsHandoff: expect.any(Function) });
+  sendViaTwilio.mockClear();
+  expect(await sendCustomerMessage({ ...valid, metadata: { original_message_type: 'annual_prepay_payment_reminder' } }))
+    .toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+  expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
 test.each([
   [{ prefs: { sms_enabled: false }, suppressionLoaded: true }, 'SMS_OPTED_OUT'],
   [{ prefs: { sms_enabled: true }, suppressionLoaded: true, suppression: { reason: 'opt_out_keyword' } }, 'SUPPRESSED_OPT_OUT'],

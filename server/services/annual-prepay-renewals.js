@@ -2,7 +2,7 @@ const { addMonthsSameDay: addMonthsSameDayShared } = require('../utils/date-only
 const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
 const logger = require('./logger');
-const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { tryLockCustomerComms, withCustomerCommsLock, withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -7679,10 +7679,12 @@ function paymentReminderClaimColumnForDaysOut(daysOut) {
 // (not 24h) keeps yesterday's 10 AM dunning from suppressing today's 10 AM
 // reminder on the boundary.
 const PAYMENT_REMINDER_DUNNING_SUPPRESS_MS = 20 * 60 * 60 * 1000;
-async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd = null } = {}) {
+async function invoiceDunningActiveToday(invoiceId, {
+  now = new Date(), todayYmd = null, database = db, rethrow = false,
+} = {}) {
   try {
-    const row = await db('invoice_followup_sequences')
-      .where({ invoice_id: invoiceId })
+    const row = await database('invoice_followup_sequences').where({ invoice_id: invoiceId })
+      .modify((query) => { if (database.isTransaction) query.forUpdate(); })
       .first('status', 'last_touch_at', 'next_touch_at');
     if (!row) return false;
     // A REAL recent send suppresses regardless of status — the FINAL step of
@@ -7715,11 +7717,187 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
     }
     return false;
   } catch (err) {
+    if (rethrow) throw err;
     // Fail open (send the reminder): a read miss must not silence the only
     // visit-anchored nudge; worst case the customer gets dunning + reminder.
     logger.warn(`[annual-prepay] dunning suppression check failed for invoice ${invoiceId}: ${err.message}`);
     return false;
   }
+}
+
+async function paymentReminderCopy({ term, invoice, customer, amountDue }) {
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
+  const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+    kind: 'invoice', entityType: 'invoices', entityId: invoice.id,
+    customerId: customer.id, codePrefix: invoiceShortCodePrefix(invoice),
+  });
+  const firstVisitDate = effectiveFirstVisitDate(term);
+  const body = await renderSmsTemplate('annual_prepay_payment_reminder', {
+    first_name: customer.first_name || 'there',
+    amount_text: ` for $${amountDue.toFixed(2)}`,
+    first_visit_date: formatDateLabel(firstVisitDate),
+    pay_link: payUrl,
+  }, { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: term.id });
+  return { body, firstVisitDate };
+}
+
+function invoiceStillOwedAsQuoted(context) {
+  const recheck = async (connection) => {
+    const verdict = await require('./messaging/billing-email-replay-eligibility')
+      .billingEmailReplayEligible(context, connection);
+    if (verdict.eligible === true) return { ok: true };
+    // Throw retryable read failures so the nested savepoint rolls back before
+    // the outer Email/Text/App authority continues using its connection.
+    if (verdict.retryable === true) throw new Error(verdict.reason || 'annual prepay reminder unavailable');
+    return { ok: false, code: 'PREPAY_QUOTE_CHANGED', reason: verdict.reason,
+      retryable: false };
+  };
+  return async ({ database, dbi } = {}) => {
+    const connection = database || dbi || db;
+    try {
+      // Contain read errors without releasing the authority transaction's locks.
+      return connection.isTransaction
+        ? await connection.transaction((savepoint) => recheck(savepoint))
+        : await recheck(connection);
+    } catch (err) {
+      return { ok: false, code: 'PREPAY_QUOTE_CHANGED',
+        reason: `annual prepay reminder unreadable before dispatch: ${err.message}`, retryable: true };
+    }
+  };
+}
+
+async function sendExplicitPaymentReminderChannels({
+  claimedTerm, invoice, customer, daysOut, amountDue, channels, opts,
+  sentCol, claimCol, releaseClaim, reverseReminderCredit,
+}) {
+  const { body, firstVisitDate } = await paymentReminderCopy({
+    term: claimedTerm, invoice, customer, amountDue,
+  });
+  if (!body) {
+    await reverseReminderCredit();
+    await releaseClaim();
+    return { sent: false, reason: 'missing_sms_template' };
+  }
+
+  const { sendReminderChannels, reminderProgress } = require('./billing-reminder-delivery');
+  const source = 'annual_prepay_payment_reminder';
+  const eventKey = `annual-prepay-payment:${claimedTerm.id}:${daysOut}`;
+  const prior = (await reminderProgress(customer.id, source, channels))
+    .find((event) => event.metadata.notificationEventKey === eventKey);
+  const hadPriorDelivery = (prior?.delivered?.size || 0) > 0;
+  let reachedNow = false;
+
+  let result;
+  try {
+    result = await sendReminderChannels({
+      customerId: customer.id,
+      invoiceId: null,
+      invoiceIds: [invoice.id],
+      policyInvoiceIds: [],
+      source,
+      purpose: 'balance_reminder',
+      eventKey,
+      channels,
+      offLedgerBalanceCents: Math.round(amountDue * 100),
+      metadata: { original_message_type: source, annual_prepay_term_id: claimedTerm.id,
+        first_visit_date: firstVisitDate, days_out: daysOut },
+      send: async (channel, ledger) => {
+        const context = {
+          customer_id: customer.id,
+          invoice_id: invoice.id,
+          source_entry_point: source,
+          notificationEventKey: eventKey,
+          collections_ledger_id: ledger?.id,
+          annual_prepay_term_id: claimedTerm.id,
+          first_visit_date: firstVisitDate,
+          days_out: daysOut,
+          rendered_amount: amountDue.toFixed(2),
+          delivery_channel: channel,
+        };
+        const boundary = invoiceStillOwedAsQuoted(context);
+        let outcome;
+        try {
+          outcome = await sendCustomerMessage({
+            to: channel === 'sms' ? customer.phone : null,
+            body,
+            channel: channel === 'push' ? 'sms' : channel,
+            audience: 'customer',
+            purpose: 'payment_link',
+            customerId: customer.id,
+            invoiceId: invoice.id,
+            identityTrustLevel: 'phone_matches_customer',
+            entryPoint: source,
+            ...(channel === 'sms'
+              ? { providerPreSendCheck: boundary,
+                withSmsHandoff: (dispatch) => withSmsConsentLock(db, {
+                  phone: customer.phone, customerId: customer.id,
+                }, (trx) => dispatch(trx)) }
+              : { preSendCheck: boundary }),
+            metadata: {
+              ...(opts.metadata || {}),
+              original_message_type: source,
+              annual_prepay_term_id: claimedTerm.id,
+              first_visit_date: firstVisitDate,
+              days_out: daysOut,
+              rendered_amount: amountDue.toFixed(2),
+              billingDeliveryCategory: 'billing',
+              billingDeliveryLeg: channel,
+              notificationEventKey: eventKey,
+              ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
+              ...(channel === 'push' ? { appOnly: true } : {}),
+            },
+          });
+        } catch (err) {
+          if (classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') reachedNow = true;
+          throw err;
+        }
+        if (outcome?.bellPersisted === true
+          || (outcome?.deliveryOutcome && classifyDeliveryCertainty(outcome) !== 'not_sent')) reachedNow = true;
+        return outcome;
+      },
+    });
+  } catch (err) {
+    if (!reachedNow) throw err;
+    logger.warn(`[annual-prepay] reminder rail failed after delivery for term ${claimedTerm.id}: ${err.message}`);
+    await releaseClaim();
+    return { sent: true, termId: claimedTerm.id, complete: false };
+  }
+
+  reachedNow ||= result.deliveredNow.length > 0;
+  if (!reachedNow) await reverseReminderCredit();
+  for (const channel of result.deliveredNow) {
+    await db('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: channel === 'push' ? 'app_outbound' : `${channel}_outbound`,
+      channel,
+      subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
+      body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start) via ${channel}`,
+    }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
+  }
+  if (result.complete) {
+    const sentAt = new Date();
+    await db('annual_prepay_terms').where({ id: claimedTerm.id }).whereNull(sentCol)
+      .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt })
+      .catch((err) => logger.error(`[annual-prepay] payment reminder sent-stamp failed for term ${claimedTerm.id}: ${err.message}`));
+  } else {
+    await releaseClaim();
+  }
+  return { sent: hadPriorDelivery || reachedNow, termId: claimedTerm.id, complete: result.complete };
+}
+
+async function routeExplicitPaymentReminder(context) {
+  let channels;
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: context.customer.id }).first();
+    channels = require('./billing-delivery-channels').explicitBillingChannels(prefs || {}, 'billing');
+  } catch (err) {
+    logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${context.customer.id}: ${err.message}`);
+    await context.reverseReminderCredit();
+    await context.releaseClaim();
+    return { sent: false, reason: 'notification_prefs_unavailable' };
+  }
+  return channels ? sendExplicitPaymentReminderChannels({ ...context, channels }) : null;
 }
 
 async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
@@ -7839,6 +8017,11 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       await releaseClaim();
       return { sent: false, reason: 'customer_missing_or_deleted' };
     }
+    const explicit = await routeExplicitPaymentReminder({
+      claimedTerm, invoice, customer, daysOut, amountDue, opts,
+      sentCol, claimCol, releaseClaim, reverseReminderCredit,
+    });
+    if (explicit) return explicit;
     if (!customer.phone) {
       // The invoice email already carries the pay link (sent at accept, plus
       // the follow-up sequence's email legs) — with no phone there is no SMS
@@ -9049,6 +9232,7 @@ module.exports = {
     TERMITE_NOTICE_MISSED_ESCALATION_COLUMN,
     paymentReminderColumnForDaysOut,
     paymentReminderClaimColumnForDaysOut,
+    invoiceStillOwedAsQuoted,
     invoiceDunningActiveToday,
     shouldAlertTerm,
     isLastServiceNearTermEnd,

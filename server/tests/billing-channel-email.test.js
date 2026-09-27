@@ -147,6 +147,26 @@ describe('billing channel email adapter', () => {
       .toMatchObject({ appointment_id: 'visit-1', collections_ledger_id: 'ledger-email-1' });
   });
 
+  test('retains the complete annual-prepay quote and term pins', () => {
+    const eventKey = 'annual-prepay-payment:term-1:1';
+    const context = {
+      schema_version: 1,
+      customer_id: 'cust-1',
+      invoice_id: 'inv-1',
+      category: 'billing',
+      source_entry_point: 'annual_prepay_payment_reminder',
+      notificationEventKey: eventKey,
+      collections_ledger_id: 'ledger-email-1',
+      annual_prepay_term_id: 'term-1',
+      first_visit_date: '2026-09-28',
+      days_out: 1,
+      rendered_amount: '392.04',
+    };
+    expect(sanitizeBillingReplayContext(context))
+      .toMatchObject({ annual_prepay_term_id: 'term-1', first_visit_date: '2026-09-28', days_out: 1 });
+    expect(sanitizeBillingReplayContext({ ...context, days_out: undefined })).toBeNull();
+  });
+
   test('accepts the actual 60-day card-expiry producer stage', () => {
     expect(sanitizeBillingReplayContext({ schema_version: 1, customer_id: 'cust-1', category: 'billing',
       source_entry_point: 'autopay_card_expiry_warning', notificationEventKey: 'payment-expiry:pm-1:9:2026:60_day',

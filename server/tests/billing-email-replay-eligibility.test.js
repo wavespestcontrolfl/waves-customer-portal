@@ -3,17 +3,28 @@ jest.mock('../services/autopay-eligibility', () => ({
   ...jest.requireActual('../services/autopay-eligibility'),
   getChargeableAutopayMethod: jest.fn(),
 }));
-jest.mock('../services/annual-prepay-renewals', () => ({ getCardExpiryExemptions: jest.fn() }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getCardExpiryExemptions: jest.fn(),
+  _private: { invoiceDunningActiveToday: jest.fn() },
+}));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({ invoiceStillCollectible: jest.fn() }));
-jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: jest.fn() }));
+jest.mock('../services/invoice-helpers', () => ({
+  selfPayAtDispatch: jest.fn(),
+  isInvoiceCollectibleStatus: jest.fn((status) => ['draft', 'sent', 'overdue'].includes(status)),
+  invoiceAmountDue: jest.fn((invoice) => Number(invoice.total) - Number(invoice.credit_applied || 0)),
+  invoiceWithdrawnFromCustomer: jest.fn(() => false),
+}));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
+jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn() }));
 
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
 const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals');
+const { invoiceDunningActiveToday } = require('../services/annual-prepay-renewals')._private;
 const { invoiceStillCollectible } = require('../services/messaging/deferred-replay-registry');
 const { selfPayAtDispatch } = require('../services/invoice-helpers');
 const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
+const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
 
 const customerId = '11111111-1111-4111-8111-111111111111';
@@ -48,6 +59,7 @@ function databaseWith(seed = {}) {
         return query;
       }),
       orderBy: jest.fn(() => query),
+      forUpdate: jest.fn(() => query),
       first: jest.fn(async () => filtered()[0] || null),
       select: jest.fn(async () => filtered()),
     };
@@ -81,6 +93,8 @@ beforeEach(() => {
   invoiceStillCollectible.mockResolvedValue({ eligible: true });
   selfPayAtDispatch.mockReturnValue(async () => ({ ok: true }));
   collectionsChannelPermitted.mockResolvedValue({ allowed: true, durable: false });
+  invoiceDunningActiveToday.mockResolvedValue(false);
+  assertInvoiceDepositSettlementReady.mockResolvedValue(undefined);
 });
 
 afterAll(() => jest.useRealTimers());
@@ -256,4 +270,81 @@ test('an unreadable eligibility dependency fails closed for retry', async () => 
     source_entry_point: 'autopay_pre_charge_reminder', charge_date: chargeDate },
   databaseWith({ customers: new Error('database unavailable') })))
     .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
+});
+
+describe('annual-prepay payment reminder replay', () => {
+  const firstVisitDate = '2026-09-27';
+  const meta = {
+    customer_id: customerId,
+    invoice_id: 'inv-annual',
+    source_entry_point: 'annual_prepay_payment_reminder',
+    notificationEventKey: 'annual-prepay-payment:term-annual:1',
+    collections_ledger_id: 'ledger-email',
+    annual_prepay_term_id: 'term-annual',
+    first_visit_date: firstVisitDate,
+    days_out: 1,
+    rendered_amount: '350.00',
+  };
+  const term = { id: 'term-annual', customer_id: customerId, prepay_invoice_id: 'inv-annual',
+    status: 'payment_pending', term_start: firstVisitDate, first_visit_date: null };
+  const invoice = { id: 'inv-annual', customer_id: customerId, status: 'sent',
+    total: '392.04', credit_applied: '42.04', payer_id: null };
+  const database = (patch = {}) => databaseWith({
+    annual_prepay_terms: [{ ...term, ...patch.term }],
+    invoices: [{ ...invoice, ...patch.invoice }],
+    collections_contact_ledger: [],
+  });
+
+  test('accepts the bound unpaid term and current credited amount', async () => {
+    await expect(billingEmailReplayEligible(meta, database())).resolves.toEqual({ eligible: true });
+  });
+
+  test.each([
+    ['declined', { term: { status: 'cancelled' } }, 'annual-prepay-term-settled'],
+    ['paid', { invoice: { status: 'paid' } }, 'annual-prepay-invoice-settled'],
+    ['changed quote', { invoice: { credit_applied: '50.00' } }, 'annual-prepay-amount-changed'],
+    ['rebound invoice', { term: { prepay_invoice_id: 'another-invoice' } }, 'annual-prepay-term-binding-changed'],
+    ['moved visit', { term: { first_visit_date: etDateString(addETDays(new Date(), 2)) } },
+      'annual-prepay-first-visit-changed'],
+  ])('refuses a %s reminder', async (_label, patch, reason) => {
+    await expect(billingEmailReplayEligible(meta, database(patch)))
+      .resolves.toMatchObject({ eligible: false, reason });
+  });
+
+  test('keeps a failed dunning preparation read retryable', async () => {
+    invoiceDunningActiveToday.mockRejectedValueOnce(new Error('read failed'));
+    await expect(billingEmailReplayEligible(meta, database()))
+      .resolves.toEqual({ eligible: false, reason: 'annual-prepay-dunning-unavailable', retryable: true });
+  });
+
+  test('retries while a received deposit still needs invoice reconciliation', async () => {
+    assertInvoiceDepositSettlementReady.mockRejectedValueOnce(new Error('deposit pending'));
+    const held = database(); held.isTransaction = true;
+    await expect(billingEmailReplayEligible(meta, held))
+      .resolves.toEqual({ eligible: false, reason: 'annual-prepay-deposit-settlement-pending', retryable: true });
+    expect(assertInvoiceDepositSettlementReady).toHaveBeenCalledWith(held, expect.any(Object), { lock: true });
+  });
+
+  test('rechecks collections as off-ledger debt with the current leg excluded', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const own = { id: 'ledger-email', customer_id: customerId, source: 'annual_prepay_payment_reminder',
+      metadata: { notificationEventKey: meta.notificationEventKey } };
+    await expect(billingEmailReplayEligible(meta, databaseWith({
+      annual_prepay_terms: [term], invoices: [invoice], collections_contact_ledger: [own],
+    }))).resolves.toEqual({ eligible: true });
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
+      invoiceId: null, invoiceIds: [], offLedgerBalanceCents: 35000,
+      excludeLedgerIds: ['ledger-email'], channel: 'email',
+    }));
+  });
+
+  test('retries an incomplete first policy snapshot instead of sending on partial debt', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    collectionsChannelPermitted.mockResolvedValueOnce({
+      allowed: true, durable: false, balanceIncomplete: true,
+    });
+    await expect(billingEmailReplayEligible(meta, database()))
+      .resolves.toEqual({ eligible: false, reason: 'collections-policy-unavailable', retryable: true });
+    expect(collectionsChannelPermitted).toHaveBeenCalledTimes(1);
+  });
 });

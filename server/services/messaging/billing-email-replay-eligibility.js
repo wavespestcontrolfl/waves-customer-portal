@@ -143,6 +143,93 @@ async function balanceReminderVisitRefusal(meta, database) {
   return null;
 }
 
+function validAnnualPrepayReminderPin(meta) {
+  const daysOut = Number(meta.days_out);
+  return !!meta.annual_prepay_term_id
+    && /^\d{4}-\d{2}-\d{2}$/.test(meta.first_visit_date || '')
+    && [1, 3].includes(daysOut)
+    && meta.notificationEventKey === `annual-prepay-payment:${meta.annual_prepay_term_id}:${daysOut}`;
+}
+
+function annualPrepayReminderWindowOpen(firstVisitDate, daysOut, now) {
+  const offsets = Number(daysOut) === 3 ? [3, 2] : [1];
+  return offsets.some((offset) => etDateString(addETDays(now, offset)) === firstVisitDate);
+}
+
+function annualInvoiceRefusal(invoice, helpers) {
+  if (!invoice || !helpers.isInvoiceCollectibleStatus(invoice.status)
+    || invoice.payer_id || helpers.invoiceWithdrawnFromCustomer(invoice)) {
+    return refused('annual-prepay-invoice-settled');
+  }
+  return null;
+}
+
+function annualTermRefusal(meta, term, now) {
+  if (!term) return refused('annual-prepay-term-binding-changed');
+  if (term.status !== 'payment_pending') return refused('annual-prepay-term-settled');
+  const liveFirstVisitDate = dateOnlyString(term.first_visit_date) || dateOnlyString(term.term_start);
+  if (liveFirstVisitDate !== meta.first_visit_date) return refused('annual-prepay-first-visit-changed');
+  return annualPrepayReminderWindowOpen(meta.first_visit_date, meta.days_out, now)
+    ? null : refused('annual-prepay-reminder-window-passed');
+}
+
+async function annualPrepayReminderRefusal(meta, database) {
+  if (meta.source_entry_point !== 'annual_prepay_payment_reminder') return null;
+  if (!validAnnualPrepayReminderPin(meta)) return refused('annual-prepay-reminder-pin-missing');
+
+  // Hold invoice then term through Email/Text dispatch or the App bell commit.
+  // Native App fan-out rechecks on the root DB after the visible bell commits.
+  const lock = database?.isTransaction === true;
+  let invoiceQuery = database('invoices')
+    .where({ id: meta.invoice_id, customer_id: meta.customer_id });
+  if (lock) invoiceQuery = invoiceQuery.forUpdate();
+  const invoice = await invoiceQuery.first();
+  const helpers = require('../invoice-helpers');
+  const invoiceRefusal = annualInvoiceRefusal(invoice, helpers);
+  if (invoiceRefusal) return invoiceRefusal;
+  try {
+    await require('../estimate-deposits').assertInvoiceDepositSettlementReady(database, invoice, { lock });
+  } catch {
+    return refused('annual-prepay-deposit-settlement-pending', true);
+  }
+
+  let termQuery = database('annual_prepay_terms')
+    .where({ id: meta.annual_prepay_term_id, prepay_invoice_id: meta.invoice_id, customer_id: meta.customer_id });
+  if (lock) termQuery = termQuery.forUpdate();
+  const term = await termQuery.first('id', 'status', 'term_start', 'first_visit_date');
+  const now = new Date();
+  const termRefusal = annualTermRefusal(meta, term, now);
+  if (termRefusal) return termRefusal;
+  const amountDue = helpers.invoiceAmountDue(invoice);
+  if (amountDue.toFixed(2) !== meta.rendered_amount) return refused('annual-prepay-amount-changed');
+  try {
+    const dunningActive = await require('../annual-prepay-renewals')._private.invoiceDunningActiveToday(
+      meta.invoice_id,
+      { database, rethrow: true, todayYmd: etDateString(now), now },
+    );
+    if (dunningActive) return refused('annual-prepay-dunning-active');
+  } catch {
+    return refused('annual-prepay-dunning-unavailable', true);
+  }
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
+  const permitted = await require('../collections/rail-guard').collectionsChannelPermitted({
+    customerId: meta.customer_id,
+    invoiceId: null,
+    invoiceIds: [],
+    channel: meta.delivery_channel || 'email',
+    purpose: 'balance_reminder',
+    offLedgerBalanceCents: Math.round(amountDue * 100),
+    excludeLedgerIds: await persistedLedgerExclusions(meta, database),
+    logTag: 'annual-prepay',
+    detail: true,
+    database,
+  });
+  if (permitted?.balanceIncomplete) return refused('collections-policy-unavailable', true);
+  return permitted?.allowed === true || permitted === true
+    ? null
+    : refused('collections-policy-denied', permitted?.durable !== true);
+}
+
 async function invoiceRefusal(meta, database) {
   if (!meta.invoice_id) return null;
   if (INVOICE_GUARDS.has(meta.source_entry_point)) {
@@ -182,7 +269,8 @@ async function collectionsPolicyRefusal(meta, database) {
 
 async function billingEmailReplayEligible(meta, database = db) {
   try {
-    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, collectionsPolicyRefusal];
+    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, annualPrepayReminderRefusal,
+      invoiceRefusal, collectionsPolicyRefusal];
     for (const check of checks) {
       const refusal = await check(meta || {}, database);
       if (refusal) return refusal;

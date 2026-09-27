@@ -4,7 +4,10 @@ jest.mock('../models/db', () => (...args) => mockPg(...args));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({
   invoiceStillCollectible: jest.fn(async () => ({ eligible: true })),
 }));
-jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: () => async () => ({ ok: true }) }));
+jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'),
+  selfPayAtDispatch: () => async () => ({ ok: true }),
+}));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn(async () => ({ allowed: true, durable: false })) }));
 
 const { randomUUID } = require('node:crypto');
@@ -41,7 +44,28 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     });
     await mockPg.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
-      table.text('status'); table.date('scheduled_date'); table.text('service_type');
+      table.text('status'); table.date('scheduled_date'); table.text('service_type'); table.uuid('source_estimate_id');
+    });
+    await mockPg.schema.createTable('invoices', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id').notNullable(); table.text('status');
+      table.decimal('total', 12, 2); table.decimal('credit_applied', 12, 2).defaultTo(0);
+      table.integer('payer_id'); table.timestamp('customer_collection_withdrawn_at');
+      table.uuid('scheduled_service_id'); table.text('notes'); table.jsonb('line_items');
+    });
+    await mockPg.schema.createTable('annual_prepay_terms', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id').notNullable(); table.uuid('prepay_invoice_id').notNullable();
+      table.text('status'); table.date('term_start'); table.date('first_visit_date');
+    });
+    await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
+      table.uuid('invoice_id'); table.text('status'); table.timestamp('last_touch_at'); table.timestamp('next_touch_at');
+    });
+    await mockPg.schema.createTable('estimates', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id').notNullable();
+    });
+    await mockPg.schema.createTable('estimate_deposits', (table) => {
+      table.uuid('id').primary();
+      table.uuid('estimate_id'); table.text('status'); table.decimal('amount', 12, 2);
+      table.decimal('credited_amount', 12, 2).defaultTo(0); table.decimal('refunded_amount', 12, 2).defaultTo(0);
     });
   }, 30000);
 
@@ -50,6 +74,11 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     await mockPg('collections_contact_ledger').delete();
     await mockPg('scheduled_services').delete();
+    await mockPg('invoice_followup_sequences').delete();
+    await mockPg('annual_prepay_terms').delete();
+    await mockPg('invoices').delete();
+    await mockPg('estimate_deposits').delete();
+    await mockPg('estimates').delete();
   });
 
   afterAll(async () => {
@@ -113,4 +142,65 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg('scheduled_services').where({ id: visitId }).update(change);
     await expect(billingEmailReplayEligible(meta)).resolves.toMatchObject({ eligible: false, retryable: false });
   });
+
+  test('holds annual invoice, deposit and term locks through dispatch and refuses a concurrent receipt', async () => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    const termId = randomUUID();
+    const invoiceId = randomUUID();
+    const estimateId = randomUUID();
+    const serviceId = randomUUID();
+    const firstVisitDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('estimates').insert({ id: estimateId, customer_id: customerId });
+    await mockPg('scheduled_services').insert({ id: serviceId, customer_id: customerId,
+      status: 'confirmed', scheduled_date: firstVisitDate, source_estimate_id: estimateId });
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'sent', total: '392.04',
+      scheduled_service_id: serviceId, line_items: JSON.stringify([]) });
+    await mockPg('annual_prepay_terms').insert({ id: termId, customer_id: customerId,
+      prepay_invoice_id: invoiceId, status: 'payment_pending', term_start: firstVisitDate });
+    const check = require('../services/annual-prepay-renewals')._private.invoiceStillOwedAsQuoted({
+      customer_id: customerId,
+      invoice_id: invoiceId,
+      source_entry_point: 'annual_prepay_payment_reminder',
+      notificationEventKey: `annual-prepay-payment:${termId}:1`,
+      collections_ledger_id: ownId,
+      annual_prepay_term_id: termId,
+      first_visit_date: firstVisitDate,
+      days_out: 1,
+      rendered_amount: '392.04',
+      delivery_channel: 'email',
+    });
+
+    await mockPg.transaction(async (held) => {
+      await expect(check({ database: held })).resolves.toEqual({ ok: true });
+      for (const [table, id] of [['invoices', invoiceId], ['annual_prepay_terms', termId]]) {
+        await expect(mockPg.transaction(async (contender) => {
+          await contender.raw("SET LOCAL lock_timeout = '100ms'");
+          await contender(table).where({ id }).update({ status: 'cancelled' });
+        })).rejects.toMatchObject({ code: '55P03' });
+      }
+      const contender = await mockPg.raw(
+        "SELECT pg_try_advisory_xact_lock(hashtext('estimate.deposit.ledger'), hashtext(?::text)) AS locked",
+        [estimateId],
+      );
+      expect(contender.rows[0].locked).toBe(false);
+      await held.schema.renameTable('invoice_followup_sequences', 'invoice_followup_sequences_hidden');
+      await expect(check({ database: held })).resolves.toMatchObject({ ok: false, retryable: true });
+      await expect(held.raw('SELECT 1')).resolves.toBeTruthy();
+      await held.schema.renameTable('invoice_followup_sequences_hidden', 'invoice_followup_sequences');
+    });
+    await mockPg.transaction(async (receipt) => {
+      await receipt.raw(
+        "SELECT pg_advisory_xact_lock(hashtext('estimate.deposit.ledger'), hashtext(?::text))",
+        [estimateId],
+      );
+      await receipt('estimate_deposits').insert({ id: randomUUID(), estimate_id: estimateId, status: 'received', amount: 40 });
+      await mockPg.transaction(async (handoff) => {
+        await handoff.raw("SET LOCAL lock_timeout = '100ms'");
+        await expect(check({ database: handoff })).resolves.toMatchObject({ ok: false, retryable: true });
+        await expect(handoff.raw('SELECT 1')).resolves.toBeTruthy();
+      });
+    });
+    await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
+    await expect(mockPg('invoices').where({ id: invoiceId }).update({ status: 'paid' })).resolves.toBe(1);
+  }, 15000);
 });

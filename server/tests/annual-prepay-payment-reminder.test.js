@@ -6,6 +6,11 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
+  classifyDeliveryCertainty: jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty,
+}));
+jest.mock('../services/billing-reminder-delivery', () => ({
+  reminderProgress: jest.fn(),
+  sendReminderChannels: jest.fn(),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(),
@@ -40,6 +45,7 @@ const db = require('../models/db');
 const { autoApplyAccountCreditIfEnabled, reverseAppliedCredit } = require('../services/customer-credit');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const { reminderProgress, sendReminderChannels } = require('../services/billing-reminder-delivery');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { _private } = AnnualPrepayRenewals;
 
@@ -61,7 +67,7 @@ const REMINDER_COLS = {
   payment_reminder_1d_claimed_at: {},
 };
 
-function query({ first, returning, columnInfo, rows = [] } = {}) {
+function query({ first, firstError, returning, columnInfo, rows = [] } = {}) {
   const q = {};
   [
     'whereIn',
@@ -81,9 +87,11 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
   });
   q.orWhere = jest.fn(() => q);
   q.orWhereNotNull = jest.fn(() => q);
+  q.modify = jest.fn((callback) => { callback(q); return q; });
+  q.forUpdate = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.insert = jest.fn(() => q);
-  q.first = jest.fn(async () => first);
+  q.first = jest.fn(async () => { if (firstError) throw firstError; return first; });
   q.returning = jest.fn(async () => returning || []);
   q.columnInfo = jest.fn(async () => columnInfo || {});
   q.catch = jest.fn(() => Promise.resolve());
@@ -95,6 +103,7 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    if (table === 'notification_prefs' && (!queue || !queue.length)) return query();
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -120,6 +129,7 @@ describe('annual prepay pre-visit payment reminders', () => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
     _private.resetCachesForTests();
+    reminderProgress.mockResolvedValue([]);
   });
 
   test('column helpers map only the supported day counts', () => {
@@ -586,5 +596,75 @@ describe('collections policy + ledger on the payment reminder', () => {
       expect.objectContaining({ id: 'led-1' }),
       expect.objectContaining({ code: 'QUIET_HOURS_HOLD' }),
     );
+  });
+});
+
+describe('explicit annual payment reminder channels', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+    reminderProgress.mockResolvedValue([]);
+    renderSmsTemplate.mockResolvedValue('pay reminder body');
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+  });
+
+  function arm(channel) {
+    setDbQueues({
+      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }),
+        query({ returning: [{ ...BASE_TERM }] }), query()],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+      notification_prefs: [query({ first: { customer_id: CUSTOMER.id, billing_channels: [channel] } })],
+      customer_interactions: [query()],
+    });
+    sendReminderChannels.mockImplementation(async (args) => {
+      await args.send(channel, { id: `ledger-${channel}` });
+      return { complete: true, deliveredNow: [channel], results: {} };
+    });
+  }
+
+  test.each(['email', 'push', 'sms'])('routes the selected %s leg with a final quote guard', async (channel) => {
+    arm(channel);
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1))
+      .resolves.toEqual({ sent: true, termId: 'term-1', complete: true });
+
+    expect(sendReminderChannels).toHaveBeenCalledWith(expect.objectContaining({
+      invoiceId: null, invoiceIds: ['inv-1'], policyInvoiceIds: [],
+      offLedgerBalanceCents: 39204, eventKey: 'annual-prepay-payment:term-1:1',
+    }));
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(input.metadata).toMatchObject({
+      annual_prepay_term_id: 'term-1', first_visit_date: '2026-07-11', days_out: 1,
+      rendered_amount: '392.04', billingDeliveryLeg: channel,
+      collections_ledger_id: `ledger-${channel}`,
+    });
+    if (channel === 'sms') {
+      expect(input.preSendCheck).toBeUndefined();
+      expect(input.providerPreSendCheck).toEqual(expect.any(Function));
+      expect(input.withSmsHandoff).toEqual(expect.any(Function));
+    } else {
+      expect(input.preSendCheck).toEqual(expect.any(Function));
+    }
+    if (channel === 'push') expect(input).toMatchObject({ channel: 'sms', metadata: { appOnly: true } });
+  });
+
+  test('an unreadable stored choice retries without falling through to legacy Text', async () => {
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    const release = query();
+    setDbQueues({
+      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }),
+        query({ returning: [{ ...BASE_TERM }] }), release],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+      notification_prefs: [query({ firstError: new Error('preferences unavailable') })],
+    });
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1))
+      .resolves.toEqual({ sent: false, reason: 'notification_prefs_unavailable' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
+    expect(release.update).toHaveBeenCalled();
   });
 });

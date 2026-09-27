@@ -387,6 +387,12 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
       && Boolean(input.metadata?.followThroughCommitmentId))
+    // Annual-prepay Text holds its invoice and term through Twilio dispatch.
+    || (input.audience === 'customer' && input.purpose === 'payment_link'
+      && input.entryPoint === 'annual_prepay_payment_reminder'
+      && input.metadata?.original_message_type === 'annual_prepay_payment_reminder'
+      && Boolean(input.metadata?.annual_prepay_term_id)
+      && typeof providerPreSendCheck === 'function')
     // Recruiting texts hold the application row through the provider
     // request: the deferred replay (deferred-replay-registry
     // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
