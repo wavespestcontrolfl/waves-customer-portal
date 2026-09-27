@@ -37,7 +37,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const commitments = require('./call-commitments');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf, etParts } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
@@ -168,15 +168,42 @@ function evidenceFrom(r) {
   return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
 }
 
+// The stated time of a scheduling promise is usually the appointment itself
+// ("I'll put you on the schedule for around 3"), and its booking always
+// comes before it: a visit booked after the call FOR exactly that slot — the
+// stated ET day, arriving at the stated minute — is the promised appointment
+// and keeps the promise early. Every other early booking waits for the
+// stated time: an unrelated visit ("schedule it after the 2 PM inspection"),
+// or any booking on another kind of promise (booking Thursday's inspection
+// does not send the quote promised after it). A booking linked to the call
+// itself is the fulfillment proof's to close (visit_booked_from_this_call).
+// The stated slot ({ day, minute } in ET), or null when there is none to wait for.
+function appointmentSlot(r) {
+  if (r.kind !== 'schedule_visit') return null;
+  const since = evidenceFrom(r);
+  const at = promisedAt(r);
+  if (!since || !at || since.getTime() <= at.getTime()) return null;
+  const { hour, minute } = etParts(since);
+  return { day: etDateString(since), minute: hour * 60 + minute };
+}
+
+// A TIME column's HH:MM[:SS] as minutes past midnight (NaN when unreadable).
+function minuteOfDay(time) {
+  const [h, m] = String(time).split(':').map(Number);
+  return h * 60 + m;
+}
+
 async function followedUpIds(conn, rows) {
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).
-  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
+  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
     .filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
+  // A booking for a scheduling promise's own slot counts from the call's end.
+  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.slot ? promisedAt(x.r) : x.since).getTime())));
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
   // Numbers match however they were written (9415550123, +19415550123,
   // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
@@ -201,8 +228,8 @@ async function followedUpIds(conn, rows) {
   // (the nightly series top-up, a booking's seeded follow-ups) and never one
   // later cancelled (the proof's own rule).
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
-    .where('created_at', '>', floor).whereNull('recurring_parent_id').whereNull('parent_service_id')
-    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at') : [];
+    .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
+    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at', 'scheduled_date', 'window_start') : [];
   // A call that reached the customer — the proof's bar for a returned
   // callback (completed customer leg of 60 s or more, affirmatively not
   // voicemail), applied to every SLA kind; never a voice-relay sandbox call.
@@ -251,8 +278,11 @@ async function followedUpIds(conn, rows) {
     : phoneKey(rec.to_phone) === x.phone);
   const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
     : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
+  const booked = (v, x) => after(v, x.since)
+    || (!!x.slot && !!v.scheduled_date && !!v.window_start && after(v, promisedAt(x.r))
+      && etCalendarDayOf(v.scheduled_date) === x.slot.day && minuteOfDay(v.window_start) === x.slot.minute);
   for (const x of scoped) {
-    if (visits.some((v) => visitFor(v, x) && after(v, x.since))
+    if (visits.some((v) => visitFor(v, x) && booked(v, x))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || texts.some((t) => mine(t, x) && after(t, x.since))) done.add(x.r.id);
   }

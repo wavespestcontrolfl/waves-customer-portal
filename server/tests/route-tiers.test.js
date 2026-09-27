@@ -300,4 +300,20 @@ describe('loadReminderFreeze (72h reminder is the HARD gate)', () => {
     const res = await loadReminderFreeze(reminderDbStub({ throwOnFirstQuery: true }), [], NOW);
     expect(res).toEqual({ failed: false, frozen: new Set() });
   });
+
+  // GATE_AUTO_DISPATCH_FLEX_TIER passes its own, tighter 73h band instead of
+  // the default 72.25h — every existing call site above omits the 4th arg,
+  // so this is purely additive (the default keeps route-tiers' own callers
+  // byte-identical).
+  test('an explicit freezeHours widens (or narrows) the claimable band independently of the 72.25h default', async () => {
+    const mk = (appt) => reminderDbStub({
+      rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: appt, reminder_72h_sent: false, suppressed_by_sibling: false }],
+    });
+    // 73h out: inside a 73h band, but outside the default 72.25h band.
+    const at73h = new Date(NOW.getTime() + 73 * 3600000).toISOString();
+    let res = await loadReminderFreeze(mk(at73h), ['s1'], NOW, 73);
+    expect(res.frozen.has('s1')).toBe(true);
+    res = await loadReminderFreeze(mk(at73h), ['s1'], NOW); // default 72.25h
+    expect(res.frozen.has('s1')).toBe(false);
+  });
 });
