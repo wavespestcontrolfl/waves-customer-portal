@@ -205,6 +205,7 @@ describe('rescheduleAgreementEvidence', () => {
 
   test('a negation governing the commitment itself, or a cancellation, is not an agreement', () => {
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: I cannot promise we will see you Thursday at two.').ok).toBe(false);
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: I cannot promise we will see you then. Thursday at two is available.').ok).toBe(false);
     expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: Please cancel it.\nAgent: Okay.').ok).toBe(false);
   });
 

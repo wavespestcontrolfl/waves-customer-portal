@@ -175,11 +175,25 @@ function hasAnyMarker(ns, markers) {
   const p = padded(ns);
   return markers.some((m) => p.includes(padded(m)));
 }
-// Does the agent's turn commit to the slot: a sentence with a commitment and
-// no condition on it ("We'll see you then, and if you need anything, call
-// us" commits; "We'll see you then if a slot opens up" does not)?
+// Does the agent's turn commit to the slot: a clause with a commitment and
+// neither a condition nor a negation on it ("We'll see you then, and if you
+// need anything, call us" and "Friday doesn't work, but we'll see you
+// Thursday" commit; "We'll see you then if a slot opens up" and "I cannot
+// promise we will see you then" do not)?
 function commitsToSlot(turn) {
-  return sentenceSpans(turn.raw).some((sentence) => hasAnyMarker(sentence.ns, COMMITMENT_MARKERS) && !hasCondition(sentence.ns, CLOSING_OFFERS));
+  return sentenceSpans(turn.raw).some((sentence) => sentence.ns.split(new RegExp(`\\b(?:${[...CLAUSE_BREAKS].join('|')})\\b`))
+    .some((clause) => hasAnyMarker(clause, COMMITMENT_MARKERS) && !hasCondition(clause, CLOSING_OFFERS) && !negationGovernsCommitment(clause)));
+}
+// Does a "not"/"can't" before the clause's commitment govern it ("I cannot
+// promise we will see you then"), rather than turn down another time first
+// ("Not Friday, we will see you Thursday", "We can't do Friday, we'll see
+// you Thursday")? A leading "no" answers what came before.
+function negationGovernsCommitment(clause) {
+  const p = padded(clause);
+  const at = Math.min(...COMMITMENT_MARKERS.map((m) => p.indexOf(padded(m))).filter((k) => k >= 0));
+  const before = withoutCourtesy(p.slice(0, at).split(' ').filter(Boolean));
+  const lastNegation = before.findLastIndex((tok) => NEGATING_WORDS.has(tok));
+  return lastNegation >= 0 && !talksOtherTime(before.slice(lastNegation + 1).join(' '), -1);
 }
 function hasRefusalMarker(ns) {
   const p = padded(ns);
