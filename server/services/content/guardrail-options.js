@@ -18,6 +18,8 @@
  */
 
 const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
+const { resolveSpokeTarget } = require('../content-astro/spoke-routing');
+const { HUB_SITE_KEYS, normalizeSpokeSites } = require('../content-astro/spoke-sites');
 
 const BRIEF_PRICE_PROHIBITION_RE = /\bno\s+(?:[\w-]+\s+){0,3}(?:dollar amounts?|prices|pricing)\b/i;
 
@@ -82,7 +84,13 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     ...(Array.isArray(briefLinks) ? briefLinks : []),
     ...(curatedHubLink ? [curatedHubLink] : []),
   ];
-  const relatedPostHosts = brief?.voice_constraints?.related_posts_target_sites || brief?.target_sites || [];
+  const selectedRelatedHosts = brief?.voice_constraints?.related_posts_target_sites;
+  const effectiveSpoke = resolveSpokeTarget(brief);
+  const effectiveRelatedHosts = normalizeSpokeSites(effectiveSpoke ? [effectiveSpoke] : HUB_SITE_KEYS).sort();
+  const frozenRelatedHosts = normalizeSpokeSites(selectedRelatedHosts).sort();
+  const relatedTargetMatches = selectedRelatedHosts != null
+    && frozenRelatedHosts.length === effectiveRelatedHosts.length
+    && frozenRelatedHosts.every((host, index) => host === effectiveRelatedHosts[index]);
   const isRefresh = brief.action_type === 'refresh_existing_page';
   // A supporting-blog run IS a blog target: the affiliate gate builds its
   // product index only for blog targets, so without this every valid
@@ -130,8 +138,12 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     // (Codex).
     forbidAllPrices: briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
     allowedInternalLinks,
-    relatedPostLinks: relatedPostPaths,
-    relatedPostHosts: Array.isArray(relatedPostHosts) ? relatedPostHosts.filter(Boolean) : [],
+    // The network kill switch is evaluated again at publication time. If it
+    // changes a frozen spoke brief into a hub publish (or vice versa), remove
+    // the optional path allowance so a relative candidate fails closed as an
+    // unknown route until the brief is recomposed for the effective host.
+    relatedPostLinks: relatedTargetMatches ? relatedPostPaths : [],
+    relatedPostHosts: effectiveRelatedHosts,
     isRefresh,
   };
 }

@@ -2403,6 +2403,7 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
       page_type: 'supporting-blog',
       target_sites: ['wavespestcontrol.com'],
       voice_constraints: {
+        related_posts_target_sites: ['wavespestcontrol.com'],
         related_posts: [
           { title: 'Fall Armyworm Outbreak', path: '/lawn-care/fall-armyworm-outbreak/', keyword: 'fall armyworm' },
           { title: 'Chinch Bug Damage', path: '/lawn-care/chinch-bug-damage/', keyword: 'chinch bugs' },
@@ -2431,6 +2432,30 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     const bare = deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' });
     expect(bare.allowedInternalLinks).toEqual([]);
     expect(bare.relatedPostLinks).toEqual([]);
+  });
+
+  test('related-post allowances fail closed when the spoke kill switch changes the publish host', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'false';
+    try {
+      const brief = {
+        action_type: 'new_supporting_blog',
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: {
+          related_posts_target_sites: ['sarasotaflpestcontrol.com'],
+          related_posts: [{ path: '/termite/spoke-only/' }],
+        },
+      };
+      const options = deriveSyncGuardrailOptions({}, brief);
+      expect(options.relatedPostHosts).toEqual(['wavespestcontrol.com']);
+      expect(options.relatedPostLinks).toEqual([]);
+      const result = guardrails.evaluate({ body: '[Spoke only](/termite/spoke-only/)' }, options);
+      expect(result.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+    }
   });
 
   test('member-expression components are rejected (Codex round 2)', () => {
