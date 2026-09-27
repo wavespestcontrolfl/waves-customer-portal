@@ -17,12 +17,18 @@
  * ends on templateBriefBody — this gate stops paying both providers for
  * rewrites the validator throws away. Off (default; owner decision
  * 2026-09-26) → every brief is built from templateBriefBody with no
- * provider call at all. A gate-off template is a STABLE result — the
+ * provider call at all, and the "template for every brief" rule wins
+ * over any PRE-EXISTING cached state: an already-stored LLM brief, or a
+ * template stuck 'validator'/'transient' (including one already at the
+ * attempt cap), is REPLACED with a gate_off template on its next
+ * regeneration rather than kept or left capped (codex #5044 r1 P2-1/P2-2)
+ * — the validator-rejection attempt cap itself only applies while the
+ * gate is ON. A gate-off template is then a STABLE result — the
  * `unchanged` cache branch treats it like a real cache hit (not
- * re-processed every :19/:49 tick) and it never advances the
- * validator-rejection attempt cap. Flipping the gate back on is read at
- * the next sweep tick and un-sticks those visits into a fresh LLM
- * attempt (see the `unchanged` check in generateVisitBrief).
+ * re-processed every :19/:49 tick) and its llm_attempts always resets to
+ * 0. Flipping the gate back on is read at the next sweep tick and earns
+ * every one of those visits a genuine fresh LLM attempt (see the
+ * `unchanged` and `validator_capped` checks in generateVisitBrief).
  *
  * Shape (mirrors the WDO skeleton in appointment-tagger.js):
  *   - deterministic grounding assembly reusing existing pieces
@@ -2611,25 +2617,32 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
 
   const existing = parseStoredBrief(svc.pre_service_brief);
   const llmGateOn = briefLlmGateEnabled();
-  // Template-generated briefs are NOT a permanent cache hit: they exist
-  // because a provider was down or a response was rejected, and an
-  // unchanged grounding would otherwise pin the reduced template forever.
-  // Each sweep retries the LLM; a repeat miss just re-stores the template.
+  const existingIsTemplate = existing?.generated_via === 'template';
+  // Template-generated briefs are NOT a permanent cache hit while the LLM
+  // gate is ON: they exist because a provider was down or a response was
+  // rejected, and an unchanged grounding would otherwise pin the reduced
+  // template forever — each sweep retries the LLM; a repeat miss just
+  // re-stores the template. That is UNCHANGED here (gate-on rule below is
+  // byte-identical to before this dark gate existed: only a non-template
+  // — i.e. a real LLM — brief is a cache hit).
   //
-  // The ONE exception is a template stored because GATE_PREVISIT_BRIEF_LLM
-  // was OFF (llm_miss_kind 'gate_off'): with the LLM gate STILL off, that
-  // is a stable, deliberate result, not a miss — treat it as a real cache
-  // hit so the :19/:49 backstops don't re-derive (and re-write) the same
-  // template every tick. The LLM gate's current value rides this check
-  // (not just the stored brief) so flipping it back on falls through
-  // below and earns a fresh LLM attempt on the very next sweep tick.
+  // While the LLM gate is OFF the rule flips: the owner wants a template
+  // for EVERY brief (2026-09-26), so ONLY a brief already stamped
+  // llm_miss_kind 'gate_off' is a stable, deliberate result worth caching
+  // — a cached LLM brief, or a template stuck there for any other reason
+  // (validator/transient), must fall through and be REPLACED with a fresh
+  // gate_off template (codex r1 P2-1: a pre-existing LLM brief must not
+  // keep serving once the gate goes dark). Falling through also means the
+  // validator_capped branch right below must not fire while the gate is
+  // off (P2-2) — it is gate-on-only so a rollback (gate back to 'true')
+  // is never blocked by a cap earned before the gate went dark.
+  const cacheHit = llmGateOn
+    ? !existingIsTemplate
+    : (existingIsTemplate && existing?.llm_miss_kind === 'gate_off');
   if (
     String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
     && existing?.grounding_hash === groundingHash
-    && (
-      existing.generated_via !== 'template'
-      || (existing.llm_miss_kind === 'gate_off' && !llmGateOn)
-    )
+    && cacheHit
   ) {
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
@@ -2638,12 +2651,18 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
   // unchanged — stop spending dual-provider calls after the cap. A changed
   // grounding (or PROMPT_VERSION bump) changes the hash and retries fresh;
   // transient misses (provider down, truncation) never enter this branch.
+  // Gate-on only (see above): while the LLM gate is off no provider call
+  // is made regardless, so this cap must never itself block the rollback
+  // — a visit capped before the gate went dark gets restamped 'gate_off'
+  // below (with llm_attempts reset) and earns a genuine first attempt the
+  // moment the gate is set back to 'true'.
   const policyFingerprint = visitBriefPolicyFingerprint();
   const sameCapLineage = existing?.grounding_hash === groundingHash
-    && existing?.generated_via === 'template'
+    && existingIsTemplate
     && existing?.llm_policy_fingerprint === policyFingerprint;
   if (
-    String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
+    llmGateOn
+    && String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
     && sameCapLineage
     && existing.llm_miss_kind === 'validator'
     && (existing.llm_attempts || 0) >= VISIT_BRIEF_LLM_ATTEMPT_CAP
@@ -2683,11 +2702,16 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     // llm_attempts counts VALIDATOR rejections only, accumulating across
     // same-hash template re-stores; a transient miss preserves the count
     // without adding to it, so outages can never walk a visit into the cap.
+    // A gate_off store always RESETS to 0 (never carries sameCapLineage's
+    // count forward) — the LLM gate going dark voids any cap earned before
+    // it did, so a rollback (gate back to 'true') always gets a genuine
+    // first attempt rather than landing pre-capped (codex r1 P2-2).
     ...(via === 'template' ? {
       llm_miss_kind: missKind || 'transient',
       llm_policy_fingerprint: policyFingerprint,
-      llm_attempts: (sameCapLineage ? (existing.llm_attempts || 0) : 0)
-        + (missKind === 'validator' ? 1 : 0),
+      llm_attempts: missKind === 'gate_off'
+        ? 0
+        : (sameCapLineage ? (existing.llm_attempts || 0) : 0) + (missKind === 'validator' ? 1 : 0),
     } : {}),
     // The ET calendar day and service identity this brief was generated
     // FOR. Any writer can reschedule the visit or rewrite its
