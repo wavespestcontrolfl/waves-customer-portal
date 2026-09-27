@@ -347,6 +347,11 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect(sel).toEqual(expect.arrayContaining(['c.per_application_fee', 'c.payer_id as customer_payer_id']));
     expect(sel).not.toEqual(expect.arrayContaining(['ss.billed_to_payer_id']));
     expect(sel).not.toEqual(expect.arrayContaining(['ss.per_application_fee']));
+    // splitFromSharedInvoiceId(v) reads this column — without it in the
+    // real projection the sibling-lookup guard below is dead code in
+    // production, even though a hand-built fixture row can carry the field
+    // regardless of what's actually selected (Codex pre-push P1).
+    expect(sel).toEqual(expect.arrayContaining(['ss.recurring_template_overrides']));
   });
 
   test('a visit that cannot charge the card (payer-billed via visit or customer / callback / gate off → pay-link invoice) leaves the customer exempt', async () => {
