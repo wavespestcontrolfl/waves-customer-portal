@@ -8,6 +8,7 @@
  */
 
 const logger = require('./logger');
+const { addETDaysAtWallClock } = require('../utils/datetime-et');
 
 // `lastObservation/summary/` is not a real FAWN endpoint (confirmed live
 // 2026-09-26: it 400s). The documented, working "all stations" feed is
@@ -149,6 +150,21 @@ function rainfallInches(station = {}) {
   const cm = numberOrNull(station.rain_sum);
   if (cm != null) return cm / 2.54;
   return numberOrNull(firstDefined(station.Rain_Tot, station.rainfall_in, station.precipitation));
+}
+
+// FAWN documents 15-minute observations from 23:45 on the preceding local
+// date: https://fawn.ifas.ufl.edu/controller.php/lastDay/ . A numeric rain_sum
+// can cover only part of that day. Recognized SWFL stations use Eastern time;
+// advance one calendar day at the same wall time so DST requires 92 or 100
+// observations instead of the usual 96. Unknown coverage cannot prove a total.
+function hasCompleteDailyCoverage(station) {
+  const count = Number(station.num_obs);
+  if (!Number.isInteger(count) || typeof station.startTime !== 'string'
+    || !/(?:Z|[+-]\d{2}:\d{2})$/.test(station.startTime)) return false;
+  const start = new Date(station.startTime);
+  if (!Number.isFinite(start.getTime())) return false;
+  const expected = (addETDaysAtWallClock(start, 1).getTime() - start.getTime()) / (15 * 60 * 1000);
+  return [92, 96, 100].includes(expected) && count === expected;
 }
 
 // FAWN's documented temperature fields (t2m_avg, tsoil_avg) are °C, and wind
@@ -355,6 +371,7 @@ const FawnWeather = {
       const station = selectStation(data, options);
 
       if (!station) throw new Error('No FAWN station found');
+      if (!hasCompleteDailyCoverage(station)) throw new Error('Selected station has incomplete daily observation coverage');
 
       const rainfall_in = rainfallInches(station);
       // A missing/non-numeric rain_sum on the selected row (a FAWN schema

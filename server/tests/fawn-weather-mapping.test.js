@@ -212,6 +212,58 @@ describe('FawnWeather — real API shape', () => {
       expect(snap.error).toMatch(/400/);
     });
 
+    test.each([undefined, null, '', 'unknown', '48', '95', '97', '96.5'])('rejects incomplete or invalid daily observation coverage: %s', async (num_obs) => {
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        json: async () => [realShapedRow({ num_obs, rain_sum: '0' })],
+      }));
+      const snap = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
+      expect(snap.rainfall_in).toBeNull();
+      expect(snap.error).toMatch(/coverage/);
+    });
+
+    test.each([
+      ['2026-03-06T23:45:00-05:00', '96', true],
+      ['2026-03-07T23:45:00-05:00', '92', true],
+      ['2026-03-07T23:45:00-05:00', '91', false],
+      ['2026-03-08T23:45:00-04:00', '96', true],
+      ['2026-10-30T23:45:00-04:00', '96', true],
+      ['2026-10-31T23:45:00-04:00', '100', true],
+      ['2026-10-31T23:45:00-04:00', '96', false],
+      ['2026-11-01T23:45:00-05:00', '96', true],
+      [undefined, '96', false],
+      ['invalid', '96', false],
+      ['2026-09-24T23:45:00', '96', false],
+    ])('daily coverage follows the station calendar across DST: %s / %s', async (startTime, num_obs, complete) => {
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        json: async () => [realShapedRow({ startTime, num_obs, rain_sum: '2.54' })],
+      }));
+      const snap = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
+      if (complete) expect(snap.rainfall_in).toBeCloseTo(1, 5);
+      else {
+        expect(snap.rainfall_in).toBeNull();
+        expect(snap.error).toMatch(/coverage/);
+      }
+    });
+
+    test('incomplete rain does not replace or extend the bounded last-good reading', async () => {
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+      global.fetch = jest.fn(async () => ({ ok: true, json: async () => [realShapedRow({ rain_sum: '1.27' })] }));
+      const options = { latitude: 27.45, longitude: -82.57 };
+      expect((await FawnWeather.getRecentRainfall(options)).rainfall_in).toBeCloseTo(0.5, 5);
+
+      nowSpy.mockReturnValue(1_700_000_000_000 + 20 * 60 * 1000);
+      global.fetch = jest.fn(async () => ({ ok: true, json: async () => [realShapedRow({ num_obs: '48', rain_sum: '0' })] }));
+      expect((await FawnWeather.getRecentRainfall(options)).rainfall_in).toBeCloseTo(0.5, 5);
+
+      nowSpy.mockReturnValue(1_700_000_000_000 + 7 * 60 * 60 * 1000);
+      const expired = await FawnWeather.getRecentRainfall(options);
+      expect(expired.rainfall_in).toBeNull();
+      expect(expired.error).toMatch(/coverage/);
+      nowSpy.mockRestore();
+    });
+
     // These three exercise the bounded fallback with Date.now() mocked so a
     // SECOND call's failure is a genuinely fresh fetch attempt (the raw
     // station-rows cache also has a 15min TTL, keyed only by period, not by
