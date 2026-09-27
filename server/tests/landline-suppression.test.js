@@ -204,3 +204,41 @@ describe('checkSuppression non_mobile branch', () => {
     })).toMatchObject({ ok: false });
   });
 });
+
+// Owner ruling 2026-09-27: a STOP text and a wrong-number flag are facts
+// about the phone, so they never stop a payment or billing email; a staff
+// do-not-contact (and any unknown reason) still does. Texts and App keep
+// the HARD semantics.
+describe('checkSuppression payment-email carve-out', () => {
+  const billingEmails = [
+    ['the billing email authority recheck', { channel: 'email', to: '+19415550100', metadata: { billingDeliveryLeg: true } }],
+    ['a routed billing Email leg', { channel: 'email', metadata: { billingDeliveryLeg: 'email', billingDeliveryCategory: 'invoice' } }],
+    ['a billing-purpose email', { channel: 'email', audience: 'customer', customerId: 'c1', purpose: 'billing' }],
+  ];
+  const loaded = (reason) => ({ suppressionLoaded: true, suppression: { reason, created_at: '2026-09-01T12:00:00Z' } });
+
+  test.each(billingEmails.flatMap(([label, input]) => [
+    'opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number',
+  ].map((reason) => [label, reason, input])))('%s is not stopped by %s', async (_label, reason, input) => {
+    expect(await checkSuppression(input, {}, loaded(reason))).toEqual({ ok: true });
+  });
+
+  test.each(billingEmails.flatMap(([label, input]) => [
+    ['manual_dnc', 'SUPPRESSED_MANUAL_DNC'], ['mystery_reason', 'SUPPRESSED_OTHER'],
+  ].map(([reason, code]) => [label, reason, input, code])))('%s is still stopped by %s', async (_label, reason, input, code) => {
+    expect(await checkSuppression(input, {}, loaded(reason))).toMatchObject({ ok: false, code });
+  });
+
+  test('an unreadable suppression state still fails closed for a billing email', async () => {
+    expect(await checkSuppression(billingEmails[0][1], {}, { suppression: { reason: 'opt_out_keyword' } }))
+      .toMatchObject({ ok: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
+  });
+
+  test.each([
+    ['a billing text', { channel: 'sms', purpose: 'billing', metadata: { billingDeliveryLeg: 'sms' } }, 'SUPPRESSED_OPT_OUT'],
+    ['a billing App leg', { channel: 'push', metadata: { billingDeliveryLeg: 'push', billingDeliveryCategory: 'invoice' } }, 'SUPPRESSED_OPT_OUT'],
+    ['a non-billing email', { channel: 'email', audience: 'customer', purpose: 'appointment' }, 'SUPPRESSED_OPT_OUT'],
+  ])('%s keeps STOP as a hard stop', async (_label, input, code) => {
+    expect(await checkSuppression(input, {}, loaded('opt_out_keyword'))).toMatchObject({ ok: false, code });
+  });
+});
