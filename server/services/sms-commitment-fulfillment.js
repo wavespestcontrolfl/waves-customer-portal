@@ -236,10 +236,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     // R2 (owner ruling 2026-09-25): a payment question is answered by money
     // actually landing, not by a staff reply — a settled payment toward one
     // of the customer's invoices, money tied to no invoice, or a received
-    // estimate deposit, or a prepayment recorded on a visit, after the
-    // request. A payment receipt (text, App push or email) is not evidence of
-    // its own: it reports one of these rows, which answers directly. Four
-    // distinct tables share one witness type; each row is
+    // estimate deposit, after the request. A payment receipt (text, App push
+    // or email) is not evidence of its own: it reports one of these rows,
+    // which answers directly. Three distinct tables share one witness type;
+    // each row is
     // tagged with its source table so admissibility/quoting/revalidation
     // know which (Codex #4816 r13 P1, payment-row lock order; Codex round 1
     // #4996: P1-A manual-payment linkage, P1-C settlement time, P2 exact-
@@ -302,8 +302,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .leftJoin('setup_fee_claims as sfc', 'sfc.invoice_id', 'pinv.id')
           .leftJoin('estimates as sfc_estimate', 'sfc_estimate.id', 'sfc.estimate_id')
           .where({ 'p.customer_id': customerId, 'p.status': 'paid' })
-          // A visit prepayment applied at completion is the visit's prepaid
-          // stamp, already its own leg below: never counted twice.
+          // A prepayment applied at completion books the visit's prepaid
+          // BALANCE (scheduled_services.prepaid_*), not money received then —
+          // like account credit covering an invoice. A prepaid stamp is a
+          // balance with no receipt history: editing it, raising it or
+          // re-spreading a series moves its time and amount with no money
+          // arriving (Codex #4996 r7/r8, pre-push), so neither the stamp nor
+          // its application is evidence here. Cash recorded against an
+          // invoice (recordManualPayment) is, through the manual link above.
           .whereRaw("COALESCE(p.metadata::jsonb ->> 'source', '') <> 'scheduled_service_prepaid'")
           .whereRaw("COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''")
           .whereRaw(NOT_FULLY_REFUNDED('p'))
@@ -359,22 +365,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .orderBy('ed.received_at', 'desc').limit(LIMIT + 1)
           .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.card_surcharge', 'ed.refunded_amount', 'ed.received_at',
             'estimates.property_id as property_id', 'estimates.service_interest'),
-        // A prepayment staff record on a visit (cash at the door, Zelle —
-        // the /prepaid route and series prepay) exists only as the visit's
-        // prepaid stamp until completion books it against the invoice, so
-        // the stamp is the evidence (Codex #4996 r5). A series prepayment
-        // stamps each visit with its share at one instant; the total rides
-        // along. Annual prepay coverage (its own method) is an earlier
-        // invoice's money; a cash or Zelle stamp on a visit an annual term
-        // later linked stays real money (annual-prepay-renewals.js keeps it).
-        conn('scheduled_services as pv').where({ 'pv.customer_id': customerId }).where('pv.prepaid_amount', '>', 0)
-          .whereRaw("COALESCE(pv.prepaid_method, '') <> 'annual_prepay_invoice'")
-          .where('pv.prepaid_at', '>', after).where('pv.prepaid_at', '<=', now)
-          .orderBy('pv.prepaid_at', 'desc').limit(LIMIT + 1)
-          .select('pv.id', 'pv.prepaid_amount', 'pv.prepaid_method', 'pv.prepaid_at', 'pv.service_type', 'pv.scheduled_date', 'pv.property_id',
-            conn.raw('SUM(pv.prepaid_amount) OVER (PARTITION BY pv.prepaid_at) AS prepaid_total'),
-            conn.raw('COUNT(*) OVER (PARTITION BY pv.prepaid_at) AS prepaid_visits')),
-      ]).then(([invoicePayments, ledger, deposits, prepaidVisits]) => {
+      ]).then(([invoicePayments, ledger, deposits]) => {
         const legs = [
           invoicePayments.map(({ paid_in_full: paidInFull, charge_key: _charge, charge_total: chargeTotal, charge_invoices: chargeInvoices, ...row }) => ({
             ...row, payment_source: 'invoice',
@@ -387,10 +378,6 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             text: `Payment of ${paidAmount(row.amount, row)} recorded ${dateOnlyString(row.payment_date)}${tender(method)}`
               + `${/^\d{4}-\d{2}$/.test(billedMonth || '') ? ` (monthly plan charge for ${billedMonth})` : ''}${refundNote(row.refund_amount)}` })),
           deposits.map(({ service_interest: service, ...row }) => ({ ...row, payment_source: 'deposit', text: depositText(row, service) })),
-          prepaidVisits.map(({ prepaid_method: method, prepaid_total: total, prepaid_visits: visits, ...row }) => ({ ...row, payment_source: 'prepaid',
-            text: `Prepayment of $${Number(row.prepaid_amount).toFixed(2)}${tender(method)} recorded ${etDateString(new Date(row.prepaid_at))}`
-              + ` for the ${row.service_type} visit on ${dateOnlyString(row.scheduled_date)}`
-              + `${Number(visits) > 1 ? ` — part of $${Number(total).toFixed(2)} prepaid across ${visits} visits` : ''}` })),
         ];
         // Each leg is capped on its OWN LIMIT, so together they can run
         // past LIMIT with nothing lost; only a leg that overflowed marks the
@@ -636,10 +623,10 @@ const ORDERING_TIME = {
   sms: (row) => row.created_at, call: (row) => row.created_at, email: (row) => row.received_at,
   email_delivery: (row) => row.delivered_at || row.sent_at, invoice: (row) => row.sent_at,
   // Each payment leg's own sort key: settled_at (invoice and ledger legs),
-  // received_at (deposits), prepaid_at (visit prepayments). With it a
-  // payment_truncated failure relaxes like any other ordered source for a
-  // commitment that can never cite a payment (Codex round 1 P2).
-  payment: (row) => row.settled_at || row.received_at || row.prepaid_at,
+  // received_at (deposits). With it a payment_truncated failure relaxes
+  // like any other ordered source for a commitment that can never cite a
+  // payment (Codex round 1 P2).
+  payment: (row) => row.settled_at || row.received_at,
 };
 // The only kind that admits payment evidence; the watcher's event page wakes
 // only these rows for money landing (Codex #4996 r4).
@@ -785,14 +772,14 @@ async function holdsLeadOwnership(trx, estimateId, customerId) {
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
   const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
     estimate: 'estimates', visit: 'scheduled_services',
-    // A 'payment' witness is one of four distinct rows (R2); which table to
+    // A 'payment' witness is one of three distinct rows (R2); which table to
     // lock depends on which leg matched, carried on the verdict as
     // payment_source. Lock order stays customer → source → commitment →
     // payment (lockLiveCommitment above always runs first), and skipLocked
     // means a racing refund/void/chargeback either loses this row to us or
     // leaves us nothing to hold — never a fulfilled verdict grounded on
     // reversed money (rule 8, Codex #4816 r13 P1).
-    payment: { invoice: 'payments', ledger: 'payments', deposit: 'estimate_deposits', prepaid: 'scheduled_services' }[verdict.payment_source],
+    payment: { invoice: 'payments', ledger: 'payments', deposit: 'estimate_deposits' }[verdict.payment_source],
     // The linked invoice a payment settles (paymentLink).
     invoice: 'invoices' };
   const table = tables[verdict.record_type];

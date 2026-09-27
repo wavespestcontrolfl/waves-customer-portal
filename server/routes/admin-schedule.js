@@ -79,7 +79,6 @@ const {
   buildPrepaidSeriesContext,
   hasAnnualCoverage,
   withoutAnnualCoverage,
-  prepaidAtFor,
   ANNUAL_PREPAY_METHOD,
 } = require('../services/prepaid-series');
 // Single-visit prepaid stamp: refuse only rows that are genuinely over.
@@ -10055,7 +10054,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 prepaid_amount: amt,
                 prepaid_method: payload?.method || 'cash',
                 prepaid_note: payload?.note || null,
-                prepaid_at: prepaidAtFor(db, amt),
+                prepaid_at: new Date(),
               })
               .returning(['id']);
             if (!stamped.length) {
@@ -15998,8 +15997,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
         prepaid_amount: amt,
         prepaid_method: method || null,
         prepaid_note: note || null,
-        // An edit keeps the time the money came in (prepaid-series.js).
-        prepaid_at: prepaidAtFor(db, amt),
+        prepaid_at: db.fn.now(),
       })
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
     if (!updated.length) {

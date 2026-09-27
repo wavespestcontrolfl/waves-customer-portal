@@ -349,17 +349,13 @@ async function stampSeriesPrepaid(db, {
     for (let i = 0; i < stampTargets.length; i++) {
       const row = stampTargets[i];
       const amt = slices[i];
-      // An amendment that records no more money on a visit keeps the time
-      // that money came in; the audit below records the same time, so the
-      // integrity watchdog's allocation match still holds (Codex #4996 r8).
-      const stampedAt = keptPrepaidAt(row, amt, now);
       const [updated] = await trx('scheduled_services')
         .where({ id: row.id })
         .update({
           prepaid_amount: amt,
           prepaid_method: method || null,
           prepaid_note: note || null,
-          prepaid_at: stampedAt,
+          prepaid_at: now,
         })
         .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at', 'scheduled_date']);
       if (!updated) throw new Error('Series prepayment did not update every locked visit');
@@ -369,7 +365,7 @@ async function stampSeriesPrepaid(db, {
         actor_type: 'system', action: 'prepaid_series.allocated',
         resource_type: 'scheduled_service', resource_id: row.id,
         metadata: { customer_id: anchor.customer_id, series_parent_id: parentId,
-          prepaid_amount: amt, prepaid_method: method || null, prepaid_at: new Date(stampedAt).toISOString() },
+          prepaid_amount: amt, prepaid_method: method || null, prepaid_at: now.toISOString() },
         critical: true, trx,
       });
       updatedRows.push(updated);
@@ -598,22 +594,7 @@ async function listCustomerPrepaidPlans(db, customerId) {
   return plans.sort((a, b) => (b.remainingVisits || 0) - (a.remainingVisits || 0));
 }
 
-// When a visit's prepayment was received. An edit that records no more money
-// than the stamp already held (a note, method or amount correction) keeps
-// the original time; a larger amount, or a fresh stamp, is money received
-// now. SMS payment evidence dates a prepayment by this stamp, so an edit must
-// not pass an old payment off as new (Codex #4996 r7/r8). The single-visit and
-// bulk writers stamp in one UPDATE (prepaidAtFor); the series writer applies
-// the same rule to the rows it has already locked (keptPrepaidAt).
-function prepaidAtFor(knex, amount) {
-  return knex.raw('CASE WHEN prepaid_at IS NOT NULL AND COALESCE(prepaid_amount, 0) >= ? THEN prepaid_at ELSE now() END', [amount]);
-}
-function keptPrepaidAt(row, amount, now) {
-  return row.prepaid_at && Number(row.prepaid_amount) >= Number(amount) ? row.prepaid_at : now;
-}
-
 module.exports = {
-  prepaidAtFor,
   TERMINAL_STATUSES,
   ANNUAL_PREPAY_METHOD,
   hasAnnualCoverage,
