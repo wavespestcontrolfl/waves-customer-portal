@@ -213,6 +213,10 @@ function assertOnlyHasIds(ARGS) {
   if (!ids.length) {
     throw new Error(`--only must name at least one scenario id (got "${ARGS.only}")`);
   }
+  // Use the replay's fixture loader and selector so preflight accepts exactly
+  // the IDs each child will accept, before any benchmark condition starts.
+  const { loadFixture, renderDateTokens, selectScenarios } = require('../services/eval/voice-relay-replay');
+  selectScenarios(renderDateTokens(loadFixture()), ids);
 }
 
 /**

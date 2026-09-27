@@ -81,7 +81,7 @@ describe('voice relay eval — fixture lint', () => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     fixture.scenarios[0].fixtures.resume = resume;
     expect(replay.lintFixture(fixture).join('\n')).toContain('fixtures.resume:');
-    expect(() => replay._internals.selectScenarios(fixture)).toThrow(/fixture lint failed/);
+    expect(() => replay.selectScenarios(fixture)).toThrow(/fixture lint failed/);
   });
 
   test.each([null, { segmentsText: '' }, { segmentsText: 'Caller: Earlier request.', reconnects: 2, priorCallerTurns: 0 }])(
@@ -290,7 +290,7 @@ describe('voice relay eval — fixture lint', () => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     fixture.scenarios[0].fixtures.toolResponses.capture_lead = response;
     expect(replay.lintFixture(fixture).join('\n')).toMatch(/toolResponses.capture_lead:/);
-    expect(() => replay._internals.selectScenarios(fixture)).toThrow(/fixture lint failed/);
+    expect(() => replay.selectScenarios(fixture)).toThrow(/fixture lint failed/);
   });
 
   test.each([

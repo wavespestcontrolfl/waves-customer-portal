@@ -1033,13 +1033,22 @@ describe('assertOnlyHasIds / runBenchmark — --only must name at least one real
     expect(() => assertOnlyHasIds({})).not.toThrow();
   });
 
+  test.each(['spanish-eta-typo', 'booking-happy-path,spanish-eta-typo'])('unknown scenario IDs in --only=%s fail before any child runs', async (only) => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', `--only=${only}`],
+      execFileImpl,
+    })).rejects.toThrow(/unknown scenario id\(s\): spanish-eta-typo/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
   test('a real --only value with extra commas/whitespace around real ids is accepted', async () => {
     const execFileImpl = stubChild([{
       code: 0,
       stdout: JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }),
     }]);
     await expect(runBenchmark({
-      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--only= booking-happy-path , slot-gone '],
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--only= booking-happy-path , slot-gone , spanish-eta-matched-attested '],
       execFileImpl,
     })).resolves.toBeDefined();
   });
