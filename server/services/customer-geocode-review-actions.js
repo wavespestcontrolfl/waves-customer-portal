@@ -189,20 +189,23 @@ async function markOutside({ trx, customerId, input, actorId, customer, primary,
 }
 
 async function revokePin({ trx, customerId, input, actorId, customer, primary, storedReview, visitContext }) {
-  if (!pinsMatch(customer, storedReview)) {
+  if (!pinsMatch(customer, storedReview) && !pinsMatch(primary, storedReview)) {
     throw actionError('The current pin has no matching review provenance.', 409, 'review_pin_missing');
   }
   await reviewStore.saveReview(trx, customer, {
     status: 'needs_pin', reason: 'verification_revoked', source: storedReview.source || null,
     evidence: storedReview.evidence || null, latitude: storedReview.latitude, longitude: storedReview.longitude,
   });
-  const cleared = await clearMatchingPins(trx, customer, primary, storedReview, visitContext);
+  const cleared = await clearMatchingPins(trx, customer, primary, storedReview, visitContext, {
+    clearMirrors: true,
+    additionalPins: [customer, primary],
+  });
   await auditResolution(trx, customerId, actorId, input.action, { cleared });
   return { addressBriefIds: cleared.visitIds };
 }
 
-async function requestRetry({ trx, customerId, input, actorId, customer, storedReview }) {
-  if (hasUsablePin(customer)) {
+async function requestRetry({ trx, customerId, input, actorId, customer, primary, storedReview }) {
+  if (hasUsablePin(customer) || hasUsablePin(primary)) {
     throw actionError('Revoke the current pin before retrying the lookup.', 409, 'pin_present');
   }
   await reviewStore.saveReview(trx, customer, {
