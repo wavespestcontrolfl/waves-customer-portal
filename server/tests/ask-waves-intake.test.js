@@ -75,6 +75,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'Termites are unable to harm your home once treated.',
     'Las termitas son incapaces de dañar su hogar una vez tratado.',
     'Once treated, termites are unable to harm your home.',
+    'Termites are unable to cause your home any harm once treated.',
     'Ants are incapable of crossing the barrier once it is applied.',
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
@@ -266,6 +267,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['This spray for ants is unable to harm your pets.', ''],
     ['This treatment for termites is incapable of causing harm to children.', ''],
     ['Este spray para hormigas es incapaz de dañar a sus mascotas.', ''],
+    ['This treatment is unable to cause your pets any harm.', ''],
+    ['This product is incapable of doing children any harm.', ''],
+    ['This treatment is incapable of causing your dog harm.', ''],
     ['This pesticide is not considered hazardous to children.', ''],
     ['The product is not classified as toxic to pets.', ''],
     ['The treatment is not regarded as dangerous for dogs.', ''],
@@ -497,6 +501,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Come back in 2 hours to this chat with questions.', 'What should I do after the treatment?'],
     ['Please come back after 30 minutes to this chat.', 'What should I do after the treatment?'],
     ['Regrese mañana a este chat si tiene preguntas.', '¿Qué hago después del tratamiento?'],
+    ['Come back at 10 AM to our office.', 'What should I do after the treatment?'],
+    ['Regrese a las 10 a nuestra oficina.', '¿Qué hago después del tratamiento?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
