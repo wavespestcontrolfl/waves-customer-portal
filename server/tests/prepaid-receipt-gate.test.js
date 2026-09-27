@@ -228,6 +228,24 @@ describe('resolveScheduledServiceCharge', () => {
       })).toBe(0);
     });
 
+    // Codex pre-push P0 (round 2): findFirstApplicationInvoiceForEstimateService
+    // returns { invoice: null, canceledSetupFee } when a canceled acceptance
+    // invoice carried the one-time setup fee with no live replacement —
+    // completion parks that shape for manual billing rather than reminting.
+    // The resolver must refuse the fee here too, or Charge Now would mint
+    // only the per-application charge and silently drop the fee.
+    test('a canceled acceptance invoice carrying the setup fee (no live replacement) refuses the fee, not just a partial mint', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: null,
+        liveBeside: null,
+        canceledSetupFee: { id: 'inv-3', invoice_number: 'WPC-2026-0400', status: 'canceled' },
+      });
+      expect(await resolveScheduledServiceCharge({
+        estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+        perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
+      })).toBe(0);
+    });
+
     test('without svc/dbConn (a caller that has neither) skips the lookup and still bills the fee', async () => {
       expect(await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',

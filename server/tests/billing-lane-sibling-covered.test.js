@@ -218,6 +218,30 @@ describe('siblingInvoiceCoverageVerdict', () => {
     expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'error' });
   });
 
+  // Codex pre-push P0 (round 2): the lookup's null-invoice return is NOT
+  // always "no relevant match" — it also carries canceledSetupFee when a
+  // canceled acceptance invoice included the one-time setup fee with no
+  // live replacement. Losing that here would let a write caller mint only
+  // the per-visit/per-application charge and silently drop the fee
+  // completion itself parks for manual billing instead.
+  test('needs_review — a canceled acceptance invoice carrying the setup fee, with no live replacement', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: null,
+      liveBeside: null,
+      canceledSetupFee: { id: 'inv-3', invoice_number: 'WPC-2026-0400', status: 'canceled' },
+    });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({
+      status: 'needs_review',
+      invoice: null,
+      canceledSetupFee: { id: 'inv-3', invoice_number: 'WPC-2026-0400', status: 'canceled' },
+    });
+  });
+
+  test('none — a null invoice with no canceledSetupFee either', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'none' });
+  });
+
   test('coveringSiblingInvoice (the display-safe wrapper) still collapses needs_review/error to null', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },

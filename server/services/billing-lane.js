@@ -769,10 +769,14 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
 // mint refuses (throws, retryable) on exactly these two cases
 // (invoiceLookupFailed / the terminal-invoice branch) rather than mint —
 // this verdict lets other write callers refuse the same way.
-//   { status: 'covered', invoice }                     — a live sibling invoice covers this trip
-//   { status: 'needs_review', invoice, liveBeside }     — a terminal/refunded match only a human can reconcile
-//   { status: 'error' }                                 — the lookup itself failed
-//   { status: 'none' }                                  — no relevant match at all
+//   { status: 'covered', invoice }                             — a live sibling invoice covers this trip
+//   { status: 'needs_review', invoice, liveBeside }            — a terminal/refunded match only a human can reconcile
+//   { status: 'needs_review', invoice: null, canceledSetupFee } — a canceled acceptance invoice carried the
+//                                                                  one-time setup fee with NO live replacement;
+//                                                                  completion parks this rather than remint the
+//                                                                  visit charge alone and silently drop the fee
+//   { status: 'error' }                                        — the lookup itself failed
+//   { status: 'none' }                                         — no relevant match at all
 async function siblingInvoiceCoverageVerdict(svc, dbConn) {
   let result;
   try {
@@ -782,7 +786,19 @@ async function siblingInvoiceCoverageVerdict(svc, dbConn) {
     return { status: 'error' };
   }
   const inv = result?.invoice;
-  if (!inv || !inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return { status: 'none' };
+  if (!inv) {
+    // codex pre-push P0: a null invoice is NOT always "no relevant match" —
+    // the lookup also returns a canceled acceptance invoice that carried
+    // the one-time setup fee (canceledSetupFee) with no live replacement.
+    // Losing that signal here let the resolver mint only the per-visit/
+    // per-application charge and silently drop the fee completion would
+    // otherwise park for manual billing (splitTerminalCompletionInvoice /
+    // completionTerminalIncludedSetupFee in complete-scheduled-service.js).
+    return result?.canceledSetupFee
+      ? { status: 'needs_review', invoice: null, canceledSetupFee: result.canceledSetupFee }
+      : { status: 'none' };
+  }
+  if (!inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return { status: 'none' };
   const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
   if (CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(inv.status))) {
     return { status: 'needs_review', invoice: inv, liveBeside: result?.liveBeside || null };
