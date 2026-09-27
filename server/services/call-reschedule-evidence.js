@@ -17,24 +17,33 @@
  * must resolve to the target slot's calendar date, and the LAST hour
  * reference must equal its hour — a later, different mention of either
  * automatically fails closed on its own (no separate "later turn conflicts"
- * bookkeeping needed). A range reference ("two to four", "between eight and
- * nine") counts its START as the hour. The slot itself comes from
- * `confirmedStartAt` (V2's own field), so the transcript's resolved day+hour
- * and V2's structured value are two independent sources that must agree —
- * that agreement is structural here, not a second runtime diff.
+ * bookkeeping needed). The last day reference is read with the ones chained
+ * right before it: a weekday beside a date only describes that date
+ * ("October 8, Thursday" is October 8), and alternatives ("Monday or
+ * Thursday") must each be the slot. A range reference ("two to four",
+ * "between eight and nine") counts its START as the hour. The slot itself
+ * comes from `confirmedStartAt` (V2's own field), so the transcript's
+ * resolved day+hour and V2's structured value are two independent sources
+ * that must agree — that agreement is structural here, not a second runtime
+ * diff.
  *
  * The first agent turn from the later of the two final references on must
  * affirm the slot: a commitment phrase, or a bare yes that states the slot
- * itself or is nothing but a short yes; the slot's own turn may be the
- * agent proposing it as a question, but any other agent question in between
- * changes the subject and fails closed. A hedge or
- * unsettled condition ("let me check", "if we have space") in the clauses
- * stating the slot or from the turn completing it onward fails closed, and so
- * does a refusal ("I cannot make it", "never mind") in those clauses or
- * anywhere after the slot's final mention — the SAME marker earlier in the
- * call, before the slot was settled, is fine. A time with minutes ("2:30",
- * "two ten") never grounds an on-the-hour slot. Day and hour references are
- * parsed by call-time-mentions.js.
+ * itself or is nothing but a short yes. An agent turn that asks the caller
+ * anything but a closing question ("anything else?") is not an affirmation:
+ * on the slot's own turn it is the agent putting the slot to the caller, and
+ * the next agent turn must then affirm; later, it changes the subject and
+ * fails closed. A hedge or unsettled condition ("let me check", "if we have
+ * space") in the clauses stating the slot or from the turn completing it
+ * onward fails closed, and so does a refusal ("I cannot make it", "never
+ * mind") in those clauses or anywhere after the slot's final mention — the
+ * SAME marker earlier in the call, before the slot was settled, is fine. A
+ * negation on the slot's own words ("okay, but not Thursday", "I can't do
+ * Thursday at two"), after it in the turn completing it, or anywhere up to
+ * the affirming turn (the caller's "no" to a proposal) fails closed too;
+ * after the affirmation, "no, that's all" only closes the call. A time with
+ * minutes ("2:30", "two ten") never grounds an on-the-hour slot. Day and
+ * hour references are parsed by call-time-mentions.js.
  *
  * Contract: rescheduleAgreementEvidence({ transcript, confirmedStartAt,
  * callStartedAt }) -> { ok, reason, window: { fromTurn, toTurn } | null,
@@ -45,7 +54,7 @@
 const { etDateString } = require('../utils/datetime-et');
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
 const {
-  normalize, parseTurns, parseDayMentions, splitTurnSentences, wholeCallPeriodFlags, extractHourMentionsWholeCall,
+  normalize, parseTurns, parseDayMentions, splitTurnSentences, sentenceSpans, extractHourMentions,
 } = require('./call-time-mentions');
 
 // Fail-closed hedge/unsettled markers, matched as padded substrings.
@@ -134,12 +143,80 @@ function hasRefusalMarker(ns) {
   return REFUSAL_MARKERS.some((m) => p.includes(m));
 }
 
+// A negation turns the slot down ("okay, but not Thursday", "I can't do
+// Thursday at two", "no" to "would Thursday at two work?"), however politely
+// the agent then acknowledges it. "t" is an n't contraction once normalized
+// ("can't" reads "can t"). A bare "no" answers what came before it ("No, we
+// will see you Thursday at two"), so before the slot it counts only right
+// against it ("no Thursday openings"). Courtesy phrases refuse nothing.
+const NEGATING_WORDS = new Set(['not', 'never', 'cannot', 't']);
+const NO_WORDS = new Set(['no', 'nope', 'nah']);
+const COURTESY_NEGATIONS = [
+  'no problem', 'not a problem', 'no worries', 'no need', 'don t worry', 'don t forget',
+  'don t need to be home', 'don t need to be there', 'don t have to be home', 'don t have to be there',
+];
+function withoutCourtesy(toks) {
+  let p = padded(toks.join(' '));
+  for (const phrase of COURTESY_NEGATIONS) {
+    while (p.includes(padded(phrase))) p = p.replace(padded(phrase), ' ');
+  }
+  return p.split(' ').filter(Boolean);
+}
+function hasNegation(ns) {
+  return withoutCourtesy(ns.split(' ')).some((tok) => NEGATING_WORDS.has(tok) || NO_WORDS.has(tok));
+}
+// Is a slot word ({ pos, end }, turn-level) negated in its clause: by any
+// negation after the clause's last slot word, `slotEnd` ("Thursday at two
+// isn't good"), by "no" right against it, or by "not"/"can't" before it that
+// no commitment to the slot overrides ("not Friday, we will see you
+// Thursday" commits after the "not"). A correction between the day and the
+// hour ("Thursday at 11, no, make it noon") is before the hour, not after.
+function negatesSlotWord(clause, word, slotEnd) {
+  if (hasNegation(clause.toks.slice(slotEnd - clause.start).join(' '))) return true;
+  const before = withoutCourtesy(clause.toks.slice(0, word.pos - clause.start));
+  if (NO_WORDS.has(before[before.length - 1])) return true;
+  const lastNegation = before.findLastIndex((tok) => NEGATING_WORDS.has(tok));
+  return lastNegation >= 0 && !hasAnyMarker(before.slice(lastNegation + 1).join(' '), COMMITMENT_MARKERS);
+}
+
+// A question that asks nothing about the slot ("anything else?").
+const CLOSING_QUESTIONS = ['anything else', 'something else', 'what else', 'any questions', 'any other questions', 'any other question'];
+function isClosingQuestion(ns) {
+  return CLOSING_QUESTIONS.some((q) => padded(ns).includes(padded(q)));
+}
+
+// Day references right before the last one, with nothing between but these,
+// describe the same day ("October 8, Thursday", "Thursday the 8th") or offer
+// alternatives ("Monday or Thursday").
+const SAME_DAY_FILLER = new Set(['the', 'on']);
+const ALTERNATIVE_JOINERS = new Set(['or', 'and']);
+
+// Does the call's last day reference name the slot's date? It is read with
+// the references chained right before it: a weekday beside a date only
+// describes that date, so it must be the date's weekday ("October 8,
+// Thursday" names October 8, never the nearest Thursday); alternatives must
+// each be the slot, since the call never settled between them.
+function lastDayNamesSlot(dayRefs, turns, slotDate) {
+  const chain = [dayRefs[dayRefs.length - 1]];
+  let alternatives = false;
+  for (let k = dayRefs.length - 2; k >= 0 && dayRefs[k].turnIdx === chain[0].turnIdx; k -= 1) {
+    const between = turns[chain[0].turnIdx].ns.split(' ').slice(dayRefs[k].end, chain[0].pos);
+    if (!between.every((t) => SAME_DAY_FILLER.has(t) || ALTERNATIVE_JOINERS.has(t))) break;
+    alternatives = alternatives || between.some((t) => ALTERNATIVE_JOINERS.has(t));
+    chain.unshift(dayRefs[k]);
+  }
+  const pinned = !alternatives && chain.some((m) => m.weekday == null);
+  const slotWeekday = new Date(`${slotDate}T12:00:00Z`).getUTCDay();
+  return chain.every((m) => (pinned && m.weekday != null ? m.weekday === slotWeekday : m.candidates.has(slotDate)));
+}
+
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you
 // Thursday at two" refuses Friday, not Thursday.
 const CLAUSE_BREAKS = new Set(['but', 'so', 'however', 'although', 'though', 'instead']);
 
 // The clause of a turn holding the token at turn-level position `pos`: its
-// sentence, from the last clause break before `pos` to the sentence's end.
+// sentence's tokens from the last clause break before `pos` to the
+// sentence's end, and the turn-level position of the first of them.
 function clauseAt(turnRaw, pos) {
   let offset = 0;
   for (const sentence of splitTurnSentences(turnRaw)) {
@@ -149,11 +226,11 @@ function clauseAt(turnRaw, pos) {
       for (let i = pos - offset - 1; i >= 0; i -= 1) {
         if (CLAUSE_BREAKS.has(toks[i])) { start = i + 1; break; }
       }
-      return toks.slice(start).join(' ');
+      return { toks: toks.slice(start), start: offset + start };
     }
     offset += toks.length;
   }
-  return '';
+  return { toks: [], start: pos };
 }
 
 // Slot facts, ET-calendar based. No day-count cap on the slot itself: the
@@ -183,19 +260,15 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   const slot = slotFacts(confirmedStartAt, callStartedAt);
   if (!slot) return { ok: false, reason: 'unparseable_or_out_of_range_slot', window: null, excerpt: null };
   const turns = parseTurns(transcript);
-  if (!turns || !turns.length) return { ok: false, reason: 'unparseable_transcript', window: null, excerpt: null };
-  if (!turns.some((t) => t.agent) || !turns.some((t) => !t.agent)) {
-    return { ok: false, reason: 'one_sided_transcript', window: null, excerpt: null };
-  }
-
-  // Period signal (am/pm/morning/afternoon) scoped to the WHOLE call.
-  const flags = wholeCallPeriodFlags(turns.map((t) => t.raw));
+  if (!turns) return { ok: false, reason: 'unparseable_transcript', window: null, excerpt: null };
+  // Both speakers must be on it: an agreement takes two sides.
+  if (new Set(turns.map((t) => t.agent)).size < 2) return { ok: false, reason: 'one_sided_transcript', window: null, excerpt: null };
 
   const dayRefs = [];
   const hourRefs = [];
   turns.forEach((t, idx) => {
     parseDayMentions(t.raw, slot.started).forEach((m) => dayRefs.push({ ...m, turnIdx: idx }));
-    extractHourMentionsWholeCall(t.raw, flags).forEach((m) => hourRefs.push({ ...m, turnIdx: idx }));
+    extractHourMentions(t.raw).forEach((m) => hourRefs.push({ ...m, turnIdx: idx }));
   });
   if (!dayRefs.length) return { ok: false, reason: 'no_day_ref_in_call', window: null, excerpt: null };
   if (!hourRefs.length) return { ok: false, reason: 'no_hour_ref_in_call', window: null, excerpt: null };
@@ -207,7 +280,7 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // with no extra bookkeeping needed.
   const lastDay = dayRefs[dayRefs.length - 1];
   const lastHour = hourRefs[hourRefs.length - 1];
-  if (!lastDay.candidates.has(slot.date)) return { ok: false, reason: 'last_day_ref_mismatch', window: null, excerpt: null };
+  if (!lastDayNamesSlot(dayRefs, turns, slot.date)) return { ok: false, reason: 'last_day_ref_mismatch', window: null, excerpt: null };
   if (lastHour.hour24 !== slot.hour24 || lastHour.offHour) return { ok: false, reason: 'last_hour_ref_mismatch', window: null, excerpt: null };
 
   // V2's confirmed_start_at and the transcript-resolved day+hour are checked
@@ -217,46 +290,59 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // diff against.
   const anchorIdx = Math.max(lastDay.turnIdx, lastHour.turnIdx);
   const failAt = (reason, toTurn = anchorIdx) => ({ ok: false, reason, window: { fromTurn: anchorIdx, toTurn }, excerpt: excerptOf(turns, anchorIdx, toTurn, 2) });
+  // The slot's day and hour words (an on-the-hour mention is one token,
+  // ending at `end`), the clauses stating them, and the rest of the turn
+  // completing the slot.
+  const dayWord = { turnIdx: lastDay.turnIdx, pos: lastDay.pos, end: lastDay.end };
+  const hourWord = { turnIdx: lastHour.turnIdx, pos: lastHour.end - 1, end: lastHour.end };
+  const dayClause = clauseAt(turns[dayWord.turnIdx].raw, dayWord.pos);
+  const hourClause = clauseAt(turns[hourWord.turnIdx].raw, hourWord.pos);
+  const slotEndIn = (clause, word, other) => (other.turnIdx === word.turnIdx && other.pos >= clause.start
+    && other.pos < clause.start + clause.toks.length ? Math.max(word.end, other.end) : word.end);
+  const cut = Math.max(...[dayWord, hourWord].filter((w) => w.turnIdx === anchorIdx).map((w) => w.end));
+  const slotClauses = [dayClause.toks.join(' '), hourClause.toks.join(' '), turns[anchorIdx].ns.split(' ').slice(cut).join(' ')];
 
   // A hedge or unsettled condition in the clauses stating the slot ("if we
   // have space, Thursday at two"), or anywhere from the turn completing it
   // onward, however politely acknowledged, means the slot was not agreed. The
   // same marker earlier in the call, before the slot was settled, is fine.
-  const hedgeText = [
-    clauseAt(turns[lastDay.turnIdx].raw, lastDay.pos),
-    clauseAt(turns[lastHour.turnIdx].raw, lastHour.end - 1),
-    ...turns.slice(anchorIdx).map((t) => t.ns),
-  ];
-  if (hedgeText.some(hasHedgeMarker)) return failAt('hedge_on_slot');
+  if ([...slotClauses.slice(0, 2), ...turns.slice(anchorIdx).map((t) => t.ns)].some(hasHedgeMarker)) return failAt('hedge_on_slot');
 
   // A refusal in the clause that states the slot ("I cannot make it Thursday
   // at two", "Thursday at two won't work") or anywhere after its final
   // mention, however politely acknowledged ("okay"), means the slot was not
   // agreed. A refusal in an earlier clause turns down another option
   // ("Friday doesn't work, but we'll see you Thursday at two").
-  const cut = Math.max(lastDay.turnIdx === anchorIdx ? lastDay.end : 0, lastHour.turnIdx === anchorIdx ? lastHour.end : 0);
-  const slotText = [
-    clauseAt(turns[lastDay.turnIdx].raw, lastDay.pos),
-    clauseAt(turns[lastHour.turnIdx].raw, lastHour.end - 1),
-    turns[anchorIdx].ns.split(' ').slice(cut).join(' '),
-    ...turns.slice(anchorIdx + 1).map((t) => t.ns),
-  ];
-  if (slotText.some(hasRefusalMarker)) return failAt('slot_refused');
+  if ([...slotClauses, ...turns.slice(anchorIdx + 1).map((t) => t.ns)].some(hasRefusalMarker)) return failAt('slot_refused');
+
+  // Does an agent turn put a question to the caller: the slot stated as one
+  // ("would Thursday at two work? Please let me know"), or any question but
+  // a closing one ("Thursday at two. Does that work for you?")?
+  const asksCaller = (idx) => sentenceSpans(turns[idx].raw).some((sentence) => sentence.question
+    && (!isClosingQuestion(sentence.ns) || [lastDay.turnIdx === idx ? lastDay.pos : -1, lastHour.turnIdx === idx ? lastHour.end - 1 : -1]
+      .some((pos) => pos >= sentence.start && pos < sentence.end)));
 
   // The FIRST agent turn from the slot on must affirm it. The slot's own turn
-  // may be the agent proposing it as a question ("so you want two to
-  // four?"), but any other agent question in between changes the subject
-  // ("would you like text reminders?"), and an agent statement that does not
-  // affirm does not settle it: either way the slot was not agreed.
-  const asks = (turn) => /\?\s*$/.test(turn.raw.trim());
-  let affirmIdx = -1;
-  for (let i = anchorIdx; i < turns.length; i += 1) {
-    if (!turns[i].agent) continue;
-    if (asks(turns[i]) && i === anchorIdx) continue;
-    if (!asks(turns[i]) && affirmsSlot(turns[i], i === anchorIdx)) affirmIdx = i;
-    break;
+  // may be the agent putting it to the caller ("so you want two to four?"),
+  // and the next agent turn then decides; any later agent question changes
+  // the subject ("would you like text reminders?"), and an agent statement
+  // that does not affirm does not settle it: either way the slot was not
+  // agreed.
+  const agentTurnFrom = (from) => turns.findIndex((t, i) => i >= from && t.agent);
+  let affirmIdx = agentTurnFrom(anchorIdx);
+  if (affirmIdx === anchorIdx && asksCaller(affirmIdx)) affirmIdx = agentTurnFrom(anchorIdx + 1);
+  if (affirmIdx === -1 || asksCaller(affirmIdx) || !affirmsSlot(turns[affirmIdx], affirmIdx === anchorIdx)) return failAt('no_affirming_agent_turn');
+
+  // A negation on the slot's own words, after it in the turn completing it,
+  // or anywhere up to the affirming turn (the caller's "no" to the proposal,
+  // the agent's "okay, I don't have that") turned it down. After the
+  // affirmation only the explicit refusals above count: "no, that's all"
+  // closes the call.
+  if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord))
+    || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord))
+    || [slotClauses[2], ...turns.slice(anchorIdx + 1, affirmIdx + 1).map((t) => t.ns)].some(hasNegation)) {
+    return failAt('slot_refused', affirmIdx);
   }
-  if (affirmIdx === -1) return failAt('no_affirming_agent_turn');
 
   return {
     ok: true,

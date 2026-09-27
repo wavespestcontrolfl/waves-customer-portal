@@ -166,6 +166,75 @@ describe('rescheduleAgreementEvidence', () => {
   });
 
   // Structural fail-closed guards, no fixture speaks the slot at all.
+  // A question anywhere in the agent's turn puts the slot to the caller, so
+  // the agreement waits for the answer; a closing question does not.
+  test('an agent turn asking the caller anything but a closing question is not an agreement', () => {
+    expect(evidence('Caller: Can we move my visit?\nAgent: Okay, would Thursday at two work? Please let me know.'))
+      .toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+    const confirmAsk = 'Caller: Can we move my visit?\nAgent: Okay, Thursday at two. Does that work for you?';
+    expect(evidence(confirmAsk)).toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+    expect(evidence(`${confirmAsk}\nCaller: Yes, that works.\nAgent: Great, you are all set.`).ok).toBe(true);
+    expect(evidence('Caller: Can we move my visit to Thursday at two?\nAgent: Okay, we will see you then. Anything else I can help with?\nCaller: No, that is all.').ok)
+      .toBe(true);
+  });
+
+  // "No" to the proposal, or a slot the agent turns down while saying okay.
+  test('a negation on the slot, however politely acknowledged, is not an agreement', () => {
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, but not Thursday.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, I don\'t have that.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, there are no Thursday openings.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: No.\nAgent: Okay.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: I can\'t do Thursday at two.\nAgent: Okay.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday?\nAgent: We will see you Thursday at two, is that not good?').ok).toBe(false);
+  });
+
+  test('a negation that answers something else, or a courtesy, does not refuse the slot', () => {
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: No problem, we will see you Thursday at two.').ok).toBe(true);
+    expect(evidence('Caller: Can we move it?\nAgent: We will see you Thursday at two. You don\'t need to be home.').ok).toBe(true);
+    expect(evidence('Caller: Can we do Friday at two?\nAgent: We can\'t do Friday, we will see you Thursday at two.').ok).toBe(true);
+  });
+
+  // A weekday beside a date only describes it, and alternatives never settle
+  // the day.
+  test('a weekday next to a date describes that date; "or" leaves the day open', () => {
+    const oct8 = 'Caller: Can we move my visit?\nAgent: We will see you October 8, Thursday at two.';
+    expect(evidence(oct8)).toMatchObject({ ok: false, reason: 'last_day_ref_mismatch' });
+    expect(evidence(oct8, '2026-10-08T14:00:00-04:00').ok).toBe(true);
+    const the8th = 'Caller: Can we move my visit?\nAgent: We will see you Thursday the 8th at two.';
+    expect(evidence(the8th, '2026-10-08T14:00:00-04:00').ok).toBe(true);
+    expect(evidence(the8th)).toMatchObject({ ok: false, reason: 'last_day_ref_mismatch' });
+    expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Wednesday, October 8 at two.', '2026-10-08T14:00:00-04:00'))
+      .toMatchObject({ ok: false, reason: 'last_day_ref_mismatch' });
+    expect(evidence('Caller: Can we move my visit?\nAgent: We will see you on the 1st of October at two.', '2026-10-01T14:00:00-04:00').ok).toBe(true);
+    expect(evidence('Caller: I can do Monday or Thursday at two.\nAgent: Great, we will see you then.'))
+      .toMatchObject({ ok: false, reason: 'last_day_ref_mismatch' });
+  });
+
+  // Codex #5071: a question sentence followed by another in the same turn is
+  // still a question, and the "okay" after it answers nothing.
+  test('a slot put as a question stays unanswered whatever follows it in the turn', () => {
+    expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you? Okay.'))
+      .toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+  });
+
+  // An am/pm said about another time ("my 9 AM visit") says nothing about a
+  // bare "two", which reads as business hours.
+  test('an am/pm belongs to its own time, not to every hour in the call', () => {
+    const r = evidence('Caller: My 9 AM appointment is too early; can we move it to Thursday at two?\nAgent: Yes, Thursday at two works.');
+    expect(r.ok).toBe(true);
+    expect(evidence('Caller: Can we do Thursday morning?\nAgent: We will see you Thursday at 9 AM.', '2026-09-24T09:00:00-04:00').ok).toBe(true);
+  });
+
+  // A length of time is not a clock time: "for two" ends no sentence as an
+  // hour, and a number running into hours or minutes is a duration.
+  test('a duration is never read as the appointment hour', () => {
+    expect(evidence('Caller: Can we move it to Thursday?\nAgent: We will see you Thursday. The service should last for two.'))
+      .toMatchObject({ ok: false, reason: 'no_hour_ref_in_call' });
+    for (const length of ['about three hours', 'about two and a half hours', 'around three to four hours', 'about one or two hours']) {
+      expect(evidence(`Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two. It takes ${length}.`).ok).toBe(true);
+    }
+  });
+
   test('an unlabeled transcript line fails closed rather than trusting turn order', () => {
     const r = evidence('Hello, this is a call with no speaker labels.');
     expect(r).toMatchObject({ ok: false, reason: 'unparseable_transcript' });

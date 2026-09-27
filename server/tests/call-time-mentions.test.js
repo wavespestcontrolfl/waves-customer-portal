@@ -30,6 +30,17 @@ describe('parseDayMentions', () => {
     expect(datesIn('Why not next Saturday, or Friday?')).toEqual([['2026-10-03', '2026-10-10'], ['2026-10-02', '2026-10-09']]);
   });
 
+  test('"the 8th" names this month\'s or next month\'s; with its month it is a month and day', () => {
+    expect(datesIn('How about the 30th, or the 8th?')).toEqual([['2026-09-30', '2026-10-30'], ['2026-10-08', '2026-11-08']]);
+    expect(datesIn('The 8th of October, or October the 9th, or 10th of October.'))
+      .toEqual([['2026-10-08', '2027-10-08'], ['2026-10-09', '2027-10-09'], ['2026-10-10', '2027-10-10']]);
+    expect(datesIn('That was the 8 of them.')).toEqual([]);
+  });
+
+  test('a weekday mention carries its weekday', () => {
+    expect(parseDayMentions('next Thursday or Monday', STARTED).map((m) => m.weekday)).toEqual([4, 1]);
+  });
+
   test('mentions come back in spoken order with their token spans', () => {
     expect(parseDayMentions('not friday we will see you tomorrow', STARTED).map((m) => [m.kind, m.pos, m.end]))
       .toEqual([['weekday', 1, 2], ['tomorrow', 6, 7]]);
