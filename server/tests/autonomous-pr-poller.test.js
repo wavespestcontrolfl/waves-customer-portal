@@ -2554,10 +2554,11 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     }));
   });
 
-  test('pollPending preserves a superseded current-claim PR while approval queue recovery is pending', async () => {
+  test.each([null, 'named_competitor_publishing'])(
+    'pollPending preserves a superseded current-claim PR while queue recovery is pending (%s)', async (skipReason) => {
     const run = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-current' });
     const recoveryClaim = {
-      id: 'opp-1', status: 'claimed', skip_reason: 'named_competitor_publishing', claim_id: 'claim-current',
+      id: 'opp-1', status: 'claimed', skip_reason: skipReason, claim_id: 'claim-current',
       bucket: 'citability_backfill',
       signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:new' } },
     };

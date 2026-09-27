@@ -2001,11 +2001,11 @@ async function pollRun(run, { allowMerge = true } = {}) {
         if (row.status === 'pending_review' && row.skip_reason === pendingSkipReasonForRun(run)) {
           return await retireSupersededCitabilityPr(run, { ...pr, number: prNumber }, gh);
         }
-        // Approval recovery owns this short-lived claimed state. It may have
-        // already persisted the PR-bearing run while both queue park writes
-        // failed, so do not annotate that current owner away before the
-        // janitor restores the park for terminal retirement.
-        if (row.status === 'claimed' && row.skip_reason === 'named_competitor_publishing') {
+        // Stale-claim or approval recovery owns a current-claim row that is
+        // still claimed. The worker may have persisted the PR-bearing run
+        // while both queue park writes failed, so do not annotate that owner
+        // away before recovery restores the park for terminal retirement.
+        if (row.status === 'claimed') {
           return { pending: true, transient: true, reason: 'citability_retirement_queue_recovery_pending' };
         }
         return await supersedeRun(run, row);
@@ -2285,8 +2285,7 @@ async function pollPending() {
         && sameQueueClaim(queueRow, run)
         && queueRow.bucket === 'citability_backfill'
         && require('./opportunity-queue')._internals.pageEditSuperseded(queueRow)
-        && queueRow.status === 'claimed'
-        && queueRow.skip_reason === 'named_competitor_publishing';
+        && queueRow.status === 'claimed';
       if (!stillParked && !currentClaimPrRecovery) {
         const r = await supersedeRun(run, queueRow);
         await reconcileSupersededPr(run);
