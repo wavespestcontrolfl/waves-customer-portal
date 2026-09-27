@@ -537,6 +537,10 @@ function buildAftercare(applications) {
   const distinctPositiveDirections = wateringClauses.filter(
     (note) => isActionableWateringInstruction(note) && !isWateringHoldInstruction(note),
   ).length > 1;
+  const conditionalDirections = wateringClauses.some((note) => (
+    isActionableWateringInstruction(note)
+      && /\b(?:if|unless|when|whenever|provided\s+that|depending\s+on|as\s+(?:needed|required|necessary))\b/i.test(note)
+  ));
   const recordedInstructions = displayableProductNotes.join(' ');
   const preservedRecordedInstructions = recordedInstructions ? `${recordedInstructions} ` : '';
   const requiredWithoutInstruction = applicationWaterEvidence.some(
@@ -553,6 +557,7 @@ function buildAftercare(applications) {
   const state = [
     { when: opposingDirections, watering: `${recordedInstructions} These recorded product directions oppose each other. Confirm the directions with your technician before changing irrigation.`, evidenceSource: 'conflicting_product_instructions', needsReview: true },
     { when: distinctPositiveDirections, watering: `${recordedInstructions} These recorded product directions differ. Confirm the directions with your technician before changing irrigation.`, evidenceSource: 'conflicting_product_instructions', needsReview: true },
+    { when: conditionalDirections, watering: `${recordedInstructions} These product directions depend on a recorded condition. Confirm whether that condition applies with your technician before changing irrigation.`, evidenceSource: 'conditional_product_instruction', needsReview: true },
     { when: requiredWithoutInstruction && productNotes.length > 0, watering: `${preservedRecordedInstructions}A required product watering instruction is missing. Confirm the directions with your technician before changing irrigation.`, evidenceSource: 'incomplete_product_instructions', needsReview: true },
     { when: incompleteRecordedInstruction, watering: `${preservedRecordedInstructions}Confirm the amount and timing for watering-in with your technician before changing irrigation.`, evidenceSource: 'incomplete_product_instruction', needsReview: true },
     { when: productNotes.length > 0, watering: recordedInstructions, evidenceSource: 'product_instruction', needsReview: false },

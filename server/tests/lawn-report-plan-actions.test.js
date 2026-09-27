@@ -363,6 +363,21 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
     expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
   });
 
+  test.each([
+    'Water in with 0.25 inches if no rain occurs within 24 hours.',
+    'Water within 24 hours unless it rains.',
+    'Water for 20 minutes when the soil becomes dry.',
+    'Water for 20 minutes as needed.',
+  ])('conditional product instructions remain visible without plan credit: %s', (irrigationNotes) => {
+    for (const required of [true, false, null]) {
+      const aftercare = buildAftercare([{ product: { irrigation_required: required, irrigation_notes: irrigationNotes } }]);
+      expect(aftercare).toMatchObject({
+        evidenceSource: 'conditional_product_instruction', needsReview: true, creditableWaterIn: false,
+      });
+      expect(aftercare.watering).toContain(irrigationNotes);
+    }
+  });
+
   test.each([true, false])('the assistant conditions the full plan on the recorded restriction ending (visitInPlanWeek=%s)', (visitInPlanWeek) => {
     const aftercare = buildAftercare([
       { product: { name: 'Acelepryn Xtra', epa_reg_number: '100-1680', irrigation_notes: aceleprynRainPrecaution } },
