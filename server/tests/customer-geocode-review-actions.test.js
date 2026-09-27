@@ -157,6 +157,14 @@ test.each(['outside_service_area', 'revoke'])('%s broadcasts cleared visits afte
         additionalPins: [expect.objectContaining(reviewedPin), expect.objectContaining(reviewedPin)],
       }),
     );
+  } else {
+    expect(visits.clearMatchingPins).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(),
+      expect.objectContaining({
+        clearMirrors: true,
+        additionalPins: [expect.objectContaining(reviewedPin), expect.objectContaining(reviewedPin)],
+      }),
+    );
   }
   expect(dispatch.emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({
     jobId: 'visit-3', actorId: 'actor-1',
@@ -201,4 +209,27 @@ test('retry clears the address memo and invokes lookup only after commit', async
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith(customer.id);
   expect(visits.prelockVisitContext).not.toHaveBeenCalled();
   expect(briefs.refreshAppointmentAddressBriefs).not.toHaveBeenCalled();
+});
+
+test('retry rejects while only the primary location retains a usable pin', async () => {
+  const { conn } = connection();
+  const primaryPin = { latitude: 27.41, longitude: -82.41 };
+  const actionConn = table => {
+    const row = table === 'customers' ? customer : table === 'customer_properties'
+      ? { ...customer, ...primaryPin, id: 'property-1', customer_id: customer.id }
+      : null;
+    const query = {
+      where: () => query, forUpdate: () => query, first: async () => row,
+      select: async () => [row], update: async () => 1,
+    };
+    return query;
+  };
+  actionConn.raw = conn.raw;
+  actionConn.transaction = async callback => callback(actionConn);
+
+  await expect(resolveCustomerGeocodeReview(
+    customer.id, { action: 'retry', revision: 'current' }, 'actor-1', actionConn,
+  )).rejects.toMatchObject({ statusCode: 409, code: 'pin_present' });
+  expect(review.saveReview).not.toHaveBeenCalled();
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
 });
