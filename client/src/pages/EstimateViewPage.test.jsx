@@ -8,6 +8,9 @@ import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
 import TrustFooter from '../components/brand/TrustFooter';
 import EstimateViewPage, { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
+
+const { oneTimeOnlyIntelligenceCopy, resolveOneTimeServiceCopy } = oneTimeCopyModule;
 
 vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'mixed-termite-token' }) }));
 vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }));
@@ -571,7 +574,16 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
   });
 
-  it('strips a stale guaranteed one-time hero after the service-specific overlay', async () => {
+  it('strips stale server-resolved German-roach hero and row guarantees while preserving priced scope', async () => {
+    const rawRow = {
+      service: 'german_roach', label: 'German Roach Cleanout', amount: 350, kind: 'charge', visits: 2,
+    };
+    const rawCopy = resolveOneTimeServiceCopy(rawRow);
+    const rawServiceCopy = oneTimeOnlyIntelligenceCopy([rawRow]);
+    expect(rawCopy.outcome).toMatch(/100% guaranteed/i);
+    expect(rawCopy.includes.join(' ')).toMatch(/100% guaranteed/i);
+    expect(rawServiceCopy.hero.sub).toMatch(/100% guaranteed/i);
+
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -596,15 +608,9 @@ describe('mixed-estimate approval microcopy', () => {
           askChips: [],
           oneTimeBreakdown: {
             total: 350,
-            items: [{ service: 'german_roach', label: 'German Roach Cleanout', amount: 350, kind: 'charge' }],
+            items: [{ ...rawRow, copy: rawCopy }],
           },
-          oneTimeServiceCopy: {
-            hero: {
-              eyebrow: 'Your German roach treatment',
-              h1: 'Your German roach treatment quote is ready!',
-              sub: 'Two targeted visits — 100% guaranteed with the Waves Guarantee.',
-            },
-          },
+          oneTimeServiceCopy: rawServiceCopy,
           defaultServiceMode: 'one_time',
           renderFlags: {},
         },
@@ -619,36 +625,36 @@ describe('mixed-estimate approval microcopy', () => {
 
     render(<EstimateViewPage />);
 
-    expect(await screen.findByRole('heading', { name: 'Your German roach treatment quote is ready!' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /German roach cleanout quote is ready/i })).toBeInTheDocument();
     expect(screen.queryByText(/100% guaranteed/i)).not.toBeInTheDocument();
     expect(screen.getByText(/actual property/i)).toBeInTheDocument();
+    expect(screen.getByText('$350.00')).toBeInTheDocument();
+    expect(screen.getByText(/Two targeted visits that clear the roaches/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText(/Gel bait placed where German roaches actually live/i)).toBeInTheDocument();
+    expect(screen.queryByText(/100% guaranteed|Waves Guarantee/i)).not.toBeInTheDocument();
   });
 });
 
 describe('OneTimeBreakdownCard', () => {
-  it('renders the service copy pack a row carries — outcome, visit bullets, terms — like a plan card', () => {
-    render(<OneTimeBreakdownCard breakdown={{ total: 350, items: [{
+  it('renders the actual server-resolved service copy for a normal control', () => {
+    const row = {
       service: 'german_roach',
       label: 'German Roach Cleanout Service — 2 Visit Program',
       amount: 350,
       visits: 2,
-      copy: {
-        key: 'german_roach',
-        outcome: 'Your kitchen back. Two targeted visits that clear the roaches and the eggs they left behind — 100% guaranteed.',
-        includes: [
-          'Visit 1 — gel bait where German roaches actually live: kitchen, bath, hinges, appliances, and plumbing voids',
-          'If they come back, so do we — 100% guaranteed with the Waves Guarantee',
-        ],
-        assurance: 'If they come back, so do we — 100% guaranteed with the Waves Guarantee',
-        terms: 'Pay on service day. No recurring schedule, no contract.',
-      },
+    };
+    render(<OneTimeBreakdownCard breakdown={{ total: 350, items: [{
+      ...row,
+      copy: resolveOneTimeServiceCopy(row),
     }] }} />);
-    expect(screen.getByText(/Your kitchen back\. Two targeted visits/)).toBeInTheDocument();
+    expect(screen.getByText(/Your home back.+Two targeted visits/)).toBeInTheDocument();
     // Bullets sit behind the same "See everything included" dropdown the
     // recurring PriceCard rows use — collapsed until tapped.
-    expect(screen.queryByText(/Visit 1 — gel bait where German roaches actually live/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /See everything included \(2\)/ }));
-    expect(screen.getByText(/Visit 1 — gel bait where German roaches actually live/)).toBeInTheDocument();
+    expect(screen.queryByText(/Gel bait placed where German roaches actually live/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/ }));
+    expect(screen.getByText(/Gel bait placed where German roaches actually live/)).toBeInTheDocument();
     expect(screen.getByText('If they come back, so do we — 100% guaranteed with the Waves Guarantee')).toBeInTheDocument();
     expect(screen.getByText('Pay on service day. No recurring schedule, no contract.')).toBeInTheDocument();
     expect(screen.getByText('$350.00')).toBeInTheDocument();

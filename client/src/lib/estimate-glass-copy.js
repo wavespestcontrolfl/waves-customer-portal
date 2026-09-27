@@ -437,10 +437,11 @@ const GLASS_ONE_TIME_HERO_REVIEW_NO_GUARANTEE = {
 // A recurring estimate the server marks noGuaranteeClaims keeps its pack but
 // never its guarantee: a hero subline that promises one (the pest pack's
 // "unlimited free callbacks, and a money-back guarantee", lawn's "backed by
-// our money-back guarantee") falls back to the bundle pack's subline, which
-// claims only that the plan was priced from the property.
+// our money-back guarantee", or a one-time service's callback/re-treatment
+// promise) falls back to the bundle pack's subline, which claims only that
+// the plan was priced from the property.
 export function glassPackWithoutGuarantee(pack) {
-  if (!pack || !/guarantee/i.test(pack.heroSub || '')) return pack;
+  if (!pack || !/guarantee|callbacks?|re[- ]?treat(?:ment|s|ed|ing)?|risk[- ]free/i.test(pack.heroSub || '')) return pack;
   return { ...pack, heroSub: GLASS_PACKS.bundle.heroSub };
 }
 

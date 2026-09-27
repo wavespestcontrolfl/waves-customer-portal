@@ -1964,19 +1964,53 @@ export function OneTimePriceCard({ oneTimePrice, breakdown, noGuarantee = false 
 // shape the recurring PriceCard rows carry, so a one-time service reads
 // like a plan card (owner 2026-09-03). Shared by the standalone
 // OneTimeBreakdownCard and the rows embedded in a service section.
-function OneTimeRowCopy({ copy }) {
+const ONE_TIME_GUARANTEE_CLAIM = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?treat(?:ment|s|ed|ing)?|risk[- ]free/i;
+
+function oneTimeOutcomeWithoutGuarantee(text) {
+  if (!text) return null;
+  // The shipped German-roach outcome appends its guarantee to otherwise
+  // useful visit/scope copy in the same sentence. Remove that suffix first,
+  // then discard any remaining sentence whose whole point is a guarantee.
+  const withoutSuffix = String(text)
+    .replace(/,\s*100%\s+guaranteed(?:\s+with the Waves Guarantee)?(?=[.!?]|$)/gi, '')
+    .trim();
+  const sentences = withoutSuffix.match(/[^.!?]+[.!?]?/g) || [];
+  return sentences
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence && !ONE_TIME_GUARANTEE_CLAIM.test(sentence))
+    .join(' ')
+    .trim() || null;
+}
+
+function oneTimeCopyWithoutGuarantee(copy) {
   if (!copy) return null;
+  return {
+    ...copy,
+    outcome: oneTimeOutcomeWithoutGuarantee(copy.outcome),
+    includes: Array.isArray(copy.includes)
+      ? copy.includes.filter((line) => !ONE_TIME_GUARANTEE_CLAIM.test(String(line || '')))
+      : [],
+    assurance: null,
+    terms: ONE_TIME_GUARANTEE_CLAIM.test(String(copy.terms || '')) ? null : copy.terms,
+  };
+}
+
+function OneTimeRowCopy({ copy, noGuarantee = false }) {
+  if (!copy) return null;
+  const visibleCopy = noGuarantee ? oneTimeCopyWithoutGuarantee(copy) : copy;
   return (
     <>
-      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
-        {copy.outcome}
-      </div>
-      {Array.isArray(copy.includes) && copy.includes.length ? (
-        <RowInclusions items={copy.includes} collapsible />
+      {visibleCopy.outcome ? (
+        <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
+          {visibleCopy.outcome}
+        </div>
       ) : null}
-      {copy.terms ? (
+      {Array.isArray(visibleCopy.includes) && visibleCopy.includes.length ? (
+        <RowInclusions items={visibleCopy.includes} collapsible />
+      ) : null}
+      {visibleCopy.terms ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 10, lineHeight: 1.5 }}>
-          {copy.terms}
+          {visibleCopy.terms}
         </div>
       ) : null}
     </>
@@ -1999,7 +2033,7 @@ export function oneTimeRowIdentityKey(item = {}) {
   return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null, noGuarantee = false }) {
   // excludeServices accepts plain service keys (setup-fee callers) and
   // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
@@ -2061,7 +2095,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                     {item.detail}
                   </div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} />
+                <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
                 {quoteNote ? (
                   <div style={{ fontSize: 14, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
@@ -4569,7 +4603,7 @@ function customerOneTimeLabel(item = {}) {
   return label || 'One-time service';
 }
 
-function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
+function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee = false }) {
   const items = Array.isArray(contribution?.items)
     ? contribution.items.filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
     : [];
@@ -4599,7 +4633,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
-                <OneTimeRowCopy copy={item.copy} />
+                <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
               </div>
             );
           }
@@ -4610,7 +4644,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
                 {item.detail ? (
                   <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} />
+                <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                 {amount}
@@ -4987,7 +5021,7 @@ export function ServiceSection({
             the monitoring price so the two figures read as ONE plan. */}
         {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
           <>
-            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
+            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" noGuarantee={noGuarantee} />
             <div style={{ fontSize: 16, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
               Monitoring is what keeps them working:
             </div>
@@ -5188,7 +5222,7 @@ export function ServiceSection({
             box — multi-service plans no longer detach it into a separate card
             (owner 2026-07-10). Termite renders its install ABOVE the price
             (lead variant above); everything else trails the price block. */}
-        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} />}
+        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} noGuarantee={noGuarantee} />}
 
         {serviceDetailsRequest ? (
           <ServiceDetailsRequestRow
@@ -8105,6 +8139,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 {!estimate.showOneTimeOption ? (
                   <OneTimeBreakdownCard
                     breakdown={pricing.oneTimeBreakdown}
+                    noGuarantee={noGuaranteeClaims}
                     // Only exclude fees that actually render their own
                     // SetupFeeCard — a glass-suppressed card must stay in
                     // this list or the one-time total understates itself
@@ -8386,6 +8421,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {services.length > 1 && !estimate.showOneTimeOption ? (
             <OneTimeBreakdownCard
               breakdown={pricing.oneTimeBreakdown}
+              noGuarantee={noGuaranteeClaims}
               // Mirror of the single-service path: keep glass-suppressed
               // setup fees in the breakdown so the total stays honest.
               // Items embedded inside their own service box
@@ -8428,7 +8464,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return (
       <>
         {hasOneTimeRows
-          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} noGuarantee={noGuaranteeClaims} />
           : (
             <OneTimePriceCard
               oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}

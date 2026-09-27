@@ -189,6 +189,18 @@ describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring est
     expect(stripped.aiTitle).toBe(pest.aiTitle);
   });
 
+  it.each(['30-day callback included', 'Free re-treatment if activity returns'])(
+    'replaces a one-time hero whose guarantee is phrased as %s',
+    (claim) => {
+      setGlassDefault(true);
+      const base = glassEstimateCopyFor('bundle');
+      const staleHero = { ...base, heroSub: `One visit, licensed and insured. ${claim}.` };
+      const stripped = glassPackWithoutGuarantee(staleHero);
+      expect(stripped.heroSub).toBe(base.heroSub);
+      expect(stripped.heroSub).not.toMatch(/callback|re[- ]?treat|guarantee/i);
+    },
+  );
+
   it('leaves a guarantee-free pack, or no pack, untouched', () => {
     setGlassDefault(true);
     const termite = glassEstimateCopyFor('termite_bait');

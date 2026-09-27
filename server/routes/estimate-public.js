@@ -4766,6 +4766,7 @@ function renderMembershipBlockHtml(membership) {
 
 function renderPage(token, estimate, estData, membership, opts = {}) {
   const est = estimate;
+  const noGuaranteeClaims = estimate?.noGuaranteeClaims === true;
   // "Show your work" payload — built (gate-checked) by the caller; null
   // keeps every byte of the rendered page identical to the pre-gate HTML.
   const showYourWork = opts.showYourWork || null;
@@ -4804,7 +4805,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const germanRoachOneTimeCopy = germanRoachCleanoutItem
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
     : '';
-  const germanRoachGuaranteeCopy = '100% guaranteed with the Waves Guarantee.';
   // Service copy pack (estimate-one-time-copy.js) — the hero note takes the
   // pack only when EVERY billable row resolves to the same key (a mixed
   // roach + wasp quote must not read as a roach cleanout — codex pre-push
@@ -4815,7 +4815,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // renderers agree on when a quote is mixed (codex #3823 r8 P0).
   const oneTimeIntelligenceRows = [...oneTimeItems, ...boraCareOneTimeRows];
   const oneTimeHeroCopy = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems) && oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows)
-    ? oneTimeItems.map(resolveOneTimeServiceCopy).find(Boolean) || null
+    ? oneTimeItems.map(item => resolveOneTimeServiceCopy(item, { noGuaranteeClaims })).find(Boolean) || null
     : null;
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
@@ -5596,7 +5596,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // (serviceMixMakesNoGuaranteeClaim, decided by the route from the
   // estimate's rows): the card keeps its cancel/refund terms and drops the
   // guarantee heading and item.
-  const planTermsNoGuarantee = estimate?.noGuaranteeClaims === true;
+  const planTermsNoGuarantee = noGuaranteeClaims;
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
     <h2>${planTermsNoGuarantee ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
@@ -5804,7 +5804,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeRowCopyAllowed = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
   // One copy per logical job, included (service-credit) rows skipped — the
   // same helper the React contract uses (codex #3823 r3 P2s).
-  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems) : [];
+  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems, { noGuaranteeClaims }) : [];
   const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
@@ -6063,7 +6063,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // a boolean, never per row.
   // One-time-only service copy pack chips lead (roach, flea, wasp, bed
   // bug, …) — same source the React contract's askChips reads.
-  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows) : null;
+  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows, { noGuaranteeClaims }) : null;
   const askPrompts = oneTimeOnlyAskCopy?.askChips?.length
     ? oneTimeOnlyAskCopy.askChips.slice(0, 6)
     : buildEstimateAskPrompts(
@@ -6626,7 +6626,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
+    ${!noGuaranteeClaims && canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
 
@@ -23541,6 +23541,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   const basePayload = Array.isArray(payload.frequencies)
     ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
     : payload;
+  const noGuaranteeClaims = estimate?.noGuaranteeClaims === true || estimateMakesNoGuaranteeClaim(estData, basePayload);
   // Normalize breakdown labels BEFORE sections are built: the per-service
   // oneTimeContribution rows and the top-level breakdown must be the SAME
   // row objects, or the client's exclusion identity (service|label|amount)
@@ -23580,7 +23581,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
           const copies = resolveOneTimeRowCopies(labeled.map((row) => {
             const raw = rawRowFor(row);
             return raw ? { ...raw, ...row } : row;
-          }));
+          }), { noGuaranteeClaims });
           return labeled.map((row, i) => (copies[i] ? { ...row, copy: copies[i] } : row));
         })(),
       },
@@ -23666,7 +23667,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // row's hero/AI/chips (codex pre-push P0).
   const oneTimeServiceCopy = !regulatedSurface
     && (contractPayload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate))
-    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows])
+    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows], { noGuaranteeClaims })
     : null;
   const askChips = regulatedSurface
     ? []

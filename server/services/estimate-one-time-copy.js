@@ -25,6 +25,8 @@
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
+const GUARANTEE_COPY = /guarantee|callbacks?|re[- ]?treat|money[- ]?back|risk[- ]?free|satisfaction/i;
+const NO_GUARANTEE_HERO = 'Review the itemized service scope and terms below. Licensed & insured.';
 
 function searchText(item = {}) {
   return [item.service, item.offerKey, item.label, item.name, item.displayName, item.detail, item.det]
@@ -216,7 +218,7 @@ function fillTrapChecks(text, checks) {
     .replace('{checks}', `${word} trap check${n === 1 ? '' : 's'}`);
 }
 
-function resolveOneTimeServiceCopy(item = {}) {
+function resolveOneTimeServiceCopy(item = {}, { noGuaranteeClaims = false } = {}) {
   const key = oneTimeCopyKeyFor(item);
   if (!key) return null;
   const entry = PACK[key];
@@ -339,6 +341,16 @@ function resolveOneTimeServiceCopy(item = {}) {
     const days = Number(item.creditableWithinDays) || 0;
     if (days > 0 && entry.creditBullet) lines.push(entry.creditBullet.replace('{creditDays}', String(days)));
   }
+  // A row's normal assurance cannot override the estimate-wide decision
+  // (for example, stale pest pricing beside authored termite work).
+  // Keep the sold visit scope and payment terms while removing promises.
+  if (noGuaranteeClaims) {
+    assurance = null;
+    outcome = entry.outcomeNoGuarantee || outcome;
+    if (GUARANTEE_COPY.test(outcome || '')) outcome = 'Your service follows the written scope and terms in this estimate.';
+    lines = lines.filter(line => !GUARANTEE_COPY.test(line));
+    if (GUARANTEE_COPY.test(terms || '')) terms = 'Your written service scope and terms apply.';
+  }
   return {
     key,
     outcome: fillVisits(outcome, visits),
@@ -355,7 +367,7 @@ function resolveOneTimeServiceCopy(item = {}) {
 //   { key, hero: { eyebrow, h1, sub }, aiTitle?, aiBody?, askChips } or null.
 // Hero strings keep {first}/{city} for the renderer; {Visits} is filled
 // here from the row's visit count.
-function oneTimeOnlyIntelligenceCopy(items = []) {
+function oneTimeOnlyIntelligenceCopy(items = [], { noGuaranteeClaims = false } = {}) {
   // Raw (un-normalized) rows carry no `kind` — a member-discount row is a
   // negative price, and an adjustment row is never a service. Included
   // (service-credit) and quote-required rows ARE services: they resolve to
@@ -412,7 +424,7 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
     hero: {
       eyebrow: entry.hero.eyebrow,
       h1: fillVisits(entry.hero.h1, visits),
-      sub: fillVisits(heroSub, visits),
+      sub: noGuaranteeClaims ? NO_GUARANTEE_HERO : fillVisits(heroSub, visits),
     },
     ...(entry.aiTitle ? { aiTitle: entry.aiTitle, aiBody } : {}),
     askChips: Array.isArray(entry.askChips) ? [...entry.askChips] : [],
@@ -430,11 +442,11 @@ const COMPONENT_EXPANSION_KEYS = new Set(['rodent_exclusion']);
 // Row copies for a breakdown, aligned by index; included (service-credit)
 // rows never carry copy. Both render paths use this so they cannot diverge
 // (codex #3823 r3 P2s).
-function resolveOneTimeRowCopies(rows = []) {
+function resolveOneTimeRowCopies(rows = [], { noGuaranteeClaims = false } = {}) {
   const seen = new Set();
   return (Array.isArray(rows) ? rows : []).map((row) => {
     if (!row || row.serviceSpecificDiscountApplied === true || row.kind === 'included') return null;
-    const copy = resolveOneTimeServiceCopy(row);
+    const copy = resolveOneTimeServiceCopy(row, { noGuaranteeClaims });
     if (!copy) return null;
     if (COMPONENT_EXPANSION_KEYS.has(copy.key)) {
       if (seen.has(copy.key)) return null;

@@ -18,6 +18,7 @@ const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-map
 const {
   attachPublicPricingContract,
   buildWaveGuardIntelligencePayload,
+  estimateMakesNoGuaranteeClaim,
   renderPage,
 } = require('../routes/estimate-public');
 
@@ -521,6 +522,69 @@ describe('Waves AI intelligence payload', () => {
 });
 
 describe('server-rendered page', () => {
+  const noGuaranteeRows = [
+    roach2,
+    { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 350 },
+    { service: 'wasp', label: 'Wasp Nest Treatment', amount: 350 },
+  ];
+  const authoredTermiteData = (row) => ({
+    result: { recurring: { services: [] }, oneTime: { items: [{ ...row, price: row.amount, name: row.label }] } },
+    proposal: {
+      enabled: true,
+      buildings: [{ name: 'Building A', lineItems: [{ description: 'Termite Trenching', frequency: 'one_time', unitPrice: 180 }] }],
+    },
+  });
+
+  test.each(noGuaranteeRows)('authored termite work neutralizes the legacy hero and expanded $service row copy', (row) => {
+    const estData = authoredTermiteData(row);
+    const noGuaranteeClaims = estimateMakesNoGuaranteeClaim(estData);
+    expect(noGuaranteeClaims).toBe(true);
+    const html = renderPage('mixed-termite-token', {
+      id: 'estimate-termite-stale-copy', status: 'sent', customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+      onetimeTotal: 350, quoteRequired: false, noGuaranteeClaims,
+    }, estData);
+    expect(html).toContain('Review the itemized service scope and terms below. Licensed &amp; insured.');
+    expect(html).toContain('class="onetime-includes-wrap"');
+    expect(html).toContain('Pay on service day.');
+    expect(html).not.toMatch(/100% guaranteed|30-day callback|retreat guaranteed|backed by the Waves Guarantee/i);
+    if (row.service === 'german_roach') {
+      expect(html).toContain('Two targeted visits that treat the roaches');
+      expect(html).toContain('Visit 2 about 10–14 days later');
+    }
+  });
+
+  test.each(noGuaranteeRows)('the public contract neutralizes $service copy from the same authored-termite decision', (row) => {
+    const estData = authoredTermiteData(row);
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: row.amount, items: [row] } },
+      { status: 'sent' }, estData,
+    );
+    const copy = contract.oneTimeBreakdown.items[0].copy;
+    expect(copy.assurance).toBeNull();
+    expect(copy.includes.length).toBeGreaterThan(0);
+    expect(copy.terms).toContain('Pay on service day.');
+    expect(JSON.stringify(copy)).not.toMatch(/guarantee|callback|re[- ]?treat|risk[- ]?free/i);
+    expect(contract.oneTimeServiceCopy.hero.sub).toBe('Review the itemized service scope and terms below. Licensed & insured.');
+    // Resolving an estimate-wide exception must not mutate the shared pack.
+    expect(resolveOneTimeServiceCopy(row).assurance).toMatch(/guarantee|callback/i);
+  });
+
+  test.each([true, false])('the legacy one-time toggle honors the estimate guarantee decision (%s)', (noGuaranteeClaims) => {
+    const html = renderPage('termite-toggle-token', {
+      status: 'sent', customerName: 'Test Customer', address: '1 Main St, Bradenton, FL 34203',
+      monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0, tier: 'Bronze',
+      showOneTimeOption: true, oneTimeChoicePrice: 350, noGuaranteeClaims,
+    }, { result: {
+      recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50 }] },
+      oneTime: { items: [], specItems: [] }, results: { pest: { apps: 4 } },
+    } });
+    expect(html).toContain('data-mode-only="one_time"');
+    const callback = 'Includes a 30-day callback period if pests return after this visit.';
+    if (noGuaranteeClaims) expect(html).not.toContain(callback);
+    else expect(html).toContain(callback);
+  });
+
   test('one-time-only roach estimate renders the outcome, the visit bullets, the terms, and the roach chips', () => {
     const est = {
       id: 'estimate-roach-ssr',
