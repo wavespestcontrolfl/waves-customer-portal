@@ -606,6 +606,12 @@ const PLAN_CONDITION_COPY = {
   review: 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.',
   hold: 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.',
 };
+const PLAN_CONDITION_STATE = {
+  'false:false': null,
+  'false:true': 'hold',
+  'true:false': 'review',
+  'true:true': 'review',
+};
 const PLAN_CREDIT_COPY = {
   run: 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.',
   hold: 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.',
@@ -613,31 +619,20 @@ const PLAN_CREDIT_COPY = {
 
 function WeekPlanCallout({ weekPlan, aftercare }) {
   if (!weekPlan?.title) return null;
-  const legacyNeedsReview = [
-    Boolean(aftercare?.watering),
-    aftercare?.neutral !== true,
-    !aftercare?.evidenceSource,
-  ].every(Boolean);
-  const needsReview = [aftercare?.needsReview === true, legacyNeedsReview].some(Boolean);
-  const canCreditWaterIn = [
-    aftercare?.creditableWaterIn === true,
-    aftercare?.evidenceSource === 'product_instruction',
-    aftercare?.wateringHold !== true,
-    !needsReview,
-  ].every(Boolean);
+  const care = aftercare || {};
+  const legacyNeedsReview = Boolean(care.watering)
+    && care.neutral !== true && !care.evidenceSource;
+  const needsReview = care.needsReview === true || legacyNeedsReview;
+  const canCreditWaterIn = care.creditableWaterIn === true
+    && care.evidenceSource === 'product_instruction'
+    && care.wateringHold !== true
+    && !needsReview;
   // Week membership cannot establish whether a timed restriction has ended.
   // Keep the full plan conditional on the recorded restriction and its windows.
-  const planConditionState = [
-    ['review', needsReview],
-    ['hold', aftercare?.wateringHold === true],
-  ].find(([, applies]) => applies)?.[0];
+  const planConditionState = PLAN_CONDITION_STATE[`${needsReview}:${care.wateringHold === true}`];
   const planCondition = PLAN_CONDITION_COPY[planConditionState];
-  const credited = [
-    canCreditWaterIn,
-    weekPlan.visitInPlanWeek === true,
-    weekPlan.prescribesRun === true,
-    Boolean(weekPlan.afterTreatment),
-  ].every(Boolean);
+  const visitCredit = canCreditWaterIn && weekPlan.visitInPlanWeek === true;
+  const credited = visitCredit && weekPlan.prescribesRun === true && weekPlan.afterTreatment;
   const shown = credited ? weekPlan.afterTreatment : weekPlan;
   const planCreditState = weekPlan.prescribesRun === true ? 'run' : 'hold';
 
@@ -645,11 +640,11 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
     <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
       {planCondition ? (
         <div data-testid="lawn-week-plan-condition" style={{ marginBottom: 6, fontSize: 14, color: BODY }}>
-          {aftercare.watering ? <div>{aftercare.watering}</div> : null}
+          {care.watering ? <div>{care.watering}</div> : null}
           <strong>{planCondition}</strong>
         </div>
       ) : null}
-      {canCreditWaterIn && weekPlan.visitInPlanWeek === true ? (
+      {visitCredit ? (
         <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={planCreditState} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
           {PLAN_CREDIT_COPY[planCreditState]}
         </div>
