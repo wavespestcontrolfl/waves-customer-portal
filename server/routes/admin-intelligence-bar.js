@@ -17,7 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingBillingRefusalFor,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
@@ -654,10 +654,22 @@ function confirmationDisplayParams(toolName, params, preview) {
     // /confirm-action would re-resolve to somebody else.
     return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
   }
-  if (toolName === 'create_appointment' && preview?.pinned_technician) {
+  if (toolName === 'create_appointment') {
+    // The price the visit will carry — the pinned one, stated or catalog —
+    // is a money fact the card must show (owner 2026-09-27); the contract
+    // carries this display line as a billing effect.
+    const pinnedPrice = preview?.pinned_price;
+    const { price, ...unpriced } = params;
+    const shown = !pinnedPrice ? params : {
+      ...unpriced,
+      price: pinnedPrice.amount != null
+        ? `$${Number(pinnedPrice.amount).toFixed(2)} (${pinnedPrice.source === 'stated' ? 'as stated' : `catalog price, ${pinnedPrice.service_name}`}) — invoiced when the visit is completed`
+        : 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type',
+    };
+    if (!preview?.pinned_technician) return shown;
     // Show the pinned tech by NAME (the id is opaque on a card) — the visit
     // binds to exactly this technician at commit.
-    const { technician_id, technician_name, ...rest } = params;
+    const { technician_id, technician_name, ...rest } = shown;
     return { ...rest, technician: preview.pinned_technician.name };
   }
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
@@ -884,16 +896,28 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       };
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
-      // The booking sets no price (ADMIN-BUG-R12): a customer whose billing
-      // needs one on the visit gets no card — the executor would refuse the
-      // same booking on its locked row at commit. Fail closed on a read error.
-      let billingRefusal;
+      // The visit's price (owner 2026-09-27: the Intelligence Bar books like
+      // the Schedule screen): the stated price, else the catalog default the
+      // Schedule screen pre-fills. The card must show it, so it is resolved
+      // NOW and pinned; the executor re-derives it at commit and refuses on
+      // any drift. A booking that would complete with no invoice
+      // (ADMIN-BUG-R12) gets no card. Fail closed on a read error.
+      let booking;
       try {
-        billingRefusal = await ibBookingBillingRefusalFor(String(params.customer_id), params.service_type);
+        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price);
       } catch {
-        return { failed: true, modelResult: { error: 'Could not verify how this customer is billed — book it from the Schedule screen instead. Nothing was changed.' } };
+        return { failed: true, modelResult: { error: 'Could not work out this visit\'s price or how this customer is billed — try again in a moment. Nothing was changed.' } };
       }
-      if (billingRefusal) return { failed: true, modelResult: { error: billingRefusal } };
+      if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
+      if (booking.error) return { failed: true, modelResult: { error: booking.error } };
+      // Server pins, set unconditionally so a model-supplied value can never
+      // stand in for them.
+      params._booking_price = booking.price;
+      params._booking_service_id = booking.serviceId;
+      preview = {
+        ...preview,
+        pinned_price: { amount: booking.price, source: booking.source, service_name: booking.serviceName },
+      };
     }
     if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
       // Pin the visit being moved (W0B): the card must name the customer,
