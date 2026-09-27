@@ -475,6 +475,44 @@ describe('invoice tier discounts', () => {
     expect(invoice.total).toBe(0);
   });
 
+  // Codex round 4 P0: `authoritativeZero` used to re-derive this predicate
+  // inline as `Number(scheduled.estimated_price) === 0`, and Number(null)
+  // === 0 — so a NEVER-PRICED row (estimated_price null, no net stamp at
+  // all) with a stale positive primary_line_price ALSO satisfied it,
+  // anchoring storedNetAmount at 0 instead of the caller's own fallbackAmount
+  // (97.20 — the SAME per-application-fee precedence completionInvoiceAmount
+  // uses) and reconciling a genuinely-owed fee all the way down to $0.
+  // Fixed: it now nets to the fallback (via a "Scheduled price adjustment"
+  // reconciling the stale $100 gross primary line down to it — the SAME
+  // reconciliation shape as "gross callback lines" above, just anchored at
+  // 97.20 instead of 0), never $0.
+  test('a null estimated_price with a positive primary_line_price is NOT an authoritative zero — nets to the fee fallback, never $0', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: null, property_type: 'residential' },
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Quarterly Pest Control',
+        estimated_price: null,
+        primary_line_price: 100,
+      }],
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService('scheduled-1', {
+      fallbackAmount: 97.2,
+      fallbackDescription: 'Quarterly Pest Control',
+    });
+
+    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(97.2);
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Quarterly Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+    expect(invoice.total).toBe(97.2);
+  });
+
   test('scheduled invoice creation hydrates service date and type', async () => {
     const ctx = setupDb({
       customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },

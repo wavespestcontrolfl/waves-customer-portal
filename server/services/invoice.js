@@ -21,6 +21,7 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
+const { hasAuthoritativeZeroPrice } = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -1584,9 +1585,17 @@ async function buildScheduledServiceInvoiceLines(
   // back up to that fee. completion-pricing.postgres.test.js's "fully
   // discounted application stays zero" pins this with fallbackAmount
   // matching (0) — this guard is for a caller whose fallback does NOT.
+  // Codex round 4 P0: this used to re-derive the check inline as
+  // `Number(scheduled.estimated_price) === 0`, and Number(null) === 0 —
+  // so a NEVER-PRICED row (estimated_price null, no reconciliation
+  // authority at all) with a positive primary_line_price misread as an
+  // authoritative zero, reconciling a genuinely-owed fee (e.g. the
+  // fallbackAmount another caller correctly resolved) back down to $0.
+  // Delegate to the shared predicate so this can never drift from
+  // completionInvoiceAmount / predictCompletionBilling's own reading of
+  // the same provenance signal.
   const authoritativeZero = primaryBaseKnown
-    && Number(scheduled.estimated_price) === 0
-    && Number(scheduled.primary_line_price) > 0;
+    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
   const storedNetAmount = Number(scheduled.estimated_price) > 0 || authoritativeZero
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
