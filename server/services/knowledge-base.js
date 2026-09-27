@@ -6,6 +6,7 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const { createDeepMessage } = require('./llm/deep');
+const { etDateString } = require('../utils/datetime-et');
 
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
@@ -64,6 +65,104 @@ async function uniqueSlug(base) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// AI AUDIT HELPERS
+// ══════════════════════════════════════════════════════════════
+// Auto-sync entries are rebuilt from live data on every sync, so a finding on
+// one is fixed at its source, never in the KB row (the next sync would
+// overwrite the edit). Those rows stay searchable; the finding routes to the
+// source's admin screen instead of hiding the entry. Wiki mirrors
+// (source='wiki-sync') are the same: agronomic-wiki.js syncKbCopyTrust owns
+// their status, so the audit never hides or restores them.
+function auditSourceFor(entry) {
+  if (entry && entry.source === 'wiki-sync') return { fixIn: 'agronomic_wiki', label: 'Agronomic wiki', link: '/admin/knowledge' };
+  if (entry && entry.source === 'protocol-sync') return { fixIn: 'protocols', label: 'Protocols', link: '/admin/service-library?tab=protocols' };
+  if (!entry || entry.source !== 'auto-sync') return null;
+  const slug = cleanText(entry.slug);
+  if (slug.startsWith('product-')) return { fixIn: 'products_catalog', label: 'Products catalog', link: '/admin/inventory?tab=products' };
+  if (slug.startsWith('cogs-')) return { fixIn: 'service_product_usage', label: 'Service product usage', link: '/admin/inventory?tab=protocols' };
+  if (slug.startsWith('pricing-')) return { fixIn: 'pricing_config', label: 'Pricing config', link: '/admin/pricing-logic' };
+  return { fixIn: 'protocols', label: 'Protocols', link: '/admin/service-library?tab=protocols' };
+}
+
+function buildAuditPrompt(entry, now = new Date()) {
+  const source = auditSourceFor(entry);
+  return `You are auditing a knowledge base entry for a pest control & lawn care company (Waves Pest Control) in Southwest Florida. Review this entry for accuracy.
+
+Today's date: ${etDateString(now)}. Timestamps on or before today are not errors — judge the content, not when it was verified.
+${source ? `This entry is generated from the ${source.label} data; a finding means that source record needs fixing.
+` : ''}
+ENTRY:
+Title: ${entry.title}
+Category: ${entry.category}
+Content:
+${entry.content}
+
+Respond ONLY with a JSON object (no markdown fences):
+{
+  "status": "pass" | "flag" | "update-needed",
+  "confidence": "high" | "medium" | "low",
+  "issues": ["list of specific concerns if any"],
+  "summary": "one-line assessment"
+}
+
+Flag if: outdated regulations, incorrect chemical rates, expired certifications, wrong pricing logic, stale API references, or anything a SWFL pest/lawn pro would catch as wrong. Only call a label rate or active-ingredient percentage wrong when you are sure of the label value, and state that value; if you are unsure, say "verify against label" and do not flag for that alone. If it looks solid, pass it.`;
+}
+
+const AUDIT_CONFIDENCE = new Set(['high', 'medium', 'low']);
+
+// Decide what one AI verdict does to its entry. Only an explicit pass
+// verifies; an unparsed or unknown verdict changes nothing. A flagged verdict
+// never stamps last_verified_at (a flag is not a verification) and never hides
+// a generated row. A pass restores an entry only when the AI audit hid it — a
+// person's flag stays until a person clears it.
+function planAuditOutcome(entry, parsed, now = new Date()) {
+  const verdict = parsed && parsed.status;
+  const source = auditSourceFor(entry);
+  if (verdict !== 'pass' && verdict !== 'flag' && verdict !== 'update-needed') {
+    return { auditResult: 'error', rowResult: 'error', updates: {}, findings: parsed || {}, source };
+  }
+  const flagged = verdict !== 'pass';
+  const updates = {};
+  if (flagged) {
+    if (!source && entry.status !== 'flagged') updates.status = 'flagged';
+  } else {
+    updates.last_verified_at = now;
+    updates.verified_by = 'ai-cron';
+    if (AUDIT_CONFIDENCE.has(parsed.confidence)) updates.confidence = parsed.confidence;
+    if (entry.status === 'flagged' && entry.flag_owner === 'ai-review') updates.status = 'active';
+  }
+  const findings = source && flagged
+    ? { ...parsed, fix_in: source.fixIn, fix_link: source.link }
+    : parsed;
+  // The stored row result is what flag ownership reads: 'flagged' only when
+  // this verdict is what hides the entry; a generated row's finding is
+  // 'flagged-source' and never owns a flag.
+  const rowResult = !flagged ? 'passed' : (updates.status === 'flagged' ? 'flagged' : 'flagged-source');
+  return { auditResult: flagged ? 'flagged' : 'passed', rowResult, updates, findings, source };
+}
+
+// Latest flag provenance for an entry: 'ai-review' or 'manual-flag'.
+const FLAG_OWNER_SQL = `(SELECT a.audit_type FROM knowledge_base_audits a
+  WHERE a.kb_entry_id = knowledge_base.id AND a.audit_type IN ('ai-review', 'manual-flag')
+    AND a.result = 'flagged'
+  ORDER BY a.created_at DESC LIMIT 1)`;
+
+// True when an entry's current flag came from the AI audit (not a person), so
+// a content change — the fix — should put it back in search. Callers hold the
+// entry's row lock (every flag write takes it), so the answer cannot move
+// under them.
+async function flagIsFromAIAudit(entry, conn = db) {
+  if (!entry || entry.source === 'wiki-sync') return false;
+  const latest = await conn('knowledge_base_audits')
+    .where({ kb_entry_id: entry.id })
+    .whereIn('audit_type', ['ai-review', 'manual-flag'])
+    .where({ result: 'flagged' })
+    .orderBy('created_at', 'desc')
+    .first();
+  return !!latest && latest.audit_type === 'ai-review';
+}
+
+// ══════════════════════════════════════════════════════════════
 // CORE CRUD
 // ══════════════════════════════════════════════════════════════
 const KnowledgeBaseService = {
@@ -98,8 +197,33 @@ const KnowledgeBaseService = {
           ? JSON.stringify(updates[key]) : updates[key];
       }
     }
-    const [entry] = await db('knowledge_base').where({ id }).update(data).returning('*');
-    return entry;
+    return db.transaction(async (trx) => {
+      const current = await trx('knowledge_base').where({ id }).forUpdate().first();
+      if (!current) return undefined;
+      // An edit that changes an AI-hidden entry's content returns it to
+      // search — the kb_restore_ai_flag_on_content_change trigger does that
+      // for every writer.
+      // A person's Verify is the review a flag asks for. It never overrides
+      // a wiki mirror's trust gate or a non-flag status like archived.
+      if (updates.restoreFlag && updates.status === undefined
+        && current.status === 'flagged' && current.source !== 'wiki-sync') {
+        data.status = 'active';
+      }
+      // A person's flag records its owner in the same transaction — an
+      // explicit Flag always, an editor status change when it hides the entry
+      // — and before the row write, so the content trigger sees it.
+      if (updates.flagReason !== undefined || (data.status === 'flagged' && current.status !== 'flagged')) {
+        await trx('knowledge_base_audits').insert({
+          kb_entry_id: id,
+          audit_type: 'manual-flag',
+          findings: cleanText(updates.flagReason) || 'Manually flagged for review',
+          result: 'flagged',
+          audited_by: 'waves',
+        });
+      }
+      const [entry] = await trx('knowledge_base').where({ id }).update(data).returning('*');
+      return entry;
+    });
   },
 
   async getById(id) {
@@ -178,41 +302,51 @@ const KnowledgeBaseService = {
 
   // ── Verify (mark as reviewed) ──
   async verify(id, verifiedBy = 'waves') {
-    return this.update(id, { last_verified_at: new Date(), verified_by: verifiedBy, confidence: 'high' });
+    return this.update(id, { last_verified_at: new Date(), verified_by: verifiedBy, confidence: 'high', restoreFlag: true });
   },
 
   // ── Flag ──
   async flag(id, reason) {
-    const entry = await this.update(id, { status: 'flagged' });
-    await db('knowledge_base_audits').insert({
-      kb_entry_id: id,
-      audit_type: 'manual-flag',
-      findings: reason || 'Manually flagged for review',
-      result: 'flagged',
-      audited_by: 'waves',
-    });
-    return entry;
+    return this.update(id, { status: 'flagged', flagReason: reason || '' });
   },
 
   // ══════════════════════════════════════════════════════════════
   // AI AUDIT — "Question Your Assumptions" cron
   // ══════════════════════════════════════════════════════════════
-  async runAIAudit({ maxEntries = 10, forceAll = false } = {}) {
+  async runAIAudit({ maxEntries = 10, forceAll = false, flaggedOnly = false, ids = null } = {}) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       logger.warn('[kb] ANTHROPIC_API_KEY not set — skipping AI audit');
       return { audited: 0, flagged: 0, results: [] };
     }
 
-    // Get entries that need review: stale, low confidence, or unverified
-    let query = db('knowledge_base').where({ status: 'active' });
-    if (!forceAll) {
-      query = query.where(function () {
-        this.where('confidence', '!=', 'high')
-          .orWhere('last_verified_at', '<', db.raw("NOW() - INTERVAL '30 days'"))
-          .orWhereNull('last_verified_at');
-      });
+    // Get entries that need review: stale, low confidence, or unverified.
+    // flaggedOnly re-reviews entries an earlier audit hid. Rotation is by the
+    // last AI review, not last_verified_at — a flag no longer stamps that, so
+    // ordering on it would re-pick the same rows every week.
+    let query = db('knowledge_base')
+      .select('knowledge_base.*', db.raw(
+        '(SELECT MAX(a.created_at) FROM knowledge_base_audits a WHERE a.kb_entry_id = knowledge_base.id AND a.audit_type = ?) AS last_ai_review_at',
+        ['ai-review'],
+      ));
+    if (Array.isArray(ids)) query = query.whereIn('knowledge_base.id', ids);
+    if (flaggedOnly) {
+      // Only entries the AI audit hid — a person's flag is a person's call.
+      query = query.where({ status: 'flagged' }).whereNot({ source: 'wiki-sync' })
+        .whereRaw(`${FLAG_OWNER_SQL} = 'ai-review'`);
+    } else {
+      query = query.where({ status: 'active' });
+      if (!forceAll) {
+        query = query.where(function () {
+          this.where('confidence', '!=', 'high')
+            .orWhere('last_verified_at', '<', db.raw("NOW() - INTERVAL '30 days'"))
+            .orWhereNull('last_verified_at');
+        });
+      }
     }
-    const entries = await query.orderBy('last_verified_at', 'asc').limit(maxEntries);
+    const entries = await query
+      .orderByRaw('last_ai_review_at ASC NULLS FIRST')
+      .orderBy('last_verified_at', 'asc')
+      .limit(maxEntries);
 
     if (!entries.length) {
       logger.info('[kb] AI audit: nothing to review');
@@ -222,6 +356,7 @@ const KnowledgeBaseService = {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const results = [];
     let flagged = 0;
+    let passed = 0;
 
     for (const entry of entries) {
       try {
@@ -231,24 +366,7 @@ const KnowledgeBaseService = {
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
           messages: [{
             role: 'user',
-            content: `You are auditing a knowledge base entry for a pest control & lawn care company (Waves Pest Control) in Southwest Florida. Review this entry for accuracy.
-
-ENTRY:
-Title: ${entry.title}
-Category: ${entry.category}
-Last verified: ${entry.last_verified_at || 'never'}
-Content:
-${entry.content}
-
-Respond ONLY with a JSON object (no markdown fences):
-{
-  "status": "pass" | "flag" | "update-needed",
-  "confidence": "high" | "medium" | "low",
-  "issues": ["list of specific concerns if any"],
-  "summary": "one-line assessment"
-}
-
-Flag if: outdated regulations, incorrect chemical rates, expired certifications, wrong pricing logic, stale API references, or anything a SWFL pest/lawn pro would catch as wrong. If it looks solid, pass it.`,
+            content: buildAuditPrompt(entry),
           }],
         });
 
@@ -257,27 +375,48 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
         try {
           parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
         } catch {
-          parsed = { status: 'pass', confidence: 'medium', issues: [], summary: 'Could not parse AI response' };
+          parsed = { status: 'unparsed', issues: [], summary: 'Could not parse AI response' };
         }
 
-        const auditResult = parsed.status === 'flag' || parsed.status === 'update-needed' ? 'flagged' : 'passed';
-        if (auditResult === 'flagged') flagged++;
-
-        await db('knowledge_base_audits').insert({
-          kb_entry_id: entry.id,
-          audit_type: 'ai-review',
-          findings: JSON.stringify(parsed),
-          result: auditResult,
-          audited_by: 'ai-cron',
+        // The model call is slow: apply the verdict under the row lock, and
+        // only to the version that was audited. An edit or a person's flag in
+        // the meantime wins; the verdict is kept as a 'stale' audit row.
+        const { auditResult, source } = await db.transaction(async (trx) => {
+          const current = await trx('knowledge_base').where({ id: entry.id }).forUpdate().first();
+          // updated_at moves on every write (edit, verify, flag, sync) but
+          // not on an audit verdict, so any change since the read shows here.
+          const stamp = (v) => (v ? new Date(v).getTime() : null);
+          if (!current || stamp(current.updated_at) !== stamp(entry.updated_at)
+            || current.content !== entry.content || current.status !== entry.status) {
+            await trx('knowledge_base_audits').insert({
+              kb_entry_id: entry.id, audit_type: 'ai-review', findings: JSON.stringify(parsed || {}), result: 'stale', audited_by: 'ai-cron',
+            });
+            return { auditResult: 'stale', updates: {}, findings: parsed, source: null };
+          }
+          const flagOwner = current.status === 'flagged' && await flagIsFromAIAudit(current, trx) ? 'ai-review' : null;
+          const outcome = planAuditOutcome({ ...current, flag_owner: flagOwner }, parsed);
+          await trx('knowledge_base_audits').insert({
+            kb_entry_id: entry.id,
+            audit_type: 'ai-review',
+            findings: JSON.stringify(outcome.findings),
+            result: outcome.rowResult,
+            audited_by: 'ai-cron',
+          });
+          if (Object.keys(outcome.updates).length) {
+            await trx('knowledge_base').where({ id: entry.id }).update(outcome.updates);
+          }
+          return outcome;
         });
+        if (auditResult === 'flagged') flagged++;
+        if (auditResult === 'passed') passed++;
 
-        // Update entry confidence and potentially flag it
-        const updates = { last_verified_at: new Date(), verified_by: 'ai-cron' };
-        if (parsed.confidence) updates.confidence = parsed.confidence;
-        if (auditResult === 'flagged') updates.status = 'flagged';
-        await db('knowledge_base').where({ id: entry.id }).update(updates);
-
-        results.push({ id: entry.id, title: entry.title, ...parsed });
+        results.push({
+          id: entry.id,
+          title: entry.title,
+          ...parsed,
+          ...(auditResult === 'stale' ? { status: 'stale', summary: 'Entry changed during the audit; verdict not applied' } : {}),
+          ...(source && auditResult === 'flagged' ? { fixIn: source.fixIn, fixLabel: source.label, fixLink: source.link } : {}),
+        });
         logger.info(`[kb] AI audit: ${entry.title} → ${auditResult}`);
       } catch (err) {
         logger.error(`[kb] AI audit failed for "${entry.title}": ${err.message}`);
@@ -285,7 +424,7 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       }
     }
 
-    return { audited: entries.length, flagged, results };
+    return { audited: entries.length, flagged, passed, results };
   },
 
   // ── Get audits for an entry ──
@@ -522,6 +661,8 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
         const tagJson = JSON.stringify(safeTags);
         const existingTagJson = JSON.stringify(normalizeTags(existing.tags));
         if (existing.content !== safeContent || existing.title !== safeTitle || existing.path !== safePath || existing.category !== safeCategory || existingTagJson !== tagJson) {
+          // A content change returns an AI-hidden entry to search
+          // (kb_restore_ai_flag_on_content_change trigger).
           await db('knowledge_base').where({ id: existing.id }).update({
             slug: safeSlug,
             path: safePath,
@@ -713,3 +854,4 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
 };
 
 module.exports = KnowledgeBaseService;
+module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit };
