@@ -27,9 +27,11 @@ const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 const { appointmentClaimProblems } = require('./next-visit-claims');
 
-// v5: preserve authoritative empty schedules and require technician evidence
-// before turning a zero pressure score into an inspection assertion.
-const PROMPT_VERSION = 'pest_visit_summary_narrative_v5';
+// v6: preserve authoritative empty schedules and require independently
+// traceable technician evidence before turning a zero pressure score into an
+// inspection assertion. A no_activity finding alone is not traceable because
+// both report assembly and blank completion flows synthesize that category.
+const PROMPT_VERSION = 'pest_visit_summary_narrative_v6';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -169,10 +171,8 @@ function groundingFacts({
   const hasPositiveActivityFinding = findingList.some((finding) => (
     ['activity', 'pest_activity'].includes(String(finding?.category || '').toLowerCase())
   ));
-  const zeroInspectionSupported = !hasPositiveActivityFinding && (
-    pressureEvidence.zeroInspectionSupported === true
-    || findingList.some((finding) => finding?.category === 'no_activity')
-  );
+  const zeroInspectionSupported = !hasPositiveActivityFinding
+    && pressureEvidence.zeroInspectionSupported === true;
   const pressureIsZero = Number(pestPressure?.displayScore) === 0;
   const pressure = pestPressure && pestPressure.enabled && pestPressure.displayScore != null
     ? {

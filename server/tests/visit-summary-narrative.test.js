@@ -14,6 +14,7 @@ const { calculatePestPressureScore, hasTechnicianZeroEvidence } = require('../se
 const { extractTechnicianRating } = require('../services/pest-pressure/components/technician-rating');
 const { DEFAULT_CONFIG } = require('../services/pest-pressure/config');
 const { sanitizeRecap } = require('../services/completion-recap');
+const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 const { appointmentClaimProblems } = require('../services/service-report/next-visit-claims');
 
 const {
@@ -115,7 +116,7 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
   expect(SYSTEM_PROMPT).toContain('Mention at most one customer-visible finding');
   expect(SYSTEM_PROMPT).toContain('Never blame the customer');
-  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v5');
+  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v6');
 });
 
 test('current next visit replaces stale recap appointment in model facts and fallback', () => {
@@ -302,7 +303,7 @@ test('clean model output is used verbatim', async () => {
   expect(callModel).toHaveBeenCalledWith(expect.objectContaining({
     jsonMode: true,
     maxTokens: 400,
-    promptVersion: 'pest_visit_summary_narrative_v5',
+    promptVersion: 'pest_visit_summary_narrative_v6',
   }));
 });
 
@@ -564,7 +565,7 @@ test('customer-only zero score does not become a technician inspection claim', a
   );
 });
 
-test('a completed record with no findings cannot establish an inspected absence', async () => {
+test('a completed blank record and its synthetic no-activity finding cannot establish an inspected absence', async () => {
   const knex = (table) => ({ where: () => (table === 'service_records'
     ? { first: async () => ({ status: 'completed' }) }
     : { select: async () => [] }) });
@@ -573,21 +574,31 @@ test('a completed record with no findings cannot establish an inspected absence'
   const score = calculatePestPressureScore({ technicianRating: extracted.value }, DEFAULT_CONFIG);
   expect(score.displayedScore).toBe(0);
   const args = input({
-    findings: [],
+    findings: [buildNoActivityFinding('pest')],
     pestPressure: { enabled: true, displayScore: score.displayedScore, label: score.label.name },
     pestPressureEvidence: { zeroInspectionSupported: hasTechnicianZeroEvidence(score.componentScores) },
     nextAppointment: null,
   });
   const facts = groundingFacts(args);
+  expect(facts.findings).toEqual([expect.objectContaining({ title: 'No activity observed this visit' })]);
   expect(facts.pressure.zeroInspectionSupported).toBe(false);
   expect(deterministicSummary(facts)).not.toMatch(/visible pest activity|areas assessed/);
   const callModel = jest.fn();
   await expect(applyVisitSummaryNarrative(args, { callModel })).resolves.toBe(deterministicSummary(facts));
   expect(callModel).not.toHaveBeenCalled();
 
-  const explicit = groundingFacts({ ...args, findings: [{ category: 'no_activity', title: 'No activity observed' }] });
-  expect(explicit.pressure.zeroInspectionSupported).toBe(true);
-  expect(deterministicSummary(explicit)).toContain('No visible pest activity was noted in the areas assessed today.');
+  const directFacts = groundingFacts({
+    ...args,
+    pestPressureEvidence: {
+      zeroInspectionSupported: hasTechnicianZeroEvidence({
+        technicianActivityRating: { value: 0, present: true },
+      }),
+    },
+  });
+  expect(directFacts.pressure.zeroInspectionSupported).toBe(true);
+  expect(deterministicSummary(directFacts)).toContain(
+    'No visible pest activity was noted in the areas assessed today.',
+  );
 });
 
 test.each([null, undefined, '', false, '0'])('a malformed direct rating %j cannot establish an inspected absence', (value) => {
