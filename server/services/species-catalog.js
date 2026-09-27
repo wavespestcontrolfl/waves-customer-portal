@@ -428,7 +428,7 @@ function buildNameIndices() {
     // resolve to the organism (Codex #4974 r8).
     const taxonNames = e.kind === 'sign' ? '' : String(e.scientific_name || '');
     for (const part of taxonNames.split('/')) {
-      if (!part.trim()) continue;
+      // buildWholeWordIndex centrally discards blank names from every source.
       scientificPairs.push([part, e.slug]);
       // A stage annotation is still the same taxon. Index its bare binomial
       // too, so an adult and larval entry sharing one species resolve the
@@ -470,6 +470,9 @@ function buildNameIndices() {
     for (const alias of node.aliases || []) nodePairs.push([alias, node.id]);
   }
   for (const sg of CATALOG.subgroups.values()) {
+    // Species-level situation nodes must not shadow their exact entry taxon.
+    // Multiple entries for that taxon already resolve to their shared ancestor.
+    if (sg.rank === 'species') continue;
     for (const part of String(sg.scientific || '').split('/')) {
       if (TAXON.test(part.trim())) {
         nodePairs.push([part.trim(), sg.id]);

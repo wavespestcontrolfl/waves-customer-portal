@@ -596,6 +596,22 @@ describe('resolveName regressions', () => {
     },
   );
 
+  test.each(['click beetle', 'click beetles'])(
+    'bare %s does not assert an eyed click beetle', (name) => {
+      expect(catalog.resolveName(name)?.node.id).toBe('beetles');
+      expect(catalog.resolveName(`eyed ${name}`)?.node.slug).toBe('eyed-click-beetle');
+      expect(catalog.resolveName('Alaus oculatus')?.node.slug).toBe('eyed-click-beetle');
+    },
+  );
+
+  test('an exact species taxon reaches its entry while shared situation taxa stay neutral', () => {
+    expect(catalog.resolveName('Centruroides hentzi')).toMatchObject({
+      via: 'scientific', node: { slug: 'hentz-striped-scorpion' },
+    });
+    expect(catalog.resolveName('Centruroides')?.node.id).toBe('centruroides-scorpions');
+    expect(catalog.resolveName('Apis mellifera')?.node.id).toBe('bees');
+  });
+
   test.each(['alate', 'alates'])('generic %s does not claim an ant or termite identification', (name) => {
     expect(catalog.resolveName(name)).toBeNull();
     expect(catalog.resolveName('termite swarmers')).toMatchObject({ node: { slug: 'termite-swarmers' } });
