@@ -313,6 +313,36 @@ function freezeBoundaryFloor(now = new Date()) {
   return { date: etDateString(boundary), startMin: hour * 60 + minute + 1 };
 }
 
+// Outside the flexible tier the candidate pipeline is untouched.
+const NO_FLEX_CANDIDATE_RULES = { findTimeArgs: {}, admit: (slots) => slots };
+
+/**
+ * The flexible tier's candidate admission for candidate-slots, as one unit
+ * (Codex #4995 r6 P2 — kept out of the candidate pipeline itself): the
+ * find-time floor on the date the 73h freeze ends (freezeBoundaryFloor →
+ * startFloorByDate), and the filter of fetched slots — a destination inside
+ * the freeze (destinationFrozen) or outside the window's legal dates
+ * (flexWindowAdmits) is dropped and tallied in `drops` (flex_frozen /
+ * flex_floor). Outside flex mode (ctx.tierMeta.mode) both are no-ops.
+ */
+function flexCandidateRules(service, ctx) {
+  if (!(ctx.tierMeta && ctx.tierMeta.mode === 'flex')) return NO_FLEX_CANDIDATE_RULES;
+  const origDate = toDateStr(service.scheduled_date);
+  const { date, startMin } = freezeBoundaryFloor(ctx.nowDate);
+  const dropReason = (slot) => {
+    if (destinationFrozen(service, slot.date, slot.start_time, ctx.nowDate)) return 'flex_frozen';
+    return flexWindowAdmits(ctx.tierWindow, origDate, slot.date) ? null : 'flex_floor';
+  };
+  return {
+    findTimeArgs: { startFloorByDate: { [date]: startMin } },
+    admit: (slots, drops) => slots.filter((slot) => {
+      const reason = dropReason(slot);
+      if (reason) drops[reason] += 1;
+      return !reason;
+    }),
+  };
+}
+
 module.exports = {
   FLEX_TIER_RADIUS_DAYS,
   FLEX_TIER_FREEZE_HOURS,
@@ -322,5 +352,5 @@ module.exports = {
   flexWindowAdmits,
   ownScheduleFrozen,
   destinationFrozen,
-  freezeBoundaryFloor,
+  flexCandidateRules,
 };

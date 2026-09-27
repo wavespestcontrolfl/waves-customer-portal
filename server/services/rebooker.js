@@ -1643,7 +1643,7 @@ class SmartRebooker {
       // the placement being written rather than the caller's plan.
       if (typeof options.moveGuard === 'function') {
         await options.moveGuard({
-          trx, technicianId: keptTechId, service, destination: { date: newDateStr, windowStart: updates.window_start || null },
+          trx, technicianId: keptTechId, service, destination: { date: newDateStr, windowStart: updates.window_start },
         });
       }
       // A reviewed move also pins the route whose destination was probed.

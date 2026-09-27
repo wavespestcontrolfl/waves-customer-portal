@@ -244,6 +244,31 @@ test('the series occurrence guard clamps the candidate window (a next occurrence
   expect(changed.constraints.route_tiers.window.dateTo).toBe(shiftDateStr(nextOccurrence, -1));
 });
 
+test('an apply-time series-neighbor read failure refuses the move AND degrades the run (Codex #4995 r6 P2)', async () => {
+  reminderResults = [[], []];
+  let scheduledServicesCalls = 0;
+  db.mockImplementation((table) => {
+    if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
+    if (table === 'scheduled_services') {
+      scheduledServicesCalls++;
+      // 1st: loadEligibleServices; 2nd: pass 1's bulk neighbor read (clean);
+      // 3rd: the apply-time recheck's fresh neighbor read — which fails.
+      if (scheduledServicesCalls === 3) {
+        const c = buildChain([]);
+        c.then = (resolve, reject) => Promise.reject(new Error('db down')).then(resolve, reject);
+        return c;
+      }
+      return buildChain([svc()]);
+    }
+    return buildChain([]);
+  });
+  const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+  expect(res.changed).toBe(0);
+  expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+  expect(decisions('no_change').map((d) => d.reason_code)).toContain('SERIES_NEIGHBORS_UNKNOWN');
+  expect(res.status).toBe('completed_with_errors');
+});
+
 test('same-day re-time is inside the window (never excluded)', async () => {
   reminderResults = [[], []];
   const sameDayCand = { ...CAND, date: VISIT_DATE, start_time: '13:00', end_time: '14:00' };
