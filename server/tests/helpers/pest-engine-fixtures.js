@@ -1,7 +1,7 @@
 /**
  * Test-only fixture "species catalog" for `pest-engine.test.js`. Mirrors the
  * REAL `../../services/species-catalog.js` API surface (getEntry, getGroup,
- * getSubgroup, getCategory, getNode, listEntries, lineage, genericGuidance, nextPhoto,
+ * getSubgroup, getCategory, getNode, listEntries, lineage,
  * lookAlikes, _index, CATALOG_VERSION) over small, hand-built data instead
  * of the live `species-catalog-v1` data files — per the 2026-09-26 contract
  * delta note, the live entry files are being revised in parallel by content
@@ -62,36 +62,6 @@ function buildFixtureCatalog({
     return rungs;
   }
 
-  function nextPhoto(id) {
-    const node = getNode(id);
-    if (!node) return null;
-    if (node.next_photo) return node.next_photo;
-    if (node.level === 'entry' && Array.isArray(node.look_alikes) && node.look_alikes[0]) {
-      return { ask: node.look_alikes[0].next_photo, why: node.look_alikes[0].difference || null };
-    }
-    return null;
-  }
-
-  function genericGuidance(id) {
-    let merged = null;
-    for (const rung of lineage(id)) {
-      if (rung.level === 'entry') continue;
-      const guidance = getNode(rung.id)?.generic_guidance;
-      if (!guidance) continue;
-      const inheritedCompatibility = merged?.compatibility;
-      merged = { ...(merged || {}), ...guidance };
-      if (guidance.compatibility) {
-        merged.compatibility = { ...(inheritedCompatibility || {}), ...guidance.compatibility };
-        if (guidance.compatibility.safety) {
-          merged.compatibility.safety = {
-            ...(inheritedCompatibility?.safety || {}), ...guidance.compatibility.safety,
-          };
-        }
-      }
-    }
-    return merged;
-  }
-
   function lookAlikes(slug) {
     const entry = getEntry(slug);
     if (!entry) return [];
@@ -109,8 +79,6 @@ function buildFixtureCatalog({
     getNode,
     listEntries,
     lineage,
-    genericGuidance,
-    nextPhoto,
     lookAlikes,
     _index: () => ({ legacy_slug_map: legacySlugMap }),
   };
@@ -133,17 +101,17 @@ const FIXTURE = buildFixtureCatalog({
   categories: {
     insect: { label: 'Insect', generic: 'an insect' },
     wildlife: { label: 'Wildlife', generic: 'a wildlife visitor' },
-    other: { label: 'Other', generic: 'something else', next_photo: { ask: 'Other retake photo', why: 'Other retake why' } },
+    other: { label: 'Other', generic: 'something else' },
   },
   groups: [
-    { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant', next_photo: { ask: 'Ant group node photo', why: 'Ant group why' } },
+    { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant' },
     { id: 'termites', label: 'Termites', category: 'insect', generic: 'termite activity' },
     { id: 'wasps-bees', label: 'Wasps, bees & hornets', category: 'insect', generic: 'a stinging insect' },
     { id: 'rodents', label: 'Rats & mice', category: 'insect', generic: 'a rat, mouse, or other rodent' },
     { id: 'turtles', label: 'Turtles & tortoises', category: 'wildlife', generic: 'a turtle or tortoise' },
   ],
   subgroups: [
-    { id: 'fire-ants', group: 'ants', label: 'Fire Ants', generic: 'a fire ant', scientific: 'Solenopsis', next_photo: { ask: 'Fire ant subgroup photo', why: 'Fire ant subgroup why' } },
+    { id: 'fire-ants', group: 'ants', label: 'Fire Ants', generic: 'a fire ant', scientific: 'Solenopsis' },
   ],
   entries: [
     ownerApproved({
