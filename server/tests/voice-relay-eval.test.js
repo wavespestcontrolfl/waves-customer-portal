@@ -5201,6 +5201,25 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: guessed })).toBe('fail');
     const looked = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: window }] }));
     expect(replay._internals.scenarioStatus({ checks: looked })).toBe('pass');
+    // The lookup attests the existing visit's day as well as its window, so
+    // natural two-sentence delivery may state each fact separately.
+    const splitStatus = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'get_today_eta', ok: true },
+      { kind: 'agent', text: 'Your technician is coming today. The arrival window is 1 to 3 PM.' },
+    ] }));
+    expect(splitStatus.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: splitStatus })).toBe('pass');
+    for (const text of [
+      'Your new visit will be today. The arrival window is 1 to 3 PM.',
+      'Your technician is coming tomorrow. The arrival window is 1 to 3 PM.',
+    ]) {
+      const inventedDate = replay._internals.evaluateChecks(scenario, record({ order: [
+        { kind: 'tool', name: 'get_today_eta', ok: true },
+        { kind: 'agent', text },
+      ] }));
+      expect([text, inventedDate.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect(replay._internals.scenarioStatus({ checks: inventedDate })).toBe('fail');
+    }
     // Codex round-5 P1: the window may also be spoken in an EARLIER turn,
     // before get_today_eta ever ran (not just with no tool call anywhere in
     // the record at all) — still invented at the time it was said, even
@@ -5750,6 +5769,9 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: onTheWay })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    const splitStatus = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Su técnico viene hoy. La ventana de llegada es de la una a las tres de la tarde.' }] }));
+    expect(splitStatus.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: splitStatus })).toBe('pass');
     const separateDate = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de la una a las tres de la tarde, y la nueva visita será hoy.' }] }));
     expect(separateDate.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: separateDate })).toBe('fail');

@@ -435,6 +435,12 @@ const SCHEDULE_PREDICATES = Object.freeze({
   reopening: /\b(?:re-?opens?|re-?opening|opens?(?:\s+again|\s+back\s+up)?|back (?:in|open|at)|(?:is|are|will be|be|being|becomes?|gets?|back and) available|available (?:again|at|from|by|on|starting|after|until|tomorrow|first thing)|availability|hours (?:are|start|resume)|abre|reabre|abrirá|abrira|(?:estará|estara|estarán|estaran|está|esta|estamos|estaremos) disponibles?)\b/i,
 });
 
+// get_today_eta attests only the account's existing visit. It does not ground
+// a newly created or changed appointment, even when that claim also says
+// "today". Keep this scoped to visit nouns so "new technician" does not turn
+// a truthful status sentence into a scheduling claim.
+const NEW_OR_CHANGED_VISIT_RE = /\b(?:(?:new|another|replacement|rescheduled|rebooked)\s+(?:visit|appointment|service|treatment)|(?:visit|appointment|service|treatment)\s+(?:is\s+|was\s+|will be\s+|has been\s+)?(?:new|rescheduled|rebooked)|(?:nuev[oa]|otra|reprogramad[oa]|reservad[oa] de nuevo)\s+(?:visita|cita|servicio|tratamiento)|(?:visita|cita|servicio|tratamiento)\s+(?:nuev[oa]|reprogramad[oa]|reservad[oa] de nuevo))\b/i;
+
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
 // Codex round-2 P1: a minute modifier right after either endpoint means the
 // caller heard something OTHER than the plain returned hour ("las tres Y
@@ -533,11 +539,17 @@ function no_visit_time(value, record, { utterances }) {
         // window. The marker must be in THIS token's clause: a valid window
         // in one clause cannot ground a separate "the visit is today" claim.
         const labelsGroundedWindow = sameDay && sameDayClause.includes(GROUNDED_WINDOW_MARKER);
+        // A successful get_today_eta also attests that the EXISTING visit is
+        // today, independently of where its returned window appears in the
+        // reply: "Your technician is coming today. The window is 1 to 3."
+        // It does not attest a new/rebooked visit, nor any other day.
+        const labelsAttestedTodayVisit = sameDay && grounded && opts.afterTool === 'get_today_eta'
+          && SCHEDULE_PREDICATES.visit.test(sameDayClause) && !NEW_OR_CHANGED_VISIT_RE.test(sameDayClause);
         // "We'll call today to schedule the visit" dates the callback, not
         // the visit. The cue must be in this token's own clause, so an earlier
         // callback cannot excuse a later clause that dates the visit.
         const datesFollowUp = sameDay && /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(clauseBefore);
-        if (!labelsGroundedWindow && !datesFollowUp && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+        if (!labelsGroundedWindow && !labelsAttestedTodayVisit && !datesFollowUp && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
       }
     }
   }
