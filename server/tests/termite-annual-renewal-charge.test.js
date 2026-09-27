@@ -1335,6 +1335,35 @@ describe('termite annual renewal charge', () => {
       expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
 
+    // Codex #4971 r6 P1 (audit): the charge's authority is recomputed under
+    // the held gate on BOTH terms — a successor withdrawn (or lapsed) while
+    // the charge waited for the gate is never charged, even though its fence
+    // was already claimed.
+    test('a successor withdrawn while the charge waited for the gate is never charged', async () => {
+      mockCommon();
+      mockGraceHelpers({ graceDays: 30 });
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn(), voidInvoice: jest.fn() }));
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../services/recurring-card-on-file', () => ({ resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-1' })) }));
+      const chargeInvoiceWithSavedCard = jest.fn();
+      jest.doMock('../services/stripe', () => ({
+        assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
+        chargeInvoiceWithSavedCard,
+        quoteInvoiceSavedCardCharge: jest.fn(async () => ({ total: 249 })),
+      }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const successor = baseSuccessor();
+      const { conn } = makeDecideConn({ successor, eligibilityInvoice: { status: 'draft' }, freshInvoice: { status: 'draft' } });
+      const gate = require('../services/annual-prepay-renewals').withParentDecisionLock;
+      gate.mockImplementation(async (termId, fn) => { successor.status = 'cancelled'; return fn(); });
+
+      const outcome = await _private.decideAndCharge(successor, baseParent(), conn);
+
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({ status: 'ineligible', reason: 'successor_status_cancelled' });
+    });
+
     test('a refusal whose pay-link delivery FAILED leaves leg 7b\'s marker unstamped, so 7b retries the delivery', async () => {
       mockCommon();
       mockGraceHelpers({ graceDays: 30 });
@@ -3271,12 +3300,17 @@ describe('termite annual renewal charge', () => {
         }
         if (table === 'annual_prepay_terms') {
           return {
-            where: jest.fn(() => ({
+            where: jest.fn((filter) => ({
               whereNull: jest.fn(() => ({ update: stampUpdate })),
               update: deferredUpdate,
               // The successor's own status re-read after a retire's void
-              // asks for 'status'; every other read here is the parent.
-              first: jest.fn((col) => Promise.resolve(col === 'status' ? successorAfterVoid : parent)),
+              // asks for 'status'; the withdrawal's own re-read under the
+              // gate (Codex #4971 r6 P1) reads the successor row; every
+              // other read here is the parent.
+              first: jest.fn((col) => {
+                if (col === 'status') return Promise.resolve(successorAfterVoid);
+                return Promise.resolve(filter?.id === successor.id ? successor : parent);
+              }),
             })),
           };
         }
@@ -3609,7 +3643,7 @@ describe('termite annual renewal charge', () => {
   // parent that no longer authorizes it stays ACTIVE with ONE staff alert
   // (refund or honor it) — never a customer message.
   describe('onRenewalSuccessorPaid (paid sync hook)', () => {
-    function hookConn({ parent, paidAfter = true }) {
+    function hookConn({ parent, paidAfter = true, successor: hookSuccessor = paidSuccessor() }) {
       const updates = [];
       const conn = jest.fn((table) => {
         // paidAfterParentChanged: the ONE "paid after the parent changed"
@@ -3621,7 +3655,8 @@ describe('termite annual renewal charge', () => {
         if (table === 'annual_prepay_terms') {
           return {
             where: jest.fn((filter) => ({
-              first: jest.fn(async () => (filter.id === 'parent-1' ? parent : undefined)),
+              // The bell re-reads the successor under the gate (Codex #4971 r6 P1).
+              first: jest.fn(async () => (filter.id === 'parent-1' ? parent : (filter.id === 'succ-term-1' ? hookSuccessor : undefined))),
               update: jest.fn(async (payload) => { updates.push({ filter, payload }); return 1; }),
               whereNull: jest.fn(() => ({ update: jest.fn(async (payload) => { updates.push({ filter, payload }); return 1; }) })),
             })),
@@ -3701,9 +3736,16 @@ describe('termite annual renewal charge', () => {
         }
         if (table === 'annual_prepay_terms') {
           return {
-            where: jest.fn(() => ({
+            where: jest.fn((filter) => ({
               update: jest.fn(async (payload) => { updates.push(payload); return 1; }),
-              first: jest.fn(async (col) => (col === 'status' ? { status: 'cancelled' } : parent)),
+              // The withdrawal re-reads the successor under the gate (Codex
+              // #4971 r6 P1); the post-void status read and the parent read
+              // answer as before.
+              first: jest.fn(async (col) => {
+                if (col === 'status') return { status: 'cancelled' };
+                const owed = rows.find((row) => row.id === filter?.id);
+                return owed && !col ? owed : parent;
+              }),
             })),
           };
         }

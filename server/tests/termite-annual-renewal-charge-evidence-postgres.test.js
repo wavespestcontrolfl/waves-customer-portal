@@ -135,12 +135,21 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
     ({ etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et'));
   });
 
+  // The renewal gate's session lock borrows a pooled connection this suite's
+  // db mock does not have — run it inline (the lock mechanics have their own
+  // real-Postgres suite, annual-prepay-parent-decision-lock-postgres).
+  let originalLock;
   beforeEach(async () => {
     jest.clearAllMocks();
     fixture = await createScratchDb();
     db = fixture.db;
+    originalLock = Renewals.withParentDecisionLock;
+    Renewals.withParentDecisionLock = (_termId, fn) => fn();
   });
-  afterEach(async () => { if (fixture) await fixture.destroy(); });
+  afterEach(async () => {
+    Renewals.withParentDecisionLock = originalLock;
+    if (fixture) await fixture.destroy();
+  });
 
   const daysFromToday = (n) => etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), n));
 
@@ -589,6 +598,21 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       }));
     });
 
+    test('the late-paid alert is decided under the gate: a parent restored while it waited is never belled', async () => {
+      const { parent, parentInvoice, successor } = await refundRace();
+      await db('annual_prepay_terms').where({ id: parent.id }).update({ status: 'cancelled', updated_at: new Date() });
+      Renewals.withParentDecisionLock = async (_termId, fn) => {
+        // The refund bounced and the prior year was reinstated before the gate.
+        await db('payments').where({ stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id }).update({ status: 'paid', refund_status: null });
+        await db('annual_prepay_terms').where({ id: parent.id }).update({ status: 'active' });
+        return fn();
+      };
+      const fresh = await db('annual_prepay_terms').where({ id: successor.id }).first();
+      await expect(Charge._private.bellLatePaidRenewal(fresh, db)).resolves.toBe('not_owed');
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      expect((await db('annual_prepay_terms').where({ id: successor.id }).first()).renewal_late_paid_belled_at).toBeNull();
+    });
+
     test('a normal renewal (no refund) still stamps the parent renewed', async () => {
       const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000) });
       const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
@@ -682,6 +706,45 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const row = await db('annual_prepay_terms').where({ id: successor.id }).first();
       expect(row.status).toBe('payment_pending');
       expect(row.renewal_sweep_deferred_at).not.toBeNull();
+    });
+
+    // Codex #4971 r6 P1 (structural): the withdrawal's pre-gate verdict is
+    // never its authority. The parent's refund is reversed (a bounced refund
+    // restores the payment) while the withdrawal waits for the gate: under
+    // the gate the refusal is recomputed, no longer holds — nothing is
+    // voided, no alert, the row is rotated.
+    test('the parent\'s payment restored between the outside check and the gate: no void, no alert, rotated', async () => {
+      const { parentInvoice, successor } = await sentRenewalOfRefundableParent();
+      const [refund] = await db('payments').insert({ status: 'refunded', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id }).returning('id');
+      Renewals3.withParentDecisionLock = async (_termId, fn) => {
+        await db('payments').where({ id: refund.id }).update({ status: 'paid' }); // the refund bounced
+        return fn();
+      };
+
+      const c = counts();
+      await Charge._private.withdrawSuccessorsOfIneligibleParents({ conn: db, limit: 50, counts: c });
+
+      expect(c).toEqual({ withdrawScanned: 1, withdrawn: 0 });
+      expect(mockVoidInvoice).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      const row = await db('annual_prepay_terms').where({ id: successor.id }).first();
+      expect(row.status).toBe('payment_pending');
+      expect(row.renewal_sweep_deferred_at).not.toBeNull();
+    });
+
+    test('a refusal that still holds under the gate withdraws exactly as before', async () => {
+      const { parentInvoice, renewalInvoice, successor } = await sentRenewalOfRefundableParent();
+      await db('payments').insert({ status: 'refunded', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id });
+      let gateTaken = false;
+      Renewals3.withParentDecisionLock = async (_termId, fn) => { gateTaken = true; return fn(); };
+
+      const c = counts();
+      await Charge._private.withdrawSuccessorsOfIneligibleParents({ conn: db, limit: 50, counts: c });
+
+      expect(gateTaken).toBe(true);
+      expect(c).toEqual({ withdrawScanned: 1, withdrawn: 1 });
+      expect(mockVoidInvoice).toHaveBeenCalledWith(renewalInvoice.id, { requireUnsettled: true });
+      expect((await db('annual_prepay_terms').where({ id: successor.id }).first()).status).toBe('cancelled');
     });
 
     test('a lost staff bell voids nothing — rotated to ring again', async () => {

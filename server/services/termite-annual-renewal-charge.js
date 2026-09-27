@@ -1093,10 +1093,30 @@ async function chargeFollowThroughOwed(conn, successor) {
 // Returns 'retired', 'presented' (left to the grace lapse) or
 // 'manual_review' (a partial credit — belled), each only once its bell
 // persisted, or 'deferred' (rotated: money in motion, a transient or
-// settled void refusal, or a lost bell — the caller writes no exclusion).
-async function withdrawRenewalSuccessor(successor, reason, conn = db, { lapseOwnsPresented = false } = {}) {
-  if (!successor.renewed_from_term_id) return withdrawSuccessorUnderGate(successor, reason, conn, lapseOwnsPresented);
-  return withRenewalGate(successor, () => withdrawSuccessorUnderGate(successor, reason, conn, lapseOwnsPresented));
+// settled void refusal, a lost bell, or the reason no longer holding — the
+// caller writes no exclusion).
+//
+// Codex #4971 r6 P1 (structural): a decision computed BEFORE the gate is
+// never the authority for an action taken UNDER it. The caller's refusal
+// only labels the bell; under the held gate this re-reads the successor and
+// its parent and recomputes the refusal itself (withdrawalRefusalUnderGate
+// — successorRecoveryRefusal: the parent durably ineligible, or the
+// successor's own grace window closed). A refusal that no longer holds, or
+// is no longer durable (the parent's payment or coverage restored in
+// between), withdraws nothing: no bell, no void — rotated for a later tick.
+async function withdrawRenewalSuccessor(successor, label, conn = db) {
+  if (!successor.renewed_from_term_id) return withdrawSuccessorUnderGate(successor, label, conn);
+  return withRenewalGate(successor, () => withdrawSuccessorUnderGate(successor, label, conn));
+}
+
+// The withdrawal's own verdict, read under the gate: null when the renewal
+// must NOT be withdrawn now, else the recomputed durable refusal (with the
+// fresh successor row).
+async function withdrawalRefusalUnderGate(successor, conn) {
+  const fresh = await conn('annual_prepay_terms').where({ id: successor.id }).first();
+  if (fresh?.status !== PAYMENT_PENDING_STATUS) return null;
+  const refusal = await successorRecoveryRefusal(fresh, conn);
+  return refusal?.retire ? { ...refusal, successor: fresh } : null;
 }
 
 // Codex #4971 r5 P2 (lock order): every renewal action on a successor holds
@@ -1109,7 +1129,15 @@ function withRenewalGate(successor, fn) {
   return require('./annual-prepay-renewals').withParentDecisionLock(successor.renewed_from_term_id, fn, { alsoTermIds: [successor.id] });
 }
 
-async function withdrawSuccessorUnderGate(successor, reason, conn, lapseOwnsPresented) {
+async function withdrawSuccessorUnderGate(original, label, conn) {
+  const refusal = await withdrawalRefusalUnderGate(original, conn);
+  if (!refusal) {
+    logger.info(`[termite-annual-renewal] withdrawal of successor ${original.id} skipped — ${label} no longer holds under the gate`);
+    await stampSweepDeferred(original, conn);
+    return 'deferred';
+  }
+  const { successor, lapseOwnsPresented } = refusal;
+  const reason = label;
   if (lapseOwnsPresented && (await renewalWasPresented(conn, successor))) {
     const told = await bellOrRotate(successor, 'ineligible', `${reason} — the renewal was already presented to the customer, so the grace-lapse pass will resolve it`, conn);
     return told ? 'presented' : 'deferred';
@@ -1230,7 +1258,18 @@ async function onRenewalSuccessorPaid(successor, conn = db) {
 // demotion that can still come back) AND the renewal was paid AFTER that
 // change: a renewal paid in October whose prior year is refunded or
 // disputed the next March was a legitimate payment, not a late one.
-async function bellLatePaidRenewal(successor, conn) {
+//
+// Codex #4971 r6 P1 (audit): decided and rung UNDER the renewal gate, on
+// terms re-read there — a parent whose payment or coverage was restored, or
+// a successor already alerted or no longer active, is never belled on a
+// verdict read before the gate.
+async function bellLatePaidRenewal(original, conn) {
+  return withRenewalGate(original, () => bellLatePaidRenewalUnderGate(original, conn));
+}
+
+async function bellLatePaidRenewalUnderGate(original, conn) {
+  const successor = await conn('annual_prepay_terms').where({ id: original.id }).first();
+  if (successor?.status !== 'active' || successor.renewal_late_paid_belled_at) return 'not_owed';
   const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
   const refusal = await parentRefusalForSuccessor(conn, successor, parent);
   if (refusal.eligible || !refusal.durable) return 'not_owed';
@@ -1350,7 +1389,7 @@ async function bellOrRotate(term, kind, reason, conn) {
 async function handleChargeRefusal(successor, refusal, conn) {
   if (refusal.reason === 'already_attempted') return { status: 'already_attempted' };
   if (refusal.retire) {
-    const retired = await withdrawRenewalSuccessor(successor, refusal.reason, conn, { lapseOwnsPresented: refusal.lapseOwnsPresented });
+    const retired = await withdrawRenewalSuccessor(successor, refusal.reason, conn);
     // Anything but a retry leaves the row decided — keep leg 7a off it.
     if (retired !== 'deferred' && retired !== 'retired') await stampRenewalChargeSkip(successor, `ineligible:${refusal.reason}`, conn);
     return { status: 'ineligible', reason: refusal.reason, retired };
@@ -1570,9 +1609,8 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     // submission (and only then gets to decide).
     if (successor.renewed_from_term_id) {
       const outcome = await withRenewalGate(successor, async () => {
-        const freshParent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
-        const parentEligibility = await parentRefusalForSuccessor(conn, successor, freshParent);
-        if (!parentEligibility.eligible) return { blocked: true, ...parentEligibility };
+        const refusal = await chargeRefusalUnderGate(successor, conn);
+        if (refusal) return { blocked: true, ...refusal };
         return { blocked: false, result: await submitCharge() };
       });
       if (outcome.blocked) return handleRefusalAtSubmission(successor, outcome, conn);
@@ -1624,6 +1662,23 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     await followThroughChargeOutcome(successor, 'ambiguous', 'post_charge_status_unverified', conn, { first: true });
     return { status: 'ambiguous', reason: 'post_charge_status_unverified' };
   }
+}
+
+// Codex #4971 r6 P1 (audit, structural rule: a decision computed before the
+// gate is never the authority for an action under it): the charge's last
+// check runs UNDER the held gate and re-reads BOTH terms — the successor
+// itself (still payment_pending and not dispute-suspended: a withdrawal or
+// a lapse that won the gate first leaves nothing to charge) and its parent
+// (parentRefusalForSuccessor). The invoice's own collectibility is
+// re-judged by the charge's claim under the invoice row lock. null = charge.
+async function chargeRefusalUnderGate(successor, conn) {
+  const fresh = await conn('annual_prepay_terms').where({ id: successor.id }).first();
+  if (fresh?.status !== PAYMENT_PENDING_STATUS || fresh.dispute_suspended_at) {
+    return { eligible: false, reason: `successor_status_${fresh?.dispute_suspended_at ? 'dispute_suspended' : fresh?.status || 'missing'}`, durable: true };
+  }
+  const freshParent = await conn('annual_prepay_terms').where({ id: fresh.renewed_from_term_id }).first();
+  const parentEligibility = await parentRefusalForSuccessor(conn, fresh, freshParent);
+  return parentEligibility.eligible ? null : parentEligibility;
 }
 
 // The parent re-check under withParentDecisionLock refused AFTER the
@@ -2781,7 +2836,7 @@ async function refuseRecoveryDelivery(successor, conn, context) {
   const refusal = await successorRecoveryRefusal(successor, conn);
   if (!refusal) return null;
   if (refusal.retire) {
-    const outcome = await withdrawRenewalSuccessor(successor, refusal.reason, conn, { lapseOwnsPresented: refusal.lapseOwnsPresented });
+    const outcome = await withdrawRenewalSuccessor(successor, refusal.reason, conn);
     return outcome === 'deferred' ? 'deferred' : 'handled';
   }
   await ringRenewalBell(successor, 'ineligible', `${context}, and ${refusal.reason} — no invoice sent; it will be re-checked automatically`);
