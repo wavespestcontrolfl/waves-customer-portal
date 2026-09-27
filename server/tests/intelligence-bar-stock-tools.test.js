@@ -496,14 +496,35 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toEqual({ productId: ALPINE.id });
   });
 
-  test('a "Taurus ST" voice-typo grounds via the distinctive "taurus" token ("ST" is not a formulation code)', async () => {
+  test('a "Taurus ST" voice-typo is an explicit target that does not resolve: clarify first, then a "yes" grounds', async () => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
-    const result = await resolveInventoryWriteTarget({
+    const first = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock',
       prompt: 'Can you add 12 fluid ounces of Taurus ST to our inventory',
       preview: { product: { id: TAURUS.id, name: TAURUS.name } },
     });
-    expect(result).toEqual({ productId: TAURUS.id });
+    expect(first).toMatchObject({ code: 'target_clarification_required' });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['Can you add 12 fluid ounces of Taurus ST to our inventory']);
+    const confirmed = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: 'Yes',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 12,
+    });
+    expect(confirmed).toEqual({ productId: TAURUS.id });
+  });
+
+  test.each([
+    'Restock Unlisted Chemical instead of Taurus SC',
+    'We bought Unlisted Chemical instead of Taurus SC, add 2 jugs',
+    'Add 2 jugs of something new, not Taurus SC',
+  ])('an unresolved or negated mention never grounds the preview product (%s)', async (prompt) => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt,
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
   });
 
   // "SE" IS a real formulation code (suspension emulsion), and the catalog
@@ -966,7 +987,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
 
       test.each([
         "We just bought a thing of Taurus as to add this to your inventory I think it's 78 ounces",
-        'Can you add 12 fluid ounces of Taurus ST to our inventory',
+        'We picked up 12 fluid ounces of Taurus today',
       ])('a real production prompt still grounds via the distinctive "taurus" token (%s)', async (prompt) => {
         setGroundingDb({ products: [TAURUS, ALPINE] });
         const result = await resolveInventoryWriteTarget({

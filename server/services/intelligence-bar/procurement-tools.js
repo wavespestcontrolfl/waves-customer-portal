@@ -1207,6 +1207,14 @@ function hasGrammaticalTie(rawText, spans) {
 const BODY_CUE_WORD_RE = /\b(?:notes?|message|text|sms|email|reply|comment|instructions|memo)\b/gi;
 const BODY_CUE_PHRASE_RE = /\b(?:saying|that\s+says|reading|with\s+the\s+(?:text|body|message|note|content))\b/gi;
 const BODY_CUE_WINDOW = 40;
+// A mention right after a negation or exclusion ("instead of Taurus SC",
+// "not Taurus", "rather than Alpine WSG") is the product the operator does
+// NOT want, so it never names a target.
+const NEGATION_BEFORE_RE = /\b(?:not|no|never|without|except|besides|instead\s+of|rather\s+than|other\s+than)\s+(?:(?:a|an|the|any|some|our|that|this)\s+)?$/i;
+function negatedMention(rawText, start) {
+  return NEGATION_BEFORE_RE.test(rawText.slice(Math.max(0, start - 30), start));
+}
+
 function bodyRegionStart(rawText) {
   let earliest = Infinity;
   for (const match of rawText.matchAll(BODY_CUE_WORD_RE)) {
@@ -1286,7 +1294,7 @@ async function productsNamedIn(rawText) {
         .map((token) => ({ words: [token], weak: true })),
     ];
     const phrases = candidates
-      .map((phrase) => ({ ...phrase, spans: findPhraseSpansInRawText(rawText, phrase.words).filter((span) => span.start < bodyStart) }))
+      .map((phrase) => ({ ...phrase, spans: findPhraseSpansInRawText(rawText, phrase.words).filter((span) => span.start < bodyStart && !negatedMention(rawText, span.start)) }))
       .filter((phrase) => phrase.spans.length > 0);
     if (!phrases.length) continue;
     // Single-word evidence needs a grammatical tie (see hasGrammaticalTie)
@@ -1301,16 +1309,14 @@ async function productsNamedIn(rawText) {
   return { named, conflict };
 }
 
-// Does the operator's own text (this prompt, or — only when the call site
-// opts in AND this prompt names nothing AND this prompt is a bare follow-up
-// — their own recent prior turns) ground the preview's product? Returns
-// { productId } (allow), { mismatch: true } (a different single product was
-// named — target_relationship_mismatch), or null (no grounding found; the
-// caller keeps its original clarification refusal, which also covers "named
-// 2+ products"). `allowPriorTurns` is each call site's own explicit policy —
-// a selector that failed to resolve, or a deictic reference with no page
-// context, must stand on the CURRENT prompt alone.
-async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { allowPriorTurns = false, observedSeq = null } = {}) {
+// Does the operator's own text (this prompt, or — only when this prompt
+// names nothing AND is a bare follow-up — their own recent prior turns)
+// ground the preview's product? Returns { productId } (allow),
+// { mismatch: true } (a different single product was named —
+// target_relationship_mismatch), or null (no grounding found; the caller
+// keeps its original clarification refusal, which also covers "named 2+
+// products"). Called only where the grammar found no target at all.
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null } = {}) {
   if (!preview?.product?.id) return null;
   const decide = (named) => {
     if (named.size !== 1) return null; // 0 = nothing to ground on; 2+ = ambiguous, refuse
@@ -1332,7 +1338,7 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
   const fromCurrent = decide(current.named);
   if (fromCurrent) return fromCurrent;
   if (current.named.size > 0) return null; // current prompt named something (ambiguous) — never fall back
-  if (!allowPriorTurns || !isBareFollowUp(prompt)) return null;
+  if (!isBareFollowUp(prompt)) return null;
   // A stale tab's view of the thread must never ground off turns it never
   // saw (Codex round-2 P2, two tabs on one thread): `observedSeq` is the
   // requesting tab's own OBSERVED tail seq, threaded in from the route's
@@ -1410,12 +1416,6 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // turns — see resolveByOperatorGrounding. `threadSeq` (the caller's
   // observed thread tail) rides along on every call so a stale tab never
   // reads prior turns it never saw.
-  const groundedOrUnavailable = async (clarification, options) => {
-    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId, { ...options, observedSeq: threadSeq });
-    if (fallback?.productId) return { productId: fallback.productId };
-    if (fallback?.mismatch) return { ...unavailable, code: 'target_relationship_mismatch' };
-    return clarification;
-  };
   const amount = `(?:the\\s+)?${quantity}\\s+${unit}\\s+of\\s+`;
   const patterns = [
     /^write off the (?:spilled|damaged) (?:bag|bottle|container|case|jug) of\s+(.+)$/i,
@@ -1427,11 +1427,15 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     /^(?:restock|reorder)\s+(.+)$/i,
   ];
   const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
-  // No pattern matched at all: this is the ONLY site where a prior turn may
-  // stand in, and only when the current prompt is itself a bare follow-up
-  // ("1 bottle", "Yes") — resolveByOperatorGrounding enforces the bareness
-  // check; this just states the site's policy.
-  if (!selected) return groundedOrUnavailable(unavailable, { allowPriorTurns: true });
+  // No pattern matched at all, so the operator named no target the grammar
+  // can read: this is the one place the free-phrasing fallback runs (and,
+  // for a bare follow-up like "1 bottle", recent operator turns).
+  if (!selected) {
+    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq });
+    if (fallback?.productId) return { productId: fallback.productId };
+    if (fallback?.mismatch) return { ...unavailable, code: 'target_relationship_mismatch' };
+    return unavailable;
+  }
   let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
   let literal = null;
   const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);
@@ -1451,17 +1455,14 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   const productId = deictic && inventoryPage ? pageData.productId || pageData.product_id || query.get('productId')
     : name.replace(/^product\s+/i, '');
   const selector = UUID_RE.test(String(productId || '')) ? { product_id: productId } : { product_name: name };
-  // A deictic reference ("this product") with no page context to resolve it
-  // names nothing itself — the current prompt may still separately name the
-  // preview product, but a prior turn never substitutes for a missing page
-  // selection.
-  if (deictic && !selector.product_id) return groundedOrUnavailable(unavailable, { allowPriorTurns: false });
+  // The grammar found an explicit target here (a page deictic, or a named
+  // selector below). When that target can't be resolved, the operator asked
+  // for something specific the catalog doesn't show, so they are asked to
+  // clarify; the free-phrasing fallback never substitutes another mention
+  // ("Restock Unlisted Chemical instead of Taurus SC").
+  if (deictic && !selector.product_id) return unavailable;
   const resolved = literal || await resolveProduct(selector);
-  // The grammar extracted a selector but it didn't resolve (e.g. "Restock
-  // Unlisted Chemical") — the current prompt may still name the preview
-  // product elsewhere in free phrasing, but a prior turn never rescues a
-  // name the operator just typed and got wrong.
-  if (resolved.error) return groundedOrUnavailable({ ...resolved, code: 'target_clarification_required' }, { allowPriorTurns: false });
+  if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };
 }
