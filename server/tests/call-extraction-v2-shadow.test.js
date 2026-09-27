@@ -102,8 +102,18 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v12');
-    expect(PROMPT_HASH).toMatch(/^v12-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v13');
+    expect(PROMPT_HASH).toMatch(/^v13-[a-f0-9]{12}$/);
+  });
+
+  test('includes the reschedule agreement and moved-appointment rules (schema 1.16.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('caller_accepted_slot: for a booking or reschedule that ENDS with an agreed slot');
+    expect(prompt).toContain('Judge the WHOLE call');
+    expect(prompt).toContain('moved_appointment_date: for status "reschedule_requested" ONLY');
+    expect(prompt).toContain('never infer it from the new slot');
+    expect(prompt).toContain('scheduling.caller_accepted_slot (when true');
+    expect(prompt).toContain('ONE speaker\'s words from ONE turn');
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -263,7 +273,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.15.0');
+    expect(SCHEMA_VERSION).toBe('1.16.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
