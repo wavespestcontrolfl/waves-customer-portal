@@ -15,9 +15,10 @@
  *   - the agent's commitment (/scheduling/agent_committed_booking, speaker
  *     "agent") and the caller's acceptance (/scheduling/caller_accepted_slot,
  *     speaker "caller") each appear word for word in one turn of that
- *     speaker, in sentences free of negation, hedges and open conditions
- *     (the booking check's own screens, call-triage-flags.js — a quote cut
- *     from "We will not see you Thursday" does not ground);
+ *     speaker, in sentences that are not questions and are free of
+ *     negation, hedges and open conditions (the booking check's own
+ *     screens, call-triage-flags.js — a quote cut from "We will not see you
+ *     Thursday" or "Will we see you Thursday at two?" does not ground);
  *   - an agreed-slot quote (/scheduling/confirmed_start_at) appears word for
  *     word in one turn and contains every recorded slot word; the hour word
  *     is one hour ("two", "2", "noon") and is the slot's; the period words
@@ -27,7 +28,12 @@
  *     moved appointment's date;
  *   - when the extraction names the moved appointment, a quote pinned to
  *     /scheduling/moved_appointment_date appears word for word in one turn,
- *     contains moved_appointment_words, and those words name that date.
+ *     in sentences free of negation, hedges and conditions ("Do not move my
+ *     September 24th visit" does not ground; a question may), contains
+ *     moved_appointment_words, and those words name that date.
+ * Day words name one date: the next that fits from the call's day ("the
+ * 1st" said on September 30 is October 1, never December 1); "next
+ * Thursday", which can mean two dates, names none.
  * Which words are the final agreed ones (corrections, approximations,
  * ranges) is the extraction's judgement, as the owner ruled. A quote shorter
  * than three words must be the speaker's whole turn ("Yes."), never a
@@ -41,7 +47,7 @@
 
 const { etWallClockOfConfirmedStart, turnHasNegationOrHedge, turnHasUnresolvedConditional } = require('./call-triage-flags');
 const { statedDateComponents } = require('./reschedule-date-evidence');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays, validCalendarDate } = require('../utils/datetime-et');
 
 const MIN_FRAGMENT_WORDS = 3;
 
@@ -76,7 +82,9 @@ function parseTurns(transcript) {
     const m = line.match(/^\s*(agent|caller)\s*:\s*(.*)$/i);
     if (!m) return null;
     // Sentences (on . ! ?) with their normalized text, for the screen below.
-    const sentences = joinMeridiem(m[2]).split(/[.!?]+/).map(normalize).filter(Boolean);
+    // Each keeps whether it was a question ("Will we see you Thursday at two?").
+    const sentences = (joinMeridiem(m[2]).match(/[^.!?]+[.!?]*/g) || [])
+      .map((raw) => ({ ns: normalize(raw), question: /\?/.test(raw) })).filter((x) => x.ns);
     turns.push({ agent: m[1].toLowerCase() === 'agent', ns: normalize(m[2]), sentences });
   }
   return turns;
@@ -97,7 +105,7 @@ function sentencesAround(turn, quote) {
   const qt = normalize(quote).split(' ');
   const starts = [];
   let at = 0;
-  for (const sentence of turn.sentences) { starts.push(at); at += sentence.split(' ').length; }
+  for (const sentence of turn.sentences) { starts.push(at); at += sentence.ns.split(' ').length; }
   const tt = turn.ns.split(' ');
   const hits = [];
   for (let i = 0; i + qt.length <= tt.length; i += 1) {
@@ -105,19 +113,22 @@ function sentencesAround(turn, quote) {
   }
   return turn.sentences.filter((sentence, n) => {
     const from = starts[n];
-    const to = from + sentence.split(' ').length;
+    const to = from + sentence.ns.split(' ').length;
     return hits.some(([a, b]) => a < to && b > from);
-  }).join(' ');
+  });
 }
 
 // Does the extraction's reading of this quote stand against the words said
 // around it? The sentences it sits in must carry no negation, hedge or open
 // condition — the booking check's own screens (call-triage-flags.js), applied
 // to the quote's sentences rather than its whole turn so an unrelated "No
-// worries." earlier in the turn does not void a real commitment.
-function plainlySaid(turn, quote) {
+// worries." earlier in the turn does not void a real commitment — and, for a
+// commitment, acceptance or slot, must not be a question.
+function plainlySaid(turn, quote, askingFails) {
   const around = sentencesAround(turn, quote);
-  return Boolean(around) && !turnHasNegationOrHedge(around) && !turnHasUnresolvedConditional(around);
+  const text = around.map((x) => x.ns).join(' ');
+  return Boolean(text) && !turnHasNegationOrHedge(text) && !turnHasUnresolvedConditional(text)
+    && !(askingFails && around.some((x) => x.question));
 }
 
 // Does this quote hold these recorded words, word for word?
@@ -151,26 +162,47 @@ function statedHour(hourWords, periodWords) {
 // bounded to this week or next below); "tonight", "this morning", "this
 // afternoon" and "this evening" are the call's own day.
 const TODAY_WORDS = /^\s*(?:tonight|this (?:morning|afternoon|evening))\s*$/i;
-const WEEKDAY_LEAD = /^\s*(?:this coming|this|coming|next)\s+/i;
+// "This Thursday" / "this coming Thursday" is the nearest one. "Next
+// Thursday" is left to the grammar, which does not read it: it can mean
+// either of two dates, so it grounds none.
+const NEAREST_LEAD = /^\s*(?:this coming|this|coming)\s+/i;
+
+function isoDate(y, m, d) {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+// The one date these stated components name, counting from the call's ET
+// day: a stated year names its date; otherwise the NEXT date that fits —
+// a month and day this year or next, a day of the month this month or
+// next, a weekday its next occurrence (today included). Null when none.
+function nearestDate(said, started) {
+  const today = etDateString(started);
+  const [ty, tm] = today.split('-').map(Number);
+  if (said.year !== undefined) return isoDate(said.year, said.month, said.day);
+  if (said.month !== undefined) {
+    const thisYear = isoDate(ty, said.month, said.day);
+    return thisYear >= today ? thisYear : isoDate(ty + 1, said.month, said.day);
+  }
+  if (said.day !== undefined) {
+    const thisMonth = isoDate(ty, tm, said.day);
+    if (thisMonth >= today && validCalendarDate(thisMonth)) return thisMonth;
+    const next = isoDate(tm === 12 ? ty + 1 : ty, tm === 12 ? 1 : tm + 1, said.day);
+    return validCalendarDate(next) ? next : null;
+  }
+  if (said.weekday !== undefined) return etDateString(addETDays(started, (said.weekday - etParts(started).dayOfWeek + 7) % 7));
+  return null;
+}
 
 // Do these words name `date` (YYYY-MM-DD)? The words must be exactly one
 // date the shared reschedule date grammar reads
 // (reschedule-date-evidence.js statedDateComponents), every component they
-// state must be the date's, and what they leave unstated bounds how far
-// ahead they reach from the call's ET day: a weekday alone this week or
-// next (13 days), a day of the month alone this month or next (62), a
-// month and day this year or next (366).
+// state must be the date's, and the date must be the one they name — the
+// next that fits (nearestDate), never a later one.
 function namesDate(words, date, started) {
-  const said = statedDateComponents(String(words).replace(TODAY_WORDS, 'today').replace(WEEKDAY_LEAD, ''), started);
+  const said = statedDateComponents(String(words).replace(TODAY_WORDS, 'today').replace(NEAREST_LEAD, ''), started);
   if (!said) return false;
-  const [year, month, day] = date.split('-').map(Number);
-  const is = { year, month, day, weekday: new Date(`${date}T12:00:00Z`).getUTCDay() };
-  if (!['year', 'month', 'day', 'weekday'].every((k) => said[k] === undefined || said[k] === is[k])) return false;
-  const ahead = (Date.UTC(year, month - 1, day) - Date.parse(`${etDateString(started)}T00:00:00Z`)) / 86400000;
-  let reach = 366;
-  if (said.day === undefined) reach = 13;
-  else if (said.month === undefined) reach = 62;
-  return said.year !== undefined || (ahead >= 0 && ahead <= reach);
+  const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
+  return (said.weekday === undefined || said.weekday === weekday) && nearestDate(said, started) === date;
 }
 
 // Do the recorded slot words state exactly this slot? No day words only
@@ -188,11 +220,14 @@ function movedAppointmentGrounded(scheduling, quotes, started) {
     && quotes.some((q) => holds(q, words));
 }
 
-const SCREENED_FIELDS = new Set([
+// Every quote the grounding uses is screened; a question fails a statement
+// of agreement, but a caller naming the visit to move usually asks ("Can you
+// move my September 24th visit?").
+const ASKING_FAILS = new Set([
   '/scheduling/agent_committed_booking', '/scheduling/caller_accepted_slot', '/scheduling/confirmed_start_at',
 ]);
 function isPlain(holding, quote, fieldPath) {
-  return holding.length > 0 && (!SCREENED_FIELDS.has(fieldPath) || holding.every((turn) => plainlySaid(turn, quote)));
+  return holding.length > 0 && holding.every((turn) => plainlySaid(turn, quote, ASKING_FAILS.has(fieldPath)));
 }
 
 /**
@@ -212,8 +247,8 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return fail('unparseable_transcript');
 
   // The quotes pinned to one field that appear word for word in a turn of
-  // their stated speaker (and, when given, only that speaker's) — for the
-  // commitment, acceptance and slot, plainly said wherever they appear.
+  // their stated speaker (and, when given, only that speaker's), plainly
+  // said wherever they appear (isPlain).
   const grounded = (fieldPath, speaker = null) => (Array.isArray(v2.evidence) ? v2.evidence : [])
     .filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker)
       && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath))

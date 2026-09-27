@@ -94,6 +94,9 @@ describe('groundRescheduleAgreement', () => {
     expect(said('If the tech is free we will see you Thursday at two in the afternoon.', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
     expect(said('We will see you Thursday at two in the afternoon.', 'Thursday at two works for me, but actually no it does not.'))
       .toMatchObject({ ok: false, reason: 'caller_acceptance_ungrounded' });
+    // Codex #5092 r8: a question is not a commitment or an acceptance.
+    expect(said('Will we see you Thursday at two in the afternoon?', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
+    expect(said('We will see you Thursday at two in the afternoon.', 'Thursday at two works for me?')).toMatchObject({ ok: false, reason: 'caller_acceptance_ungrounded' });
     // Another sentence of the turn is not screened: "No worries." does not void it.
     expect(said('No worries. We will see you Thursday at two in the afternoon.', `Great. ${OK_CALLER}`).ok).toBe(true);
   });
@@ -150,16 +153,20 @@ describe('groundRescheduleAgreement', () => {
   // (reschedule-date-evidence.js), abbreviations included.
   test('day words are one date the shared grammar reads, bounded by what they leave unstated', () => {
     const on = (day, slot = THURSDAY_2PM) => agreedAt(slot, `We will see you ${day} at two in the afternoon.`, { day, hour: 'two', period: 'in the afternoon' });
-    for (const day of ['Thurs.', 'Thu', 'next Thursday', 'this Thursday', 'tomorrow', 'Sept. 24th', 'September 24', 'the 24th', '9/24', 'Thurs., Sept. 24']) {
+    for (const day of ['Thurs.', 'Thu', 'this Thursday', 'tomorrow', 'Sept. 24th', 'September 24', 'the 24th', '9/24', 'Thurs., Sept. 24']) {
       expect([day, on(day).ok]).toEqual([day, true]);
     }
-    // Wrong day, not one date, or out of reach.
-    for (const day of ['Friday', 'the 25th', 'Thursday or Friday', 'sometime Thursday', 'Wednesday, September 24']) {
+    // Wrong day, not one date, or two dates ("next Thursday").
+    for (const day of ['Friday', 'the 25th', 'Thursday or Friday', 'sometime Thursday', 'Wednesday, September 24', 'next Thursday']) {
       expect([day, on(day).reason]).toEqual([day, 'agreed_slot_words_mismatch']);
     }
-    expect(on('Thursday', '2026-10-08T14:00:00-04:00').ok).toBe(false); // three weeks out: not this week or next
-    expect(on('the 24th', '2026-12-24T14:00:00-05:00').ok).toBe(false); // three months out
+    // Codex #5092 r8: day words name the NEXT date that fits, never a later one.
+    expect(on('Thursday', '2026-10-01T14:00:00-04:00').ok).toBe(false); // a week after the next Thursday
+    expect(on('the 24th', '2026-10-24T14:00:00-04:00').ok).toBe(false); // September 24 is still ahead
+    expect(on('the 1st', '2026-10-01T14:00:00-04:00').ok).toBe(true);
+    expect(on('the 1st', '2026-12-01T14:00:00-05:00').ok).toBe(false);
     expect(on('December 24th', '2026-12-24T14:00:00-05:00').ok).toBe(true);
+    expect(on('September 22nd', '2027-09-22T14:00:00-04:00').ok).toBe(true); // passed this year: next year's
   });
 
   test('a weekday beside an explicit date describes that date', () => {
@@ -187,6 +194,9 @@ describe('groundRescheduleAgreement', () => {
     expect(moved('my September 24th visit', null)).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
     expect(moved('my September 24th visit', 'the 24th')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
     expect(moved('my September 24th visit', 'September 24th', { callerOpening: 'Can you move my next visit?' }))
+      .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    // Codex #5092 r8: a negated moved-date sentence does not name the visit to move.
+    expect(moved('my September 24th visit', 'September 24th', { callerOpening: 'Do not move my September 24th visit.' }))
       .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
     // With no day words, the slot must keep the moved appointment's date.
     expect(moved('my September 25th visit', 'September 25th', { movedDate: '2026-09-25' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
