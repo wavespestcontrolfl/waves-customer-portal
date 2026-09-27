@@ -30,8 +30,9 @@ function makeThreadsDb({ threads = [], turns = [] }) {
       const api = {
         where(colOrFn, op, val) {
           if (arguments.length === 2) {
-            // where(col, val)
-            rows = rows.filter((r) => r[colOrFn] === op);
+            // where(col, val); a row without `seeded` is an ordinary turn (the
+            // column's default is false).
+            rows = rows.filter((r) => (colOrFn === 'seeded' ? Boolean(r.seeded) : r[colOrFn]) === op);
           } else if (arguments.length === 3 && op === '>=' && val && val.__minAgeMinutes != null) {
             const cutoff = Date.now() - val.__minAgeMinutes * 60000;
             rows = rows.filter((r) => new Date(r.created_at).getTime() >= cutoff);
@@ -130,6 +131,18 @@ describe('IbThreads.recentOperatorTurns', () => {
     });
     const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
     expect(result).toEqual(['ok', 'yes', 'We bought a jug of Alpine WSG']);
+  });
+
+  test('turns seeded from client history (no real age) are skipped', async () => {
+    const IbThreads = withThreadsModule({
+      threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
+      turns: [
+        { thread_id: THREAD_ID, seq: 1, role: 'user', content: 'We bought a jug of Alpine WSG', seeded: true, created_at: minutesAgo(1) },
+        { thread_id: THREAD_ID, seq: 3, role: 'user', content: 'yes', created_at: minutesAgo(1) },
+      ],
+    });
+    const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
+    expect(result).toEqual(['yes']);
   });
 
   test('an assistant-only mention never comes back, even when it is the most recent turn', async () => {

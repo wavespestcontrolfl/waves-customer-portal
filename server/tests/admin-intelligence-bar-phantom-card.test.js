@@ -228,6 +228,23 @@ test('a claim after a semicolon is its own clause: the earlier-card mention befo
   });
 });
 
+test('a reply claiming more cards than this turn created gets a notice with the real count', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  scriptModelTurns([
+    [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+    [{ type: 'text', text: "I've prepared the confirmation cards below for both changes." }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(1);
+    expect(body.response).toContain('Only 1 confirmation card was created for this reply.');
+  });
+});
+
 test('a reply claiming a card that THIS turn actually created gets no notice', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({

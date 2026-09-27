@@ -621,6 +621,28 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toMatchObject({ code: 'target_clarification_required' });
   });
 
+  test('a qualifier inside a registered alias is part of the product identity ("Velista WDG" for "Velista")', async () => {
+    const VELISTA = { id: 'p-velista', name: 'Velista', active: true };
+    setGroundingDb({ products: [VELISTA, ALPINE], aliases: [{ product_id: VELISTA.id, alias_name: 'Velista WDG' }] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: 'We bought Velista WDG, two bottles',
+      preview: { product: { id: VELISTA.id, name: VELISTA.name } },
+    });
+    expect(result).toEqual({ productId: VELISTA.id });
+  });
+
+  test('the current turn\'s own operation words decide: "It arrived, one bottle" after "Order Taurus SC" is a receipt', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['Order Taurus SC']);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: 'It arrived, one bottle',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' },
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+    });
+    expect(result).toEqual({ productId: TAURUS.id });
+  });
+
   describe('the words must ask for the tool\'s own operation', () => {
     test.each([
       ['adjust_stock', 'We ordered Taurus SC', {}],

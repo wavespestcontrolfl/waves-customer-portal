@@ -1114,10 +1114,13 @@ function qualifiersPreceding(rawText, toIndex) {
 // of each phrase is checked: "We have Taurus SC on the shelf. We bought
 // Taurus SC 20%" conflicts on its second mention even though the first is
 // clean.
-function qualifierConflict(rawText, phrases, productNameRaw) {
+// `identityNames` are the product's catalog name and its registered aliases:
+// a qualifier in any of them is part of the product's identity ("Velista
+// WDG" is a registered alias of "Velista").
+function qualifierConflict(rawText, phrases, identityNames) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const nameTokens = new Set(normalizeForMatch(productNameRaw).split(' '));
-  const nameConcentrations = [...productNameRaw.matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1]));
+  const nameTokens = new Set(identityNames.flatMap((name) => normalizeForMatch(name).split(' ')));
+  const nameConcentrations = identityNames.flatMap((name) => [...String(name).matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1])));
   return phrases.some((phrase) => phrase.spans.some((span) => {
     const before = qualifiersPreceding(rawText, span.start);
     const after = qualifiersFollowing(rawText, span.end);
@@ -1315,7 +1318,8 @@ async function productsNamedIn(rawText) {
     // prior-turn fallback the way a genuine qualifier conflict does.
     const allSpans = phrases.flatMap((phrase) => phrase.spans);
     if (!isClosedVocabResidual(rawText, allSpans)) continue;
-    if (qualifierConflict(rawText, phrases, p.name)) { conflict = true; continue; }
+    const identityNames = [p.name, ...aliasRows.filter((a) => a.product_id === p.id).map((a) => a.alias_name)];
+    if (qualifierConflict(rawText, phrases, identityNames)) { conflict = true; continue; }
     named.add(p.id);
   }
   return { named, conflict };
@@ -1338,11 +1342,17 @@ const RECEIPT_WORDS = new Set(['bought', 'buy', 'purchase', 'purchased', 'picked
 const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock']);
 // A receipt phrase grounds only a restock: a count correction or a write-off
 // from the same words is never inferred.
+// texts[0] is the current prompt. Its own operation words decide; an earlier
+// turn's words count only when the current prompt has none, so "It arrived,
+// one bottle" after "Order Taurus SC" is a receipt.
 function operationMatches(toolName, texts, preview) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const words = texts.flatMap((text) => normalizeForMatch(text).split(' '));
-  const receipt = words.some((word) => RECEIPT_WORDS.has(word));
-  const order = words.some((word) => ORDER_WORDS.has(word));
+  const cues = (textList) => {
+    const words = textList.flatMap((text) => normalizeForMatch(text).split(' '));
+    return { receipt: words.some((word) => RECEIPT_WORDS.has(word)), order: words.some((word) => ORDER_WORDS.has(word)) };
+  };
+  const current = cues(texts.slice(0, 1));
+  const { receipt, order } = current.receipt || current.order ? current : cues(texts.slice(1));
   if (toolName === 'adjust_stock') {
     return receipt && !order && (preview.movement_type == null || preview.movement_type === 'restock');
   }

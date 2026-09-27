@@ -267,12 +267,26 @@ function sanitizeQueryImages(images) {
 const { CONTINUATION_TURN } = IbThreads;
 
 // Phantom-card guard (see the finalResponse assembly below): text that
-// claims a confirmation card. When the turn created no pending action, the
-// reply gets a notice. It is not narrowed to "new" cards: a claim that also
-// mentions a prior card ("a new card to replace the previous card") is
-// still a claim, and the notice's wording is true either way.
+// claims confirmation cards. When the reply claims more cards than the turn
+// created pending actions for, it gets a notice saying how many exist. It is
+// not narrowed to "new" cards: a claim that also mentions a prior card ("a
+// new card to replace the previous card") is still a claim, and the
+// notice's wording is true either way.
 const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bclick confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
-const PHANTOM_CARD_NOTICE = "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
+// How many cards a reply claims: an explicit count ("two confirmation
+// cards"), else 2 for a plural claim and 1 for a singular one.
+const CARD_COUNT_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
+function claimedCardCount(text) {
+  if (!CARD_CLAIM_RE.test(text)) return 0;
+  const explicit = String(text).match(/\b(\d+|one|two|three|four|five|six|both)\s+(?:(?:new|separate)\s+)?(?:confirmation\s+)?cards?\b/i);
+  if (explicit) return Number(explicit[1]) || CARD_COUNT_WORDS[explicit[1].toLowerCase()];
+  return /\bcards\b/i.test(text) ? 2 : 1;
+}
+function phantomCardNotice(created) {
+  if (created === 0) return "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
+  return `Only ${created} confirmation card${created === 1 ? ' was' : 's were'} created for this reply. `
+    + 'If something is missing, ask again and say exactly what to change.';
+}
 
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
@@ -2601,8 +2615,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // before analytics logging and thread persistence, so the logged and
     // persisted text match what the operator sees. The notice is
     // tool-agnostic: it never names a specific field.
-    if (!pendingProposals.length && CARD_CLAIM_RE.test(finalResponse)) {
-      finalResponse += `\n\n${PHANTOM_CARD_NOTICE}`;
+    if (claimedCardCount(finalResponse) > pendingProposals.length) {
+      finalResponse += `\n\n${phantomCardNotice(pendingProposals.length)}`;
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;
