@@ -29,9 +29,7 @@ const APPLY = process.argv.includes('--apply');
 const reauditIdx = process.argv.indexOf('--reaudit');
 const REAUDIT = reauditIdx >= 0 ? Math.max(0, parseInt(process.argv[reauditIdx + 1], 10) || 0) : 0;
 
-// Generated rows whose latest flag came from the AI audit. The same filter
-// guards the UPDATE, so a person's flag landing after the dry-run list is
-// never cleared.
+// Generated rows whose latest flag came from the AI audit.
 function generatedAiFlaggedQuery() {
   return db('knowledge_base')
     .where({ status: 'flagged', source: 'auto-sync' })
@@ -50,9 +48,18 @@ async function main() {
   if (rows.length > 20) console.log(`  … ${rows.length - 20} more`);
 
   if (APPLY && rows.length) {
-    const n = await generatedAiFlaggedQuery()
-      .whereIn('id', rows.map((r) => r.id))
-      .update({ status: 'active', updated_at: new Date() });
+    // Same row lock every flag write takes, so a person's flag landing after
+    // the list above is seen and kept.
+    const { _internals: { flagIsFromAIAudit } } = require('../services/knowledge-base');
+    let n = 0;
+    for (const { id } of rows) {
+      n += await db.transaction(async (trx) => {
+        const row = await trx('knowledge_base').where({ id }).forUpdate().first();
+        if (!row || row.status !== 'flagged' || !(await flagIsFromAIAudit(id, trx))) return 0;
+        await trx('knowledge_base').where({ id }).update({ status: 'active', updated_at: new Date() });
+        return 1;
+      });
+    }
     console.log(`restored ${n}`);
   }
 

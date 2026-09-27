@@ -53,6 +53,7 @@ describe('KB AI audit', () => {
     const out = planAuditOutcome(productEntry, { status: 'flag', confidence: 'high', issues: ['rate'], summary: 'rate off' }, NOW);
     expect(out.auditResult).toBe('flagged');
     expect(out.updates).toEqual({});
+    expect(out.rowResult).toBe('flagged-source');
     expect(out.findings).toMatchObject({ fix_in: 'products_catalog', fix_link: '/admin/inventory?tab=products' });
   });
 
@@ -60,6 +61,7 @@ describe('KB AI audit', () => {
     const out = planAuditOutcome(manualEntry, { status: 'update-needed', confidence: 'high', summary: 'x' }, NOW);
     expect(out.auditResult).toBe('flagged');
     expect(out.updates).toEqual({ status: 'flagged' });
+    expect(out.rowResult).toBe('flagged');
     expect(out.findings.fix_in).toBeUndefined();
   });
 
