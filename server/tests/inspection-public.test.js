@@ -2079,6 +2079,39 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking).not.toHaveBeenCalled();
     });
 
+    test.each([
+      ['missing ZIP', '5 Palm Ave, Bradenton, FL'],
+      ['postal-city alias with the same ZIP', '5 Palm Ave, Palma Sola, FL 34209'],
+    ])('a supplied copy with %s cannot bypass an outside-area review as a sibling property', async (_case, address) => {
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = {
+        id: 'cust-1', phone: '9415550101', account_id: 'acct-1',
+        address_line1: '5 Palm Ave', address_line2: '', city: 'Bradenton', state: 'FL', zip: '34209',
+        latitude: null, longitude: null,
+      };
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-1', status: 'outside_area', reason: 'staff_confirmed_outside_area',
+        address_snapshot: ['5 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+        latitude: null, longitude: null,
+      };
+      listResults.scheduled_services = [];
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.51, lng: -82.52 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), {
+        date: FUTURE_DATE, time: '09:00', address,
+      });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
+      expect(insertCalls.some(call => call.table === 'customers')).toBe(false);
+      expect(updateCalls.some(call => call.table === 'customers' && call.payload.latitude != null)).toBe(false);
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
     test('a supplied copy of the verified address retains its reviewed pin', async () => {
       gateState.reviewLive = true;
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
