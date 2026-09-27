@@ -210,11 +210,33 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   // roster references without a role verb claim nothing
   expect(ungroundedClaims('The service covers all of the traps around your home.', facts)).toEqual([]);
 
-  // standalone clock times validate against the window boundaries (codex
-  // round-8 P1): a reformatted single time keeps the meridiem honest
+  // Standalone clock times cannot turn either endpoint of the customer-facing
+  // window into an exact arrival promise.
   expect(ungroundedClaims('Your next visit is Monday, August 3 at 8 PM.', facts))
     .toContain('ungrounded_time:8 PM');
-  expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('Arriving Monday, August 3 at 8 PM.', facts))
+    .toContain('ungrounded_time:8 PM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM. Arrival is at 8 PM.', facts))
+    .toContain('ungrounded_time:8 PM');
+  expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts))
+    .toContain('ungrounded_time:8 AM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 10 AM.', facts))
+    .toContain('ungrounded_time:10 AM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at noon.', facts))
+    .toContain('ungrounded_time:NOON');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at midnight.', facts))
+    .toContain('ungrounded_time:MIDNIGHT');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 20:00.', facts))
+    .toContain('ungrounded_time:20:00');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('Your next visit is tomorrow, Monday, August 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_relative_date:tomorrow');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM tomorrow.', facts))
+    .toContain('ungrounded_relative_date:tomorrow');
+  expect(ungroundedClaims('Today we completed service. Your next visit is Monday, August 3, arriving 8–10 AM.', facts))
+    .toEqual([]);
+  expect(ungroundedClaims('Your next visit is Monday, August 3 in 2027, arriving 8–10 AM.', facts)
+    .some((problem) => problem.includes('ungrounded_date:') && problem.includes('in 2027'))).toBe(true);
 
   // standalone weekday mentions validate against the grounded visit (codex
   // round-6 P1): no month-day needed for "Tuesday" to contradict a Monday
@@ -261,7 +283,11 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 PM.', facts))
     .toContain('ungrounded_window:8–10 PM');
   expect(ungroundedClaims('Your next visit is Tuesday, August 3, arriving 8–10 AM.', facts))
-    .toContain('ungrounded_date:Tuesday, August 3');
+    .toContain('ungrounded_weekday:Tuesday');
+  expect(ungroundedClaims(
+    'Your next visit is Monday, August 3, arriving 8–10 AM. The technician will return Tuesday, August 4.',
+    facts,
+  )).toEqual(expect.arrayContaining(['ungrounded_weekday:Tuesday']));
   expect(ungroundedClaims('See you on September 3.', facts)).toContain('ungrounded_date:September 3');
   // with no grounded next visit, any window/date mention rejects
   const noVisit = groundingFacts(input({ nextAppointment: null }));
