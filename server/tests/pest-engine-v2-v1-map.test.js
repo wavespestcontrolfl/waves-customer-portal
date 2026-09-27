@@ -3,7 +3,7 @@
 // v1 identity that is true of it (pre-push audit on Codex #4916 r3).
 const catalog = require('../services/species-catalog');
 const {
-  buildAnswer, mapToV1, UNNAMED_SAFETY_LINE, UNNAMED_NEXT_PHOTO, _test: { v1IdentityFor },
+  buildAnswer, mapToV1, UNNAMED_SAFETY_LINE, UNNAMED_SAFETY_CLAUSES, UNNAMED_NEXT_PHOTO, _test: { v1IdentityFor },
 } = require('../services/photo-id-v2/pest-engine');
 
 function approvedClone(entry) {
@@ -72,13 +72,36 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   // authored wording. This is the safety property that survives: the line
   // still tells the customer to keep their distance and call for medical
   // help when the answered node has anything under it that keeps distance.
+  // The line is triaged for the node's worst member (Codex #5106 r1): the
+  // fire-ants node holds the pet-toxic little fire ant; widow spiders are
+  // venomous biters, so a bite gets emergency care, not "call a doctor".
   test.each([
-    ['fire-ant', 'fire-ants'],
-    ['black-widow', 'widow-spiders'],
-  ])('a draft medical-risk %s climb carries visible generic safety guidance', (slug, nodeId) => {
+    ['fire-ant', 'fire-ants', `${UNNAMED_SAFETY_LINE} ${UNNAMED_SAFETY_CLAUSES.pets}`],
+    ['black-widow', 'widow-spiders', `${UNNAMED_SAFETY_CLAUSES.base} ${UNNAMED_SAFETY_CLAUSES.venomousBite}`],
+  ])('a draft medical-risk %s climb carries visible generic safety guidance', (slug, nodeId, line) => {
     const built = answerFor(slug, { approved: false });
     expect(built).toMatchObject({ answer: { node_id: nodeId }, entry: null });
-    expect(built.genericSafetyLine).toBe(UNNAMED_SAFETY_LINE);
+    expect(built.genericSafetyLine).toBe(line);
+  });
+
+  test.each([
+    'florida-cottonmouth', 'eastern-diamondback-rattlesnake', 'eastern-coral-snake', 'brown-recluse',
+  ])('a draft venomous biter %s never gets the call-a-doctor bite line', (slug) => {
+    const line = answerFor(slug, { approved: false }).genericSafetyLine;
+    expect(line).toContain(UNNAMED_SAFETY_CLAUSES.venomousBite);
+    expect(line).not.toContain(UNNAMED_SAFETY_CLAUSES.general);
+  });
+
+  test('a draft cane toad keeps a vet instruction for pets', () => {
+    expect(answerFor('cane-toad', { approved: false }).genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.pets);
+  });
+
+  // Codex #5106 r1: the cottonmouth / water snake pair is photo_can_confirm
+  // false; the climbed answer must not ask for another photo.
+  test('a draft cottonmouth climb keeps the no-photo-confirms veto', () => {
+    const built = answerFor('florida-cottonmouth', { approved: false });
+    expect(built.entry).toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
   });
 
   // Contract delta 2026-09-26 #1: an unnamed answer's v1 compatibility is

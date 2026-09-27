@@ -41,10 +41,15 @@ ladder for any id.
 owner-approved and fact-check-clean. Any other answer (an unapproved
 species, a spread of candidates, a disagreement, or an unknown) shows only
 the engine's fixed templates in `server/services/photo-id-v2/pest-engine.js`:
-one safe-distance retake prompt (`UNNAMED_NEXT_PHOTO`) and, when any entry
-under the answered node can bite, sting or irritate, is wildlife, or is
-protected (or when nothing was identified at all), one safety line
-(`UNNAMED_SAFETY_LINE`). It carries no referral: the next step is the team,
+one safe-distance retake prompt (`UNNAMED_NEXT_PHOTO`), or the fixed
+technician guidance (`NO_PHOTO_CONFIRMS`) when the top candidate has a
+look-alike no photo can separate, and, when any entry under the answered node
+can bite, sting or irritate, is wildlife, is protected or is toxic to pets (or
+when nothing was identified at all), one safety line assembled from fixed
+`UNNAMED_SAFETY_CLAUSES`. The line is triaged for the node's worst member: a
+venomous biter anywhere under it (snakes, widows, recluse) makes a bite an
+emergency-care instruction, and a pet-toxic entry adds a call-your-vet
+clause. It carries no referral: the next step is the team,
 or an inspection for a node whose every entry is inspection-first (termites,
 rodents, bed bugs, carpenter ants). Its v1 columns are derived from every
 entry under the node: any hazard flag one of them has, the highest urgency,

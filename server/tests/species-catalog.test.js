@@ -980,8 +980,16 @@ describe('loader API surface', () => {
 // is not approved today, so a new or re-drafted species can't reopen it.
 describe('unnamed answers show only fixed text (real catalog)', () => {
   const {
-    buildAnswer, resolveCandidate, UNNAMED_SAFETY_LINE, UNNAMED_NEXT_PHOTO,
+    buildAnswer, resolveCandidate, UNNAMED_SAFETY_CLAUSES, UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS,
   } = require('../services/photo-id-v2/pest-engine');
+  const clauses = Object.values(UNNAMED_SAFETY_CLAUSES);
+  // A fixed-clause line: the base clause, then only other fixed clauses.
+  const isFixedLine = (line) => {
+    if (!line.startsWith(UNNAMED_SAFETY_CLAUSES.base)) return false;
+    let rest = line;
+    for (const clause of clauses) rest = rest.replace(clause, '');
+    return rest.trim() === '';
+  };
   const keepsDistance = (e) => (!!e.risk && e.risk !== 'low') || !!e.safety?.protected
     || e.role === 'wildlife' || e.role === 'protected_wildlife';
   const unapproved = catalog.listEntries().filter((e) => !catalog.isApproved(e));
@@ -996,9 +1004,9 @@ describe('unnamed answers show only fixed text (real catalog)', () => {
     const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
     expect(built.entry).toBeNull();
     expect(built.referral).toBeNull();
-    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
-    if (keepsDistance(entry)) expect(built.genericSafetyLine).toBe(UNNAMED_SAFETY_LINE);
-    else expect([UNNAMED_SAFETY_LINE, null]).toContain(built.genericSafetyLine);
+    expect([UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS]).toContainEqual(built.nextPhoto);
+    if (keepsDistance(entry)) expect(built.genericSafetyLine).toEqual(expect.any(String));
+    if (built.genericSafetyLine !== null) expect(isFixedLine(built.genericSafetyLine)).toBe(true);
     const shown = JSON.stringify({
       answer: built.answer, group: built.group, evidence: built.evidence, candidates: built.candidatesBlock,
       next_photo: built.nextPhoto, referral: built.referral, safety_line: built.genericSafetyLine,

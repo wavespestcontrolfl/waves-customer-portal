@@ -436,7 +436,11 @@ function realCatalogV2ResultFor(slug, confidence = 0.95) {
 // ONLY these fixed templates (never a group's own authored prose) — read
 // straight from the real (unmocked) engine module, same as the builder
 // helpers above.
-const { UNNAMED_SAFETY_LINE, UNNAMED_NEXT_PHOTO } = jest.requireActual('../services/photo-id-v2/pest-engine');
+const { UNNAMED_SAFETY_LINE, UNNAMED_SAFETY_CLAUSES, UNNAMED_NEXT_PHOTO } = jest.requireActual('../services/photo-id-v2/pest-engine');
+// The fixed unnamed line for a node holding venomous biters, and for one
+// holding a pet-toxic species (Codex #5106 r1).
+const VENOMOUS_BITE_LINE = `${UNNAMED_SAFETY_CLAUSES.base} ${UNNAMED_SAFETY_CLAUSES.venomousBite}`;
+const PET_RISK_LINE = `${UNNAMED_SAFETY_LINE} ${UNNAMED_SAFETY_CLAUSES.pets}`;
 
 async function post(base, path, body, headers = {}) {
   return fetch(`${base}${path}`, {
@@ -1463,7 +1467,7 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     const engineResult = realCatalogV2ResultFor('florida-cottonmouth');
     // Contract delta 2026-09-26 #1: a referral is only an approved, named
     // entry's own routing — an unapproved climb (even a venomous-snake one)
-    // gets referral: null and the fixed UNNAMED_SAFETY_LINE, and its v1
+    // gets referral: null and the fixed VENOMOUS_BITE_LINE, and its v1
     // compatibility is derived from every snake under the answered node.
     expect(engineResult).toMatchObject({
       v2: {
@@ -1471,7 +1475,7 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
         answer: { level: 'subgroup', node_id: 'venomous-snakes' },
         entry: null,
         referral: null,
-        generic_safety_line: UNNAMED_SAFETY_LINE,
+        generic_safety_line: VENOMOUS_BITE_LINE,
       },
       v1: {
         species_slug: null,
@@ -1503,25 +1507,25 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
   // always the fixed UNNAMED_SAFETY_LINE (never per-node authored wording)
   // whenever anything under the answered node keeps its distance.
   test.each([
-    'fire-ant',
-    'black-widow',
-    'tussock-moth-caterpillar',
-    'cuban-treefrog',
+    ['fire-ant', PET_RISK_LINE],
+    ['black-widow', VENOMOUS_BITE_LINE],
+    ['tussock-moth-caterpillar', UNNAMED_SAFETY_LINE],
+    ['cuban-treefrog', PET_RISK_LINE],
   ])('gate on: a real draft %s climb keeps visible generic medical guidance through POST, storage, and GET', async (
-    slug,
+    slug, line,
   ) => {
     mockGateState.photoIdV2 = true;
     const engineResult = realCatalogV2ResultFor(slug);
-    expect(engineResult.v2).toMatchObject({ entry: null, generic_safety_line: UNNAMED_SAFETY_LINE });
+    expect(engineResult.v2).toMatchObject({ entry: null, generic_safety_line: line });
     mockIdentifyPestV2.mockResolvedValue(engineResult);
 
     await withServer(async (base) => {
       const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
-      expect(body.v2.generic_safety_line).toBe(UNNAMED_SAFETY_LINE);
-      expect(JSON.parse(TABLES.pest_identifications[0].report_contract).v2.generic_safety_line).toBe(UNNAMED_SAFETY_LINE);
+      expect(body.v2.generic_safety_line).toBe(line);
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract).v2.generic_safety_line).toBe(line);
 
       const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
-      expect(detail.v2.generic_safety_line).toBe(UNNAMED_SAFETY_LINE);
+      expect(detail.v2.generic_safety_line).toBe(line);
     });
   });
 
@@ -1561,12 +1565,12 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     ]);
     // Contract delta 2026-09-26 #1: the treefrogs node has an irritant
     // (keeps-distance) member, so the mixed answer gets the fixed
-    // UNNAMED_SAFETY_LINE rather than staying null; inspection stays v1's
+    // PET_RISK_LINE rather than staying null; inspection stays v1's
     // own unmatched default (true).
     expect(engineResult).toMatchObject({
       v2: {
         answer: { level: 'subgroup', node_id: 'treefrogs' }, entry: null,
-        generic_safety_line: UNNAMED_SAFETY_LINE,
+        generic_safety_line: PET_RISK_LINE,
       },
       v1: {
         service_line: 'none',
@@ -1580,15 +1584,15 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     await withServer(async (base) => {
       const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
       expect(body.v2).toMatchObject({
-        answer: { node_id: 'treefrogs' }, entry: null, generic_safety_line: UNNAMED_SAFETY_LINE,
+        answer: { node_id: 'treefrogs' }, entry: null, generic_safety_line: PET_RISK_LINE,
       });
       expect(JSON.parse(TABLES.pest_identifications[0].report_contract).v2).toMatchObject({
-        answer: { node_id: 'treefrogs' }, generic_safety_line: UNNAMED_SAFETY_LINE,
+        answer: { node_id: 'treefrogs' }, generic_safety_line: PET_RISK_LINE,
       });
       expect(JSON.parse(TABLES.pest_identifications[0].report_contract).safety).not.toHaveProperty('irritant');
       const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
       expect(detail.v2).toMatchObject({
-        answer: { node_id: 'treefrogs' }, generic_safety_line: UNNAMED_SAFETY_LINE,
+        answer: { node_id: 'treefrogs' }, generic_safety_line: PET_RISK_LINE,
       });
     });
   });

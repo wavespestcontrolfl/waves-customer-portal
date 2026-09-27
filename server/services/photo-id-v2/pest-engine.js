@@ -119,7 +119,17 @@ const DEFAULT_GENERIC_COMPATIBILITY = Object.freeze({
 // comes from owner-approved entries or from here, never from group prose. A
 // group's prose would have to stay right for every species under it,
 // reviewed or not, and each new species broke a different group's text.
-const UNNAMED_SAFETY_LINE = "Until we know exactly what this is, keep your distance, don't touch it, and keep kids and pets away. If anyone is bitten, stung or scratched, wash the area and call a doctor; call 911 for trouble breathing or a severe reaction.";
+// The line is assembled from fixed hazard-class clauses, each chosen when
+// ANY entry under the answered node carries that hazard, so a node is
+// always triaged for its worst member (Codex #5106 r1).
+const UNNAMED_SAFETY_CLAUSES = Object.freeze({
+  base: "Until we know exactly what this is, keep your distance, don't touch it, and keep kids and pets away.",
+  // Venomous biters (snakes, widows, recluse): a bite needs care now.
+  venomousBite: 'If anyone is bitten, call 911 or get emergency medical care right away, even if it seems minor at first; for a sting or scratch, wash the area and call a doctor, and call 911 for trouble breathing or a severe reaction.',
+  general: 'If anyone is bitten, stung or scratched, wash the area and call a doctor; call 911 for trouble breathing or a severe reaction.',
+  pets: 'If a pet bites, licks or mouths it, call your vet right away.',
+});
+const UNNAMED_SAFETY_LINE = `${UNNAMED_SAFETY_CLAUSES.base} ${UNNAMED_SAFETY_CLAUSES.general}`;
 const UNNAMED_NEXT_PHOTO = Object.freeze({
   ask: "From a safe distance, zoom in so it fills the frame and take one more photo in good light. Don't move closer or touch it.",
   why: 'A sharper photo helps us narrow it down.',
@@ -145,10 +155,22 @@ function keepsDistance(entry) {
     || entry.role === 'wildlife' || entry.role === 'protected_wildlife';
 }
 
-// An unknown answer (no node) could be anything, so it always gets the line.
+function isVenomousBiter(entry) {
+  const safety = entry.safety || {};
+  return !!safety.venomous && !!safety.bites && !safety.stings && entry.risk === 'medical';
+}
+
+// An unknown answer (no node) could be anything, so it is triaged for the
+// whole catalog.
 function unnamedSafetyLineFor(nodeId) {
-  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : [];
-  return !nodeId || members.some(keepsDistance) ? UNNAMED_SAFETY_LINE : null;
+  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : catalog.listEntries();
+  const pets = members.some((entry) => !!entry.safety?.toxic_to_pets);
+  if (nodeId && !pets && !members.some(keepsDistance)) return null;
+  return [
+    UNNAMED_SAFETY_CLAUSES.base,
+    members.some(isVenomousBiter) ? UNNAMED_SAFETY_CLAUSES.venomousBite : UNNAMED_SAFETY_CLAUSES.general,
+    pets ? UNNAMED_SAFETY_CLAUSES.pets : null,
+  ].filter(Boolean).join(' ');
 }
 
 const URGENCY_ORDER = ['low', 'moderate', 'high'];
@@ -860,9 +882,12 @@ function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
   // unapproved look-alike must not surface even indirectly through it.
   // A look-alike no photo can separate outranks the runner-up pair's photo
   // tip: say so instead (Codex #4974 r5).
-  const governing = level === 'entry' && top?.entry ? governingPair(top, second, shownKind) : null;
+  // Computed at every level: an unapproved top candidate climbs to a node,
+  // but a pair no photo can separate still vetoes a retake prompt there
+  // (only its prose is withheld). Codex #5106 r1.
+  const governing = top?.entry ? governingPair(top, second, shownKind) : null;
   if (governing?.photo_can_confirm === false) {
-    if (!isApproved(catalog.getEntry(governing.slug))) return { ...NO_PHOTO_CONFIRMS };
+    if (level !== 'entry' || !isApproved(catalog.getEntry(governing.slug))) return { ...NO_PHOTO_CONFIRMS };
     return { ask: governing.next_photo || null, why: governing.difference || null, photo_can_confirm: false };
   }
   if (top?.entry && second?.entry && isApproved(top.entry) && isApproved(second.entry)) {
@@ -1569,7 +1594,9 @@ module.exports = {
   ACTION_LABELS,
   REFERRAL_TEMPLATES,
   UNNAMED_SAFETY_LINE,
+  UNNAMED_SAFETY_CLAUSES,
   UNNAMED_NEXT_PHOTO,
+  NO_PHOTO_CONFIRMS,
   escalateBelow,
   toImages,
   _test: {

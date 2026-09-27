@@ -39,7 +39,7 @@ const engine = require('../services/photo-id-v2/pest-engine');
 
 const {
   buildAnswer, mapToV1, resolveCandidate, dedupeCandidates, isConsequential, isApproved,
-  identifyPestV2, REFERRAL_TEMPLATES, UNNAMED_NEXT_PHOTO,
+  identifyPestV2, REFERRAL_TEMPLATES, UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS,
 } = engine;
 
 // ── ctx-builder helpers for buildAnswer unit tests ─────────────────────────
@@ -354,9 +354,19 @@ describe('buildAnswer — next_photo', () => {
     });
   });
 
-  test('falls back to the node next_photo when there is no curated pair', () => {
-    const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
+  test('an unapproved answer with no look-alike pair gets the fixed retake prompt', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('pending-verification-ant', 0.95)] }));
+    expect(built.entry).toBeNull();
     expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+  });
+
+  // Codex #5106 r1: climbing to a node withholds a look-alike pair's prose
+  // but must keep its "no photo can confirm" veto (another fixture entry
+  // lists unreviewed-ant as photo_can_confirm: false).
+  test('an unapproved answer that climbs to a node keeps a look-alike veto', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
+    expect(built.entry).toBeNull();
+    expect(built.nextPhoto).toEqual(NO_PHOTO_CONFIRMS);
   });
 
   test('a single entry-level candidate (no second candidate) preserves its own first look-alike\'s photo_can_confirm:false — Codex round-0 P1', () => {
