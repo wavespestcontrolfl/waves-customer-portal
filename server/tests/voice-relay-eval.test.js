@@ -5106,11 +5106,17 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por mensajería.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto con el servicio de mensajería.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por correo desde la secretaría.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos, como le confirmé, el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'El presupuesto, como le confirmé, se enviará por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Prepararemos y enviaremos el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'He preparado el recibo y la oficina enviará el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito y quizás le llamaremos para revisarlo.', 'pass'],
     ['spanish-pricing-gate-off', 'No solo le enviaremos el presupuesto, también le llamaremos.', 'pass'],
     ['spanish-pricing-gate-off', 'El presupuesto se envió antes, pero le enviaremos un nuevo presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le envié el recibo y le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Puede ser que le enviemos el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Quizás le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'No le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Dudo que le enviemos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Es dudoso que le enviemos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto se envió por correo.', 'fail'],
@@ -5125,6 +5131,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le he enviado el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Le ha enviado el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Le hemos enviado el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le he preparado y enviado el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le hemos preparado y enviado el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Ya he revisado y enviado el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'He revisado la solicitud y enviado el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto ha sido enviado por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Quizás le enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Tal vez recibirá el presupuesto por correo.', 'fail'],
@@ -5788,6 +5798,8 @@ describe('voice relay eval — named spoken checks', () => {
       'La cita no ha sido solicitada ni confirmada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
       'La cita no fue confirmada ni solicitada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
       'La cita no ha sido confirmada ni solicitada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
+      'La cita no fue confirmada ni fue solicitada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
+      'La cita no ha sido confirmada ni ha sido solicitada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
     ]) {
       const neverRequested = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect(neverRequested.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('domingo') }));
@@ -6055,6 +6067,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Esa hora ya no está disponible y no se reservó nada. La cita no ha sido solicitada ni confirmada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
       'Esa hora ya no está disponible y no se reservó nada. La cita no fue confirmada ni solicitada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
       'Esa hora ya no está disponible y no se reservó nada. La cita no ha sido confirmada ni solicitada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
+      'Esa hora ya no está disponible y no se reservó nada. La cita no fue confirmada ni fue solicitada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
+      'Esa hora ya no está disponible y no se reservó nada. La cita no ha sido confirmada ni ha sido solicitada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
     ]) {
       const neverRequested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', turn: 3, text }] }));
       expect(neverRequested.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('lunes') }));
