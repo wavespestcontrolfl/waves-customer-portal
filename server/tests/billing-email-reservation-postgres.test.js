@@ -387,41 +387,21 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     });
     const loaded = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();
 
-    let snapshotRead;
-    const snapshotReady = new Promise((resolve) => { snapshotRead = resolve; });
-    let releaseSnapshot;
-    const requoteFinished = new Promise((resolve) => { releaseSnapshot = resolve; });
-    let outerEmailRead = true;
-    const delayedDatabase = (table) => {
-      if (table === 'email_messages' && outerEmailRead) {
-        outerEmailRead = false;
-        return {
-          whereIn: async (column, values) => {
-            const stale = await mockDatabase(table).whereIn(column, values);
-            snapshotRead();
-            await requoteFinished;
-            return stale;
-          },
-        };
-      }
-      return mockDatabase(table);
-    };
-    delayedDatabase.transaction = (...args) => mockDatabase.transaction(...args);
-    delayedDatabase.raw = (...args) => mockDatabase.raw(...args);
-
-    const repairing = Reservation.repairAcceptedBillingEmailReservations([loaded], delayedDatabase);
-    await snapshotReady;
-    await mockDatabase('email_messages').where({ id: stopped.id }).update({
-      status: stopped.status,
-      sent_at: null,
-      provider_retry_exhausted_at: stopped.provider_retry_exhausted_at,
-      provider_retry_next_at: stopped.provider_retry_next_at,
-      provider_handoff_phase: stopped.provider_handoff_phase,
-      error_message: stopped.error_message,
-    });
-    const currentRequote = await mockDatabase('email_messages').where({ id: stopped.id }).first();
-    await expect(Reservation.releaseBillingEmailReservationForRequote(currentRequote, mockDatabase)).resolves.toBe(true);
-    releaseSnapshot();
+    const paused = pauseAcceptedSnapshot();
+    const repairing = Reservation.repairAcceptedBillingEmailReservations([loaded], paused.database);
+    await paused.snapshotReady;
+    try {
+      await mockDatabase('email_messages').where({ id: stopped.id }).update({
+        status: stopped.status,
+        sent_at: null,
+        provider_retry_exhausted_at: stopped.provider_retry_exhausted_at,
+        provider_retry_next_at: stopped.provider_retry_next_at,
+        provider_handoff_phase: stopped.provider_handoff_phase,
+        error_message: stopped.error_message,
+      });
+      const currentRequote = await mockDatabase('email_messages').where({ id: stopped.id }).first();
+      await expect(Reservation.releaseBillingEmailReservationForRequote(currentRequote, mockDatabase)).resolves.toBe(true);
+    } finally { paused.releaseSnapshot(); }
 
     await expect(repairing).resolves.toEqual(new Set());
     const finalLedger = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();

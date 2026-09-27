@@ -171,7 +171,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
       suppressionGroupKey: 'transactional_required',
       suppressProviderErrorLog: true,
       ...(replayContext ? { billingReplayContext: replayContext } : {}),
-      billingReplayDeclared: Boolean(replayContext) || isBillingReplaySource(input?.entryPoint),
+      billingReplayDeclared: Boolean(replayContext) || isBillingReplaySource(input),
       withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
         input, recipientEmail, preSendCheck, dispatch, state,
       }),
