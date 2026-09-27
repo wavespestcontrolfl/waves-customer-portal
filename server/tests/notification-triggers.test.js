@@ -313,6 +313,24 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  // With every admin bell-disabled, notifyAdmin's own dedupe lock (inside
+  // the bell-enabled branch) never runs — the push tag has to carry the
+  // dedupe identity on its own, same fix as the SMS case above.
+  test('push-only promise-chaser callbacks tag by the bell dedupeKey and avoid renotification', async () => {
+    db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
+      : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));
+    const PushService = require('../services/push-notifications');
+    const payload = { commitmentId: 'fixture-commitment-2', phone: '+19415550199' };
+    const dedupeKey = 'waves-promise_chaser-fixture-commitment-2-2026-09-26';
+    await triggerNotification('promise_chaser', payload, { dedupeKey });
+    await triggerNotification('promise_chaser', payload, { dedupeKey });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    for (const [, build] of PushService.sendToAdminUsers.mock.calls) {
+      expect(build('admin-1')).toMatchObject({ tag: dedupeKey, renotify: false });
+    }
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('reports bellWritten false when the notification insert fails', async () => {
     // NotificationService.create catches insert errors and returns null —
     // callers deciding whether an alert was delivered must see the truth.

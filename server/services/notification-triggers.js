@@ -897,8 +897,10 @@ function pushTagFor(triggerKey, payload = {}) {
     return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
   }
   if (triggerKey === 'promise_chaser') {
-    // Per-promise tag: two different open promises calling back before the
-    // first push is dismissed must not collapse into one banner.
+    // Fallback only — the real dispatch path below tags with the bell's own
+    // per-day dedupeKey instead, so a same-day repeat callback collapses
+    // into one banner even under a push-only preference. Per-promise here
+    // too: two different open promises calling back must not collapse.
     return `waves-promise_chaser-${payload.commitmentId || payload.callLogId || 'unknown-call'}`;
   }
   if (triggerKey === 'payment_failed' && (payload.attemptId || payload.paymentIntentId)) {
@@ -1190,8 +1192,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               title: built.title,
               body: built.body,
               url: built.link || '/admin',
+              // promise_chaser: the push tag IS the bell's own dedupeKey
+              // (already 'waves-promise_chaser-<commitment>-<ET day>') so a
+              // same-day repeat callback on the same open promise collapses
+              // into the same banner even on a push-only preference, where
+              // notifyAdmin's own dedupe lock is never reached below.
               tag: triggerKey === 'sms_reply' && dedupeKey
-                ? `waves-sms_reply-${payload.twilioSid}` : pushTagFor(triggerKey, payload),
+                ? `waves-sms_reply-${payload.twilioSid}`
+                : (triggerKey === 'promise_chaser' && dedupeKey ? dedupeKey : pushTagFor(triggerKey, payload)),
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,

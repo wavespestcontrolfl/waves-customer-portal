@@ -72,15 +72,22 @@ async function ringPromiseChaserIfNeeded(callSid) {
     if (!rows.length) return false;
 
     // Refresh the fulfillment proof for the candidate calls first — nothing
-    // stamps it until someone opens the queue (the SLA pager's own rule).
+    // stamps it until someone opens the queue (the SLA pager's own rule). A
+    // call whose proof could not be verified (thrown, or refreshFulfillment's
+    // own per-commitment `failed` count) is excluded below — an unverified
+    // lookup proves nothing, and ringing on it risks a false alert for a
+    // promise that was actually just kept.
     const callIds = [...new Set(rows.map((r) => r.call_log_id))];
+    const unverified = new Set();
     for (const id of callIds) {
-      await commitments.refreshFulfillment(db, id).catch((err) => {
+      const result = await commitments.refreshFulfillment(db, id).catch((err) => {
         logger.warn(`[promise-chaser-bell] fulfillment refresh failed for call ${id}: ${err.message}`);
+        return { failed: 1 };
       });
+      if (result.failed > 0) unverified.add(id);
     }
     const live = await commitments.stillOpenIds(db, rows.map((r) => r.id), { now });
-    let open = rows.filter((r) => live.has(r.id));
+    let open = rows.filter((r) => live.has(r.id) && !unverified.has(r.call_log_id));
     if (!open.length) return false;
 
     // followedUpIds needs each row's call-ended time (promisedAt's basis) —
