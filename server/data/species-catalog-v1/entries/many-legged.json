@@ -126,13 +126,13 @@
     "slug": "millipede",
     "common_name": "Florida Ivory Millipede",
     "aliases": [
-      "millipede",
-      "millipedes"
+      "florida ivory millipede",
+      "florida ivory millipedes"
     ],
     "scientific_name": "Chicobolus spinigerus",
     "rank": "species",
     "group": "many-legged",
-    "subgroup": null,
+    "subgroup": "millipedes",
     "site_category": "Occasional invaders",
     "traits": [
       "Coils into a tight spiral when touched",
@@ -451,7 +451,7 @@
     "scientific_name": "Oxidus gracilis",
     "rank": "species",
     "group": "many-legged",
-    "subgroup": null,
+    "subgroup": "millipedes",
     "site_category": "Occasional invaders",
     "stages": [
       "juvenile",

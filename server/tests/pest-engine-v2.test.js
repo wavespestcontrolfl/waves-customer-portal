@@ -240,7 +240,7 @@ describe('buildAnswer — tier', () => {
   });
 
   test('a sign-only read never names an organism entry (Codex #4974 r7)', () => {
-    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.95, { traitsVisible: [1] })], signOnly: true }));
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.95, { traitsVisible: [1] })], evidenceKind: { shownKind: 'sign', hiddenKind: 'organism' } }));
     expect(built.answer.level).not.toBe('entry');
     expect(built.entry).toBeNull();
   });
@@ -281,7 +281,7 @@ describe('buildAnswer — tier', () => {
 
   test('a sign-only bite-pattern veto does not block a clear organism photo', () => {
     const built = buildAnswer(baseCtx({
-      candidates: [cand('no-photo-pair-a', 0.95)], organismOnly: true, currentMonth: CURRENT_MONTH,
+      candidates: [cand('no-photo-pair-a', 0.95)], evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' }, currentMonth: CURRENT_MONTH,
     }));
     expect(built.answer.wording).toBe('pretty_sure');
     expect(built.nextPhoto).toBeNull();
@@ -293,14 +293,14 @@ describe('buildAnswer — tier', () => {
     expect(engine._test.pairBetween(a, b, 'organism')).toBeNull();
 
     const likely = buildAnswer(baseCtx({
-      candidates: [cand('no-photo-pair-a', 0.60)], organismOnly: true, currentMonth: CURRENT_MONTH,
+      candidates: [cand('no-photo-pair-a', 0.60)], evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' }, currentMonth: CURRENT_MONTH,
     }));
     expect(likely.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
   });
 
   test("a sign-only veto does not govern when shows='both'", () => {
     const built = buildAnswer(baseCtx({
-      candidates: [cand('no-photo-pair-a', 0.95)], shownKind: 'both', currentMonth: CURRENT_MONTH,
+      candidates: [cand('no-photo-pair-a', 0.95)], evidenceKind: { shownKind: 'both', hiddenKind: null }, currentMonth: CURRENT_MONTH,
     }));
     expect(built.answer.wording).toBe('pretty_sure');
     expect(built.nextPhoto).toBeNull();

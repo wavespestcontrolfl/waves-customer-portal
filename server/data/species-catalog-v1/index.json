@@ -72,7 +72,7 @@
       "generic": "an ant",
       "category": "insect",
       "next_photo": {
-        "ask": "A sharp close-up from directly above, showing the waist and antennae, next to a coin for scale.",
+        "ask": "Use zoom from a safe distance for a whole-trail or whole-mound photo showing the ants' size and movement. Do not approach, disturb, handle, or place objects beside the ants.",
         "why": "The waist shape and antennae are what separate ant genera and rule out a termite swarmer."
       }
     },
@@ -562,7 +562,7 @@
       "scientific": "Apidae / Megachilidae",
       "rank": "group",
       "next_photo": {
-        "ask": "A close-up of the abdomen (fuzzy vs. shiny) and the hole or gap it's using.",
+        "ask": "From a safe distance, use zoom to photograph the bee's body and the occupied hole or gap without approaching or disturbing the activity.",
         "why": "A shiny black abdomen and a drilled hole point to carpenter bee; fuzzy and a wall gap points to honey bee."
       }
     },
@@ -815,6 +815,22 @@
         "ask": "A close-up of the toe pads and the stripe pattern along the side.",
         "why": "Toe-pad size and the side stripe separate the oversized Cuban treefrog from native treefrogs."
       }
+    },
+    {
+      "id": "millipedes",
+      "group": "many-legged",
+      "label": "Millipedes",
+      "generic": "a millipede",
+      "aliases": [
+        "millipede",
+        "millipedes"
+      ],
+      "scientific": "Diplopoda",
+      "rank": "class",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for a side view showing the legs and body segments. Do not handle it or place objects beside it.",
+        "why": "Body shape, color, and leg count per segment help separate common millipedes."
+      }
     }
   ],
   "look_alike_groups": [
@@ -952,9 +968,9 @@
       "note": ""
     },
     "millipede": {
-      "node": "millipede",
-      "kind": "entry",
-      "note": ""
+      "node": "millipedes",
+      "kind": "subgroup",
+      "note": "The generic v1 label covers multiple catalog species; maps to the Millipedes subgroup."
     },
     "centipede": {
       "node": "many-legged",

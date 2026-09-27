@@ -461,6 +461,12 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('Florida blue centipede')).toMatchObject({ node: { slug: 'florida-blue-centipede' } });
   });
 
+  test.each(['millipede', 'millipedes'])('generic %s names the shared millipede subgroup', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'subgroup', id: 'millipedes' } });
+    expect(catalog.resolveName('Florida Ivory Millipede')).toMatchObject({ node: { slug: 'millipede' } });
+    expect(catalog.resolveName('greenhouse millipede')).toMatchObject({ node: { slug: 'greenhouse-millipede' } });
+  });
+
   test.each(['black snake', 'black snakes'])('generic %s names the shared snake group', (name) => {
     expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'group', id: 'snakes' } });
     expect(catalog.resolveName('southern black racer')).toMatchObject({ node: { slug: 'southern-black-racer' } });
@@ -666,6 +672,21 @@ describe('loader API surface', () => {
     expect(built.answer).toMatchObject({ level: 'subgroup', node_id: 'fire-ants' });
     expect(built.nextPhoto.ask).toMatch(/safe distance/);
     expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up|collect|pick up/i);
+    expect(built.nextPhoto.photo_can_confirm).toBe(true);
+  });
+
+  test.each([
+    ['little-fire-ant', 'group', 'ants', /Do not approach, disturb, handle/i],
+    ['honey-bee-wall-colony', 'subgroup', 'bees', /without approaching or disturbing/i],
+  ])('the actual draft %s fallback never asks the customer to approach or handle it', (slug, level, nodeId, distanceRule) => {
+    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
+    expect(catalog.getEntry(slug).review.status).toBe('draft');
+    const candidate = { ...resolveCandidate({ slug, confidence: 0.95 }), checked: true, verified: true };
+    const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
+    expect(built.answer).toMatchObject({ level, node_id: nodeId });
+    expect(built.nextPhoto.ask).toMatch(/safe distance/i);
+    expect(built.nextPhoto.ask).toMatch(distanceRule);
+    expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up/i);
     expect(built.nextPhoto.photo_can_confirm).toBe(true);
   });
 

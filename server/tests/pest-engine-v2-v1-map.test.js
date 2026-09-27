@@ -1,7 +1,8 @@
 // The v1 compatibility mapping against the REAL species catalog (the main
 // engine suite runs on a fixture). A named v2 species may only inherit a
 // v1 identity that is true of it (pre-push audit on Codex #4916 r3).
-const { _test: { v1SlugFor } } = require('../services/photo-id-v2/pest-engine');
+const catalog = require('../services/species-catalog');
+const { buildAnswer, mapToV1, _test: { v1SlugFor } } = require('../services/photo-id-v2/pest-engine');
 
 describe('v1SlugFor on the real catalog', () => {
   test('exact legacy mappings resolve to themselves', () => {
@@ -26,9 +27,39 @@ describe('v1SlugFor on the real catalog', () => {
   });
 });
 
+describe('inherited v1 identity keeps the named v2 entry service contract', () => {
+  const approvedCandidate = (slug) => {
+    const entry = { ...catalog.getEntry(slug), review: { status: 'owner_approved', notes: '' }, verification: [] };
+    return {
+      slug, offCatalogName: null, groupId: entry.group, confidence: 0.85, entry,
+      traitsVisible: [1], traitsNotVisible: [], checked: true, verified: true,
+    };
+  };
+  const answerFor = (slug) => buildAnswer({
+    candidates: [approvedCandidate(slug)], disagreed: false, disagreementNode: null,
+    escalationTriggered: false, openaiAnswered: false, openaiStoodInAlone: false,
+    qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+  });
+
+  test.each(['american-dog-tick', 'lone-star-tick'])('%s inherits the tick identity without inheriting the legacy flea service', (slug) => {
+    const mapped = mapToV1(answerFor(slug));
+    expect(mapped).toMatchObject({ species_slug: 'tick', service_line: 'pest', urgency: 'high' });
+    expect(mapped.report_contract).toMatchObject({
+      identification: { slug: 'tick', category: 'arachnid' },
+      urgency: 'high',
+      service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false },
+    });
+  });
+
+  test('a direct v1 mapping still uses its established compatibility service and urgency', () => {
+    const mapped = mapToV1(answerFor('fire-ant'));
+    expect(mapped).toMatchObject({ species_slug: 'fire-ant', service_line: 'pest', urgency: 'high' });
+    expect(mapped.report_contract.service).toMatchObject({ key: 'pest', label: 'General Pest Control' });
+  });
+});
+
 describe('real-catalog answer guards (Codex #4974 r2)', () => {
-  const catalog = require('../services/species-catalog');
-  const { buildAnswer, REFERRAL_TEMPLATES } = require('../services/photo-id-v2/pest-engine');
+  const { REFERRAL_TEMPLATES } = require('../services/photo-id-v2/pest-engine');
   // The guards under test are about photo-confirmability, not the owner's
   // review state, so the top entry is treated as approved here.
   const cand = (slug, confidence) => {
@@ -67,20 +98,20 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
   });
 
   test('a sign-only read lists no organism among the other possibilities (Codex #4974 r8)', () => {
-    const built = buildAnswer({ ...ctx([cand('subterranean-termite', 0.9), cand('termite-mud-tubes', 0.5)]), signOnly: true });
+    const built = buildAnswer({ ...ctx([cand('subterranean-termite', 0.9), cand('termite-mud-tubes', 0.5)]), evidenceKind: { shownKind: 'sign', hiddenKind: 'organism' } });
     expect(built.entry?.kind).not.toBe('organism');
     expect(built.candidatesBlock.map((c) => c.slug)).not.toContain('subterranean-termite');
     expect(built.evidence.matches.join(' ')).not.toMatch(/soldier|worker|body/i);
   });
 
   test('an organism-only read never names a sign entry (Codex #4974 r10)', () => {
-    const built = buildAnswer({ ...ctx([cand('discarded-wings', 0.95), cand('subterranean-termite', 0.3)]), organismOnly: true });
+    const built = buildAnswer({ ...ctx([cand('discarded-wings', 0.95), cand('subterranean-termite', 0.3)]), evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' } });
     expect(built.entry?.kind).not.toBe('sign');
     expect(built.candidatesBlock.map((c) => c.slug)).not.toContain('discarded-wings');
   });
 
   test('after dropping the contradicted kind, the best remaining candidate can still be named (Codex #4974 r11)', () => {
-    const built = buildAnswer({ ...ctx([cand('discarded-wings', 0.95), cand('subterranean-termite', 0.9)]), organismOnly: true });
+    const built = buildAnswer({ ...ctx([cand('discarded-wings', 0.95), cand('subterranean-termite', 0.9)]), evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' } });
     expect(built.entry?.slug).toBe('subterranean-termite');
   });
 
