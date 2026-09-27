@@ -1,3 +1,5 @@
+import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+
 // Billing-lane card for the appointment detail sheet: shows HOW this
 // customer pays and exactly what completing this visit will do to their
 // wallet — BEFORE the visit runs, so a phantom invoice (or a silently free
@@ -48,6 +50,21 @@ function predictionLine(prediction) {
     case 'covered_sibling_invoice': {
       const sibling = prediction.siblingServiceType ? ` on the ${prediction.siblingServiceType} visit` : '';
       const invoiceRef = prediction.invoiceNumber ? ` invoice ${prediction.invoiceNumber}` : ' an invoice';
+      // codex round-7 P1: the sibling invoice's OWN status decides this —
+      // settled (paid/prepaid/processing) really is "no charge needed," but
+      // a collectible one (draft/sent/overdue/…) still has a real balance
+      // due on THAT invoice; saying "no charge" either way let a technician
+      // walk off a job whose combined-trip invoice was still outstanding.
+      // siblingInvoiceCoverageCopy centralizes the settled/collectible split
+      // every covered_sibling_invoice consumer shares.
+      const coverage = siblingInvoiceCoverageCopy(prediction);
+      if (coverage?.collectible) {
+        const due = coverage.amountDue != null ? ` ${money(coverage.amountDue)}` : '';
+        return {
+          color: WARN.ink,
+          text: `On completion: no NEW invoice for this visit —${invoiceRef} already covers it${sibling} (same trip), but${due} is still due on that invoice. Collect there, not here.`,
+        };
+      }
       return { color: GREEN, text: `On completion: no charge —${invoiceRef} already covers this${sibling} (same trip).` };
     }
     // Codex round 5 P2: the same-trip sibling invoice this visit would

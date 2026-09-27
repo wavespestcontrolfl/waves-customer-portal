@@ -38,6 +38,7 @@ import {
   isCardExpired,
 } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice } from './visitInvoice';
+import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -307,6 +308,16 @@ export default function MobileCheckoutSheet({
   // the (already $0) base — servicesSubtotal alone would otherwise turn
   // positive from the extra and read as chargeable.
   const siblingNeedsReview = !hasOwnPrice && predictionKind === 'sibling_needs_review';
+  // codex round-7 P1: a covered_sibling_invoice prediction never mints a
+  // second invoice for THIS visit's base fee either way (price above is
+  // already $0 for it — grossAmount/amount are both null by design), but
+  // when the sibling invoice is still collectible (draft/sent/overdue/…)
+  // the generic "No charge — complete from job" copy read exactly like
+  // the genuinely-settled case, hiding a real balance due elsewhere.
+  const siblingCoverage = !hasOwnPrice && predictionKind === 'covered_sibling_invoice'
+    ? siblingInvoiceCoverageCopy(service.billingLane?.prediction)
+    : null;
+  const siblingCollectible = !!siblingCoverage?.collectible;
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
@@ -593,6 +604,8 @@ export default function MobileCheckoutSheet({
                 ? 'Price needs a refresh — reopen this visit'
                 : siblingNeedsReview && !invoicePreview
                 ? 'Needs review on Customer 360 — can’t charge here'
+                : siblingCollectible && nothingToCharge
+                ? 'Combined trip invoice due — collect there, not here'
                 : nothingToCharge
                 ? 'No charge — complete from job'
                 : discountGroupConflict

@@ -7,6 +7,7 @@ import CancelFeeNotice from './CancelFeeNotice';
 import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
+import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 function money(value) {
   const n = Number(value || 0);
@@ -176,6 +177,14 @@ export default function ScheduleCustomerSidebar({
   // resolve this" — surface the review state explicitly (mirrors
   // MobileAppointmentDetailSheet / MobileCheckoutSheet / BillingLaneCard).
   const siblingNeedsReview = service?.billingLane?.prediction?.kind === 'sibling_needs_review';
+  // codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+  // invoice is still collectible (draft/sent/overdue/…) must not read as a
+  // silent $0 total — the combined trip invoice still has a real balance
+  // due. siblingInvoiceCoverageCopy centralizes the settled/collectible
+  // split every consumer of this prediction shares.
+  const siblingCoverage = service?.billingLane?.prediction?.kind === 'covered_sibling_invoice'
+    ? siblingInvoiceCoverageCopy(service.billingLane.prediction)
+    : null;
   const basePrice = hasOwnPrice
     ? rawPrice
     : service?.billingLane
@@ -437,6 +446,22 @@ export default function ScheduleCustomerSidebar({
               <div className="text-13 mt-1" style={{ color: '#92400E' }}>
                 Combined-trip invoice needs review — resolve on Customer 360 before charging.
               </div>
+            )}
+            {siblingCoverage && siblingCoverage.collectible && (
+              <div className="text-13 mt-1" style={{ color: '#92400E' }}>
+                {siblingCoverage.detail}
+                {siblingCoverage.invoiceHref && (
+                  <>
+                    {' '}
+                    <a href={siblingCoverage.invoiceHref} style={{ color: '#92400E', textDecoration: 'underline' }}>
+                      Open invoice
+                    </a>
+                  </>
+                )}
+              </div>
+            )}
+            {siblingCoverage && !siblingCoverage.collectible && (
+              <div className="text-13 text-ink-secondary mt-1">{siblingCoverage.detail}</div>
             )}
             <a
               href={`/admin/invoices?customer=${encodeURIComponent(service.customerId)}`}

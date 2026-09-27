@@ -12,6 +12,11 @@
  */
 
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+// invoiceAmountDue is pure (no DB, no Stripe/Twilio — see that module's own
+// header) so it's safe to require at the top alongside isAlwaysFreeServiceType,
+// unlike the CANCELLED_SERVICE_RESOLVED_STATUSES / estimate-first-application-invoice
+// requires below, which stay lazy/in-function on purpose.
+const { invoiceAmountDue } = require('./invoice-helpers');
 
 // Mirror of AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD — duplicated
 // as a literal so this module stays db-free for pure unit tests; the
@@ -304,6 +309,18 @@ function predictCompletionBilling({
     // branch introduced (Codex P1, round 17) — origin/main predicted
     // 'payer' with the amount here, and was right.
     if (payerFreeReason && !(Number(resolvedPayerAmount) > 0)) return noCharge(payerFreeReason);
+    // codex round-7 P2: a provenance-backed $0 (hasAuthoritativeZeroPrice —
+    // estimatedPrice stamped 0 alongside a positive primaryLinePrice, e.g.
+    // a fully-discounted application) is a deliberately free visit even
+    // with a payer on the account — mirrors the per_application / self-pay
+    // lanes' own 'fully_discounted' exemption below. Without this check,
+    // resolvedPayerAmount fell back to Number(estimatedPrice) (0) and this
+    // returned { kind: 'payer', amount: 0 }, which unbilledCompletionGap
+    // reads as a genuine 'no_amount_on_file' money-gap alert for a visit
+    // that was never supposed to bill anyone.
+    if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
+      return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
+    }
     return {
       kind: 'payer',
       amount: resolvedPayerAmount,
@@ -994,6 +1011,16 @@ async function siblingCoveredCompletionPrediction({ svc, dbConn } = {}) {
     siblingVisit = null;
   }
 
+  // codex round-7 P1: `invoiceStatus` alone told every consumer THAT a
+  // sibling invoice exists, never whether it still needs collecting — every
+  // one of them rendered "no charge needed" even for a draft/sent/overdue
+  // invoice, so a technician could walk off a job whose combined-trip
+  // invoice was still due. `amountDue` (total − credit_applied, the same
+  // canonical charge base every Stripe/Terminal/autopay path prices from —
+  // invoiceAmountDue, invoice-helpers.js) lets the client-side copy helper
+  // (client/src/lib/siblingInvoiceCoverage.js) tell staff exactly what's
+  // still owed on THAT invoice, without minting a second one for this visit
+  // (amount stays null — the verdict here is unchanged).
   const prediction = {
     kind: 'covered_sibling_invoice',
     amount: null,
@@ -1001,6 +1028,7 @@ async function siblingCoveredCompletionPrediction({ svc, dbConn } = {}) {
     invoiceId: inv.id,
     invoiceNumber: inv.invoice_number || null,
     invoiceStatus: inv.status || null,
+    amountDue: invoiceAmountDue(inv),
     siblingServiceType: siblingVisit?.service_type || null,
   };
 

@@ -103,3 +103,58 @@ describe('ScheduleCustomerSidebar unpriced-visit billingLane.prediction fallback
     expect(screen.queryByText('$0.00')).toBeNull();
   });
 });
+
+// Codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+// invoice is still collectible (draft/sent/overdue/…) used to render as a
+// silent $0 Total with no explanation — the combined trip invoice still had
+// a real balance due. These pin the settled-vs-collectible copy split and
+// the deep link into that invoice; the collectible case fails on the
+// pre-fix code (no covered_sibling_invoice branch existed here at all).
+describe('ScheduleCustomerSidebar sibling-covered visit', () => {
+  const baseService = {
+    id: 'v0',
+    customerId: 'c1',
+    customerName: 'Test Customer',
+    status: 'confirmed',
+    estimatedPrice: null,
+    billingLane: {
+      mode: 'per_application',
+      source: 'explicit',
+      monthlyRate: 74.7,
+      prediction: {
+        kind: 'covered_sibling_invoice',
+        amount: null,
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-2026-0505',
+        siblingServiceType: 'Quarterly Pest Control',
+      },
+    },
+  };
+
+  it('a settled (paid) sibling invoice reads as covered, no link needed', async () => {
+    render(
+      <ScheduleCustomerSidebar
+        service={{ ...baseService, billingLane: { ...baseService.billingLane, prediction: { ...baseService.billingLane.prediction, invoiceStatus: 'paid', amountDue: 153.6 } } }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('Total')).toBeTruthy());
+    expect(screen.getAllByText('$0.00').length).toBeGreaterThan(0);
+    expect(screen.getByText(/nothing to collect/i)).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /open invoice/i })).toBeNull();
+  });
+
+  it('a collectible (sent) sibling invoice tells staff to collect there, with the amount due and a link to it', async () => {
+    render(
+      <ScheduleCustomerSidebar
+        service={{ ...baseService, billingLane: { ...baseService.billingLane, prediction: { ...baseService.billingLane.prediction, invoiceStatus: 'sent', amountDue: 153.6 } } }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('Total')).toBeTruthy());
+    expect(screen.queryByText(/nothing to collect/i)).toBeNull();
+    expect(screen.getByText(/\$153\.60 due/i)).toBeTruthy();
+    const link = screen.getByRole('link', { name: /open invoice/i });
+    expect(link.getAttribute('href')).toBe('/admin/invoices/inv-1');
+  });
+});

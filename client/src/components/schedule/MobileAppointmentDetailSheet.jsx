@@ -34,6 +34,7 @@ import PrepaySwitchSheet from './PrepaySwitchSheet';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 import { describeCardRequestState, describeCardRequestResult, canSendCardRequest } from './cardLinkStatus';
+import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -256,6 +257,12 @@ export default function MobileAppointmentDetailSheet({
   const siblingCoveredInvoice = service.billingLane?.prediction?.kind === 'covered_sibling_invoice'
     ? service.billingLane.prediction
     : null;
+  // codex round-7 P1: the sibling invoice's OWN status decides the copy —
+  // a settled (paid/prepaid/processing) sibling invoice needs nothing, but
+  // a collectible one (draft/sent/overdue/…) still has a real balance due
+  // that a technician must not walk away from. Centralized in
+  // siblingInvoiceCoverageCopy so every consumer of this prediction agrees.
+  const siblingCoverage = siblingInvoiceCoverageCopy(siblingCoveredInvoice);
   // Codex round 5 P2: the sibling lookup came back needs_review/error
   // (billing-lane.js siblingCoveredCompletionPrediction) — the mint
   // resolver refuses to charge this visit for EITHER reason, so it must
@@ -563,10 +570,30 @@ export default function MobileAppointmentDetailSheet({
             Covered by WaveGuard {tierLabel(tier)} — no charge needed
           </div>
         )}
-        {!coveredByMembership && !isPrepaid && siblingCoveredInvoice && (
+        {!coveredByMembership && !isPrepaid && siblingCoverage && !siblingCoverage.collectible && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
             Covered by invoice {siblingCoveredInvoice.invoiceNumber || 'on file'}
             {siblingCoveredInvoice.siblingServiceType ? ` on the ${siblingCoveredInvoice.siblingServiceType} visit` : ''} — no charge needed
+          </div>
+        )}
+        {/* codex round-7 P1: a covered_sibling_invoice prediction whose
+            sibling invoice is still collectible (draft/sent/overdue/…) is
+            NOT "no charge needed" — the combined trip invoice still has a
+            real balance due, and a technician must not walk off the job
+            thinking there's nothing to collect. This never mints a second
+            invoice for THIS visit (the kind/verdict stays covered) — it
+            just tells staff where to collect instead. */}
+        {!coveredByMembership && !isPrepaid && siblingCoverage && siblingCoverage.collectible && (
+          <div className="text-center mt-2" style={{ fontSize: 12, color: '#92400E' }}>
+            {siblingCoverage.detail}
+            {siblingCoverage.invoiceHref && (
+              <>
+                {' '}
+                <a href={siblingCoverage.invoiceHref} style={{ color: '#92400E', textDecoration: 'underline' }}>
+                  View invoice
+                </a>
+              </>
+            )}
           </div>
         )}
         {!coveredByMembership && !isPrepaid && siblingNeedsReview && (
@@ -729,9 +756,12 @@ export default function MobileAppointmentDetailSheet({
                   Covered by prepay
                 </span>
               )}
-              {!prepaidCovered && siblingCoveredInvoice && (
-                <span className="text-ink-secondary block" style={{ fontSize: 12 }}>
-                  Covered by invoice {siblingCoveredInvoice.invoiceNumber || 'on file'}
+              {!prepaidCovered && siblingCoverage && (
+                <span
+                  className={siblingCoverage.collectible ? 'block' : 'text-ink-secondary block'}
+                  style={{ fontSize: 12, color: siblingCoverage.collectible ? '#92400E' : undefined }}
+                >
+                  {siblingCoverage.short}
                 </span>
               )}
               {!prepaidCovered && siblingNeedsReview && (

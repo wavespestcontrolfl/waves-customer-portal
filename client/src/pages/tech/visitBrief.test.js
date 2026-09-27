@@ -90,6 +90,36 @@ describe('visitMoneySummary', () => {
       .toBe('Combined-trip invoice needs review — do not collect');
   });
 
+  // Codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+  // invoice is still collectible (draft/sent/overdue/…) used to say
+  // "nothing to collect" no matter what — a technician could leave without
+  // collecting the combined trip invoice that remained due. This must flag
+  // collectNeeded (the SAME amber treatment as an ordinary `invoice` row)
+  // and headline the amount still due, never the settled-case copy.
+  it('a collectible sibling invoice status flags collectNeeded and headlines the amount still due', () => {
+    const collectible = {
+      billingLane: {
+        prediction: {
+          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-2026-0505', invoiceStatus: 'overdue', amountDue: 153.6,
+        },
+      },
+    };
+    const summary = visitMoneySummary(collectible);
+    expect(summary.collectNeeded).toBe(true);
+    expect(summary.headline).toBe('Collect on invoice WPC-2026-0505 ($153.60 due)');
+
+    const settled = {
+      billingLane: {
+        prediction: {
+          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-2026-0505', invoiceStatus: 'paid', amountDue: 153.6,
+        },
+      },
+    };
+    const settledSummary = visitMoneySummary(settled);
+    expect(settledSummary.collectNeeded).toBe(false);
+    expect(settledSummary.headline).toBe('Covered by sibling invoice — nothing to collect');
+  });
+
   it('missing billingLane (older payload) fails toward NOT flagging', () => {
     const summary = visitMoneySummary({ estimatedPrice: 115 });
     expect(summary.headline).toBe(null);

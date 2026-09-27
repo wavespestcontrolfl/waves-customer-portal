@@ -255,7 +255,12 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
         invoiceNumber: 'WPC-2026-0505',
-        invoiceStatus: 'sent',
+        // Codex round-7 P1: the sibling invoice's status decides "no charge
+        // needed" vs "still due — collect on that invoice". This fixture
+        // pins the SETTLED case (paid) — see the collectible-status
+        // describe block below for the still-due case.
+        invoiceStatus: 'paid',
+        amountDue: 153.6,
         siblingServiceType: 'Quarterly Pest Control',
       },
       unbilledGap: null,
@@ -290,7 +295,60 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
       screen.getByText(/Covered by invoice WPC-2026-0505 on the Quarterly Pest Control visit — no charge needed/i),
     ).toBeInTheDocument();
   });
+});
 
+// Codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+// invoice is still collectible (draft/sent/overdue/…) previously showed the
+// SAME "no charge needed" copy as a genuinely settled one — a technician
+// could leave without collecting the combined trip invoice that remained
+// due. This pins the fix on the CTA-area note and the itemized total's
+// short label; it fails on the pre-fix code (which never branched on
+// invoiceStatus at all).
+describe('MobileAppointmentDetailSheet sibling-covered visit whose sibling invoice is still collectible', () => {
+  const COLLECTIBLE_SIBLING_SERVICE = {
+    ...BASE_SERVICE,
+    id: 'svc-lawn',
+    serviceType: 'Every 6 Weeks Lawn Care',
+    serviceTypeDisplay: 'Every 6 Weeks Lawn Care',
+    waveguardTier: 'Silver',
+    estimatedPrice: null,
+    monthlyRate: 74.7,
+    customerId: 'cust-1',
+    billingLane: {
+      mode: 'per_application',
+      source: 'explicit',
+      monthlyRate: 74.7,
+      prediction: {
+        kind: 'covered_sibling_invoice',
+        amount: null,
+        conflictStampedPrice: false,
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-2026-0505',
+        invoiceStatus: 'overdue',
+        amountDue: 153.6,
+        siblingServiceType: 'Quarterly Pest Control',
+      },
+      unbilledGap: null,
+    },
+  };
+
+  it('never says "no charge needed" — tells staff to collect on the still-due combined trip invoice, with the amount and a link', () => {
+    render(<MobileAppointmentDetailSheet service={COLLECTIBLE_SIBLING_SERVICE} onClose={() => {}} />);
+    expect(screen.queryByText(/no charge needed/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/\$153\.60 due/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/collect on that invoice/i).length).toBeGreaterThan(0);
+    const link = screen.getByRole('link', { name: /view invoice/i });
+    expect(link).toHaveAttribute('href', '/admin/invoices/inv-1');
+  });
+
+  it('reads "Collect on invoice WPC-2026-0505" in the itemized total, not "Covered by invoice"', () => {
+    render(<MobileAppointmentDetailSheet service={COLLECTIBLE_SIBLING_SERVICE} onClose={() => {}} />);
+    expect(screen.queryByText(/^Covered by invoice WPC-2026-0505$/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Collect on invoice WPC-2026-0505/i).length).toBeGreaterThan(0);
+  });
+});
+
+describe('MobileAppointmentDetailSheet monthlyRate fallback', () => {
   // Codex pre-push P1: a legacy customer with NO explicit billing_mode still
   // gets the monthlyRate fallback from the Charge Now mint endpoint's OWN
   // gate (resolveScheduledServiceCharge checks the RAW billing_mode column,

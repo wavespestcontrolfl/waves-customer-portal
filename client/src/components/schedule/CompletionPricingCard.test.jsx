@@ -88,6 +88,29 @@ it('reads a covered_sibling_invoice prediction as covered — no charge', async 
   expect(screen.getByText('$0.00')).toBeInTheDocument();
 });
 
+// Codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+// invoice is still collectible (draft/sent/overdue/…) previously read
+// exactly like a settled one — "Covered application" / "nothing to
+// collect" — even though the combined trip invoice still has a real
+// balance due elsewhere. This never mints a charge HERE either (amount
+// stays $0.00 — the completion never bills this visit a second time), but
+// the label/note must flag it, not call it "covered".
+it('reads a still-collectible covered_sibling_invoice prediction as flagged, not covered — still $0 here', async () => {
+  const collectibleSvc = { id: 'job-collectible', serviceType: 'Every 6 Weeks Lawn Care', estimatedPrice: null,
+    billingLane: {
+      prediction: {
+        kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-2026-0505', invoiceStatus: 'overdue', amountDue: 153.6,
+      },
+    } };
+  const collectibleData = { ...data, serviceId: collectibleSvc.id, currentAmount: 97.2, proposedAmount: 97.2, canApply: false, lines: [] };
+  render(<CompletionPricingCard service={collectibleSvc} adminFetch={vi.fn().mockResolvedValue({ completionPricing: collectibleData })} onReviewChange={vi.fn()} />);
+  expect(await screen.findByText('Combined trip invoice due')).toBeInTheDocument();
+  expect(screen.queryByText('Covered application')).not.toBeInTheDocument();
+  expect(screen.getByText('Collect on invoice WPC-2026-0505 ($153.60 due)')).toBeInTheDocument();
+  expect(screen.getByText('$0.00')).toBeInTheDocument();
+  expect(screen.queryByText('$97.20')).not.toBeInTheDocument();
+});
+
 it('remains unready during loading and failure, then becomes ready after retry', async () => {
   let rejectRead;
   const fetch = vi.fn().mockImplementationOnce(() => new Promise((resolve, reject) => { rejectRead = reject; }))

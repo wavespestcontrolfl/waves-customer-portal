@@ -5,6 +5,7 @@
 // comes from the canonical attachedVisitInvoice helper. Checkout math stays
 // exclusively in MobileCheckoutSheet — the brief displays, checkout charges.
 import { attachedVisitInvoice, visitInvoiceStatusNote } from '../../components/schedule/visitInvoice';
+import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 // A status-only completion still needs the combined closeout to create its
 // canonical service record. Require the explicit false from the current day
@@ -73,7 +74,17 @@ const PREDICTION_COPY = {
   // siblingCoveredCompletionPrediction). Without an entry here the kind
   // fell through `copy ? copy(amount) : null` to a silent headline: null,
   // dropping the billing row from the brief entirely (codex round-6 P2).
-  covered_sibling_invoice: () => 'Covered by sibling invoice — nothing to collect',
+  //
+  // codex round-7 P1: "nothing to collect" was ALWAYS the headline here,
+  // even when the sibling invoice is still draft/sent/overdue — genuinely
+  // collectible. `prediction` (not just `amount`, which stays null for
+  // this kind by design) carries invoiceStatus/amountDue, so
+  // siblingInvoiceCoverageCopy can tell a technician to collect on that
+  // invoice instead of walking off the job.
+  covered_sibling_invoice: (_amt, prediction) => {
+    const coverage = siblingInvoiceCoverageCopy(prediction);
+    return coverage?.collectible ? coverage.short : 'Covered by sibling invoice — nothing to collect';
+  },
   // The sibling lookup came back needs_review/error — the mint resolver
   // refuses to charge this visit either way, so the brief must say "go
   // resolve it," never stay silent (codex round-6 P2, mirrors
@@ -99,11 +110,16 @@ export function visitMoneySummary(service) {
   const rawAmount = Number(prediction.amount);
   const amount = Number.isFinite(rawAmount) ? rawAmount : null;
   const copy = PREDICTION_COPY[kind];
+  // codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+  // invoice is still collectible flags collectNeeded too — same amber
+  // "needs action" treatment VisitBriefPanel already gives an `invoice`
+  // row, so the brief doesn't bury a real balance due in quiet gray text.
+  const siblingCollectNeeded = kind === 'covered_sibling_invoice' && !!siblingInvoiceCoverageCopy(prediction)?.collectible;
   return {
     kind,
     amount,
-    collectNeeded: kind === 'invoice' && amount > 0,
-    headline: copy ? copy(amount) : null,
+    collectNeeded: (kind === 'invoice' && amount > 0) || siblingCollectNeeded,
+    headline: copy ? copy(amount, prediction) : null,
     note,
     invoice,
   };

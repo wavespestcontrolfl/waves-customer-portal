@@ -93,6 +93,7 @@ describe('siblingCoveredCompletionPrediction', () => {
       invoiceId: 'inv-1',
       invoiceNumber: 'WPC-2026-0505',
       invoiceStatus: 'sent',
+      amountDue: 153.6,
       siblingServiceType: 'Quarterly Pest Control',
     });
     expect(prediction.breakdown).toEqual(
@@ -102,6 +103,29 @@ describe('siblingCoveredCompletionPrediction', () => {
       ]),
     );
     expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(LAWN_SVC, dbConn);
+  });
+
+  // Codex round-7 P1: `invoiceStatus` alone told a consumer THAT a sibling
+  // invoice exists, never whether it still needs collecting — every
+  // covered_sibling_invoice consumer rendered "no charge needed" even for a
+  // draft/sent/overdue invoice. `amountDue` is the canonical charge base
+  // (invoiceAmountDue, invoice-helpers.js: total minus credit_applied,
+  // clamped at 0) so the client copy can say exactly what remains on THAT
+  // invoice, never the invoice's raw (pre-credit) total.
+  test('amountDue nets any account credit already applied to the sibling invoice', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: {
+        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-2026-0505',
+        status: 'overdue', total: 153.6, credit_applied: 50,
+      },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({
+      byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } },
+    });
+
+    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    expect(prediction).toMatchObject({ kind: 'covered_sibling_invoice', invoiceStatus: 'overdue', amountDue: 103.6 });
   });
 
   test('omits the breakdown when the anchored splits do not reconcile to the invoice total', async () => {

@@ -197,6 +197,31 @@ describe('payer-billed visits', () => {
     const pricedFree = predictCompletionBilling({ ...payer, serviceType: 'Pest Control Re-Service', estimatedPrice: 129 });
     expect(pricedFree).toMatchObject({ kind: 'payer', amount: 129 });
   });
+
+  // Codex round 7 P2: a payer-billed visit carrying the authoritative-zero
+  // shape (estimatedPrice stamped 0 alongside a positive primaryLinePrice —
+  // a fully-discounted application, e.g. a promo that zeroed the line) hit
+  // the SAME `hasVisitPrice` branch as a real priced payer visit and
+  // resolved to `{ kind: 'payer', amount: 0 }` — which the "an UNPRICED
+  // payer visit" test above proves unbilledCompletionGap reads as a genuine
+  // `no_amount_on_file` gap. That flagged a deliberately free visit as a
+  // missing AP charge. It must read as `no_charge`/`fully_discounted`
+  // instead, same as the per_application/self-pay lanes' own exemption, and
+  // report no gap at all.
+  test('an authoritative-zero (fully-discounted) payer visit predicts no_charge, never { kind: payer, amount: 0 } (Codex r7 P2)', () => {
+    const discounted = predictCompletionBilling({ ...payer, estimatedPrice: 0, primaryLinePrice: 62.5 });
+    expect(discounted).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+    expect(unbilledCompletionGap({ prediction: discounted })).toBeNull();
+
+    // Same shape in the per_application lane — a payer whose accepted
+    // application was discounted to $0 still must not read as amountless.
+    const discountedPerApp = predictCompletionBilling({
+      ...payer, lane: 'per_application', billingMode: 'per_application',
+      estimatedPrice: 0, primaryLinePrice: 62.5, perApplicationFee: 98,
+    });
+    expect(discountedPerApp).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+    expect(unbilledCompletionGap({ prediction: discountedPerApp })).toBeNull();
+  });
 });
 
 describe('payer gaps never borrow the service customer wallet', () => {
