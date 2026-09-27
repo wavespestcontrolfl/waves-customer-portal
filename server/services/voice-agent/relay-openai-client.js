@@ -30,10 +30,18 @@
  *       user text                → {role:'user', content:[{type:'input_text'}]}
  *       assistant text           → {role:'assistant', content:'<text>'} (a plain-string
  *                                  easy input message — valid for every role)
- *       assistant tool_use       → {type:'function_call', call_id, name, arguments}
+ *       assistant tool_use       → {type:'function_call', call_id, name, arguments},
+ *                                  preceded by its reasoning run (below) when it has one
  *       user tool_result         → {type:'function_call_output', call_id, output}
  *   tools (Anthropic {name, description, input_schema}) → Responses
  *     {type:'function', name, description, parameters, strict:false}
+ *   Reasoning (store:false, so `include: ['reasoning.encrypted_content']`
+ *     whenever the model reasons): the reasoning items immediately before a
+ *     function_call ride on its tool_use block (`_openai`, adapter-private)
+ *     and go back, with that call's own item id, in the next rounds of the
+ *     same caller turn — the pairing the Responses API validates. Reasoning
+ *     before a message, from an earlier turn, or without encrypted content is
+ *     not replayed.
  *   max_tokens → max_output_tokens
  *   thinking / output_config (Anthropic-only effort control) → dropped;
  *     reasoning effort for THIS request is read from the model's own
@@ -110,7 +118,13 @@ function toOpenAITool(tool) {
  */
 function toResponsesInput(messages) {
   const items = [];
-  for (const m of messages || []) {
+  const list = messages || [];
+  // Reasoning is replayed only for tool calls since the caller's last own
+  // message (a user turn carrying text, not just tool results) — the only
+  // reasoning the Responses API needs back (see replayableReasoning).
+  let turnStart = -1;
+  list.forEach((m, i) => { if (m && m.role === 'user' && isCallerTurn(m)) turnStart = i; });
+  list.forEach((m, index) => {
     const role = m.role === 'assistant' ? 'assistant' : 'user';
     const blocks = Array.isArray(m.content)
       ? m.content
@@ -132,7 +146,18 @@ function toResponsesInput(messages) {
         textRun.push(String(b.text ?? ''));
       } else if (b.type === 'tool_use') {
         flushText();
-        items.push({ type: 'function_call', call_id: b.id, name: b.name, arguments: JSON.stringify(b.input ?? {}) });
+        const replay = index > turnStart ? replayableReasoning(b) : null;
+        // A replayed reasoning run goes back immediately before the call it
+        // preceded, and that call carries its original item id — the pair the
+        // API validates. Without reasoning, the call goes back id-less as before.
+        if (replay) items.push(...replay.reasoning);
+        items.push({
+          type: 'function_call',
+          ...(replay ? { id: replay.itemId } : {}),
+          call_id: b.id,
+          name: b.name,
+          arguments: JSON.stringify(b.input ?? {}),
+        });
       } else if (b.type === 'tool_result') {
         flushText();
         const output = typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? '');
@@ -141,8 +166,31 @@ function toResponsesInput(messages) {
       // Any other block type never appears in this relay's own history and is skipped.
     }
     flushText();
-  }
+  });
   return items;
+}
+
+/** A user message the caller (or the relay's own turn preamble) wrote — not tool results only. */
+function isCallerTurn(message) {
+  if (!Array.isArray(message.content)) return true;
+  return message.content.some((b) => b && b.type === 'text');
+}
+
+/**
+ * The reasoning run mapResponseToMessage attached to a tool_use block
+ * (`_openai`), when it can be replayed: every item carries an id and its
+ * encrypted content (store:false keeps nothing server-side), and the call
+ * carries its own item id. Anything less replays nothing — a reasoning item
+ * the API cannot pair, or cannot read back, is a 400, not lost context.
+ */
+function replayableReasoning(block) {
+  const meta = block && block._openai;
+  if (!meta || typeof meta.itemId !== 'string' || !meta.itemId) return null;
+  const reasoning = Array.isArray(meta.reasoning) ? meta.reasoning : [];
+  if (!reasoning.length) return null;
+  const usable = reasoning.every((r) => r && r.type === 'reasoning' && typeof r.id === 'string' && r.id
+    && typeof r.encrypted_content === 'string' && r.encrypted_content);
+  return usable ? { itemId: meta.itemId, reasoning } : null;
 }
 
 /** The model's own MODEL_CATALOG `voice.reasoning` effort, or null if unset. */
@@ -171,6 +219,10 @@ function buildOpenAIRequest(params = {}) {
   if (params.max_tokens) body.max_output_tokens = params.max_tokens;
   const effort = reasoningEffortFor(params.model);
   if (effort) body.reasoning = { effort };
+  // store:false keeps nothing server-side, so a reasoning item can only be
+  // passed back (toResponsesInput) with its encrypted content. An effort of
+  // 'none' produces no reasoning items to keep.
+  if (effort && effort !== 'none') body.include = ['reasoning.encrypted_content'];
   return body;
 }
 
@@ -262,14 +314,29 @@ function mapResponseToMessage(response, requestedModel) {
   }
   const content = [];
   let hasFunctionCall = false;
+  // The reasoning items since the last non-reasoning item. A run that ends
+  // at a function_call rides on that call's tool_use block (`_openai`) so
+  // toResponsesInput can pass it back in the next round of the same turn; a
+  // run followed by a message is dropped, since the relay may rewrite or
+  // withhold that text and a reasoning item must stay paired with the item
+  // that followed it.
+  let reasoningRun = [];
   for (const item of response.output || []) {
+    if (item.type === 'reasoning') {
+      reasoningRun.push({ type: 'reasoning', id: item.id, summary: Array.isArray(item.summary) ? item.summary : [], encrypted_content: item.encrypted_content });
+      continue;
+    }
     if (item.type === 'message') {
       content.push(...messageTextBlocks(item));
     } else if (item.type === 'function_call') {
       hasFunctionCall = true;
-      content.push(functionCallBlock(item, response));
+      const block = functionCallBlock(item, response);
+      if (reasoningRun.length && typeof item.id === 'string' && item.id) {
+        block._openai = { itemId: item.id, reasoning: reasoningRun };
+      }
+      content.push(block);
     }
-    // Reasoning (and any other) items carry nothing the caller hears.
+    reasoningRun = [];
   }
   // No non-blank text and no tool call — an empty output, reasoning only, or
   // blank text, whether completed or cut off by max_output_tokens (reasoning
@@ -290,6 +357,17 @@ function mapResponseToMessage(response, requestedModel) {
     stop_reason,
     usage: mapUsage(response.usage),
   };
+}
+
+/** `response` with any reasoning item missing its encrypted content filled from its output_item.done form. */
+function withDoneReasoning(response, doneItems) {
+  if (!doneItems.size || !Array.isArray(response.output)) return response;
+  const output = response.output.map((item) => {
+    if (!item || item.type !== 'reasoning' || item.encrypted_content) return item;
+    const done = doneItems.get(item.id);
+    return done && done.encrypted_content ? { ...item, encrypted_content: done.encrypted_content } : item;
+  });
+  return { ...response, output };
 }
 
 /** err normalized to name 'AbortError' whenever `signal` says this call was aborted. */
@@ -431,6 +509,9 @@ class OpenAIRelayStream {
     }
     let finalResponse = null;
     let failure = null;
+    // Each item's final form (response.output_item.done) — the source of a
+    // reasoning item's encrypted content should the terminal body omit it.
+    const doneItems = new Map();
     try {
       for await (const evt of readSSEEvents(resp.body, signal)) {
         switch (evt.type) {
@@ -445,6 +526,9 @@ class OpenAIRelayStream {
             });
             break;
           }
+          case 'response.output_item.done':
+            if (evt.item && typeof evt.item.id === 'string') doneItems.set(evt.item.id, evt.item);
+            break;
           case 'response.output_text.delta':
             if (typeof evt.delta === 'string' && evt.delta) this._emit('text', evt.delta);
             break;
@@ -470,7 +554,7 @@ class OpenAIRelayStream {
     }
     if (failure) throw new Error(`OpenAI Responses API error: ${failure}`);
     if (!finalResponse) throw new Error('OpenAI Responses API stream ended without a completed response');
-    return mapResponseToMessage(finalResponse, params.model);
+    return mapResponseToMessage(withDoneReasoning(finalResponse, doneItems), params.model);
   }
 }
 

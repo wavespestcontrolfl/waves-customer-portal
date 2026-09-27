@@ -475,3 +475,91 @@ describe('readSSEEvents — line endings', () => {
     expect(await collect(['data: {"a":1}\r\n\r\ndata: {"b":2}'])).toEqual([{ a: 1 }]);
   });
 });
+
+// Codex r5 P1: with store:false, a reasoning model's tool loop needs its
+// reasoning items back — encrypted, immediately before the call they
+// preceded, within the same caller turn.
+describe('reasoning items across tool-call rounds', () => {
+  const RS = (id, enc = `enc-${id}`) => ({ type: 'reasoning', id, summary: [], encrypted_content: enc, status: 'completed' });
+  const FC = (id, callId, name = 'lookup_customer') => ({ type: 'function_call', id, call_id: callId, name, arguments: '{}', status: 'completed' });
+
+  test('a reasoning model asks for encrypted reasoning; effort none and no-effort models do not', () => {
+    expect(buildOpenAIRequest({ model: 'gpt-6-sol', messages: [] }).include).toEqual(['reasoning.encrypted_content']);
+    expect(buildOpenAIRequest({ model: 'gpt-5.6-luna', messages: [] })).not.toHaveProperty('include');
+    expect(buildOpenAIRequest({ model: 'gpt-5.6-sol', messages: [] })).not.toHaveProperty('include');
+  });
+
+  test('the reasoning run immediately before a function_call rides on its tool_use block, trimmed to the replay fields', () => {
+    const msg = mapResponseToMessage({ status: 'completed', output: [RS('rs_1'), RS('rs_2'), FC('fc_1', 'call_1'), FC('fc_2', 'call_2')] }, 'gpt-6-sol');
+    expect(msg.content[0]._openai).toEqual({
+      itemId: 'fc_1',
+      reasoning: [
+        { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-rs_1' },
+        { type: 'reasoning', id: 'rs_2', summary: [], encrypted_content: 'enc-rs_2' },
+      ],
+    });
+    expect(msg.content[1]).not.toHaveProperty('_openai'); // nothing reasoned right before the second call
+  });
+
+  test('reasoning followed by a message is not kept (the relay may rewrite or withhold that text)', () => {
+    const msg = mapResponseToMessage({
+      status: 'completed',
+      output: [RS('rs_1'), { type: 'message', content: [{ type: 'output_text', text: 'Let me check.' }] }, FC('fc_1', 'call_1')],
+    }, 'gpt-6-sol');
+    expect(msg.content[0]).toEqual({ type: 'text', text: 'Let me check.' });
+    expect(msg.content[1]).not.toHaveProperty('_openai');
+  });
+
+  test('replay: the reasoning run goes back immediately before its call, which carries its item id', () => {
+    const toolUse = { type: 'tool_use', id: 'call_1', name: 'lookup_customer', input: {}, _openai: { itemId: 'fc_1', reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' }] } };
+    const items = toResponsesInput([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'text', text: 'One moment.' }, toolUse] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'Found.' }] },
+    ]);
+    expect(items).toEqual([
+      { role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      { role: 'assistant', content: 'One moment.' },
+      { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' },
+      { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup_customer', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'Found.' },
+    ]);
+  });
+
+  test('replay: reasoning from an earlier caller turn is not sent again, and its call goes back id-less', () => {
+    const toolUse = { type: 'tool_use', id: 'call_1', name: 'lookup_customer', input: {}, _openai: { itemId: 'fc_1', reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' }] } };
+    const items = toResponsesInput([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [toolUse] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'Found.' }] },
+      { role: 'assistant', content: 'Hi Pat.' },
+      { role: 'user', content: [{ type: 'text', text: '[clock]' }, { type: 'text', text: 'next question' }] },
+    ]);
+    expect(items.some((i) => i.type === 'reasoning')).toBe(false);
+    expect(items.find((i) => i.type === 'function_call')).toEqual({ type: 'function_call', call_id: 'call_1', name: 'lookup_customer', arguments: '{}' });
+  });
+
+  test.each([
+    ['no encrypted content', { itemId: 'fc_1', reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [] }] }],
+    ['no reasoning id', { itemId: 'fc_1', reasoning: [{ type: 'reasoning', summary: [], encrypted_content: 'enc' }] }],
+    ['no call item id', { reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' }] }],
+  ])('replay: a reasoning run with %s is not sent (it could not be paired or read back)', (_label, meta) => {
+    const items = toResponsesInput([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'lookup_customer', input: {}, _openai: meta }] },
+    ]);
+    expect(items.some((i) => i.type === 'reasoning')).toBe(false);
+    expect(items.find((i) => i.type === 'function_call')).not.toHaveProperty('id');
+  });
+
+  test('stream: encrypted content from response.output_item.done fills a terminal body that lacks it', async () => {
+    const fetchImpl = fetchStub([
+      { type: 'response.output_item.done', item: RS('rs_1', 'enc-from-done') },
+      { type: 'response.output_item.done', item: FC('fc_1', 'call_1') },
+      { type: 'response.completed', response: { id: 'r1', status: 'completed', output: [{ type: 'reasoning', id: 'rs_1', summary: [] }, FC('fc_1', 'call_1')] } },
+    ]);
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const msg = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage();
+    expect(msg.content[0]._openai.reasoning).toEqual([{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-from-done' }]);
+  });
+});

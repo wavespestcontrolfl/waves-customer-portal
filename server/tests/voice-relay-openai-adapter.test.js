@@ -279,6 +279,43 @@ describe('a full turn loop on the OpenAI adapter — tool-call round then text r
     expect(stamps.effort).toBeNull(); // voiceEffortFor never sends output_config to a non-Anthropic model
   });
 
+  // Codex r5 P1: the round-1 reasoning item reaches round 2's request,
+  // immediately before the call it preceded — through the relay's own history.
+  test('a reasoning item before a tool call is passed back in the next round of the same turn', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
+    global.fetch = mockFetchSequence([
+      [
+        {
+          type: 'response.completed',
+          response: {
+            id: 'r1', model: OPENAI_CANDIDATE, status: 'completed',
+            output: [
+              { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-1' },
+              { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup_customer', arguments: '{"phone":"+19415551234"}', status: 'completed' },
+            ],
+          },
+        },
+      ],
+      [
+        {
+          type: 'response.completed',
+          response: { id: 'r2', model: OPENAI_CANDIDATE, status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'Thanks, Pat.' }] }] },
+        },
+      ],
+    ]);
+
+    const convo = new RelayConversation({ callSid: 'CA-openai-rs', from: '+19415551234', evalHarness: true, send: () => {} });
+    await convo._runLoop('hi, this is Pat');
+
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).include).toEqual(['reasoning.encrypted_content']);
+    const input = JSON.parse(global.fetch.mock.calls[1][1].body).input;
+    const at = input.findIndex((i) => i.type === 'reasoning');
+    expect(input[at]).toEqual({ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-1' });
+    expect(input[at + 1]).toMatchObject({ type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup_customer' });
+    expect(input[at + 2]).toMatchObject({ type: 'function_call_output', call_id: 'call_1' });
+  });
+
   test('an OpenAI HTTP failure is an ordinary model failure — no silent Claude fallback', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
