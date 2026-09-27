@@ -708,6 +708,26 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       ).ok).toBe(true);
     });
 
+    test('absolute related links require a standard credential-free publish origin', () => {
+      for (const unsafeDest of [
+        'https://www.wavespestcontrol.com:8443/termite/a/',
+        'https://user:pass@www.wavespestcontrol.com/termite/a/',
+      ]) {
+        const result = checkRelatedPostsLinked(
+          { body: `See [A](${unsafeDest}), [B](/termite/b/), and [C](/termite/c/).` },
+          { voice_constraints: { related_posts: relatedPosts } }
+        );
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/linked 2 so far/);
+      }
+
+      const standardPort = checkRelatedPostsLinked(
+        { body: 'See [A](https://www.wavespestcontrol.com:443/termite/a/), [B](/termite/b/), and [C](/termite/c/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(standardPort.ok).toBe(true);
+    });
+
     test('MDX expressions that render no text do not count as visible anchor labels', () => {
       const body = 'See [{null}](/termite/a/), [{false}](/termite/b/), and [{true}](/termite/c/).';
       const result = checkRelatedPostsLinked(

@@ -46,6 +46,7 @@ const {
   blankExpressionStringLiterals,
   blankNonRenderedMarkdownWithDepths,
   normalizeInternalPath,
+  safeFleetUrlPath,
 } = require('./content-guardrails');
 const { HUB_SITE_KEYS, normalizeSpokeSites } = require('../content-astro/spoke-sites');
 const { resolveSpokeTarget } = require('../content-astro/spoke-routing');
@@ -1100,11 +1101,14 @@ function realMarkdownLinkPaths(body, allowedHosts) {
 // whole fleet, but using that broad set here would let a hub post satisfy its
 // mandatory related-link count with an absolute spoke URL.
 function firstPartyPathname(dest, allowedHosts) {
+  const raw = String(dest || '').trim();
   try {
-    const u = new URL(String(dest || '').trim());
-    if (/^https?:$/.test(u.protocol) && allowedHosts.has(u.hostname.toLowerCase())) return u.pathname || '/';
+    // Parsing succeeds only for an absolute URL here. Apply the shared fleet
+    // origin contract before discarding origin details for path comparison.
+    new URL(raw);
+    return safeFleetUrlPath(raw, allowedHosts);
   } catch { /* not absolute */ }
-  return dest;
+  return raw;
 }
 
 function relatedPostHostSet(brief) {
