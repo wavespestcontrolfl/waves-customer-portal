@@ -16,6 +16,7 @@ const {
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
 const { gateEnvValue } = require('../config/feature-gates');
+const { treeShrubFieldGuide } = require('../services/tree-shrub-field-guide');
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { scopeFromText } = require('../services/service-report/action-scope');
 const {
@@ -1802,7 +1803,12 @@ router.get('/programs', async (req, res, next) => {
     const { track, program } = req.query;
 
     if (program && PROGRAM_KEYS.includes(program) && protocols[program]) {
-      return res.json(protocolCatalogForViewer(req, { program: protocols[program] }));
+      const data = protocols[program];
+      const fieldGuideEnabled = program === 'tree_shrub' && gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE');
+      return res.json(protocolCatalogForViewer(req, { program: fieldGuideEnabled ? {
+        ...data, fieldGuideEnabled: true,
+        visits: data.visits.map(visit => ({ ...visit, fieldGuide: treeShrubFieldGuide(visit) })),
+      } : data }));
     }
 
     // Backward compat: map old track letters to new keys

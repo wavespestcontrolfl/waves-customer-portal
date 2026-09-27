@@ -24,6 +24,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
+const { treeShrubFieldGuide } = require('./tree-shrub-field-guide');
+const { resolveCatalogProductForName } = require('./completion-product-defaults');
 const { reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
 const { dispatchWithFallback } = require('./llm/call');
 const { getHourlyRainOutlook } = require('./weather-forecast');
@@ -1164,8 +1166,10 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   for (const line of linesFromProtocolText(visit, catalog)) {
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
+  const fieldGuide = treeShrubFieldGuide(visit);
   return { visit, lines, procedure: {
     name: program.name,
+    ...(fieldGuide ? { fieldGuide } : {}),
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
     objective: procedureLines(visit.main_goal).join(' ') || null,
@@ -1332,9 +1336,11 @@ function linesFromProtocolText(visit, catalog) {
     // The parser's own flag (secondary text, "if …") plus the wider
     // condition phrasing the protocols use: a primary line the tech has to
     // justify is conditional work, never selected base work.
-    const conditional = Boolean(line.conditional) || isConditionalLine(line.raw);
+    const labelHold = visit?.fieldGuide && /\bheld\b|\bhold dose\b|exact.*label needed|verify container label|target-specific label rate|whiteflies.*listed scales/i.test(line.raw)
+      ? 'Treatment needs its verified label, target and application method before mixing' : null;
+    const conditional = Boolean(line.conditional) || isConditionalLine(line.raw) || Boolean(labelHold);
     for (const product of productsOnLine(line, catalog)) {
-      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
+      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional, ...(labelHold ? { labelHold } : {}) });
     }
   }
   return out;
@@ -1569,6 +1575,23 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 
+  // A month reference cannot bypass the job's label/weather holds. Keep
+  // target and source details, but withhold scaled mixing amounts until
+  // the exact catalog product and the current checks permit them.
+  for (const currentProcedure of [procedure, ...addons.map(addon => addon.procedure)]) {
+    if (!currentProcedure?.fieldGuide) continue;
+    for (const product of Object.values(currentProcedure.fieldGuide.products)) {
+      if (!product.mix) continue;
+      const name = product.name.startsWith('TriTek') ? 'TriTek Spray Oil Emulsion (OMRI)' : product.name;
+      const row = resolveCatalogProductForName(name, catalog, { exactOnly: true });
+      const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
+      if (blocks.length || !row?.label_verified_at || !verdict || verdict.verdict !== 'ok') {
+        product.mix = null;
+        product.summary = 'Mix withheld · see product checks';
+      }
+    }
+  }
+
   return {
     enabled: true,
     serviceId: facts.serviceId,
@@ -1741,6 +1764,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
+    [Boolean(protocolLine?.labelHold), protocolLine?.labelHold],
     // The protocol lists this product as "if needed": no dose until the
     // call is made, exactly as the card withholds its amount.
     [protocolLine?.selected === false, `Listed as "if needed" on ${protocolLine?.addon || "this visit's protocol"} — confirm the call before mixing`],
@@ -1823,7 +1847,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const hit = lines.find((l) => l.product.id === product.id);
     if (!hit) continue;
     if (hit.selected !== false) return found({ addon: c.addon, selected: true, rate: lineRate(hit.raw) });
-    conditional = conditional || { addon: c.addon, selected: false, rate: null };
+    conditional = conditional || { addon: c.addon, selected: false, rate: null, ...(hit.labelHold ? { labelHold: hit.labelHold } : {}) };
   }
   return found(conditional);
 }
