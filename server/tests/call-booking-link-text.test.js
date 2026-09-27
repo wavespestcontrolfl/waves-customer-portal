@@ -34,7 +34,9 @@ const {
   stagingIneligibleReason,
   dispatchClaimedCall,
   claimForDispatch,
+  stage,
   sweep,
+  STAGING_GRACE_MINUTES,
 } = require('../services/call-booking-link-text');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
@@ -157,6 +159,26 @@ test('gate off: sweep never touches the database', async () => {
   isEnabled.mockReturnValue(true);
 });
 
+// ── stage — a grace period before ever judging a fresh call ──────────────
+describe('stage', () => {
+  test('excludes calls newer than the staging grace period (codex pre-push P1: extraction can flip valid before lead linkage lands)', async () => {
+    const wheres = [];
+    const conn = jest.fn(() => {
+      const chain = {};
+      ['where', 'orderBy', 'limit', 'select', 'whereRaw'].forEach((m) => {
+        chain[m] = jest.fn((...args) => { if (m === 'where') wheres.push(args); return chain; });
+      });
+      chain.then = (resolve) => resolve([]);
+      return chain;
+    });
+    const now = new Date('2026-09-26T18:00:00Z');
+    await stage(conn, { now });
+    const graceWhere = wheres.find(([col, op]) => col === 'created_at' && op === '<=');
+    expect(graceWhere).toBeTruthy();
+    expect(now.getTime() - graceWhere[2].getTime()).toBe(STAGING_GRACE_MINUTES * 60 * 1000);
+  });
+});
+
 // ── claimForDispatch — atomic single-row claim ────────────────────────────
 describe('claimForDispatch', () => {
   test('a pending row is claimed', async () => {
@@ -186,18 +208,19 @@ describe('dispatchClaimedCall', () => {
   const OPEN_LEAD = { id: 'lead-1', status: 'new', converted_at: null, phone: '+19415550100', first_name: 'Jamie',
     customer_id: null, estimate_id: null, is_commercial: false, deleted_at: null };
 
-  function makeDb({ lead = OPEN_LEAD, bookedSince = null, linkSentRecently = null, callLogUpdate = jest.fn(async () => 1),
-    activityInsert = jest.fn(async () => {}) } = {}) {
+  function makeDb({ lead = OPEN_LEAD, bookedSince = null, consultationCodes = [], smsWithLink = null,
+    callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'select', 'modify']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
         if (table === 'scheduled_services') return bookedSince;
-        if (table === 'short_codes') return linkSentRecently;
+        if (table === 'sms_log') return smsWithLink;
         return undefined;
       });
+      chain.pluck = jest.fn(async () => (table === 'short_codes' ? consultationCodes : []));
       chain.update = table === 'call_log' ? callLogUpdate : jest.fn(async () => 1);
       chain.insert = table === 'activity_log' ? activityInsert : jest.fn(async () => {});
       return chain;
@@ -252,19 +275,32 @@ describe('dispatchClaimedCall', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('a booking link already sent in the last 14 days blocks a second one', async () => {
-    const conn = makeDb({ linkSentRecently: { id: 'sc-1' } });
+  test('a link actually delivered by SMS in the last 14 days blocks a second one', async () => {
+    const conn = makeDb({ consultationCodes: ['abcd'], smsWithLink: { id: 'sms-1' } });
     const result = await dispatchClaimedCall(conn, CALL, NOW);
     expect(result.skipped).toBe('link_sent_recently');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('outside the 8am-8pm ET send window at dispatch time blocks the send', async () => {
+  test('a link merely MINTED (composer opened, never sent) does not suppress a real send', async () => {
+    // codex pre-push P1: a short_codes row only proves the link was minted
+    // (Virginia's composer prefill, or the estimate-email offer's own
+    // separate mint) — not that an SMS carrying it was ever accepted.
+    const conn = makeDb({ consultationCodes: ['abcd'], smsWithLink: null });
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.sent).toBe(true);
+  });
+
+  test('outside the 8am-8pm ET window is deferred to the next window open, never lost', async () => {
     const conn = makeDb();
     const lateNight = new Date('2026-09-27T03:00:00Z'); // 11 PM ET
     const result = await dispatchClaimedCall(conn, CALL, lateNight);
     expect(result.skipped).toBe('outside_send_window');
+    expect(result.deferred).toBe(true);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Re-queued as 'pending' with a fresh send_at — never terminally 'skipped'.
+    const rawCall = conn.raw.mock.calls.find(([, bindings]) => bindings?.[0]?.includes('"status":"pending"'));
+    expect(rawCall).toBeTruthy();
   });
 
   test('the link builder refusing (e.g. GATE_LEAD_INSPECTION_LINK dark) blocks the send with its reason', async () => {

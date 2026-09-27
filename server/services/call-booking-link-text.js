@@ -73,6 +73,16 @@ const STAGING_LOOKBACK_DAYS = 3;
 const STAGING_BATCH = 200;
 const DISPATCH_BATCH = 50;
 
+// v2_extraction_status flips to 'valid' before the call pipeline's own
+// lead-creation/linkage step necessarily lands (codex pre-push P1): staging
+// a call the INSTANT extraction is marked valid can catch it between those
+// two writes and stamp a permanent 'no_lead_linkage' for a lead that exists
+// moments later, with no retry (the metadata key itself is what stops a
+// second look). Waiting this long after the call's own created_at before
+// staging it at all is far cheaper than a retry/defer scheme, and costs
+// nothing against the 2-hour minimum delay this lane already imposes.
+const STAGING_GRACE_MINUTES = 15;
+
 // A call that ends without at least this much talk time is a hang-up, a
 // voicemail greeting, or a dropped call before the ask — never a "no visit
 // was set" conversation to follow up on.
@@ -235,9 +245,11 @@ function stagingIneligibleReason(call, extraction, leadId) {
  */
 async function stage(conn = db, { now = new Date() } = {}) {
   const cutoff = new Date(now.getTime() - STAGING_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const readyBy = new Date(now.getTime() - STAGING_GRACE_MINUTES * 60 * 1000);
   const calls = await conn('call_log')
     .where('v2_extraction_status', 'valid')
     .where('created_at', '>=', cutoff)
+    .where('created_at', '<=', readyBy)
     .whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
     .orderBy('created_at', 'asc')
     .limit(STAGING_BATCH)
@@ -330,10 +342,23 @@ async function bookedSinceCall(conn, customerId, since) {
   return !!row;
 }
 
+// A short_codes row only proves a consultation link was MINTED — not sent.
+// Virginia's manual composer (admin-leads.js POST /:id/consultation-link)
+// mints one to prefill the composer and the operator can close it without
+// ever clicking Send; the estimate-email consultation offer mints its own
+// for an EMAIL, which never appears in sms_log at all (codex pre-push P1).
+// Requiring the code to actually appear in an accepted outbound SMS is the
+// same evidence-not-intent standard reschedule-link-promises' matchingSend
+// applies to its own visit links.
 async function linkSentRecently(conn, leadId, now) {
   const since = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-  const row = await conn('short_codes').where({ kind: 'consultation', entity_type: 'leads', entity_id: leadId })
-    .where('created_at', '>=', since).first('id');
+  const codes = await conn('short_codes').where({ kind: 'consultation', entity_type: 'leads', entity_id: leadId })
+    .where('created_at', '>=', since).orderBy('created_at', 'desc').limit(20).pluck('code');
+  if (!codes.length) return false;
+  const row = await conn('sms_log').where('direction', 'outbound').where('created_at', '>=', since)
+    .whereIn('status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read'])
+    .where((q) => { for (const code of codes) q.orWhere('message_body', 'like', `%/l/${code}%`); })
+    .first('id');
   return !!row;
 }
 
@@ -358,7 +383,11 @@ const DISPATCH_CHECKS = [
   // covers a re-extraction, a status edit, or anything else that changed
   // this call's own facts between staging and dispatch.
   ({ call, leadId }) => stagingIneligibleReason(call, extractionOf(call), leadId),
-  ({ now }) => (!isWithinSendWindowET(now) ? 'outside_send_window' : null),
+  // Deliberately NOT an "outside the send window" check here — that is a
+  // reason to WAIT, never a reason to give up (codex pre-push P1: a 5:59 PM
+  // call is due at 7:59 PM, and a cron tick running even a few minutes late
+  // must not permanently lose it). See the reschedule branch in
+  // dispatchClaimedCall, which runs before any of these checks.
 ];
 
 // The FIRST check (lead_not_found) always returns a reason when `lead` is
@@ -385,6 +414,16 @@ async function dispatchClaimedCall(conn, call, now) {
     return { sent: false, skipped: reason };
   };
   if (!leadId) return skip('no_lead_linkage');
+  // Outside the 8 AM–8 PM ET window is a reason to WAIT, never a reason to
+  // give up (codex pre-push P1) — a call due at 7:59 PM must not be lost
+  // just because the 5-minute cron's next tick lands a moment after 8 PM.
+  // Re-queue as 'pending' at the next window open rather than terminally
+  // skipping; no activity_log row — this is not a decision, just a wait.
+  if (!isWithinSendWindowET(now)) {
+    const send_at = nextSendWindowOpenET(now).toISOString();
+    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at }, { logActivity: false });
+    return { sent: false, skipped: 'outside_send_window', deferred: true };
+  }
   const lead = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first();
   const reason = await dispatchIneligibleReason({ conn, call, lead, leadId, now });
   if (reason) return skip(reason);
@@ -438,7 +477,7 @@ async function sweep(conn = db, { now = new Date() } = {}) {
       if (!claimed) continue;
       const call = await conn('call_log').where({ id: row.id }).first();
       const result = await dispatchClaimedCall(conn, call, now);
-      if (result.sent) sent += 1; else if (!result.ambiguous) dispatchSkipped += 1;
+      if (result.sent) sent += 1; else if (!result.ambiguous && !result.deferred) dispatchSkipped += 1;
     } catch (err) {
       logger.warn(`[call-booking-link-text] dispatch failed for call ${row.id} (${err.code || err.name || 'error'})`);
       // A row left 'claimed' after a genuine failure would never be
@@ -460,6 +499,7 @@ module.exports = {
   METADATA_KEY,
   MESSAGE_TYPE,
   STAGING_LOOKBACK_DAYS,
+  STAGING_GRACE_MINUTES,
   MIN_CONVERSATION_SECONDS,
   computeSendAt,
   stagingIneligibleReason,
