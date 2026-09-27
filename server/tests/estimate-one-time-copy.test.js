@@ -570,6 +570,33 @@ describe('server-rendered page', () => {
     expect(resolveOneTimeServiceCopy(row).assurance).toMatch(/guarantee|callback/i);
   });
 
+  test.each([
+    ['Rain re-spray guarantee', false],
+    ['One-year warranty', false],
+    ['Exterior landscaping treatment', true],
+  ])('the public contract and legacy renderer apply the estimate policy to raw detail: %s', (detail, retained) => {
+    const row = { service: 'one_time_mosquito', label: 'One-Time Mosquito Treatment', amount: 275, detail };
+    for (const noGuaranteeClaims of [true, false]) {
+      const estData = authoredTermiteData(row);
+      estData.proposal.enabled = noGuaranteeClaims;
+      const estimate = {
+        id: 'estimate-raw-detail', status: 'sent', customerName: 'Test Customer',
+        address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+        onetimeTotal: 275, quoteRequired: false, noGuaranteeClaims,
+      };
+      const contract = attachPublicPricingContract(
+        { frequencies: [], oneTimeBreakdown: { total: 275, items: [row] } },
+        estimate, estData,
+      );
+      const html = renderPage('raw-detail-token', estimate, estData);
+      const shouldRetain = !noGuaranteeClaims || retained;
+      expect(contract.oneTimeBreakdown.items[0].detail).toBe(shouldRetain ? detail : null);
+      expect(html.includes(`<div class="sub">${detail}</div>`)).toBe(shouldRetain);
+      expect(html).toContain('$275');
+      expect(row.detail).toBe(detail);
+    }
+  });
+
   test.each([true, false])('the legacy one-time toggle honors the estimate guarantee decision (%s)', (noGuaranteeClaims) => {
     const html = renderPage('termite-toggle-token', {
       status: 'sent', customerName: 'Test Customer', address: '1 Main St, Bradenton, FL 34203',
@@ -583,6 +610,25 @@ describe('server-rendered page', () => {
     const callback = 'Includes a 30-day callback period if pests return after this visit.';
     if (noGuaranteeClaims) expect(html).not.toContain(callback);
     else expect(html).toContain(callback);
+  });
+
+  test.each([
+    ['pest_control', 'Pest Control', 'Re-service between visits at no charge'],
+    ['lawn_care', 'Lawn Care', 'Between-visit service calls at no charge'],
+  ])('legacy %s perks keep ordinary benefits without a free-service promise on mixed termite work', (service, name, freeServiceClaim) => {
+    for (const noGuaranteeClaims of [true, false]) {
+      const html = renderPage('mixed-termite-perks', {
+        status: 'sent', customerName: 'Test Customer', address: '1 Main St, Bradenton, FL 34203',
+        monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0, tier: 'Bronze', noGuaranteeClaims,
+      }, { result: {
+        recurring: { services: [{ service, name, mo: 50 }] },
+        oneTime: { items: [], specItems: [] }, results: { pest: { apps: 4 } },
+      } });
+      const perks = html.match(/<ul class="perks-list">([\s\S]*?)<\/ul>/)[1];
+      expect(perks.includes(freeServiceClaim)).toBe(!noGuaranteeClaims);
+      expect(perks).toContain('Locked-in pricing for 12 months');
+      if (noGuaranteeClaims) expect(html).not.toContain('protection between treatments');
+    }
   });
 
   test('one-time-only roach estimate renders the outcome, the visit bullets, the terms, and the roach chips', () => {

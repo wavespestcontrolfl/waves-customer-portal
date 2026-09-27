@@ -38,7 +38,7 @@ function acceptBookingGateToken(estimate) {
   return token ? `&accept_token=${encodeURIComponent(token)}` : '';
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
-const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
+const { GUARANTEE_COPY, resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -5016,7 +5016,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               cardConfirmTitle: 'Confirm invoice',
               cardConfirmSub: 'next step creates your invoice and makes secure payment available.',
               perksHeading: 'What WaveGuard members get',
-              perksBody: 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
+              perksBody: noGuaranteeClaims
+                ? 'Your WaveGuard membership includes priority service, locked-in pricing, and access to your service team.'
+                : 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
               finalSubhead: '',
               finalBody: '',
@@ -5808,7 +5810,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
-    const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
+    const rawDetail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
+    const detail = noGuaranteeClaims && GUARANTEE_COPY.test(rawDetail || '') ? null : rawDetail;
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
@@ -5839,6 +5842,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : (hasOnlyMosquitoServices
       ? MOSQUITO_PERKS
       : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS)))
+    .filter((perk) => !noGuaranteeClaims || !GUARANTEE_COPY.test(perk))
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   // All four GBP profiles (owner directive 2026-07-10 — was the first three).
@@ -20000,8 +20004,12 @@ function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = 
 }
 
 function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
+  // Mapped pricing can omit a raw one-time line. Classify both persisted
+  // roots, just as recurring rows do, without changing displayed totals.
   const oneTimeItems = [
-    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+    ...[estData?.result, estData?.engineResult]
+      .filter((root) => root && typeof root === 'object')
+      .flatMap((result) => normalizeOneTimeBreakdown({ ...estData, result }).items),
     ...(pricingBundle?.oneTimeBreakdown?.items || []),
     ...guaranteeProposalRows(estData),
   ];
@@ -23578,7 +23586,8 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
       oneTimeBreakdown: {
         ...basePayload.oneTimeBreakdown,
         items: (() => {
-          const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel);
+          const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel)
+            .map((row) => noGuaranteeClaims && GUARANTEE_COPY.test(row.detail || '') ? { ...row, detail: null } : row);
           if (!rowCopyAllowed) return labeled;
           const copies = resolveOneTimeRowCopies(labeled.map((row) => {
             const raw = rawRowFor(row);

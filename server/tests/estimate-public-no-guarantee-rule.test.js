@@ -83,6 +83,28 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
     expect(estimateMakesNoGuaranteeClaim(estData)).toBe(true);
   });
 
+  test.each(['lineItems', 'oneTime', 'nestedOneTime', 'specItems'])('raw %s termite work survives a mapped pest-only result', (container) => {
+    const rows = [{ service: 'termite_trenching', name: 'Termite Trenching', price: 1200 }];
+    const rawShapes = {
+      lineItems: { lineItems: rows },
+      oneTime: { oneTime: { items: rows } },
+      nestedOneTime: { results: { oneTime: { items: rows } } },
+      specItems: { specItems: rows },
+    };
+    const estData = {
+      result: { recurring: { services: PEST }, oneTime: { items: [], total: 0 } },
+      engineResult: rawShapes[container],
+    };
+    expect(estimateMakesNoGuaranteeClaim(estData, { oneTimeBreakdown: { items: [] } })).toBe(true);
+  });
+
+  test('ordinary pest work in both saved containers retains its guarantees', () => {
+    expect(estimateMakesNoGuaranteeClaim({
+      result: { recurring: { services: PEST }, oneTime: { items: [] } },
+      engineResult: { lineItems: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
+    })).toBe(false);
+  });
+
   test('an authored proposal naming termite work is flagged even when its engine rows are pest only (Codex r4)', () => {
     const estData = {
       result: { recurring: { services: PEST }, oneTime: { items: [] } },

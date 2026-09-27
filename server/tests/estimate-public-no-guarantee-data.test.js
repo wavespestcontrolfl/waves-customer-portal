@@ -136,6 +136,19 @@ describe('GET /:token/data — noGuaranteeClaims', () => {
     expect(body.estimate.noGuaranteeClaims).toBe(true);
   });
 
+  test('raw one-time termite work sets the public policy even when mapped and cached pricing omit it', async () => {
+    const base = estimateRow();
+    const body = await dataFor(estimateRow({
+      id: 'est-dual-container', token: 'dualcontainerplantoken', onetime_total: 0,
+      estimate_data: {
+        ...base.estimate_data,
+        result: { ...base.estimate_data.result, oneTime: { items: [], membershipFee: 0 } },
+        engineResult: { lineItems: [{ service: 'termite_trenching', name: 'Termite Trenching', price: 1200 }] },
+      },
+    }));
+    expect(body.estimate.noGuaranteeClaims).toBe(true);
+  });
+
   test('a disabled retained termite proposal does not suppress the current pest-plan guarantees', async () => {
     const base = estimateRow();
     const body = await dataFor(estimateRow({

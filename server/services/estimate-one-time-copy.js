@@ -25,7 +25,7 @@
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
-const GUARANTEE_COPY = /guarantee|callbacks?|re[- ]?treat|money[- ]?back|risk[- ]?free|satisfaction/i;
+const GUARANTEE_COPY = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?treat|money[- ]?back|risk[- ]?free|satisfaction|(?:re[- ]?service|service calls?)[^.!?]*(?:free|no charge)/i;
 const NO_GUARANTEE_HERO = 'Review the itemized service scope and terms below. Licensed & insured.';
 
 function searchText(item = {}) {
@@ -458,6 +458,7 @@ function resolveOneTimeRowCopies(rows = [], { noGuaranteeClaims = false } = {}) 
 
 module.exports = {
   ONE_TIME_SERVICE_COPY: PACK,
+  GUARANTEE_COPY,
   resolveOneTimeRowCopies,
   oneTimeCopyKeyFor,
   resolveOneTimeServiceCopy,
