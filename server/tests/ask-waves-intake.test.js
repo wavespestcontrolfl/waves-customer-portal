@@ -769,6 +769,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     'My cow swallowed pesticide',
     'My sheep ate rat poison',
     'Mi vaca comió veneno',
+    'My dog choked on the bait',
+    'Mi perro se atragantó con el cebo',
   ])('an exposed pet gets the veterinary script: %s', (context) => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
@@ -2191,6 +2193,8 @@ describe('looksLikeEmergency', () => {
     'Pesticide made my calf cough',
     "He didn't swallow it but he choked on the bait",
     'The dog found it and he ate the bait',
+    'Poison Control is needed',
+    'Mi hijo se atragantó con el veneno',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
