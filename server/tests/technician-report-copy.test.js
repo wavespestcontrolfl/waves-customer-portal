@@ -114,6 +114,8 @@ describe('custom action credential screening', () => {
     'Applied Lesco and opened rear gate with 24-0-11',
     'Applied Lesco, then opened rear gate with 24-0-11',
     'Broadcast granular before unlocking rear gate with 24-0-11',
+    'Applied override 24-0-11 to open the rear gate',
+    'Broadcast granular 24-0-11 to unlock the side gate',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -163,6 +165,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Use 24-68-to at the side gate',
     'Opened side gate with 2468ml',
     'Use 2468ft to open the gate',
+    'Applied override 24-0-11 to open the rear gate',
+    'Broadcast granular 24-0-11 to unlock the side gate',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();

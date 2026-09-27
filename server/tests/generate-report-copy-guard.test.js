@@ -166,6 +166,8 @@ describe('generate-report provider fallback', () => {
     'Applied Lesco and opened rear gate with 24-0-11.',
     'Applied Lesco, then opened rear gate with 24-0-11.',
     'Broadcast granular before unlocking rear gate with 24-0-11.',
+    'Applied override 24-0-11 to open the rear gate.',
+    'Broadcast granular 24-0-11 to unlock the side gate.',
   ])('retries a shaped response carrying a disguised access credential: %s', async (instruction) => {
     const unsafe = {
       ok: true,
@@ -273,6 +275,8 @@ describe('deterministic report fallback', () => {
         'Applied Lesco and opened rear gate with 24-0-11',
         'Applied Lesco, then opened rear gate with 24-0-11',
         'Broadcast granular before unlocking rear gate with 24-0-11',
+        'Applied override 24-0-11 to open the rear gate',
+        'Broadcast granular 24-0-11 to unlock the side gate',
         'Applied 24-0-11 near the rear gate',
         'Applied Lesco 24-0-11 near the rear gate',
         'Broadcast granular 24-0-11 near the rear gate',
@@ -285,6 +289,8 @@ describe('deterministic report fallback', () => {
     expect(report).toContain('Broadcast granular 24-0-11 near the rear gate');
     expect(report).not.toContain('opened rear gate with 24-0-11');
     expect(report).not.toContain('unlocking rear gate with 24-0-11');
+    expect(report).not.toContain('24-0-11 to open the rear gate');
+    expect(report).not.toContain('24-0-11 to unlock the side gate');
     expect(report).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
     expect(reportCopyRejection(report)).toBeNull();
   });
@@ -635,6 +641,8 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('Applied Lesco and opened rear gate with 24-0-11.')).toBe('access_code');
     expect(reportCopyRejection('Applied Lesco, then opened rear gate with 24-0-11.')).toBe('access_code');
     expect(reportCopyRejection('Broadcast granular before unlocking rear gate with 24-0-11.')).toBe('access_code');
+    expect(reportCopyRejection('Applied override 24-0-11 to open the rear gate.')).toBe('access_code');
+    expect(reportCopyRejection('Broadcast granular 24-0-11 to unlock the side gate.')).toBe('access_code');
     expect(reportCopyRejection('Near the rear gate, 24-0-11 fertilizer was applied.')).toBeNull();
     expect(reportCopyRejection('The gate code is 24-0-11 fertilizer.')).toBe('access_code');
     // alphabetic / quoted credentials after a code noun reject too (r34)

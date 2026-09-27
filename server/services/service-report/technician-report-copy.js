@@ -339,10 +339,14 @@ const REPORT_DIRECT_ACCESS_CODE_RES = [
 ];
 
 function containsReportAccessCode(text) {
-  if (containsExplicitNumericCredential(text)) return true;
-  const fertilizerScreened = maskFertilizerAnalyses(text);
-  const originalRelationship = accessCodeDetectionText(fertilizerScreened);
+  const raw = String(text || '');
+  if (containsExplicitNumericCredential(raw)) return true;
+  // Direct token-to-device relationships outrank fertilizer context. Check the
+  // original copy before an application qualifier can mask an N-P-K-shaped
+  // credential ("Applied override 24-0-11 to open the rear gate").
+  const originalRelationship = accessCodeDetectionText(raw);
   if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(originalRelationship))) return true;
+  const fertilizerScreened = maskFertilizerAnalyses(raw);
   const value = fertilizerScreened.replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
   const normalized = accessCodeDetectionText(value);
   // Normalization adds grouped/affixed spellings; it must never remove an
