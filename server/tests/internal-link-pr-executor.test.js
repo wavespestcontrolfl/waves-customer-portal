@@ -1291,6 +1291,27 @@ describe('internal-link PR auto-merge', () => {
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a review-level Codex rejection with no inline comments blocks the merge', async () => {
+    GitHubClient.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, commit_id: HEAD, state: 'CHANGES_REQUESTED', body: '### Codex Review\nThe anchor misleads readers.' }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'codex_findings' });
+
+    GitHubClient.listPrReviews.mockResolvedValue([]);
+    GitHubClient.listIssueComments.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector[bot]' }, body: `Codex Review: here are some suggestions.\nReviewed commit: ${HEAD.slice(0, 10)}` }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'codex_findings' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a usage-limit reply counts as silence, not a rejection', async () => {
+    GitHubClient.listIssueComments.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector[bot]' }, body: `Codex Review: You have reached your Codex usage limits. ${HEAD.slice(0, 10)}` }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', codex: 'silent' });
+  });
+
+  test('a clean Codex verdict on the head merges inside the grace window', async () => {
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', created_at: new Date().toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    GitHubClient.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, commit_id: HEAD, state: 'COMMENTED', submitted_at: new Date().toISOString(), body: "### 💡 Codex Review\nDidn't find any major issues." }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', codex: 'clean' });
+  });
+
   test('closes and returns tasks to the pool when the diff is more than the link (or main moved)', async () => {
     GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? `${headBody}Extra line.\n` : baseBody }));
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'diff_not_link_only_or_main_moved' });

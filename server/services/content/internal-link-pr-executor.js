@@ -442,7 +442,22 @@ class InternalLinkPrExecutor {
       GitHubClient.listPrReviewComments(prNumber),
     ]);
     const onHead = (sha) => String(sha || '').toLowerCase() === headSha;
-    const findings = (inline || []).filter((c) => isCodexAuthor(c?.user?.login) && (onHead(c.commit_id) || onHead(c.original_commit_id))).length;
+    const mentionsHead = (body) => (String(body || '').match(/\b[0-9a-f]{7,40}\b/gi) || [])
+      .some((run) => headSha.startsWith(run.toLowerCase()));
+    const isClean = (body) => /Codex Review/i.test(String(body || '')) && /Didn'?t find any major issues/i.test(String(body || ''));
+    const isLimit = (body) => /usage limits/i.test(String(body || ''));
+    // A Codex ANSWER on this head that is not the clean verdict is a
+    // rejection, whichever artifact carries it: inline comments, a review
+    // object (CHANGES_REQUESTED or a findings body), or a findings issue
+    // comment naming the reviewed commit. Only true silence (no answer, or a
+    // usage-limit reply) may ride the grace window.
+    const inlineFindings = (inline || []).filter((c) => isCodexAuthor(c?.user?.login) && (onHead(c.commit_id) || onHead(c.original_commit_id))).length;
+    const reviewFindings = (reviews || []).filter((r) => isCodexAuthor(r?.user?.login) && onHead(r.commit_id)
+      && !isLimit(r.body) && (String(r.state).toUpperCase() === 'CHANGES_REQUESTED' || !isClean(r.body))
+      && !/approved/i.test(String(r.state || ''))).length;
+    const commentFindings = (comments || []).filter((c) => isCodexAuthor(c?.user?.login) && mentionsHead(c.body)
+      && /Codex Review/i.test(String(c.body || '')) && !isClean(c.body) && !isLimit(c.body)).length;
+    const findings = inlineFindings + reviewFindings + commentFindings;
     const clean = !findings && codexReviewStatus({ comments, reviews, headSha }).clean === true;
     return { clean, findings };
   }
