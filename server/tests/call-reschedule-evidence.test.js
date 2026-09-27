@@ -408,7 +408,8 @@ describe('rescheduleAgreementEvidence', () => {
   });
 
   test('a relative day after the agreed slot is a correction', () => {
-    for (const said of ['Please move it a week later.', 'Make it next week.', 'Actually, another day would be better.']) {
+    for (const said of ['Please move it a week later.', 'Make it next week.', 'Actually, another day would be better.',
+      'Actually, move it back an hour.', 'Make that half an hour later.', 'Make it a day earlier.']) {
       expect(evidence(`Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.\nCaller: ${said}\nAgent: I will do that.`).ok).toBe(false);
     }
   });

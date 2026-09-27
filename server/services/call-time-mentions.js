@@ -374,11 +374,14 @@ function offeredWithAnotherHour(toks, pos, end) {
     || (HOUR_ALTERNATIVES.has(toks[prev]) && isHour(toks[skip(prev - 1, -1)]));
 }
 
-// A day said relative to the slot or the calendar ("a week later", "next
-// week", "another day") is another time too.
+// A day or offset said relative to the slot or the calendar ("a week later",
+// "next week", "another day", "back an hour") is another time too.
 const RELATIVE_DAY_PHRASES = [
   'next week', 'week later', 'weeks later', 'following week', 'week after', 'next month', 'month later', 'another day',
   'different day', 'later that week', 'later in the week', 'earlier in the week', 'next weekend', 'the weekend', 'day later', 'days later',
+  // An offset from the agreed slot ("move it back an hour", "a day earlier").
+  'hour later', 'hours later', 'hour earlier', 'hours earlier', 'back an hour', 'up an hour', 'forward an hour', 'half an hour later',
+  'half an hour earlier', 'half hour later', 'half hour earlier', 'day earlier', 'days earlier', 'week earlier',
 ];
 // The hours of the day a part-of-day word covers.
 const DAY_PARTS = { morning: [7, 11], afternoon: [12, 17], evening: [17, 21] };
