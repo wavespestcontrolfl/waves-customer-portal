@@ -2774,15 +2774,26 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
     .where("scheduled_send_at", "<=", new Date())
     .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
     // Same-trip first-application billing review (owner ruling, #5021
-    // redesign — see first-application-sibling-split.js): the automatic
-    // scheduled-send worker must never deliver an invoice whose combined
-    // total is under review. This is the ONE claim query both
-    // processScheduledSends' own loop and claimPacketInvoiceForSend's
-    // requireDue branch share, so gating it here holds every automatic send
-    // without fencing each caller separately. A parked row is simply
-    // skipped (returns null, same as "not due yet") — it is retried once
-    // the review clears, never errored.
-    .whereNull("billing_review_opened_at")
+    // round-3 redesign — see first-application-sibling-split.js): the
+    // automatic scheduled-send worker must never deliver an UNDELIVERED
+    // invoice whose combined total is under review. This is the ONE claim
+    // query both processScheduledSends' own loop and
+    // claimPacketInvoiceForSend's requireDue branch share, so gating it
+    // here holds every automatic send without fencing each caller
+    // separately. A parked row is simply skipped (returns null, same as
+    // "not due yet") — it is retried once the review clears, never errored.
+    //
+    // 'scheduled' is ambiguous the same way invoice-helpers.js's
+    // isInvoiceUndeliveredForBillingReview documents (Codex #5021 round-3
+    // pre-push P1, second round): a combined send that delivered its SMS
+    // leg but held/failed the email leg restores to 'scheduled' for a
+    // retry, WITH sms_sent_at already stamped — genuinely partial
+    // delivery, not undelivered, even though the row reads exactly like a
+    // never-sent queued invoice. This predicate mirrors that function's
+    // logic as a real WHERE clause (a JS predicate can't run inside SQL):
+    // block ONLY when a review is open AND no delivery leg has stamped yet.
+    .where((q) => q.whereNull("billing_review_opened_at")
+      .orWhereNotNull("sent_at").orWhereNotNull("sms_sent_at").orWhereNotNull("email_sent_at"))
     .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
     .returning("*");
   return claimed || null;
@@ -10400,3 +10411,9 @@ module.exports.claimInvoiceForSend = claimInvoiceForSend;
 // (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can
 // be asserted against real schema without driving the whole send twice.
 module.exports.restoreSendClaim = restoreSendClaim;
+// Test-only seam (#5021 round-3): the scheduled-send worker's own due-claim
+// query, exercised directly against real Postgres so the billing-review
+// predicate's partial-delivery carve-out (a 'scheduled' row with a
+// delivery stamp already set) can be asserted without driving the whole
+// worker loop.
+module.exports._claimDueScheduledInvoiceForSend = claimDueScheduledInvoiceForSend;

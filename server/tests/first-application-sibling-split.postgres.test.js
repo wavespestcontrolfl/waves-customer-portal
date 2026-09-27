@@ -668,5 +668,52 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       // 'sending' case just above.
       expect(() => assertInvoiceCollectible(invoice)).not.toThrow();
     }));
+
+    // Codex #5021 round-3 pre-push P1 (second round): 'scheduled' is
+    // ambiguous the SAME way 'sending' is, not just at rest. A combined
+    // send that delivered its SMS leg but held/failed its email leg
+    // restores the row to 'scheduled' for a retry (invoice.js's
+    // processScheduledSends restoreClaimedInvoice branches) WITH
+    // sms_sent_at already stamped — genuinely partially delivered, even
+    // though the status alone reads exactly like a never-sent queued row.
+    test('a review that opens on a \'scheduled\' row already carrying a delivery stamp (partial send, email retry pending) stays alert-only, not held', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft' });
+      // The SMS leg delivered; the email leg is still pending — the row
+      // was restored to 'scheduled' to retry it.
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        status: 'scheduled', sms_sent_at: new Date('2026-01-01'), scheduled_send_at: new Date(Date.now() - 60000),
+      });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      const invoice = (await readState(trx, ids)).invoice;
+      expect(invoice.billing_review_reason).toBe('sibling_date_diverged_after_delivery');
+      expect(() => assertInvoiceCollectible(invoice)).not.toThrow();
+      // The scheduled-send worker's own due-claim query must still be able
+      // to pick this row up and finish delivering the pending email leg —
+      // the review must never block the completion of a delivery that
+      // already partially reached the customer.
+      const claimed = await InvoiceService._claimDueScheduledInvoiceForSend(trx, ids.invoiceId);
+      expect(claimed).toBeTruthy();
+      expect(claimed.status).toBe('sending');
+    }));
+
+    // The contrasting case: a GENUINELY never-delivered 'scheduled' row
+    // (no stamps at all) must still be blocked from the automatic queue —
+    // the fix must not simply stop enforcing the hold for 'scheduled'.
+    test('a review on a genuinely never-delivered \'scheduled\' row still blocks the due-claim query', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft' });
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000),
+      });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      const invoice = (await readState(trx, ids)).invoice;
+      expect(invoice.billing_review_reason).toBe('sibling_date_diverged');
+      expect(() => assertInvoiceCollectible(invoice)).toThrow(/billing review/i);
+      const claimed = await InvoiceService._claimDueScheduledInvoiceForSend(trx, ids.invoiceId);
+      expect(claimed).toBeNull();
+    }));
   });
 });

@@ -40,10 +40,19 @@ const UNDELIVERED_INVOICE_STATUSES = Object.freeze(['draft', 'scheduled', 'sendi
 // never the raw array, for exactly that reason.
 function isInvoiceUndeliveredForBillingReview(invoice) {
   const status = invoiceStatusKey(invoice?.status);
-  if (status === 'sending') {
+  if (status === 'draft') return true;
+  // 'scheduled' is ALSO ambiguous, not just 'sending' (Codex #5021 round-3
+  // pre-push P1, second round): a combined send that delivered its SMS leg
+  // (stamping sms_sent_at) but held or failed its email leg gets restored
+  // to 'scheduled' for a retry (invoice.js's processScheduledSends
+  // restoreClaimedInvoice branches) — the row is genuinely PARTIALLY
+  // delivered, not undelivered, even though its status reads exactly like
+  // a never-sent queued invoice. Same fix as 'sending': fall back to the
+  // delivery stamps, which the restore never clears.
+  if (status === 'scheduled' || status === 'sending') {
     return !(invoice?.sent_at || invoice?.sms_sent_at || invoice?.email_sent_at);
   }
-  return UNDELIVERED_INVOICE_STATUSES.includes(status);
+  return false;
 }
 
 /**
