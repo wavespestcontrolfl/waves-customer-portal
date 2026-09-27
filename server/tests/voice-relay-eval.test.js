@@ -5716,6 +5716,7 @@ describe('voice relay eval — named spoken checks', () => {
     ['La visita será esta tarde. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['The visit will be today. A team member will follow up.', 'fail'],
     ['Le devolverán la llamada hoy para programar la visita.', 'pass'],
+    ['Le llamaremos hoy y la visita será esta tarde.', 'fail'],
   ])('spanish-reservice-matched treats same-day language as a visit date only when it governs the visit: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
@@ -5749,6 +5750,9 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: onTheWay })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    const separateDate = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de la una a las tres de la tarde, y la nueva visita será hoy.' }] }));
+    expect(separateDate.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: separateDate })).toBe('fail');
     for (const text of [
       'La ventana es de la una a las tres de la tarde. Probablemente llegará alrededor de las dos.',
       'La ventana es de la una a las tres de la tarde. Llegará hacia las dos.',

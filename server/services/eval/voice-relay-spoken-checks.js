@@ -480,6 +480,7 @@ const NOT_A_BARE_HOUR_H2 = `(?!\\s*(?::[0-5]\\d(?<!:00)\\b|y\\s+(?:media|cuarto|
  * and so does either endpoint carrying its own minute modifier ("1 to 3:30",
  * "one to three fifteen", "de una a tres y media").
  */
+const GROUNDED_WINDOW_MARKER = '__grounded_window__';
 function windowStripper(allowWindow) {
   if (!Array.isArray(allowWindow) || allowWindow.length !== 2) return null;
   const [h1, h2] = allowWindow.map(hourAlt);
@@ -488,7 +489,7 @@ function windowStripper(allowWindow) {
   return (text) => text.replace(re, (match, first, last) => {
     // A part of day spoken once covers both ends: "1 to 3 PM".
     const spoken = [meridiemOf(first) || meridiemOf(last), meridiemOf(last) || meridiemOf(first)];
-    return spoken.every((m, i) => !m || m === expected[i]) ? ' ' : match;
+    return spoken.every((m, i) => !m || m === expected[i]) ? ` ${GROUNDED_WINDOW_MARKER} ` : match;
   });
 }
 
@@ -522,17 +523,20 @@ function no_visit_time(value, record, { utterances }) {
       const sentence = activeStrip ? activeStrip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken${grounded ? '' : ` before ${opts.afterTool} ever succeeded`}: "${clip(raw, 160)}"`];
-      const relative = RELATIVE_DAY_RE.exec(sentence);
-      if (relative) {
+      const relatives = [...sentence.matchAll(new RegExp(RELATIVE_DAY_RE.source, 'gi'))];
+      for (const relative of relatives) {
         const sameDay = SAME_DAY_RE.test(relative[0]);
+        const clauseBefore = sentence.slice(0, relative.index).split(CLAUSE_SPLIT_RE).pop();
+        const clauseAfter = sentence.slice(relative.index + relative[0].length).split(CLAUSE_SPLIT_RE)[0];
+        const sameDayClause = `${clauseBefore}${relative[0]}${clauseAfter}`;
         // A returned arrival window may naturally be introduced as today's
-        // window. Once that exact window was stripped, the same-day label is
-        // grounded with it rather than an extra invented date.
-        const labelsGroundedWindow = sameDay && activeStrip && sentence !== raw;
+        // window. The marker must be in THIS token's clause: a valid window
+        // in one clause cannot ground a separate "the visit is today" claim.
+        const labelsGroundedWindow = sameDay && sameDayClause.includes(GROUNDED_WINDOW_MARKER);
         // "We'll call today to schedule the visit" dates the callback, not
-        // the visit. Keep the follow-up cue before the same-day token; "the
-        // visit is today" has no such cue and remains prohibited.
-        const datesFollowUp = sameDay && /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(sentence.slice(0, relative.index));
+        // the visit. The cue must be in this token's own clause, so an earlier
+        // callback cannot excuse a later clause that dates the visit.
+        const datesFollowUp = sameDay && /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(clauseBefore);
         if (!labelsGroundedWindow && !datesFollowUp && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
       }
     }
