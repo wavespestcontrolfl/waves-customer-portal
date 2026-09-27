@@ -381,7 +381,8 @@ const KnowledgeBaseService = {
           const current = await trx('knowledge_base').where({ id: entry.id }).forUpdate().first();
           // updated_at moves on every write (edit, verify, flag, sync) but
           // not on an audit verdict, so any change since the read shows here.
-          if (!current || String(current.updated_at) !== String(entry.updated_at)
+          const stamp = (v) => (v ? new Date(v).getTime() : null);
+          if (!current || stamp(current.updated_at) !== stamp(entry.updated_at)
             || current.content !== entry.content || current.status !== entry.status) {
             await trx('knowledge_base_audits').insert({
               kb_entry_id: entry.id, audit_type: 'ai-review', findings: JSON.stringify(parsed || {}), result: 'stale', audited_by: 'ai-cron',
