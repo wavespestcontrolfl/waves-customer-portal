@@ -2090,6 +2090,89 @@ describe('clarify-draft target phone (owner directive 2026-09-26: both direction
   });
 });
 
+// Codex pre-push r1 P1 on PR #5012: the outbound auto-booking TCPA recompute
+// (GATE_CALL_OUTBOUND_BOOKING) had its own hand-written `impliedConsent:
+// false`, which re-blocked an eligible outbound return call's confirmation
+// SMS regardless of what the enforce-mode verdict decided a few hundred
+// lines earlier. Both call sites now read this ONE predicate — pinning it
+// here catches either site drifting from the other again.
+describe('outboundImpliedConsentEligible (owner ruling 2026-09-26, shared by every checkTcpaConsent call site)', () => {
+  const { outboundImpliedConsentEligible } = CallRecordingProcessor._test;
+
+  test('inbound always qualifies, regardless of the eligibility flag', () => {
+    expect(outboundImpliedConsentEligible({ direction: 'inbound' }, false)).toBe(true);
+    expect(outboundImpliedConsentEligible({ direction: 'inbound' }, true)).toBe(true);
+    expect(outboundImpliedConsentEligible({}, false)).toBe(true);
+  });
+
+  test('outbound qualifies ONLY when the caller reports it eligible (prior contact confirmed)', () => {
+    expect(outboundImpliedConsentEligible({ direction: 'outbound' }, true)).toBe(true);
+    expect(outboundImpliedConsentEligible({ direction: 'outbound' }, false)).toBe(false);
+    expect(outboundImpliedConsentEligible({ direction: 'outbound' }, undefined)).toBe(false);
+  });
+
+  test('an outbound-api/outbound-dial Twilio direction is still "outbound" by prefix', () => {
+    expect(outboundImpliedConsentEligible({ direction: 'outbound-dial' }, false)).toBe(false);
+    expect(outboundImpliedConsentEligible({ direction: 'outbound-dial' }, true)).toBe(true);
+  });
+});
+
+// Codex pre-push r1 P2 on PR #5012: `!droppedMidIntake` is NOT evidence of a
+// real conversation — that detector requires MIN_CALL_SECONDS of engagement
+// BEFORE it can even fire, so an early drop (connected, hung up in the
+// first few seconds) reads as "too short to judge" (never flagged dropped)
+// and would otherwise pass the clarify-draft's `!droppedMidIntake` check as
+// though the call had completed normally. hasRealTwoWayConversation is the
+// independent predicate every outbound return-message site now shares.
+describe('hasRealTwoWayConversation (owner ruling 2026-09-26: never on a call that dropped before a real conversation)', () => {
+  const { hasRealTwoWayConversation, speakerTurns } = CallRecordingProcessor._test;
+
+  test('speakerTurns: labels a turn caller/other and folds unlabeled continuation lines in', () => {
+    const t = speakerTurns('Agent: Hi there\nCaller: Hi\nthis is Sam\nAgent: Great, Sam');
+    expect(t).toEqual([
+      { speaker: 'other', text: 'Agent: Hi there' },
+      { speaker: 'caller', text: 'Caller: Hi\nthis is Sam' },
+      { speaker: 'other', text: 'Agent: Great, Sam' },
+    ]);
+  });
+
+  test('an early drop — connected and hung up in the first few seconds — is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation('Agent: Waves Pest Control, this is Sam.\nCaller: Sorry, wrong number.')).toBe(false);
+  });
+
+  test('a substantial back-and-forth (even one that later drops mid-address) IS a real conversation', () => {
+    expect(hasRealTwoWayConversation([
+      'Agent: Hi, this is Waves calling about your quote request.',
+      'Caller: Oh yes, thanks for calling back.',
+      'Agent: Great — what is your service address?',
+      'Caller: Sure, it is one two three —',
+      'Caller: hold on,',
+    ].join('\n'))).toBe(true);
+  });
+
+  test('dead air / one-sided pickup (no reply from the other side) is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation('Agent: Hello?\nAgent: Anyone there?\nAgent: Ok, hanging up.\nAgent: Goodbye.')).toBe(false);
+  });
+
+  test('a raw unlabeled transcript (no speaker turns at all) fails closed', () => {
+    expect(hasRealTwoWayConversation('just some text with no speaker labels at all here')).toBe(false);
+    expect(hasRealTwoWayConversation('')).toBe(false);
+    expect(hasRealTwoWayConversation(null)).toBe(false);
+  });
+
+  test('label identity is irrelevant — outbound diarization swapping "Caller"/"Agent" still counts the exchange', () => {
+    // Same shape as the accepted case above but with the labels swapped
+    // (simulating outbound diarization mislabeling who is who) — the
+    // predicate counts turn alternation, never who said what.
+    expect(hasRealTwoWayConversation([
+      'Caller: Hi, this is Waves calling about your quote request.',
+      'Agent: Oh yes, thanks for calling back.',
+      'Caller: Great — what is your service address?',
+      'Agent: Sure, it is one two three.',
+    ].join('\n'))).toBe(true);
+  });
+});
+
 // codex #4919 round-9: the callStartedAt(call) anchoring at the extraction,
 // canAutoRoute, and callDateET call sites was removed with the
 // provider-timestamp/call-timeline work it was introduced alongside — this

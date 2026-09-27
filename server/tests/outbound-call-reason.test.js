@@ -60,6 +60,7 @@ function installDb(byTable = {}) {
       return state.byTable[table] || [];
     };
     b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
+    b.whereNotIn = jest.fn((...a) => { q.wheres.push(['NOT IN', ...a]); return b; });
     b.whereNull = jest.fn((...a) => { q.wheres.push(['NULL', ...a]); return b; });
     b.orWhereBetween = jest.fn((...a) => { q.wheres.push(['OR BETWEEN', ...a]); return b; });
     b.whereBetween = jest.fn((...a) => { q.wheres.push(['BETWEEN', ...a]); return b; });
@@ -398,14 +399,39 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
-  test('a spam/robocall/wrong-number inbound call does not count as prior contact', async () => {
-    installDb({ call_log: [{ id: 'in-spam', created_at: hoursAgo(1), ai_extraction_enriched: { call_nature: 'spam_solicitation' } }] });
-    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  // The mock query builder can't evaluate SQL predicates itself — it always
+  // "returns" whatever rows a test installs, regardless of WHERE clauses —
+  // so a nature exclusion is proven by asserting the QUERY the code built,
+  // not by the mock filtering rows for us. Real Postgres applies it.
+  test('the call probe excludes spam/robocall/wrong-number/vendor natures IN SQL, not via a row cap (codex pre-push r1 P2)', async () => {
+    installDb({ call_log: [{ id: 'in-spam' }] });
+    await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
+    const callQuery = state.queries.find((q) => q.table === 'call_log');
+    expect(callQuery.limits).toHaveLength(0); // no row cap
+    const natureClause = callQuery.raws.find((r) => String(r[0]).includes('call_nature'));
+    expect(natureClause[0]).toContain('NOT IN');
+    expect(natureClause[1]).toEqual(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
   });
 
-  test('a prior substantive inbound text counts', async () => {
+  test('a prior substantive inbound text counts, and the probe never caps rows at TEXT_SCAN_LIMIT (codex pre-push r1 P2)', async () => {
     installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(2), message_body: 'Can you come look at the ants?', message_type: 'inbound' }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+    const smsQuery = state.queries.find((q) => q.table === 'sms_log');
+    expect(smsQuery.limits).toHaveLength(0);
+    expect(smsQuery.wheres.some((w) => w[0] === 'NOT IN' && w[1] === 'message_type')).toBe(true);
+  });
+
+  test('a text thread of only reschedule replies / bare acknowledgements does not count — isSubstantiveText still applies over the unbounded set', async () => {
+    installDb({
+      sms_log: [
+        { id: 'ack-1', message_body: 'Ok thanks', message_type: null },
+        { id: 'ack-2', message_body: 'Can you come look at the ants?', message_type: 'reschedule_reply' },
+      ],
+    });
+    // Both rows fail isSubstantiveText (a bare closer, and an ignored type) —
+    // even though the mock "returned" them (it can't apply whereNotIn), the
+    // JS classifier still rejects them.
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
   test('an existing lead record for the phone counts, whatever its channel', async () => {

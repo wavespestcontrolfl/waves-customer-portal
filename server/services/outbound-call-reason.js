@@ -190,15 +190,60 @@ async function anyLeadRecord({ phoneLast10, before }) {
     .first('id', 'created_at');
 }
 
+// EXISTS-style probes for hasPriorContact below — UNBOUNDED, unlike
+// latestInboundCall/latestInboundText above (codex pre-push r1 P2 on PR
+// #5012): those cap at 5 calls / 25 texts and filter for quality IN JS
+// AFTER that cap, which is fine for "the single best evidence inside a 48h
+// window" (resolveOutboundCallReason's own job) but wrong for an unbounded
+// lookback — a genuine contact from months ago sitting behind a wall of
+// newer spam calls or reminder acknowledgements would never surface. The
+// SIMPLE qualifying filters (call nature; text type + "has a letter") move
+// into the SQL WHERE clause instead of a row cap, so the query itself
+// narrows the candidate set — `.first('id')` with no ORDER BY is a plain
+// `LIMIT 1`, i.e. EXISTS-style, for the call probe. The harder text
+// classifier (isSubstantiveText's emoji/reaction regexes) still runs in JS,
+// REUSED rather than reimplemented in SQL, over that now-narrowed set —
+// with no `.limit()` this time.
+async function existsQualifyingInboundCall({ phoneLast10, before }) {
+  if (!phoneLast10) return false;
+  const natures = [...NON_CONTACT_NATURES];
+  const row = await whereNotSandboxCall(db('call_log')
+    .where('direction', 'inbound')
+    .where('created_at', '<', before))
+    .whereRaw("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    .whereRaw(
+      `COALESCE(lower(trim(ai_extraction_enriched->>'call_nature')), '') NOT IN (${natures.map(() => '?').join(',')})`,
+      natures,
+    )
+    .first('id');
+  return !!row;
+}
+
+async function existsQualifyingInboundText({ phoneLast10, before }) {
+  if (!phoneLast10) return false;
+  const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+  const rows = await db('sms_log')
+    .where('direction', 'inbound')
+    .where('created_at', '<', before)
+    .whereRaw("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    .whereNotIn('message_type', [...IGNORED_TEXT_TYPES])
+    .whereRaw("message_body ~* '[a-z]'")
+    .modify((qb) => excludeRecruitingSmsLog(qb, 'message_type'))
+    .select('id', 'message_body', 'message_type');
+  return rows.some(isSubstantiveText);
+}
+
 /**
  * Did this phone (or customer) EVER contact Waves before `before`? UNBOUNDED
  * — unlike resolveOutboundCallReason's own 48h LOOKBACK_MS above, which
  * answers a different question ("why did we place THIS call") and is too
  * narrow for "did they ever reach out first" (owner ruling 2026-09-26, the
  * outbound return-message gate: GATE_CALL_OUTBOUND_RETURN_MESSAGES). Reuses
- * the same probes this file already runs for the voicemail text-back reason
- * — an inbound call, an inbound text, or a lead record — plus an existing
- * customer link, rather than a second implementation of any of them.
+ * the same qualifying rules this file already applies for the voicemail
+ * text-back reason — an inbound call, an inbound text, or a lead record —
+ * plus an existing customer link, through the EXISTS-style probes above
+ * (never the capped latestInboundCall/latestInboundText, which would miss
+ * an old genuine contact behind newer spam/acknowledgements).
  * Fails CLOSED (no prior contact) on a probe error: the caller only uses
  * this to ENABLE customer-facing sends, never to block one, so treating an
  * unknown answer as "no" is the safe direction.
@@ -208,11 +253,10 @@ async function hasPriorContact({ customerId = null, phone = null, before = new D
   const phoneLast10 = last10(phone);
   if (!phoneLast10) return false;
   const at = new Date(before);
-  const since = new Date(0);
   try {
     const [inboundCall, inboundText, leadRow] = await Promise.all([
-      latestInboundCall({ customerId: null, phoneLast10, before: at, since }),
-      latestInboundText({ customerId: null, phoneLast10, before: at, since }),
+      existsQualifyingInboundCall({ phoneLast10, before: at }),
+      existsQualifyingInboundText({ phoneLast10, before: at }),
       anyLeadRecord({ phoneLast10, before: at }),
     ]);
     return !!(inboundCall || inboundText || leadRow);
@@ -380,5 +424,7 @@ module.exports = {
   nonServiceCaller,
   isSubstantiveText,
   hasPriorContact,
-  _private: { last10, callNature, parseMetadata },
+  _private: {
+    last10, callNature, parseMetadata, existsQualifyingInboundCall, existsQualifyingInboundText,
+  },
 };
