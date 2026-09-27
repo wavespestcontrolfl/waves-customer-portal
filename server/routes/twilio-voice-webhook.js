@@ -1326,6 +1326,13 @@ router.post('/voice', async (req, res) => {
         ...(screenDecision !== 'none'
           ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
           : {}),
+        // Promise-chaser's own durability marker, embedded ATOMICALLY with
+        // this same row (null when the gate is off or the phone is
+        // unusable — see pendingClaimFragment) so a crash right after this
+        // commits still leaves a claim the sweep can find, and a row
+        // created while the gate is dark never carries one no matter how
+        // much later it flips on.
+        ...(require('../services/promise-chaser-bell').pendingClaimFragment(toE164(From)) || {}),
       });
     await db.transaction(async (trx) => {
       // Same per-SID advisory lock as /call-status and /recording-status.

@@ -14,10 +14,18 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
+// Defaults to the REAL implementation (every other test relies on genuine
+// kept-evidence queries) — only the one test that needs a lookup failure
+// overrides it with mockRejectedValueOnce.
+jest.mock('../services/followup-sla-watcher', () => {
+  const actual = jest.requireActual('../services/followup-sla-watcher');
+  return { ...actual, followedUpIds: jest.fn(actual.followedUpIds) };
+});
 const { triggerNotification } = require('../services/notification-triggers');
+const { followedUpIds: followedUpIdsMock } = require('../services/followup-sla-watcher');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
-const { ringPromiseChaserIfNeeded, markScreenFailed, sweepPromiseChasers } = require('../services/promise-chaser-bell');
+const { ringPromiseChaserIfNeeded, markScreenFailed, sweepPromiseChasers, pendingClaimFragment } = require('../services/promise-chaser-bell');
 
 jest.setTimeout(30000);
 // Synthetic caller — never a real customer's number.
@@ -446,13 +454,44 @@ const OUR_NUMBER = '+19415550100';
     expect(payload.liveCall).toBe(true);
   });
 
-  test('a call that never acquired ANY claim (the live attempt itself failed before claiming) is recovered by the sweep', async () => {
+  test('pendingClaimFragment: null when the gate is off or the phone is unusable; the durability marker shape otherwise', () => {
+    gates.promiseChaserBell = false;
+    try {
+      expect(pendingClaimFragment(PHONE)).toBeNull();
+    } finally {
+      gates.promiseChaserBell = true;
+    }
+    expect(pendingClaimFragment('anonymous')).toBeNull();
+    expect(pendingClaimFragment(PHONE)).toEqual({ promise_chaser: { status: 'pending', claimed_at: null } });
+  });
+
+  test('rows created while the gate was dark are never swept, however much later the gate flips on', async () => {
+    const earlier = callRow(600); // 10h ago — an unbooked call with an open promise
+    const commitment = commitmentRow(earlier.id);
+    // Simulates the gate being OFF when this call came in: no promise_chaser
+    // key at all — exactly what /voice's own insert leaves, since
+    // pendingClaimFragment returns null while the gate is off. Still well
+    // within the 24h lookback, and on the SAME number as the open promise —
+    // if the sweep still scanned "no key" rows, this would incorrectly ring.
+    const staleUnclaimed = callRow(60);
+    await mockConn('call_log').insert([earlier, staleUnclaimed]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // The gate is ON now (as for the whole suite) — standing in for "gate
+    // flipped on later" — and the sweep must still never touch this row.
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    const row = await mockConn('call_log').where({ id: staleUnclaimed.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toBeUndefined();
+  });
+
+  test('a crash right after the atomic insert (the durability marker committed, the live attempt never ran) is recovered by the sweep once', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
-    // Old enough to be past UNCLAIMED_GRACE_MS — never touched by
-    // ringPromiseChaserIfNeeded at all, as if the initial call_log lookup
-    // or the claim UPDATE itself failed on the live attempt.
-    const back = callRow(10);
+    // The durability marker /voice's own insert writes atomically — as if
+    // the process crashed the instant after that commit, before ever
+    // calling ringPromiseChaserIfNeeded live.
+    const back = callRow(10, { metadata: { promise_chaser: { status: 'pending', claimed_at: null } } });
     await mockConn('call_log').insert([earlier, back]);
     await mockConn('call_commitments').insert(commitment);
 
@@ -462,39 +501,31 @@ const OUR_NUMBER = '+19415550100';
     expect(row.metadata.promise_chaser).toMatchObject({ status: 'rung' });
   });
 
-  test('a call still mid an outstanding pre-connect screen is never swept prematurely', async () => {
+  test('a call still mid an outstanding pre-connect screen is never swept prematurely, even with its durability marker already pending', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
-    // No claim yet (the webhook deliberately deferred) AND still 'gated' —
-    // the sweep must leave it alone regardless of age.
-    const back = callRow(10, { metadata: { preconnect_screen: 'gated' } });
+    // The marker is present (the insert writes it unconditionally, gate
+    // permitting) AND the screen is still 'gated' — the sweep must leave it
+    // alone regardless.
+    const back = callRow(10, { metadata: { promise_chaser: { status: 'pending', claimed_at: null }, preconnect_screen: 'gated' } });
     await mockConn('call_log').insert([earlier, back]);
     await mockConn('call_commitments').insert(commitment);
 
     expect(await sweepPromiseChasers()).toBe(0);
     expect(triggerNotification).not.toHaveBeenCalled();
     const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
-    expect(row.metadata.promise_chaser).toBeUndefined();
-  });
-
-  test('a call younger than the unclaimed grace period is never swept — an active challenge may still be outstanding', async () => {
-    const earlier = callRow(240);
-    const commitment = commitmentRow(earlier.id);
-    const back = callRow(1); // 1 minute ago — inside UNCLAIMED_GRACE_MS
-    await mockConn('call_log').insert([earlier, back]);
-    await mockConn('call_commitments').insert(commitment);
-
-    expect(await sweepPromiseChasers()).toBe(0);
-    expect(triggerNotification).not.toHaveBeenCalled();
+    // Untouched — the soft skip inside ringPromiseChaserIfNeeded takes no
+    // claim and settles nothing while the screen is still outstanding.
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'pending', claimed_at: null });
   });
 
   test('a screen that resolved FAILED but never got its own terminal mark written is still never rung — by the sweep, or directly', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
-    // stampPreconnectScreen('failed') succeeded, but markScreenFailed itself
-    // never ran (a crash in between) — no promise_chaser key at all, but
-    // preconnect_screen already says 'failed', not 'gated'.
-    const back = callRow(10, { metadata: { preconnect_screen: 'failed' } });
+    // stampPreconnectScreen('failed') succeeded (and the durability marker
+    // from insert time is still 'pending'), but markScreenFailed itself
+    // never ran (a crash in between).
+    const back = callRow(10, { metadata: { promise_chaser: { status: 'pending', claimed_at: null }, preconnect_screen: 'failed' } });
     await mockConn('call_log').insert([earlier, back]);
     await mockConn('call_commitments').insert(commitment);
 
@@ -509,30 +540,110 @@ const OUR_NUMBER = '+19415550100';
     expect(row.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'screen_failed' });
   });
 
-  test('a batch of permanently ineligible unclaimed calls never starves a genuinely recoverable one behind them', async () => {
+  test('a promise kept by a booking/call/text landing between the snapshot and dispatch is caught by the SAME kept-evidence predicate, not just stillOpenIds', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
-    // Several structurally-ineligible, never-claimed calls, all OLDER than
-    // the genuinely recoverable one below — oldest-first would put them
-    // ahead of it in every LIMIT-bounded batch if they weren't excluded
-    // from the query outright (none of them ever gets a terminal claim
-    // written, so they would recur in every tick, forever).
-    // A phone of its own — blocking it must not incidentally block PHONE,
-    // which back/earlier/commitment all share.
-    const blockedPhone = '+19415550188';
-    const blocked = callRow(180, { from_phone: blockedPhone });
-    const sandboxed = callRow(170, { source: 'voice_relay_sandbox' });
-    const noPhone = callRow(160, { from_phone: 'anonymous' });
-    await mockConn('call_log').insert([blocked, sandboxed, noPhone]);
-    await mockConn('blocked_numbers').insert({ id: randomUUID(), number: blockedPhone, block_type: 'hard_block' });
-
-    const back = callRow(10);
+    const back = callRow(0);
     await mockConn('call_log').insert([earlier, back]);
     await mockConn('call_commitments').insert(commitment);
 
-    expect(await sweepPromiseChasers({ limit: 3 })).toBe(1);
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    const [, , opts] = triggerNotification.mock.calls[0];
+    expect(await opts.shouldContinue()).toBe(true);
+
+    // Staff reach the caller RIGHT in the race window — the commitment
+    // row's own status is untouched (still 'open': stillOpenIds alone
+    // would say nothing changed), but followedUpIds' own kept-evidence
+    // predicate — re-run here, not a narrower recheck — now says kept.
+    await mockConn('call_log').insert(callRow(0, {
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90,
+    }));
+    expect(await opts.shouldContinue()).toBe(false);
+    expect(await opts.beforePush()).toBe(false);
+  });
+
+  test('the live re-check fails CLOSED (never throws) when its own evidence lookup fails, blocking both hooks', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    const [, , opts] = triggerNotification.mock.calls[0];
+
+    followedUpIdsMock.mockRejectedValueOnce(new Error('synthetic evidence lookup failure'));
+    await expect(opts.shouldContinue()).resolves.toBe(false);
+    followedUpIdsMock.mockRejectedValueOnce(new Error('synthetic evidence lookup failure'));
+    await expect(opts.beforePush()).resolves.toBe(false);
+  });
+
+  test('a partial push persists accepted subscription IDs; a retry does not re-buzz them', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // Attempt 1: one subscription accepted, one failed — retryable.
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, retryable: true,
+      push: { sent: 1, failed: 1, deliveredSubscriptionIds: ['sub-accepted-1'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
-    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
-    expect(row.metadata.promise_chaser).toMatchObject({ status: 'rung' });
+    const [, , opts1] = triggerNotification.mock.calls[0];
+    // Nothing accepted before this, the very first attempt.
+    expect(opts1.deliveredSubscriptionIds).toEqual([]);
+
+    const pending = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(pending.metadata.promise_chaser).toMatchObject({ status: 'pending', deliveredSubscriptionIds: ['sub-accepted-1'] });
+
+    // Age the lease so a retry (the sweep) can reclaim it.
+    pending.metadata.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(pending.metadata) });
+
+    // Attempt 2 (the sweep): the second subscription finally accepts.
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, push: { sent: 1, failed: 0, deliveredSubscriptionIds: ['sub-accepted-1', 'sub-accepted-2'] },
+    });
+    expect(await sweepPromiseChasers()).toBe(1);
+    const [, , opts2] = triggerNotification.mock.calls[1];
+    // The already-accepted device from attempt 1 is passed forward so
+    // payment-failure-notifications.js's own mechanism never re-buzzes it.
+    expect(opts2.deliveredSubscriptionIds).toEqual(['sub-accepted-1']);
+
+    const settled = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung' });
+  });
+
+  test("an earlier call's commitment extraction still in flight leaves the claim pending — a quick callback never settles no_open_promise prematurely", async () => {
+    // The earlier call — still mid-pipeline (a live processing_token), so
+    // recordCommitmentsStep has not run yet and genuinely has no rows to find.
+    const earlier = callRow(2, { processing_token: 'synthetic-in-flight-token', processing_status: 'processing' });
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    // No call_commitments row at all yet — extraction hasn't run.
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    const pending = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    // Left pending for the sweep — never settled as a definitive "no promise".
+    expect(pending.metadata.promise_chaser).toMatchObject({ status: 'pending' });
+
+    // Extraction lands: the model pass finishes and records the promise,
+    // and the earlier call's own pipeline finalizes.
+    await mockConn('call_log').where({ id: earlier.id }).update({ processing_token: null, processing_status: 'processed' });
+    const commitment = commitmentRow(earlier.id);
+    await mockConn('call_commitments').insert(commitment);
+
+    // Age the lease so the sweep can reclaim it.
+    pending.metadata.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(pending.metadata) });
+
+    expect(await sweepPromiseChasers()).toBe(1);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const settled = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitment.id });
   });
 });

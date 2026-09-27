@@ -25,14 +25,21 @@
  * as followed up never rings this bell either.
  *
  * Durability (call_log.metadata.promise_chaser: pending → rung / skipped):
- * a claim is written the moment an attempt actually starts (never while a
- * caller is still working through the pre-connect screen — see
- * markScreenFailed / the /voice wiring) and settled to a terminal outcome
- * once resolved. A transient failure (a thrown lookup, a notification
- * insert error) leaves the claim at 'pending' rather than settling it, so
- * the EXISTING call-alert recovery sweep (scheduler.js's every-2-minutes
- * tick, the same one missed-call-bell / repeat-caller-bell use) can retry it —
- * no new sweep. A stale 'pending' lease (LEASE_MS) is reclaimable, same
+ * the 'pending' durability marker is written ATOMICALLY with the call_log
+ * row itself — /voice's own insert/update embeds it (pendingClaimFragment),
+ * gated on GATE_PROMISE_CHASER_BELL at THAT moment, so a row created while
+ * the gate is dark never carries one, however much later the gate flips on
+ * — and a screened caller's marker rides its 'passed' resolution the same
+ * way. A crash right after either commit still leaves a claim the sweep
+ * can find; a crash before it commits leaves no row at all, nothing to
+ * recover. claimAttempt then takes the actual working lease (a fresh
+ * claimed_at) the first time anything really attempts the call — the live
+ * request, immediately, or the sweep, later — and settles it to a terminal
+ * outcome once resolved. A transient failure (a thrown lookup, a
+ * notification insert error) leaves it at 'pending' rather than settling
+ * it, so the EXISTING call-alert recovery sweep (scheduler.js's every-2-
+ * minutes tick, the same one missed-call-bell / repeat-caller-bell use)
+ * retries it — no new sweep. A stale lease (LEASE_MS) is reclaimable, same
  * idiom as those two bells' own claim.
  *
  * Gated by GATE_PROMISE_CHASER_BELL (needs GATE_CALL_COMMITMENTS too — no
@@ -48,6 +55,7 @@ const commitments = require('./call-commitments');
 const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { SLA_KINDS, followedUpIds, WHAT } = require('./followup-sla-watcher');
+const { callReprocessInFlight } = require('../utils/estimate-claim-sql');
 
 // The rule's own scope: "an earlier call ... ended UNBOOKED". Same live
 // statuses repeat-caller-bell's BOOKED_SQL treats as booked — a call that
@@ -82,7 +90,10 @@ function describePromise(row) {
 }
 
 // Atomic claim: first attempt wins; a stale 'pending' lease (a crash) is
-// reclaimable; 'rung' and 'skipped' are terminal and never reclaimed.
+// reclaimable, as is one with NO lease at all yet (claimed_at null — the
+// durability marker /voice's own insert/update writes atomically with the
+// row, before anyone has actually attempted it); 'rung' and 'skipped' are
+// terminal and never reclaimed.
 async function claimAttempt(callId) {
   const token = new Date().toISOString();
   const claimed = await db('call_log').where({ id: callId })
@@ -92,12 +103,30 @@ async function claimAttempt(callId) {
     // would bind looser than the preceding ANDs and match ANY row with a
     // stale claimed_at, including unrelated and already-terminal calls
     // (repeat-caller-bell's own CLAIM_FREE_SQL wraps its OR the same way).
-    .whereRaw("((metadata->'promise_chaser'->>'status' IS DISTINCT FROM 'pending') OR (metadata->'promise_chaser'->>'claimed_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
+    .whereRaw("((metadata->'promise_chaser'->>'status' IS DISTINCT FROM 'pending') OR (metadata->'promise_chaser'->>'claimed_at') IS NULL OR (metadata->'promise_chaser'->>'claimed_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
     .update({
       metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('promise_chaser', ?::jsonb)",
         [JSON.stringify({ status: 'pending', claimed_at: token })]),
     });
   return claimed ? token : null;
+}
+
+// The durability marker /voice's own call_log insert (and its screened-
+// caller 'passed' resolution) embeds ATOMICALLY with that same write, so a
+// crash right after commit still leaves a claim the sweep can find. Gate
+// off, or no usable phone (phoneDigits) at all, returns null — the caller
+// then omits the key entirely, so a row created while dark never carries
+// one and the sweep (which only ever looks at 'pending' rows) can never
+// mistake it for a crashed live attempt, however much later the gate flips
+// on. `claimed_at: null` (never a fresh token) — this is a durability
+// marker, not a lease; claimAttempt is what actually takes the lease, the
+// FIRST time anything really attempts the call (immediately, in the same
+// request, for a non-screened caller or a passed screen; otherwise the
+// sweep, later).
+function pendingClaimFragment(fromPhone) {
+  if (!isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return null;
+  if (!commitments.phoneDigits(fromPhone)) return null;
+  return { promise_chaser: { status: 'pending', claimed_at: null } };
 }
 
 // Settle a claim to a terminal outcome, fenced on the token: a stale owner
@@ -115,6 +144,23 @@ async function settle(callId, token, status, reason = null, commitmentId = null)
     });
 }
 
+// Records progress on an attempt that is staying 'pending' for the sweep to
+// retry — currently just deliveredSubscriptionIds (a partial push already
+// reached some devices; a retry must not re-buzz them). Same token fence as
+// settle, and deliberately keeps the ORIGINAL claimed_at rather than
+// refreshing it: every other "leave pending" path in this file (a thrown
+// lookup, stats.retryable) also leaves claimed_at untouched, so a retry's
+// own cadence is the same LEASE_MS backoff throughout, never reset to a
+// fresh window just because this one attempt made partial progress.
+async function recordProgress(callId, token, extra) {
+  await db('call_log').where({ id: callId })
+    .whereRaw("metadata->'promise_chaser'->>'claimed_at' = ?", [token])
+    .update({
+      metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('promise_chaser', ?::jsonb)",
+        [JSON.stringify({ status: 'pending', claimed_at: token, ...extra })]),
+    });
+}
+
 // Has ANY call already rung for this exact promise today (ET)? The
 // cross-call half of "once per promise per day" — a genuinely separate
 // call on the same open promise must not re-buzz, but this call's OWN
@@ -129,6 +175,34 @@ async function alreadyRungToday(promiseId, now) {
     .select(db.raw("metadata->'promise_chaser'->>'at' as rung_at"));
   const today = etDateString(now);
   return rows.some((r) => r.rung_at && etDateString(new Date(r.rung_at)) === today);
+}
+
+// Is there an earlier, unbooked call on this same number, inside the
+// sweep's own lookback window, whose commitments extraction might still be
+// running? Two windows, matching the pipeline's own two stages exactly:
+// callReprocessInFlight (call-recording-processor.js's own shared,
+// dependency-free verdict via estimate-claim-sql.js — a live
+// processing_token, or a processing_status the pipeline itself still
+// treats as running or retry-eligible) for a call still mid transcription/
+// extraction, or — once that clears — a finalize write (updated_at) more
+// recent than MODEL_TIMEOUT_MS: recordCommitmentsStep's own commitments
+// model pass runs AFTER that write commits and is bounded by exactly this
+// timeout, so a call that fresh may not have its promise recorded yet even
+// though processing_status already reads 'processed'.
+async function earlierCommitmentsPending(call, now) {
+  const rows = await commitments.phoneWhereAny(
+    db('call_log').where({ direction: 'inbound' })
+      .where('created_at', '>', new Date(now.getTime() - SWEEP_LOOKBACK_MS))
+      .where('created_at', '<', call.created_at),
+    'from_phone', [call.from_phone],
+  ).select('id', 'created_at', 'updated_at', 'processing_token', 'processing_status', 'extraction_attempts');
+  if (!rows.length) return false;
+  const bookedIds = new Set((await db('scheduled_services')
+    .whereIn('source_call_log_id', rows.map((r) => r.id))
+    .whereIn('status', BOOKED_STATUSES)
+    .pluck('source_call_log_id')).map(String));
+  return rows.filter((r) => !bookedIds.has(String(r.id))).some((r) => callReprocessInFlight(r, now.getTime())
+    || (r.updated_at && now.getTime() - new Date(r.updated_at).getTime() < commitments.MODEL_TIMEOUT_MS));
 }
 
 // Which open Waves promise (if any) this call should ring for, or why not:
@@ -155,7 +229,17 @@ async function selectPromiseToRing(call, now) {
     // earlier caller is chasing us".
     && new Date(r.call_started_at).getTime() < new Date(call.created_at).getTime()
     && (!call.customer_id || !r.customer_id || String(r.customer_id) === String(call.customer_id)));
-  if (!rows.length) return { outcome: 'skip', reason: 'no_open_promise' };
+  if (!rows.length) {
+    // On a QUICK callback, the earlier call's own commitments pass
+    // (recordCommitmentsStep, call-recording-processor.js) may genuinely
+    // not have finished yet — it runs AFTER the call's own terminal
+    // finalize write (processing_token cleared, processing_status already
+    // 'processed'), bounded only by MODEL_TIMEOUT_MS, so "no rows" here can
+    // mean "hasn't looked yet", not "found nothing". "No open promise" is
+    // never a settled fact while that's still possible.
+    if (await earlierCommitmentsPending(call, now)) return { outcome: 'retry' };
+    return { outcome: 'skip', reason: 'no_open_promise' };
+  }
 
   // Scope to calls that ended UNBOOKED (the rule's own trigger, and the
   // audit's pattern) — a call that resulted in an appointment is excluded
@@ -215,6 +299,90 @@ async function selectPromiseToRing(call, now) {
   return { outcome: 'found', promise, ...describePromise(promise) };
 }
 
+// Dispatches the notification for a SELECTED promise and classifies the
+// outcome — never writes to call_log itself; the caller owns the token-
+// fenced claim/settle write, same as every other decision in this file.
+// Returns { pending: { deliveredSubscriptionIds } } to leave the claim
+// open for the sweep, or { settle: { status, reason, commitmentId },
+// delivered } for a definitive, terminal outcome.
+async function dispatchPromiseNotification(call, promise, what, when, { viaSweep, existing }) {
+  const customer = call.customer_id
+    ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
+    : null;
+
+  // Re-checked immediately before both the bell write and the push: staff
+  // may dismiss, fulfill, or close the commitment — or a manual text, a
+  // qualifying outbound call, or a booking may land — in the gap between
+  // selectPromiseToRing's own snapshot and dispatch here. Re-runs the SAME
+  // two kept-evidence predicates selectPromiseToRing already used (never a
+  // narrower recheck), so this bell and the SLA pager can never disagree on
+  // what counts as kept. A lookup failure returns false explicitly (never
+  // throws) — shouldContinue and beforePush both fail CLOSED on a plain
+  // false, unlike their shared throw-tolerant fail-OPEN contract, so an
+  // unverifiable recheck blocks the send outright; recheckError (checked
+  // below, payment-failure-notifications.js's own pattern) is what tells
+  // the caller this was a lookup failure, not a genuine close, so the
+  // claim is left pending for retry rather than settled skipped.
+  let recheckError = null;
+  const stillEligible = async () => {
+    try {
+      const stillLive = await commitments.stillOpenIds(db, [promise.id], { now: new Date() });
+      if (!stillLive.has(promise.id)) return false;
+      const followedNow = await followedUpIds(db, [promise]);
+      return !followedNow.has(promise.id);
+    } catch (err) {
+      recheckError = err;
+      return false;
+    }
+  };
+
+  const { triggerNotification } = require('./notification-triggers');
+  // Once per promise per ET day — a caller who rings twice in an afternoon
+  // does not double the bell (notifyAdmin's own dedupe lock).
+  const dedupeKey = `waves-promise_chaser-${promise.id}-${etDateString(new Date())}`;
+  // Devices a PRIOR attempt already buzzed (a partial push — sent > 0,
+  // failed > 0 — persisted these on its own way to leaving the claim
+  // pending) never get buzzed again on this retry — payment-failure-
+  // notifications.js's own deliveredSubscriptionIds pattern.
+  const deliveredSoFar = Array.isArray(existing?.deliveredSubscriptionIds) ? existing.deliveredSubscriptionIds : [];
+  const stats = await triggerNotification('promise_chaser', {
+    customerId: call.customer_id || null,
+    name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
+    phone: call.from_phone,
+    callLogId: call.id,
+    commitmentId: promise.id,
+    what,
+    when,
+    // "Calling in now" is only true at the live call sites; a durable
+    // retry lands after the call has already ended.
+    liveCall: !viaSweep,
+    calledAtLabel: call.created_at ? `${formatETDate(new Date(call.created_at))} ${formatETTime(new Date(call.created_at))}` : null,
+  }, { dedupeKey, shouldContinue: stillEligible, beforePush: stillEligible, deliveredSubscriptionIds: deliveredSoFar });
+
+  const acceptedNow = Array.isArray(stats?.push?.deliveredSubscriptionIds) ? stats.push.deliveredSubscriptionIds : [];
+  const mergedDeliveredIds = [...new Set([...deliveredSoFar, ...acceptedNow])];
+
+  // triggerNotification never throws — a swallowed bell-insert failure, a
+  // failed push, or a failed preferences lookup surfaces as stats.retryable
+  // / stats.prefsUnavailable (often with no stats.error at all) rather than
+  // a caught exception. Any of these, or an unverifiable recheck above,
+  // leaves the claim pending; only a definitive, non-retryable outcome may
+  // settle.
+  if (recheckError || stats?.error || stats?.retryable || stats?.prefsUnavailable) {
+    return { pending: { deliveredSubscriptionIds: mergedDeliveredIds } };
+  }
+  // Genuine delivery only — a deliberate non-send (every admin opted out,
+  // the bell policy silenced the category, or stillEligible just blocked a
+  // promise that closed in the race window) is still a settled, non-
+  // retryable outcome, but it never counts as "rang".
+  const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+  const skipReason = stats?.suppressed ? 'suppressed' : (stats?.policySilenced ? 'policy_silenced' : 'not_delivered');
+  return {
+    settle: { status: delivered ? 'rung' : 'skipped', reason: delivered ? null : skipReason, commitmentId: delivered ? promise.id : null },
+    delivered,
+  };
+}
+
 /**
  * Called from the /voice webhook at two points: immediately, for a call the
  * pre-connect screen never challenges, or once a challenged caller PASSES it
@@ -241,6 +409,15 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     const existing = promiseChaserState(call.metadata);
     if (existing?.status === 'rung') return true;
     if (existing?.status === 'skipped') return false;
+
+    // Still mid pre-connect screen (a challenge issued, no key pressed and
+    // no timeout yet) — the durability marker /voice's insert wrote is a
+    // 'pending' row with no lease, same as any other, so without this check
+    // a sweep tick landing in the few seconds before 'passed'/'failed'
+    // resolves could ring "calling in now" about someone not proven human
+    // yet. Soft skip: no claim taken, nothing settled — the caller's own
+    // screen resolution (or a later sweep tick, once it has) picks this up.
+    if (parseMeta(call.metadata).preconnect_screen === 'gated') return false;
 
     const token = await claimAttempt(call.id);
     if (!token) return false; // a fresh attempt already owns this call right now
@@ -271,50 +448,10 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
       return false;
     }
 
-    const customer = call.customer_id
-      ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
-      : null;
-
-    // Re-checked immediately before both the bell write and the push: staff
-    // may dismiss, fulfill, or close the commitment in the gap between the
-    // stillOpenIds snapshot above and dispatch below.
-    const stillEligible = async () => {
-      const stillLive = await commitments.stillOpenIds(db, [promise.id], { now: new Date() });
-      return stillLive.has(promise.id);
-    };
-
-    const { triggerNotification } = require('./notification-triggers');
-    // Once per promise per ET day — a caller who rings twice in an
-    // afternoon does not double the bell (notifyAdmin's own dedupe lock).
-    const dedupeKey = `waves-promise_chaser-${promise.id}-${etDateString(now)}`;
-    const stats = await triggerNotification('promise_chaser', {
-      customerId: call.customer_id || null,
-      name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
-      phone,
-      callLogId: call.id,
-      commitmentId: promise.id,
-      what,
-      when,
-      // "Calling in now" is only true at the live call sites; a durable
-      // retry lands after the call has already ended.
-      liveCall: !viaSweep,
-      calledAtLabel: call.created_at ? `${formatETDate(new Date(call.created_at))} ${formatETTime(new Date(call.created_at))}` : null,
-    }, { dedupeKey, shouldContinue: stillEligible, beforePush: stillEligible });
-
-    // triggerNotification never throws — a swallowed bell-insert failure, a
-    // failed push, or a failed preferences lookup surfaces as stats.retryable
-    // / stats.prefsUnavailable (often with no stats.error at all) rather than
-    // a caught exception. Any of these leaves the claim pending; only a
-    // definitive, non-retryable outcome may settle.
-    if (stats?.error || stats?.retryable || stats?.prefsUnavailable) return false; // leave pending — retry
-    // Genuine delivery only — a deliberate non-send (every admin opted out,
-    // the bell policy silenced the category, or stillEligible just blocked
-    // a promise that closed in the race window) is still a settled, non-
-    // retryable outcome, but it never counts as "rang".
-    const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
-    const skipReason = stats?.suppressed ? 'suppressed' : (stats?.policySilenced ? 'policy_silenced' : 'not_delivered');
-    await settle(call.id, token, delivered ? 'rung' : 'skipped', delivered ? null : skipReason, delivered ? promise.id : null);
-    return delivered;
+    const result = await dispatchPromiseNotification(call, promise, what, when, { viaSweep, existing });
+    if (result.pending) { await recordProgress(call.id, token, result.pending); return false; }
+    await settle(call.id, token, result.settle.status, result.settle.reason, result.settle.commitmentId);
+    return result.delivered;
   } catch (err) {
     logger.warn(`[promise-chaser-bell] failed for call ${String(callSid).slice(-6)}: ${err.message}`);
     return false; // leave any claim already written pending — retry
@@ -332,27 +469,26 @@ async function markScreenFailed(callSid) {
   try {
     const call = await db('call_log').where('twilio_call_sid', callSid).first('id', 'metadata');
     if (!call) return false;
-    // Never override an outcome another path already reached (e.g. a
-    // duplicate Twilio postback replaying an already-settled call).
-    if (promiseChaserState(call.metadata)) return false;
-    await db('call_log').where({ id: call.id })
-      .whereRaw("COALESCE(metadata->'promise_chaser'->>'status', '') = ''")
+    // Never override a REAL outcome another path already reached (e.g. a
+    // duplicate Twilio postback replaying an already-settled call) — but DO
+    // override the plain 'pending' durability marker /voice's own insert
+    // wrote atomically with the row: that marker is not an outcome, just
+    // "gate was live when this row was created", and this call resolving
+    // to 'failed' is exactly the outcome it was waiting to learn.
+    const existing = promiseChaserState(call.metadata);
+    if (existing?.status === 'rung' || existing?.status === 'skipped') return false;
+    const updated = await db('call_log').where({ id: call.id })
+      .whereRaw("COALESCE(metadata->'promise_chaser'->>'status', '') NOT IN ('rung', 'skipped')")
       .update({
         metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('promise_chaser', ?::jsonb)",
           [JSON.stringify({ status: 'skipped', reason: 'screen_failed', at: new Date().toISOString() })]),
       });
-    return true;
+    return updated > 0;
   } catch (err) {
     logger.warn(`[promise-chaser-bell] markScreenFailed failed for call ${String(callSid).slice(-6)}: ${err.message}`);
     return false;
   }
 }
-
-// A challenged caller who genuinely never gets a claim written (still mid-
-// Gather) resolves within Twilio's own ~12s timeout; this grace floor is
-// far past that, so a call this old with no claim at all is a failure to
-// recover, never one still legitimately outstanding.
-const UNCLAIMED_GRACE_MS = 5 * 60 * 1000;
 
 /**
  * Durable retry (runs on the existing 2-minute call-alert recovery tick,
@@ -362,51 +498,42 @@ const UNCLAIMED_GRACE_MS = 5 * 60 * 1000;
  * — the atomic claim inside ringPromiseChaserIfNeeded makes a re-offer a
  * no-op once another attempt already owns or has settled the call.
  *
- * Also recovers a call that never acquired a claim AT ALL — the initial
- * call_log lookup or the claim UPDATE itself can fail, or the process can
- * exit right after logging the call, before any 'pending' row ever exists;
- * the webhook's own firstDelivery guard means an ordinary Twilio redelivery
- * can never retry it. Excludes anything still mid pre-connect-screen
- * ('gated') or already resolved as a failed one ('failed' — belt and
- * suspenders alongside ringPromiseChaserIfNeeded's own check, so a batch
- * is never spent re-discovering the same excluded call every tick), and
- * anything younger than UNCLAIMED_GRACE_MS, so a challenge genuinely still
- * outstanding is never rung prematurely.
+ * Deliberately does NOT scan for calls with no promise_chaser key at all
+ * (a prior version did, to recover a claim that never got written) — a
+ * 'pending' durability marker is now written ATOMICALLY with the call_log
+ * row itself (or, for a screened caller, with its 'passed' resolution) —
+ * see pendingClaimFragment / the /voice wiring — so a genuine crash before
+ * that write ever commits leaves NO row at all, nothing to recover, and a
+ * row with no key was created while the gate was DARK and must stay
+ * untouched no matter how much later the gate flips on. Scanning "no key"
+ * rows instead treated every one of them (however old, however long the
+ * gate had been off) as a crashed live attempt and backfilled a burst of
+ * delayed alerts the moment the gate first went live.
  *
- * Both queries also exclude blocked numbers, sandbox calls, and unusable
- * caller IDs (mirroring ringPromiseChaserIfNeeded's own basic eligibility)
- * — none of those ever get a claim written (the function returns before
- * ever reaching claimAttempt for them), so without this a batch of such
- * rows would occupy every LIMIT-bounded slot, oldest-first, forever, and
- * starve a genuinely recoverable call behind them.
+ * Excludes blocked numbers, sandbox calls, and unusable caller IDs
+ * (mirroring ringPromiseChaserIfNeeded's own basic eligibility) — belt and
+ * suspenders only now, since none of those paths can reach pendingClaim
+ * Fragment in the first place, but cheap insurance against a future writer
+ * of this same claim shape.
  */
 async function sweepPromiseChasers({ limit = 50 } = {}) {
   if (!isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return 0;
   const since = new Date(Date.now() - SWEEP_LOOKBACK_MS);
-  const eligible = (qb) => qb.where({ direction: 'inbound' })
+  const rows = await db('call_log')
+    .where({ direction: 'inbound' })
     .modify(whereNotBlockedCall)
     .modify((q) => whereNotSandboxCall(q))
-    .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`);
-  const pendingRows = await eligible(db('call_log'))
+    .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`)
     .where('created_at', '>', since)
     .whereRaw("metadata->'promise_chaser'->>'status' = 'pending'")
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('twilio_call_sid');
-  const unclaimedRows = await eligible(db('call_log'))
-    .where('created_at', '>', since)
-    .where('created_at', '<', new Date(Date.now() - UNCLAIMED_GRACE_MS))
-    .whereRaw("metadata->'promise_chaser' IS NULL")
-    .whereRaw("COALESCE(metadata->>'preconnect_screen', '') NOT IN ('gated', 'failed')")
-    .orderBy('created_at', 'asc')
-    .limit(limit)
-    .select('twilio_call_sid');
-  const sids = [...new Set([...pendingRows, ...unclaimedRows].map((r) => r.twilio_call_sid).filter(Boolean))];
   let rang = 0;
-  for (const sid of sids) {
-    if (await ringPromiseChaserIfNeeded(sid, { viaSweep: true })) rang += 1;
+  for (const row of rows) {
+    if (row.twilio_call_sid && await ringPromiseChaserIfNeeded(row.twilio_call_sid, { viaSweep: true })) rang += 1;
   }
   return rang;
 }
 
-module.exports = { ringPromiseChaserIfNeeded, markScreenFailed, sweepPromiseChasers, describePromise };
+module.exports = { ringPromiseChaserIfNeeded, markScreenFailed, sweepPromiseChasers, pendingClaimFragment, describePromise };
