@@ -272,7 +272,7 @@ const { CONTINUATION_TURN } = IbThreads;
 // not narrowed to "new" cards: a claim that also mentions a prior card ("a
 // new card to replace the previous card") is still a claim, and the
 // notice's wording is true either way.
-const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bclick confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
+const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bconfirm(?:ation)? buttons?\b|\b(?:click|press|tap|hit|use)\s+(?:the\s+)?confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
 // How many cards a reply claims, summed over every claim phrase: each
 // "confirmation card(s)" or "card(s) below" counts its explicit number ("two
 // confirmation cards"), else 2 for a plural and 1 for a singular. A claim

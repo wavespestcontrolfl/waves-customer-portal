@@ -684,6 +684,29 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toEqual({ productId: target.id });
   });
 
+  test.each([
+    ['create_restock_request', 'Please purchase two bottles of Taurus SC', { productId: 'p-taurus' }],
+    ['adjust_stock', 'Please purchase two bottles of Taurus SC', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'Did we receive two bottles of Taurus SC?', { code: 'target_clarification_required' }],
+    ['create_restock_request', 'Did we order Taurus SC?', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'Can you log that we got two bottles of Taurus SC?', { productId: 'p-taurus' }],
+  ])('%s: "%s" (purchase verb is an order; questions never write; polite requests do)', async (toolName, prompt, expected) => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName, prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toMatchObject(expected);
+  });
+
+  test('an alias that normalizes to nothing never matches (no empty pattern)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE], aliases: [{ product_id: TAURUS.id, alias_name: '  --  ' }] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: 'We bought two bottles',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
   describe('the words must ask for the tool\'s own operation', () => {
     test.each([
       ['adjust_stock', 'We ordered Taurus SC', {}],

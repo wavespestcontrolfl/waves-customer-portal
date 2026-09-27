@@ -1299,11 +1299,13 @@ async function productsNamedIn(rawText) {
     // INSIDE the matched span needs no separate check).
     // Every phrase that could name this product (full name, each alias,
     // each distinctive token) is checked for its RAW occurrences.
+    // A name or alias that normalizes to nothing (whitespace or punctuation
+    // only) would build an empty pattern matching every word boundary.
     const phraseWords = [
       nameNorm.split(' '),
       ...aliasRows.filter((a) => a.product_id === p.id).map((a) => normalizeForMatch(a.alias_name).split(' ')),
       ...nameNorm.split(' ').filter((token) => isCandidateToken(token) && tokenOwners.get(token)?.size === 1).map((token) => [token]),
-    ];
+    ].filter((words) => words.join('') !== '');
     const phrases = phraseWords
       .map((words) => ({ single: words.length === 1, spans: findPhraseSpansInRawText(rawText, words) }))
       .filter((phrase) => phrase.spans.length > 0);
@@ -1351,12 +1353,27 @@ async function productsNamedIn(rawText) {
 const ARRIVAL_WORDS = new Set(['bought', 'purchased', 'picked', 'received', 'restocked', 'delivered', 'arrived', 'came', 'got']);
 const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock', 'buy']);
 const RECORDING_WORDS = new Set(['receive', 'add', 'added', 'adding', 'put', 'log', 'logged', 'record', 'recorded']);
+// The verb "purchase" asks for an order ("please purchase two bottles"); the
+// noun after a determiner ("we added your purchase") names nothing.
+const PURCHASE_VERB_RE = /(?<!\b(?:your|our|the|a|this|that|my|their)\s)\bpurchase\b/;
 function textOperation(text) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const words = normalizeForMatch(text).split(' ');
+  const normalized = normalizeForMatch(text);
+  const words = normalized.split(' ');
   if (words.some((word) => ARRIVAL_WORDS.has(word))) return 'receipt';
-  if (words.some((word) => ORDER_WORDS.has(word))) return 'order';
+  if (words.some((word) => ORDER_WORDS.has(word)) || PURCHASE_VERB_RE.test(normalized)) return 'order';
   return words.some((word) => RECORDING_WORDS.has(word)) ? 'receipt' : null;
+}
+
+// A question asks to read, never to write: "Did we receive two bottles of
+// Taurus SC?" grounds nothing. Polite requests ("Can you add...", "Could
+// you add...?") are not questions.
+const QUESTION_START_RE = /^\s*(?:did|do|does|have|has|had|is|are|was|were|how|what|when|where|why|who|which|any)\b/i;
+const REQUEST_START_RE = /^\s*(?:please\s+)?(?:can|could|would|will)\s+you\b/i;
+function isQuestion(text) {
+  const raw = String(text || '');
+  if (REQUEST_START_RE.test(raw)) return false;
+  return QUESTION_START_RE.test(raw) || /\?\s*$/.test(raw);
 }
 // `texts` run newest first: the current prompt, any bare turns the look-back
 // skipped, then the turn that named the product. The newest text with an
@@ -1380,7 +1397,7 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
 }
 
 async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
-  if (!preview?.product?.id) return null;
+  if (!preview?.product?.id || isQuestion(prompt)) return null;
   // `texts` are the operator's words the grounding rests on (this prompt,
   // plus the prior turn that named the product): they must also ask for the
   // same operation as the tool (operationMatches).
