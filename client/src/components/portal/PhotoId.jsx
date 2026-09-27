@@ -1257,6 +1257,9 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
           <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{tierLabel}</div>
         )}
         <ResultPhotos photos={photos} unavailablePhotoIds={unavailablePhotoIds} onPhotoUnavailable={onPhotoUnavailable} />
+        {!entry && v2.generic_safety_line && (
+          <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{v2.generic_safety_line}</div>
+        )}
         {entry && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {entry.verdict_label && (

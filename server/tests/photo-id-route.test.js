@@ -390,6 +390,48 @@ function unnamedV2ResultFor({ level = 'unknown', nodeId = null, headline = "We c
   };
 }
 
+// Route regression backed by the real catalog answer builder and v1 mapper.
+// Only provider orchestration is mocked in this suite.
+function realCatalogV2ResultForCandidates(specs) {
+  const catalog = jest.requireActual('../services/species-catalog');
+  const { buildAnswer, mapToV1, resolveCandidate } = jest.requireActual('../services/photo-id-v2/pest-engine');
+  const candidates = specs.map(([slug, confidence]) => ({
+    ...resolveCandidate({ slug, confidence }), checked: true, verified: true,
+  }));
+  const built = buildAnswer({
+    candidates, disagreed: false, disagreementNode: null,
+    escalationTriggered: false, openaiAnswered: false, openaiStoodInAlone: false,
+    qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+  });
+  return {
+    ok: true,
+    v2: {
+      version: 2,
+      catalog_version: catalog.CATALOG_VERSION,
+      tier: built.tier,
+      answer: built.answer,
+      group: built.group,
+      entry: built.entry,
+      evidence: built.evidence,
+      candidates: built.candidatesBlock,
+      next_photo: built.nextPhoto,
+      referral: built.referral,
+      generic_safety_line: built.genericSafetyLine,
+    },
+    v1: mapToV1(built),
+    internal: {
+      models: { candidates: null, verify: null, escalation: null },
+      escalation_triggered: false,
+      escalation_reasons: [],
+      disagreed: false,
+    },
+  };
+}
+
+function realCatalogV2ResultFor(slug, confidence = 0.95) {
+  return realCatalogV2ResultForCandidates([[slug, confidence]]);
+}
+
 async function post(base, path, body, headers = {}) {
   return fetch(`${base}${path}`, {
     method: 'POST',
@@ -1407,6 +1449,328 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
       expect(body.next_step.body).toContain('(941) 297-5749');
       // A referral is a routing note, never a request — no prefill.
       expect(body.next_step.request_prefill).toBeUndefined();
+    });
+  });
+
+  test('gate on: a real draft venomous-snake climb stores generic high-risk routing and returns a referral', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor('florida-cottonmouth');
+    expect(engineResult).toMatchObject({
+      v2: {
+        tier: 'needs_more_evidence',
+        answer: { level: 'subgroup', node_id: 'venomous-snakes' },
+        entry: null,
+        referral: { kind: 'wildlife_trapper' },
+      },
+      v1: {
+        species_slug: null,
+        service_line: 'none',
+        urgency: 'high',
+        report_contract: { safety: { venomous: true } },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('referral');
+      expect(body.result.label).toBeNull();
+      expect(body.v2.answer.headline).toBe('Looks like a venomous snake');
+      expect(body.v2.answer.headline).not.toMatch(/cottonmouth/i);
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'high' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({ safety: { venomous: true } });
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('referral');
+    });
+  });
+
+  test.each([
+    ['fire-ant', /call 911 if someone has trouble breathing/i],
+    ['black-widow', /see a doctor for a suspected bite.+call 911/i],
+    ['tussock-moth-caterpillar', /itchy rash.+seek medical care/i],
+    ['cuban-treefrog', /irritate eyes, nose, and airways.+see a doctor/i],
+  ])('gate on: a real draft %s climb keeps visible generic medical guidance through POST, storage, and GET', async (
+    slug, safety,
+  ) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult.v2).toMatchObject({ entry: null, generic_safety_line: expect.stringMatching(safety) });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2.generic_safety_line).toMatch(safety);
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract).v2.generic_safety_line).toMatch(safety);
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2.generic_safety_line).toMatch(safety);
+    });
+  });
+
+  test('gate on: a real draft orb-weaver climb stores no-treatment routing', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor('golden-silk-orbweaver');
+    expect(engineResult).toMatchObject({
+      v2: { answer: { level: 'subgroup', node_id: 'orb-weavers' }, entry: null },
+      v1: {
+        species_slug: null, service_line: 'none', urgency: 'low',
+        report_contract: {
+          service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+        },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({ answer: { node_id: 'orb-weavers' }, entry: null });
+      expect(TABLES.pest_identifications[0]).toMatchObject({ service_line: 'none', urgency: 'low' });
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract)).toMatchObject({
+        service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+      });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2.answer.node_id).toBe('orb-weavers');
+    });
+  });
+
+  test.each([
+    ['acrobat-ant', 'defensive-stinging-ants', 'pest', 'low', { stinging: true, venomous: false }],
+    ['trap-jaw-ant', 'defensive-stinging-ants', 'pest', 'low', { stinging: true, venomous: false }],
+    ['termite-swarmers', 'termite-swarm-activity', 'termite', 'high', { structural_threat: true }],
+  ])('gate on: draft %s stores its source-backed generic contract', async (
+    slug, nodeId, serviceLine, urgency, safety,
+  ) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult).toMatchObject({
+      v2: { answer: { level: 'subgroup', node_id: nodeId }, entry: null },
+      v1: { service_line: serviceLine, urgency, report_contract: { safety } },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({ answer: { node_id: nodeId }, entry: null });
+      expect(TABLES.pest_identifications[0]).toMatchObject({ service_line: serviceLine, urgency });
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract)).toMatchObject({ safety });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2.answer.node_id).toBe(nodeId);
+    });
+  });
+
+  test('gate on: mixed Cuban and native treefrogs store only neutral parent guidance', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultForCandidates([
+      ['cuban-treefrog', 0.55], ['green-treefrog', 0.35],
+    ]);
+    expect(engineResult).toMatchObject({
+      v2: {
+        answer: { level: 'subgroup', node_id: 'treefrogs' }, entry: null,
+        generic_safety_line: null,
+      },
+      v1: {
+        service_line: 'none',
+        report_contract: {
+          service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+        },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({
+        answer: { node_id: 'treefrogs' }, entry: null, generic_safety_line: null,
+      });
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract).v2).toMatchObject({
+        answer: { node_id: 'treefrogs' }, generic_safety_line: null,
+      });
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract).safety).not.toHaveProperty('irritant');
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2).toMatchObject({
+        answer: { node_id: 'treefrogs' }, generic_safety_line: null,
+      });
+    });
+  });
+
+  test('gate on: mixed iguana and anole keep safe lizard guidance through POST, storage, and GET', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultForCandidates([
+      ['green-iguana', 0.35], ['brown-anole', 0.30],
+    ]);
+    expect(engineResult).toMatchObject({
+      v2: {
+        answer: { level: 'group', node_id: 'lizards' }, entry: null,
+        next_photo: { ask: expect.stringMatching(/zoom from a safe distance/i) },
+      },
+      v1: {
+        species_slug: null, service_line: 'none', urgency: 'low',
+        report_contract: {
+          service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
+        },
+      },
+    });
+    expect(engineResult.v2.next_photo.ask).toMatch(/do not approach, corner, touch, or handle/i);
+    expect(engineResult.v2.next_photo.ask).not.toMatch(/close-up|a few feet|several feet|next to a coin/i);
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({
+        answer: { node_id: 'lizards' }, entry: null,
+        next_photo: { ask: expect.stringMatching(/zoom from a safe distance/i) },
+      });
+      const stored = JSON.parse(TABLES.pest_identifications[0].report_contract);
+      expect(stored).toMatchObject({
+        service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
+        v2: { answer: { node_id: 'lizards' }, next_photo: body.v2.next_photo },
+      });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2).toMatchObject({
+        answer: { node_id: 'lizards' }, entry: null, next_photo: body.v2.next_photo,
+      });
+    });
+  });
+
+  test('gate on: a real draft tussock climb keeps the tree-and-shrub contract through POST, storage, and GET', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor('tussock-moth-caterpillar');
+    expect(engineResult).toMatchObject({
+      v2: {
+        answer: { level: 'subgroup', node_id: 'stinging-caterpillars' },
+        entry: null,
+      },
+      v1: {
+        species_slug: null, service_line: 'tree_shrub', urgency: 'low',
+        report_contract: {
+          safety: { stinging: true },
+          service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_required: false },
+        },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({
+        answer: { node_id: 'stinging-caterpillars' }, entry: null,
+        generic_safety_line: expect.stringMatching(/itchy rash.+seek medical care/i),
+      });
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, service_line: 'tree_shrub', urgency: 'low' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({
+        service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_required: false },
+      });
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2).toMatchObject({
+        answer: { node_id: 'stinging-caterpillars' }, entry: null,
+        generic_safety_line: expect.stringMatching(/itchy rash.+seek medical care/i),
+      });
+    });
+  });
+
+  test('gate on: a real draft gopher-tortoise climb stores protected no-treatment routing', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor('gopher-tortoise');
+    expect(engineResult).toMatchObject({
+      v2: {
+        tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'turtles' },
+        entry: null,
+        referral: { kind: 'protected_leave_alone' },
+      },
+      v1: {
+        species_slug: null,
+        service_line: 'none',
+        urgency: 'low',
+        report_contract: {
+          service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+        },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('referral');
+      expect(body.result.label).toBeNull();
+      expect(body.v2.answer.headline).toBe('Looks like a turtle or tortoise');
+      expect(body.v2.answer.headline).not.toMatch(/gopher/i);
+      expect(body.v2.referral.text).toMatch(/protected by Florida law|no treatment is needed/i);
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'low' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({
+        service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+      });
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('referral');
+      expect(detail.v2.referral.kind).toBe('protected_leave_alone');
+    });
+  });
+
+  test.each([
+    ['giant-african-land-snail', 'regulated-land-snails', 'report_fdacs', 'other', 'high', /giant|african/i],
+    ['raccoon', 'rabies-risk-wild-mammals', 'wildlife_trapper', 'wildlife', 'high', /raccoon/i],
+    ['burrowing-owl', 'protected-ground-birds', 'protected_leave_alone', 'wildlife', 'moderate', /burrowing|owl/i],
+  ])('gate on: a real draft %s climb stores its special generic referral contract', async (
+    slug, nodeId, referralKind, category, urgency, forbiddenIdentity,
+  ) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult).toMatchObject({
+      v2: {
+        tier: 'needs_more_evidence', answer: { level: 'subgroup', node_id: nodeId },
+        entry: null, referral: { kind: referralKind },
+      },
+      v1: { species_slug: null, category, service_line: 'none', urgency },
+    });
+    expect(engineResult.v2.answer.headline).not.toMatch(forbiddenIdentity);
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('referral');
+      expect(body.result.label).toBeNull();
+      expect(body.v2.referral.kind).toBe(referralKind);
+      expect(body.v2.answer.headline).not.toMatch(forbiddenIdentity);
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, category, service_line: 'none', urgency });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('referral');
+      expect(detail.v2.referral.kind).toBe(referralKind);
+    });
+  });
+
+  test.each(['subterranean-termite', 'drywood-termite'])('gate on: a draft %s result preserves termite inspection and structural-risk data', async (slug) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult.v2.entry).toBeNull();
+    expect(engineResult.v1).toMatchObject({
+      species_slug: null, service_line: 'termite', urgency: 'high',
+      report_contract: { safety: { structural_threat: true }, service: { inspection_required: true } },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('inspection');
+      expect(body.result.label).toBeNull();
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, service_line: 'termite', urgency: 'high' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({
+        safety: { structural_threat: true },
+        service: { line: 'termite', key: null, label: 'Termite Protection', inspection_required: true },
+      });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('inspection');
     });
   });
 
