@@ -13415,8 +13415,9 @@ export function CompletionPanel({
     if (!currentPropertyAreas || !isTypedFindings || serviceLineForCloseout !== "tree_shrub") return;
     // The shared coverage field replaces the old internal bed measurement;
     // retain the existing report/estimate-actuals field on normal closeout.
-    setFindingsValues(current => String(current.bed_sqft_serviced ?? "") === String(propertyTreatedArea)
-      ? current : { ...current, bed_sqft_serviced: String(propertyTreatedArea) });
+    if (String(findingsValues.bed_sqft_serviced ?? "") === String(propertyTreatedArea)) return;
+    invalidateGeneratedReportOnTypedEdit();
+    setFindingsValues(current => ({ ...current, bed_sqft_serviced: String(propertyTreatedArea) }));
   }, [currentPropertyAreas, isTypedFindings, serviceLineForCloseout, propertyTreatedArea, findingsValues.bed_sqft_serviced]);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).

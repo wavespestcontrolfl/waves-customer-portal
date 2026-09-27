@@ -29,9 +29,9 @@ beforeEach(async () => {
   await refetchFlags();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-function mount(type = 'Tree & Shrub Care') {
+function mount(type = 'Tree & Shrub Care', fields = []) {
   return render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: type, scheduledDate: '2026-09-27',
-    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: [], nextStepChips: [] } }}
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields, nextStepChips: [] } }}
     products={products} onClose={() => {}} onSubmit={vi.fn()} />);
 }
 async function add(name) {
@@ -111,4 +111,25 @@ it('a detached product area still withdraws a derived total when the amount unit
   expect(total).toHaveValue(null);
   fireEvent.change(screen.getByPlaceholderText('Sq ft'), { target: { value: '600' } });
   expect(total).toHaveValue(null);
+});
+
+it.each([false, true])('a changed reviewed area clears untouched generated prose and preserves manual prose (%s)', async manual => {
+  const report = 'Generated report describing 600 square feet.';
+  const notes = manual ? 'Technician reviewed and corrected this description.' : report;
+  localStorage.setItem('waves_completion_draft_visit-1', JSON.stringify({
+    serviceId: 'visit-1', savedAt: Date.now(), notes, generatedReportText: report,
+    aiReportUsed: true, chipLinesDetached: true, preGenerationNotes: 'Original field notes.',
+    findingsValues: { bed_sqft_serviced: '600' }, selectedProducts: [],
+  }));
+  const original = fetch.getMockImplementation();
+  let release;
+  fetch.mockImplementation((url, ...rest) => url.includes('property-areas')
+    ? new Promise(resolve => { release = resolve; }) : original(url, ...rest));
+  mount('Tree & Shrub Care', [{ key: 'bed_sqft_serviced', label: 'Beds serviced', type: 'number' }]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  expect(screen.getByDisplayValue(notes)).toBeInTheDocument();
+  await act(async () => release(new Response(JSON.stringify(measurements), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(1200));
+  expect(screen.getByDisplayValue(manual ? notes : 'Original field notes.')).toBeInTheDocument();
+  expect(!!screen.queryByText(/the draft\s+was cleared/)).toBe(!manual);
 });
