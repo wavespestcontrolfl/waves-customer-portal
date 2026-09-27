@@ -45,7 +45,8 @@
         "slug": "chiggers",
         "difference": "Both leave itchy welts. No-see-ums bite near water at dawn/dusk; chiggers come from vegetation and bite at sock lines and skin folds.",
         "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where and when you were bitten; a technician judges from the site and timing.",
-        "photo_can_confirm": false
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
       }
     ],
     "size": "tiny",

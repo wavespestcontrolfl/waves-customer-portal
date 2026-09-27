@@ -131,6 +131,8 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(la.next_photo.trim().length).toBeGreaterThan(0);
       expect(la.next_photo.length).toBeLessThanOrEqual(180);
       expect(typeof la.photo_can_confirm).toBe('boolean');
+      expect([undefined, 'sign', 'organism']).toContain(la.photo_veto_applies_to);
+      if (la.photo_veto_applies_to) expect(la.photo_can_confirm).toBe(false);
       // Any pair with a venomous snake on either side: no photo settles it
       // and the tip never brings anyone closer (Codex #4974 r3).
       const venomousSnake = (slug) => {
@@ -353,7 +355,9 @@ describe('cross-worker slugs (planned_slugs contract)', () => {
     }
   });
 
-  test('planned_slugs and built entries do not overlap (a later PR should empty this list)', () => {
+  test('the complete 239-entry catalog has no planned slugs left', () => {
+    expect(allEntries).toHaveLength(239);
+    expect(index.planned_slugs).toEqual([]);
     for (const slug of entriesBySlug.keys()) expect(plannedSlugs.has(slug)).toBe(false);
   });
 });
@@ -379,6 +383,10 @@ describe('name collisions', () => {
     }
     expect(catalog.resolveName('a honey bee swarm on the fence').node.slug).toBe('honey-bee-swarm');
     expect(catalog.resolveName('honey bee wall colony').node.slug).toBe('honey-bee-wall-colony');
+  });
+
+  test('a representative binomial resolves when scientific_name continues with "and others"', () => {
+    expect(catalog.resolveName('Leidyula floridana')).toMatchObject({ via: 'scientific', node: { slug: 'slugs' } });
   });
 });
 
@@ -407,6 +415,10 @@ describe('legacy slug map (v1 PEST_LIBRARY → v2 catalog)', () => {
 });
 
 describe('resolveName regressions', () => {
+  test('a generic water snake name does not claim the southern water snake species', () => {
+    expect(catalog.resolveName('water snake')).toMatchObject({ via: 'node', node: { level: 'group', id: 'snakes' } });
+  });
+
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
     expect(catalog.resolveName('walkingstick')).toBeNull();
     expect(catalog.resolveName('antenna')).toBeNull();

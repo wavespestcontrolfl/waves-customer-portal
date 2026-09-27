@@ -523,7 +523,7 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Fresh droppings mean an active rodent is nearby right now, not just a past visitor. An inspection helps pin down which rodent it is, how it's getting in, and how many are likely present before any cleanup or exclusion.",
+      "what_it_means": "Fresh-looking droppings are evidence of recent rodent activity, but a photo cannot show whether that activity is ongoing. An inspection helps pin down which rodent left them and how it may be getting in before any cleanup or exclusion.",
       "fact": "The age of a dropping is a real clue: fresh ones stay soft and dark for only a few days before drying out and turning gray."
     },
     "tech_notes": "Wet droppings with disinfectant before cleanup rather than dry sweeping/vacuuming to limit dust; identify species from pellet size/shape and location pattern to guide exclusion and trap placement.",

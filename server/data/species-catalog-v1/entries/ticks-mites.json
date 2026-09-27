@@ -483,13 +483,15 @@
         "slug": "bird-rodent-mites",
         "difference": "Chigger bites cluster at sock lines and waistbands after time in grass; bird/rodent mite bites scatter over the upper body and follow a nest indoors",
         "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where and when you were bitten and any bird or rodent nest nearby; a technician judges.",
-        "photo_can_confirm": false
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
       },
       {
         "slug": "cat-flea",
         "difference": "Chigger bites cluster at sock lines and waistbands after time in tall grass; flea bites cluster low on the legs and ankles, often with pets in the home.",
         "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where you were bitten (pets/carpet vs. outdoor plants); a technician judges from that.",
-        "photo_can_confirm": false
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
       }
     ],
     "size": "tiny",
@@ -604,7 +606,8 @@
         "slug": "chiggers",
         "difference": "Bird/rodent mite bites scatter over the upper body indoors near a nest; chigger bites cluster at sock lines and waistbands after time in grass outdoors",
         "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where and when you were bitten and any bird or rodent nest nearby; a technician judges.",
-        "photo_can_confirm": false
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
       }
     ],
     "size": "tiny",

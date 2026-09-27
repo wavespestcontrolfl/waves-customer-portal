@@ -48,11 +48,9 @@ a category/group/subgroup/entry further.
   slugs" below).
 - `entries/<group>.json` — one JSON array per **group** (not per subgroup),
   e.g. `entries/ants.json` holds every ant entry regardless of which ant
-  subgroup it's in. This PR ships the 60 entries already live on the website
-  (owner "A" in the shared build brief's slug list); later PRs add more
-  `entries/*.json` files, or append more entries to an existing one — the
-  loader merges every file in the directory, so **adding a species never
-  requires touching the loader**.
+  subgroup it's in. The catalog currently ships all 239 entries from the
+  shared build brief. The loader merges every file in the directory, so
+  **adding a species never requires touching the loader**.
 
 ## How to add a species
 
@@ -79,7 +77,7 @@ brief; the jest suite enforces them)
 | `common_name`, `aka`, `aliases`, `scientific_name`, `rank` | `aliases` are lowercase, whole-word matchable; avoid short generic words |
 | `group`, `subgroup`, `site_category` | must resolve against `index.json` |
 | `traits` (3–5) | visible features only, most decisive first, ≤140 chars each |
-| `look_alikes` (1–3) | `difference` ≤160 chars, `next_photo` ≤180 chars, one visible tell |
+| `look_alikes` (1–3) | `difference` ≤160 chars, `next_photo` ≤180 chars, one visible tell; `photo_veto_applies_to` may scope a false confirmation veto to `sign` or `organism` photos |
 | `size`, `where`, `looks`, `verdict` | fixed enums — see brief |
 | `safety` (9 booleans) + `safety_line` | line required whenever any of stings/venomous/disease_vector/toxic_to_pets/protected/regulated is true |
 | `range`, `active_months`, `peak_months` | Southwest Florida (Manatee/Sarasota/Charlotte/Lee/Collier) specific |
@@ -108,16 +106,11 @@ for the caller to keep its own fallback copy for now. Read a mapping with
 ## Cross-worker slugs (`planned_slugs`)
 
 This catalog was built in parallel by three owners against a shared 239-slug
-master list (see the build brief). This PR ships only the ~60 entries owned
-by "A" (the website's existing species). A look-alike may legitimately point
-at a species another owner is building in the same batch but that doesn't
-exist as a built entry yet — `index.json#planned_slugs` is the list of every
-slug the other owners are responsible for. The jest suite fails if a
-look-alike points at a slug that is neither a built entry nor in
-`planned_slugs` — so a typo or a genuinely missing species is caught, while
-a legitimate cross-reference to work in flight is not. A later PR that adds
-those entries should remove them from `planned_slugs` as it goes; the list
-should reach empty once the full 239-slug catalog is built.
+master list (see the build brief). All 239 entries are now built, so
+`index.json#planned_slugs` is intentionally empty. The field remains the
+explicit staging list for a future catalog expansion: the jest suite fails
+if a look-alike points at a slug that is neither a built entry nor declared
+there, and it also prevents a built entry from remaining on the staging list.
 
 ## Nothing reaches customers yet
 

@@ -570,7 +570,6 @@
     "aliases": [
       "southern water snake",
       "banded water snake",
-      "water snake",
       "nerodia fasciata"
     ],
     "scientific_name": "Nerodia fasciata",
@@ -664,8 +663,8 @@
       "https://myfwc.com/wildlifehabitats/profiles/reptiles/snakes/cottonmouth/"
     ],
     "review": {
-      "status": "owner_approved",
-      "notes": "Per audit item 18: head shape alone is not a reliable cottonmouth tell (water snakes flatten/widen the head defensively) — UF/IFAS UW229 confirms harmless water snakes are often mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually. Added FWC-confirmed pupil/facial-pit/eye-visibility cues (myfwc.com cottonmouth profile, loaded this session) as the more reliable tell, but look_alikes.photo_can_confirm set to false since getting a safe, clear photo of pupil/eye detail on a snake at the water's edge isn't realistic for a homeowner; the copy tells them to treat an uncertain sighting as a cottonmouth rather than try to confirm from a distance photo."
+      "status": "draft",
+      "notes": "Per audit item 18: head shape alone is not a reliable cottonmouth tell (water snakes flatten/widen the head defensively) — UF/IFAS UW229 confirms harmless water snakes are often mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually. Added FWC-confirmed pupil/facial-pit/eye-visibility cues (myfwc.com cottonmouth profile, loaded this session) as the more reliable tell, but look_alikes.photo_can_confirm set to false since getting a safe, clear photo of pupil/eye detail on a snake at the water's edge isn't realistic for a homeowner; the copy tells them to treat an uncertain sighting as a cottonmouth rather than try to confirm from a distance photo. Returned to draft after removing the generic 'water snake' alias, which cannot identify this one species; owner re-approval is required."
     },
     "role": "wildlife",
     "risk": "defensive",

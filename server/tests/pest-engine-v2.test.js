@@ -279,6 +279,25 @@ describe('buildAnswer — tier', () => {
     expect(built.tier).toBe('needs_more_evidence');
   });
 
+  test('a sign-only bite-pattern veto does not block a clear organism photo', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95)], organismOnly: true, currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+    expect(built.nextPhoto).toBeNull();
+    expect(built.tier).toBe('ai_suggestion');
+
+    const a = catalog.getEntry('no-photo-pair-a');
+    const b = catalog.getEntry('no-photo-pair-b');
+    expect(engine._test.pairBetween(a, b, 'sign').photo_can_confirm).toBe(false);
+    expect(engine._test.pairBetween(a, b, 'organism')).toBeNull();
+
+    const likely = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.60)], organismOnly: true, currentMonth: CURRENT_MONTH,
+    }));
+    expect(likely.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+  });
+
   test('a second candidate that is NOT the curated pair still falls back to the top entry\'s own unconfirmable pair — Codex round-0 P1 (round 7)', () => {
     // ghost-ant is a real second candidate, but it is not no-photo-pair-a's
     // curated pair (that's no-photo-pair-b) — the fallback must still apply.
@@ -467,6 +486,12 @@ describe('isConsequential', () => {
   test('disease_vector makes a candidate consequential', () => {
     expect(isConsequential({ verdict: 'watch', safety: { disease_vector: true } })).toBe(true);
   });
+  test.each([
+    ['medical risk', { verdict: 'watch', risk: 'medical', safety: {} }],
+    ['allergen safety', { verdict: 'watch', risk: 'low', safety: { allergen: true } }],
+  ])('%s makes a candidate consequential', (_label, entry) => {
+    expect(isConsequential(entry)).toBe(true);
+  });
   test('inspection-first makes a candidate consequential', () => {
     expect(isConsequential({ verdict: 'watch', safety: {}, service: { inspection_first: true } })).toBe(true);
   });
@@ -654,6 +679,27 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.internal.escalation_reasons).toContain('low_confidence');
     expect(result.internal.disagreed).toBe(false);
     expect(result.v2.answer.wording).toBe('pretty_sure'); // bumped to the higher (0.85) of the two
+  });
+
+  test('provider agreement is recomputed after an organism-only read removes sign candidates', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: 'roof-rat', confidence: 0.60 }, { slug: 'fire-ant', confidence: 0.50 },
+      ], undefined, 'organism'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'roof-rat', confidence: 0.60, traits_visible: [1], traits_not_visible: [] },
+        { slug: 'fire-ant', confidence: 0.50, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows: 'organism',
+        candidates: [{ slug: 'fire-ant', confidence: 0.80, traits_visible: [1], traits_not_visible: [] }],
+      } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(true);
+    expect(result.internal.disagreed).toBe(false);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.candidates.map((candidate) => candidate.slug)).not.toContain('roof-rat');
   });
 
   test('agreement carries the WINNING side\'s own trait evidence, not Gemini\'s stale/empty verify — Codex round-0 P1 (PR-2b wiring round 2)', async () => {
@@ -1068,6 +1114,14 @@ describe('combineEscalation — agreement only takes a CHECKED confidence (Codex
     const out = combineEscalation([geminiTop(0.97, false)], escalation(0.7), new Set(['fire-ant']));
     expect(out.finalCandidates[0].confidence).toBe(0.7);
     expect(out.finalCandidates[0].traitsVisible).toEqual([1, 2]);
+  });
+
+  test('provider disagreement is computed after candidates of the contradicted kind are removed', () => {
+    const gemini = [cand('roof-rat', 0.9), cand('fire-ant', 0.6)];
+    const out = combineEscalation(gemini, escalation(0.8), new Set(['fire-ant']), 'sign');
+    expect(out.disagreed).toBe(false);
+    expect(out.finalCandidates[0].slug).toBe('fire-ant');
+    expect(out.finalCandidates.every((candidate) => candidate.entry?.kind !== 'sign')).toBe(true);
   });
 });
 

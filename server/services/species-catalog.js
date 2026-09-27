@@ -367,6 +367,11 @@ function fuzzyScanAcross(normalized, indexed) {
   return deeper || best;
 }
 
+function representativeTaxonPair(name, slug) {
+  const match = name.match(/^([A-Z][a-z]+ [a-z][a-z-]+) and others$/);
+  return [match ? match[1] : null, slug];
+}
+
 function buildNameIndices() {
   const scientificPairs = [];
   const aliasPairs = [];
@@ -380,6 +385,9 @@ function buildNameIndices() {
     for (const part of taxonNames.split('/')) {
       if (!part.trim()) continue;
       scientificPairs.push([part, e.slug]);
+      // A grouped entry may name one representative species followed by
+      // "and others". The leading binomial is still an exact taxon name.
+      scientificPairs.push(representativeTaxonPair(part.trim(), e.slug));
       // "Phyllophaga spp." also answers to its bare genus.
       const genus = part.trim().match(/^([A-Z][a-z]+) spp?\.?$/);
       if (genus) scientificPairs.push([genus[1], e.slug]);
