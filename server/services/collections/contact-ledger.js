@@ -62,13 +62,13 @@ async function recordContact({
   if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
   const existingMeta = typeof existing.metadata === 'string'
     ? JSON.parse(existing.metadata) : (existing.metadata || {});
-  // Only a confirmed failed reservation can attempt again. Preserve a
-  // delivered/resolved event's original window, including a concurrent stamp.
+  // Preserve settled event windows, including a concurrent stamp. Unsettled
+  // reservations still refresh for legacy deferred callers before dispatch.
   let contactAt = existing.occurred_at;
-  if (existingMeta.send_failed === true) {
+  if (![existingMeta.delivered, existingMeta.resolved].includes(true)) {
     const changed = await db('collections_contact_ledger').where({ id: existing.id })
-      .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
-        JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
       ]).update({ occurred_at: occurredAt });
     if (Number(changed) === 1) contactAt = occurredAt;
   }

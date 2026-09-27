@@ -6,6 +6,7 @@ jest.mock('../models/db', () => {
   database.raw = (...args) => mockPg.raw(...args);
   database.transaction = (...args) => mockPg.transaction(...args);
   return database;
+
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/push-notifications', () => ({
@@ -143,4 +144,18 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       expect(await require('../services/collections/contact-ledger').claimAttempt(contact)).toMatchObject({ delivered: true, allowed: false });
     } finally { transactionSpy.mockRestore(); }
   }, 15000);
+  test('an interrupted deferred contact refreshes its window before later delivery', async () => {
+    const ContactLedger = require('../services/collections/contact-ledger');
+    const originalAt = new Date(Date.now() - 2 * 86400000);
+    const deliveredAt = new Date();
+    const args = { customerId, channel: 'sms', purpose: 'late_payment', source: 'invoice_followup_replay',
+      idempotencyKey: `followup-replay:${invoiceId}` };
+    await ContactLedger.recordContact({ ...args, occurredAt: originalAt });
+    const resumed = await ContactLedger.recordContact({ ...args, occurredAt: deliveredAt });
+    expect(resumed.occurred_at).toEqual(deliveredAt);
+    expect(await ContactLedger.markDelivered(resumed)).toBe(true);
+    const settled = await ContactLedger.recordContact({ ...args, occurredAt: new Date(deliveredAt.getTime() + 86400000) });
+    expect(settled.occurred_at).toEqual(deliveredAt);
+    expect((await mockPg('collections_contact_ledger').where({ id: resumed.id }).first()).occurred_at).toEqual(deliveredAt);
+  });
 });
