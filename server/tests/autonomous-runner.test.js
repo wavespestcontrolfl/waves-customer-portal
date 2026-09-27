@@ -3618,6 +3618,64 @@ describe('_queueHasClaimable (catch-up probe)', () => {
   });
 });
 
+describe('citability reconciliation after publisher-boundary failures', () => {
+  test('ownership-lock failure attempts a claim-token-fenced release without hiding a moved claim', async () => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const queue = { release: jest.fn().mockResolvedValue(false) };
+    const claimedAt = new Date('2026-09-27T03:00:00Z');
+
+    await expect(runner._releaseClaimAfterOwnershipLoss(queue, 'opp-lost', { claimToken: claimedAt }))
+      .resolves.toBeUndefined();
+    expect(queue.release).toHaveBeenCalledWith('opp-lost', { claimToken: claimedAt });
+  });
+
+  test('audit failure persists current-claim PR evidence before parking a citability refresh', async () => {
+    jest.resetModules();
+    const inserts = [];
+    const dbMock = jest.fn((table) => ({
+      insert: jest.fn((patch) => {
+        inserts.push({ table, patch });
+        return { returning: jest.fn().mockResolvedValue([{ id: 'run-recovery' }]) };
+      }),
+    }));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._pendingReviewClaimOrThrow = jest.fn().mockResolvedValue(undefined);
+    const claimedAt = new Date('2026-09-27T03:05:00Z');
+    const queue = {
+      getById: jest.fn().mockResolvedValue({ id: 'opp-cite', bucket: 'citability_backfill' }),
+    };
+    const run = {
+      opportunity_id: 'opp-cite', queue_claim_id: 'claim-current', action_type: 'refresh_existing_page',
+      page_type: 'blog', shadow_mode: false, astro_pr_url: 'https://github.com/waves/pull/77',
+      claimed_at: claimedAt, draft_payload: { autopublish_head_sha: 'head-77' },
+    };
+
+    await runner._parkPublishedClaimForReconciliation(
+      queue, 'opp-cite', 'astro_pr_audit_failed', { claimToken: claimedAt }, new Error('full audit rejected'), run,
+    );
+
+    expect(inserts).toEqual([expect.objectContaining({
+      table: 'autonomous_runs',
+      patch: expect.objectContaining({
+        opportunity_id: 'opp-cite', queue_claim_id: 'claim-current',
+        outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge',
+        astro_pr_url: 'https://github.com/waves/pull/77',
+      }),
+    })]);
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledWith(
+      queue, 'opp-cite', 'astro_pr_pending_merge', { claimToken: claimedAt }, 'refresh_existing_page',
+      expect.objectContaining({ id: 'run-recovery', astro_pr_url: 'https://github.com/waves/pull/77' }),
+    );
+  });
+});
+
 describe('approveAndPublishNamedCompetitor — superseded in-flight approval', () => {
   test('terminally retires both claims instead of restoring an unreviewable pending_review row', async () => {
     jest.resetModules();

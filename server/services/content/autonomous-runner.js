@@ -1350,6 +1350,7 @@ class AutonomousRunner {
       publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
       if (err.code === 'PAGE_EDIT_OWNERSHIP_LOST') {
+        await this._releaseClaimAfterOwnershipLoss(queue, opp.id, { claimToken });
         return finalize(run, t0, {
           outcome: 'skipped_gate_fail',
           skip_reason: 'page_edit_ownership_lost',
@@ -1427,13 +1428,13 @@ class AutonomousRunner {
           reviewer_notes: notes,
         });
       } catch (err) {
-        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_audit_failed', { claimToken }, err);
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_audit_failed', { claimToken }, err, run);
         throw err;
       }
       try {
         await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type, run);
       } catch (err) {
-        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_queue_transition_failed', { claimToken }, err);
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_queue_transition_failed', { claimToken }, err, run);
       }
       return finalized;
     }
@@ -2095,6 +2096,15 @@ class AutonomousRunner {
     if (!ok) throw new Error('queue_release_failed_or_stale_claim');
   }
 
+  async _releaseClaimAfterOwnershipLoss(queue, opportunityId, payload) {
+    try {
+      const released = await queue.release(opportunityId, payload);
+      if (!released) logger.warn(`[autonomous-runner] ownership-lost release CAS already moved for ${opportunityId}`);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] ownership-lost release failed for ${opportunityId}: ${err.message}`);
+    }
+  }
+
   async _checkProtectedPage(opp = {}, brief = null) {
     const protectedPages = getProtectedPages();
     if (!protectedPages?.isProtected) return null;
@@ -2221,8 +2231,48 @@ class AutonomousRunner {
     }
   }
 
-  async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
+  async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause, run = null) {
     logger.error(`[autonomous-runner] published ${opportunityId} but ${reason}: ${cause.message}`);
+    // A refresh PR exists externally even when its normal audit insert fails.
+    // Persist minimal current-claim evidence first so supersession logic and
+    // the PR poller can retire that PR instead of terminalizing an apparently
+    // PR-less queue row. Retrying the small insert can succeed when the full
+    // audit failed on a payload/column value; if storage is unavailable, keep
+    // the claim in place rather than falsely presenting it as reconcilable.
+    if (run?.action_type === 'refresh_existing_page' && run.astro_pr_url
+      && typeof queue.getById === 'function') {
+      try {
+        const snapshot = await queue.getById(opportunityId);
+        if (snapshot?.bucket === 'citability_backfill') {
+          let recoveryRun = run;
+          if (!recoveryRun.id) {
+            const now = new Date();
+            const [saved] = await db('autonomous_runs').insert({
+              opportunity_id: opportunityId,
+              queue_claim_id: run.queue_claim_id || null,
+              action_type: run.action_type,
+              page_type: run.page_type || null,
+              shadow_mode: run.shadow_mode === undefined ? false : !!run.shadow_mode,
+              outcome: 'completed_pending_review',
+              skip_reason: 'astro_pr_pending_merge',
+              astro_pr_url: run.astro_pr_url,
+              draft_payload: JSON.stringify(run.draft_payload || {}),
+              reviewer_notes: `Recovered PR evidence after ${reason}: ${cause.message}`.slice(0, 4000),
+              claimed_at: run.claimed_at || now,
+              completed_at: now,
+            }).returning('id');
+            recoveryRun = { ...run, id: saved?.id || saved };
+          }
+          await this._pendingReviewClaimOrThrow(
+            queue, opportunityId, 'astro_pr_pending_merge', payload, run.action_type, recoveryRun,
+          );
+          return;
+        }
+      } catch (err) {
+        logger.error(`[autonomous-runner] failed to persist refresh PR reconciliation evidence for ${opportunityId}: ${err.message}`);
+        return;
+      }
+    }
     try {
       await this._pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, null);
     } catch (err) {

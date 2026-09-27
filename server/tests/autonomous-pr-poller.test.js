@@ -879,6 +879,11 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       table: 'autonomous_runs',
       updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
     }));
+    const mergedStamp = updates.find((u) => u.table === 'autonomous_runs'
+      && u.updates.astro_pr_merged_at instanceof Date);
+    expect(mergedStamp).toBeDefined();
+    expect(mergedStamp.filters['null:astro_pr_merged_at']).toBe(true);
+    expect(mergedStamp.updates.astro_pr_merged_at.toISOString()).toBe('2026-09-27T01:55:00.000Z');
     expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalled();
     expect(indexNow.submit).not.toHaveBeenCalled();
   });

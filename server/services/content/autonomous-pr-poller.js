@@ -954,7 +954,7 @@ async function supersedeRun(run, queueRow, { fromSkipReason = null, note = null 
  *     so a broken deploy is never counted as published/trust-building and
  *     IndexNow never pings a 404.
  */
-async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = null, mergedAt = null } = {}) {
+async function stampAstroPrMergedAt(run, mergedAt = null) {
   // FIRST observation of the merge → persist astro_pr_merged_at before any
   // pending return. finalize legitimately stays pending for the 30–45 min
   // production deploy, and without a DB-visible marker the daily publish
@@ -977,6 +977,10 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] astro_pr_merged_at stamp failed for run ${run.id}: ${err.message}`);
   }
+}
+
+async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = null, mergedAt = null } = {}) {
+  await stampAstroPrMergedAt(run, mergedAt);
   // Retire the PR's remediation row at the FIRST merged observation — not
   // after the completed-published claim. finalize legitimately stays pending
   // on awaiting_live_deploy/awaiting_production_deploy for the 30–45 min hub
@@ -1396,13 +1400,10 @@ async function maybeAutoMerge(run, pr) {
   if (Number.isFinite(maxPerDay) && maxPerDay >= 0) {
     const { parseETDateTime, etDateString } = require('../../utils/datetime-et');
     const startOfEtDay = parseETDateTime(`${etDateString(new Date())}T00:00`);
-    // Two countable shapes, mutually exclusive by outcome:
-    //   - finalized publishes (completed_published stamped today), and
-    //   - merged-but-not-finalized runs: still parked at the pending
-    //     outcome but with astro_pr_merged_at stamped today by
-    //     finalizeMerged. Without these, every merge awaiting its 30–45
-    //     min production deploy was invisible to the cap and a backlog
-    //     could exceed it by one merge per 2-minute tick.
+    // Two countable shapes: finalized direct publishes, and every observed
+    // PR merge. The merge marker survives later terminal state/reason changes
+    // such as superseded-citability retirement, so those live writes still
+    // consume the day budget.
     const row = await db('autonomous_runs')
       .where('action_type', run.action_type)
       .where('shadow_mode', false)
@@ -1410,10 +1411,10 @@ async function maybeAutoMerge(run, pr) {
         this.where(function finalized() {
           this.where('outcome', 'completed_published')
             .where('completed_at', '>=', startOfEtDay);
-        }).orWhere(function mergedInFlight() {
-          this.where('outcome', PENDING_OUTCOME)
-            .whereIn('skip_reason', PENDING_SKIP_REASONS)
-            .where('astro_pr_merged_at', '>=', startOfEtDay);
+        }).orWhere(function mergedPr() {
+          // Count every observed PR merge, including a superseded refresh
+          // whose terminal retirement changes its pending skip reason.
+          this.where('astro_pr_merged_at', '>=', startOfEtDay);
         });
       })
       .count('id as count')
@@ -1924,6 +1925,7 @@ async function retireSupersededCitabilityRecords(run, prNumber, queue, pendingRe
 }
 
 async function finalizeMergedSupersededCitability(run, pr, queue, pendingReason) {
+  await stampAstroPrMergedAt(run, pr.merged_at || null);
   if (!await stampTerminal(pr.number, 'merged', run)) {
     return { pending: true, transient: true, reason: 'citability_terminal_stamp_pending' };
   }
