@@ -28,13 +28,14 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 const { mapFindingsToRating } = require('../pest-pressure/components/technician-rating');
 const { appointmentClaimProblems } = require('./next-visit-claims');
 
-// v7: reject unsupported check-back/follow-up promises and avoid absence
+// v8: recognize noun-form follow-up promises as well as return verbs.
+// Reject unsupported check-back/follow-up promises and avoid absence
 // assertions beside untyped observations, which can record pest activity.
 // Preserve authoritative empty schedules and require independently
 // traceable technician evidence before turning a zero pressure score into an
 // inspection assertion. A no_activity finding alone is not traceable because
 // both report assembly and blank completion flows synthesize that category.
-const PROMPT_VERSION = 'pest_visit_summary_narrative_v7';
+const PROMPT_VERSION = 'pest_visit_summary_narrative_v8';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 

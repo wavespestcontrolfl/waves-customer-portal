@@ -116,7 +116,7 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
   expect(SYSTEM_PROMPT).toContain('Mention at most one customer-visible finding');
   expect(SYSTEM_PROMPT).toContain('Never blame the customer');
-  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v7');
+  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v8');
 });
 
 test('current next visit replaces stale recap appointment in model facts and fallback', () => {
@@ -303,7 +303,7 @@ test('clean model output is used verbatim', async () => {
   expect(callModel).toHaveBeenCalledWith(expect.objectContaining({
     jsonMode: true,
     maxTokens: 400,
-    promptVersion: 'pest_visit_summary_narrative_v7',
+    promptVersion: 'pest_visit_summary_narrative_v8',
   }));
 });
 
@@ -469,6 +469,8 @@ test.each([
   'We will check back next week to inspect again.',
   "We'll follow up next week to inspect again.",
   'We’ll follow-up next week to inspect again.',
+  'Your next follow-up is next week.',
+  'The upcoming follow up is tomorrow.',
 ])('model cannot invent an appointment promise without a next visit: %s', async (promise) => {
   const args = input({ nextAppointment: null });
   const summary = `We refreshed the perimeter and entry points today. ${promise}`;
