@@ -487,4 +487,52 @@ const OUR_NUMBER = '+19415550100';
     expect(await sweepPromiseChasers()).toBe(0);
     expect(triggerNotification).not.toHaveBeenCalled();
   });
+
+  test('a screen that resolved FAILED but never got its own terminal mark written is still never rung — by the sweep, or directly', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // stampPreconnectScreen('failed') succeeded, but markScreenFailed itself
+    // never ran (a crash in between) — no promise_chaser key at all, but
+    // preconnect_screen already says 'failed', not 'gated'.
+    const back = callRow(10, { metadata: { preconnect_screen: 'failed' } });
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+
+    // Direct call (the webhook re-entry path, or a second sweep tick) must
+    // also refuse it — the check lives in ringPromiseChaserIfNeeded itself,
+    // not only in the sweep's own query.
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'screen_failed' });
+  });
+
+  test('a batch of permanently ineligible unclaimed calls never starves a genuinely recoverable one behind them', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // Several structurally-ineligible, never-claimed calls, all OLDER than
+    // the genuinely recoverable one below — oldest-first would put them
+    // ahead of it in every LIMIT-bounded batch if they weren't excluded
+    // from the query outright (none of them ever gets a terminal claim
+    // written, so they would recur in every tick, forever).
+    // A phone of its own — blocking it must not incidentally block PHONE,
+    // which back/earlier/commitment all share.
+    const blockedPhone = '+19415550188';
+    const blocked = callRow(180, { from_phone: blockedPhone });
+    const sandboxed = callRow(170, { source: 'voice_relay_sandbox' });
+    const noPhone = callRow(160, { from_phone: 'anonymous' });
+    await mockConn('call_log').insert([blocked, sandboxed, noPhone]);
+    await mockConn('blocked_numbers').insert({ id: randomUUID(), number: blockedPhone, block_type: 'hard_block' });
+
+    const back = callRow(10);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers({ limit: 3 })).toBe(1);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'rung' });
+  });
 });

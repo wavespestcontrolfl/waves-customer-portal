@@ -45,7 +45,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString, formatETDate, formatETTime } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
-const { whereNotBlockedCall } = require('../middleware/spam-block');
+const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { SLA_KINDS, followedUpIds, WHAT } = require('./followup-sla-watcher');
 
@@ -245,6 +245,17 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     const token = await claimAttempt(call.id);
     if (!token) return false; // a fresh attempt already owns this call right now
 
+    // Checked directly here, not only via markScreenFailed's own terminal
+    // mark: if that mark itself failed to write (a crash between
+    // stampPreconnectScreen('failed') and it) or never ran, a caller who
+    // fell to voicemail must still never ring — this call's own metadata
+    // (call_log.metadata.preconnect_screen, stamped by the webhook) already
+    // says so independently of promise_chaser's own claim state.
+    if (parseMeta(call.metadata).preconnect_screen === 'failed') {
+      await settle(call.id, token, 'skipped', 'screen_failed');
+      return false;
+    }
+
     const now = new Date();
     const selection = await selectPromiseToRing(call, now);
     if (selection.outcome === 'retry') return false; // leave pending — the sweep retries it
@@ -356,25 +367,37 @@ const UNCLAIMED_GRACE_MS = 5 * 60 * 1000;
  * exit right after logging the call, before any 'pending' row ever exists;
  * the webhook's own firstDelivery guard means an ordinary Twilio redelivery
  * can never retry it. Excludes anything still mid pre-connect-screen
- * ('gated') and anything younger than UNCLAIMED_GRACE_MS, so a challenge
- * genuinely still outstanding is never rung prematurely.
+ * ('gated') or already resolved as a failed one ('failed' — belt and
+ * suspenders alongside ringPromiseChaserIfNeeded's own check, so a batch
+ * is never spent re-discovering the same excluded call every tick), and
+ * anything younger than UNCLAIMED_GRACE_MS, so a challenge genuinely still
+ * outstanding is never rung prematurely.
+ *
+ * Both queries also exclude blocked numbers, sandbox calls, and unusable
+ * caller IDs (mirroring ringPromiseChaserIfNeeded's own basic eligibility)
+ * — none of those ever get a claim written (the function returns before
+ * ever reaching claimAttempt for them), so without this a batch of such
+ * rows would occupy every LIMIT-bounded slot, oldest-first, forever, and
+ * starve a genuinely recoverable call behind them.
  */
 async function sweepPromiseChasers({ limit = 50 } = {}) {
   if (!isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return 0;
   const since = new Date(Date.now() - SWEEP_LOOKBACK_MS);
-  const pendingRows = await db('call_log')
-    .where({ direction: 'inbound' })
+  const eligible = (qb) => qb.where({ direction: 'inbound' })
+    .modify(whereNotBlockedCall)
+    .modify((q) => whereNotSandboxCall(q))
+    .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`);
+  const pendingRows = await eligible(db('call_log'))
     .where('created_at', '>', since)
     .whereRaw("metadata->'promise_chaser'->>'status' = 'pending'")
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('twilio_call_sid');
-  const unclaimedRows = await db('call_log')
-    .where({ direction: 'inbound' })
+  const unclaimedRows = await eligible(db('call_log'))
     .where('created_at', '>', since)
     .where('created_at', '<', new Date(Date.now() - UNCLAIMED_GRACE_MS))
     .whereRaw("metadata->'promise_chaser' IS NULL")
-    .whereRaw("COALESCE(metadata->>'preconnect_screen', '') <> 'gated'")
+    .whereRaw("COALESCE(metadata->>'preconnect_screen', '') NOT IN ('gated', 'failed')")
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('twilio_call_sid');
