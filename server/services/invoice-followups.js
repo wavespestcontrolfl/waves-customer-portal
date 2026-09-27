@@ -208,25 +208,29 @@ async function logFollowupEmailAttempt({
 
 // Where a billing email authority refusal lands in this engine's outcome
 // vocabulary (terminalFollowupEmailRefusal / settleFollowupEmailLedger). The
-// final refusals keep the reasons the sequence already settles on; anything
-// retryable is a not-sent attempt the step holds for. That includes
-// BILLING_PREFERENCES_CHANGED: the choice moved after fireTouch snapshotted
-// selectedChannels, so the step must re-fan-out on the customer's current
-// choice rather than settle on the stale one.
+// final refusals keep the reasons the sequence already settles on, and a
+// suppression stays a "Suppressed: " refusal. Anything else did not deliver
+// and is no final answer about this customer, so it is a retryable not-sent
+// the step holds for. That includes BILLING_PREFERENCES_CHANGED (the choice
+// moved after fireTouch snapshotted selectedChannels) and
+// INVOICE_CUSTOMER_MISMATCH (a profile merge moved the invoice after
+// fireTouch loaded this customer): the next run re-reads both.
 const FOLLOWUP_EMAIL_REFUSAL_REASONS = Object.freeze({
   BILLING_EMAIL_DISABLED: 'email_disabled',
   NO_EMAIL_RECIPIENT: 'missing_email',
   CUSTOMER_NOT_FOUND: 'customer_not_found',
   INVOICE_PAYER_BILLED: 'invoice_payer_billed',
-  INVOICE_CUSTOMER_MISMATCH: 'invoice_payer_billed',
 });
+const FOLLOWUP_EMAIL_SUPPRESSION_CODES = new Set(['EMAIL_SUPPRESSED', 'SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OTHER']);
 
 function followupEmailRefusal(block) {
   const reason = FOLLOWUP_EMAIL_REFUSAL_REASONS[block.code];
   if (reason) return { ok: false, skipped: true, reason };
-  if (block.retryable === true) return { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: block.code };
-  const detail = String(block.reason || block.code || 'suppressed');
-  return { ok: false, blocked: true, reason: detail.startsWith('Suppressed: ') ? detail : `Suppressed: ${detail}` };
+  if (FOLLOWUP_EMAIL_SUPPRESSION_CODES.has(block.code)) {
+    const detail = String(block.reason || block.code);
+    return { ok: false, blocked: true, reason: detail.startsWith('Suppressed: ') ? detail : `Suppressed: ${detail}` };
+  }
+  return { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: block.code };
 }
 
 async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true }) {

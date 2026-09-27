@@ -349,7 +349,14 @@ describe('invoice follow-up email sidecar', () => {
   // the choice: the handoff's preference-change hold keeps the touch due for
   // a re-fan-out on the current choice; the sequence is never paused on the
   // stale Email-only snapshot.
-  test('a preference change at the handoff holds the touch instead of pausing the sequence', async () => {
+  test.each([
+    ['a preference change', { code: 'BILLING_PREFERENCES_CHANGED', blocked: true, retryable: true, deferred: true,
+      deliveryOutcome: 'not_sent', reason: 'Email is not selected for this billing category' }],
+    // A profile merge that moves the invoice to the winner after fireTouch
+    // loaded this customer: the next run reloads the owner.
+    ['an invoice moved to another customer', { code: 'INVOICE_CUSTOMER_MISMATCH', blocked: true,
+      deliveryOutcome: 'not_sent', reason: 'Invoice does not belong to this customer' }],
+  ])('%s at the handoff holds the touch instead of pausing the sequence', async (_label, block) => {
     const sequence = followupRow();
     const sequenceUpdate = chain();
     setDbQueues({
@@ -361,8 +368,7 @@ describe('invoice follow-up email sidecar', () => {
       invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
     });
     BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
-      state.boundaryBlock = { code: 'BILLING_PREFERENCES_CHANGED', blocked: true, retryable: true, deferred: true,
-        deliveryOutcome: 'not_sent', reason: 'Email is not selected for this billing category' };
+      state.boundaryBlock = block;
       return { ok: false };
     });
     EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
@@ -390,6 +396,8 @@ describe('invoice follow-up email sidecar', () => {
       { ok: false, blocked: true, reason: 'Suppressed: bounce' }],
     ['a payer assigned before dispatch', { code: 'INVOICE_PAYER_BILLED', blocked: true, reason: 'payer' },
       { ok: false, skipped: true, reason: 'invoice_payer_billed' }],
+    ['an invoice moved to another customer before dispatch', { code: 'INVOICE_CUSTOMER_MISMATCH', blocked: true, reason: 'moved' },
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'INVOICE_CUSTOMER_MISMATCH' }],
   ])('%s at the handoff maps onto the sequence outcome', async (_label, block, expected) => {
     const sequence = followupRow();
     setDbQueues({
