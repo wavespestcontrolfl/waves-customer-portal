@@ -596,6 +596,31 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
   });
 
+  it("lets an unavailable conflicted draft return to the refreshed queue", async () => {
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ error: "This review changed elsewhere." }, 409);
+      reads += 1;
+      return reads === 1
+        ? response({ enabled: true, records: [record()], total: 1 })
+        : response({ enabled: true, records: [], total: 0 });
+    }));
+
+    render(<CustomerGeocodeReviewPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Discard after the other admin resolves it." } });
+    fireEvent.click(screen.getByLabelText("I confirmed this is the primary service location"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify pin" }));
+
+    expect(await screen.findByText(/current saved review is unavailable/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByText("No addresses need review.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Evidence")).not.toBeInTheDocument();
+    expect(screen.queryByText(/current saved review is unavailable/i)).not.toBeInTheDocument();
+  });
+
   it("does not let an old customer save refresh or replace the next customer", async () => {
     const oldSave = deferred();
     const onResolved = vi.fn();

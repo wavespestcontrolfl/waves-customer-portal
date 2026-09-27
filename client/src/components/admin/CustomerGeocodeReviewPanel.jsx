@@ -132,7 +132,7 @@ function ReviewRecord({ record, active, actionsDisabled, saving, error, conflict
           Latest saved pin: {hasCompletePin(record.customer) ? `${record.customer.latitude}, ${record.customer.longitude}` : "No saved pin"}
         </div>
       )}
-      {active && <CustomerGeocodeReviewForm record={record} saving={saving} error={error} conflicted={conflicted} unavailable={unavailable} onAcknowledgeConflict={onAcknowledgeConflict} onResolve={onResolve} onCancel={onEdit} />}
+      {active && <CustomerGeocodeReviewForm record={record} saving={saving} error={error} conflicted={conflicted} unavailable={unavailable} cancelDisabled={saving || (conflicted && !unavailable)} onAcknowledgeConflict={onAcknowledgeConflict} onResolve={onResolve} onCancel={onEdit} />}
     </div>
   );
 }
@@ -311,6 +311,15 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
 
   const acknowledgeConflict = () => { setConflictId(null); setError(""); };
   const editRecord = (customerId) => {
+    if (activeIdRef.current === customerId) {
+      activeIdRef.current = null;
+      setActiveId(null);
+      setConflictId(null);
+      setError("");
+      if (loadError) void load();
+      return;
+    }
+    activeIdRef.current = customerId;
     setActiveId((id) => id === customerId ? null : customerId);
     setError("");
   };

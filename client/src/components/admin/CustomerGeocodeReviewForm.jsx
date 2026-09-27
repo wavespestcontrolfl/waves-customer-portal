@@ -93,6 +93,7 @@ export default function CustomerGeocodeReviewForm({
   error,
   conflicted,
   unavailable,
+  cancelDisabled,
   onAcknowledgeConflict,
   onResolve,
   onCancel,
@@ -200,7 +201,7 @@ export default function CustomerGeocodeReviewForm({
         {retryAvailable && (
           <Button variant="secondary" onClick={() => onResolve({ revision: record.revision, action: "retry" })} disabled={saving || conflicted || unavailable || addressChanged}>Retry saved address</Button>
         )}
-        <Button variant="secondary" onClick={onCancel} disabled={saving || conflicted}>Cancel</Button>
+        <Button variant="secondary" onClick={onCancel} disabled={cancelDisabled}>Cancel</Button>
       </div>
     </div>
   );
