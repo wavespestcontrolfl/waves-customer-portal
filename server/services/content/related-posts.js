@@ -264,6 +264,14 @@ function registryCheckedUrl(row) {
   return liveUrl || canonical || row?.canonical_url_normalized || null;
 }
 
+function registryFrontmatter(row) {
+  const metadata = parseJsonObject(row?.metadata);
+  const direct = parseJsonObject(metadata.frontmatter);
+  if (Object.keys(direct).length) return direct;
+  const astro = parseJsonObject(metadata.astro);
+  return parseJsonObject(astro.frontmatter);
+}
+
 function registryFrontmatterSites(frontmatter) {
   const direct = normalizeSpokeSites(frontmatter?.domains);
   return direct.length ? direct : normalizeSpokeSites(frontmatter?.tracking?.domains);
@@ -286,15 +294,13 @@ function registryRowLivePath(row) {
 
 function registryRowVerifiedSites(row) {
   const safeRow = row || {};
-  const metadata = parseJsonObject(safeRow.metadata);
-  const frontmatter = parseJsonObject(metadata.frontmatter);
+  const frontmatter = registryFrontmatter(safeRow);
   const rawPath = registryCheckedUrl(safeRow);
   const checkedSites = normalizeSpokeSites([rawPath]);
   const actualSites = checkedSites.length ? checkedSites : HUB_SITE_KEYS;
   const configuredSites = registryFrontmatterSites(frontmatter);
-  return configuredSites.length
-    ? actualSites.filter((site) => configuredSites.includes(site))
-    : [...actualSites];
+  const renderedSites = configuredSites.length ? configuredSites : HUB_SITE_KEYS;
+  return actualSites.filter((site) => renderedSites.includes(site));
 }
 
 function registryRowLiveKeys(row) {
@@ -317,8 +323,7 @@ function candidateLiveKeys(candidate) {
 // and the live-status sweep verified the canonical route.
 function candidateFromRegistryRow(row) {
   const safeRow = row || {};
-  const metadata = parseJsonObject(safeRow.metadata);
-  const frontmatter = parseJsonObject(metadata.frontmatter);
+  const frontmatter = registryFrontmatter(safeRow);
   const path = registryRowLivePath(safeRow);
   if (!path || safeRow.reconciliation_status !== 'astro_only') return null;
   const verifiedSites = registryRowVerifiedSites(safeRow);

@@ -335,6 +335,17 @@ describe('candidateFromRegistryRow', () => {
     )).toEqual([]);
   });
 
+  test.each([
+    ['missing', {}],
+    ['empty', { domains: [] }],
+  ])('does not admit an absolute spoke URL when %s renderer domains default to hub', (_label, frontmatter) => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      canonical_url_normalized: 'https://www.sarasotaflpestcontrol.com/termite/direct-astro-post/',
+      metadata: { frontmatter },
+    })).toBeNull();
+  });
+
   test('uses tracking.domains when top-level domains are absent', () => {
     expect(candidateFromRegistryRow({
       ...liveAstroOnly,
@@ -437,7 +448,7 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
       id: 'registry-spoke', canonical_url_normalized: `https://www.${spoke}${path}`,
       content_type: 'blog', reconciliation_status: 'matched', workflow_status: 'published',
       astro_status: 'present', live_status: 'live', noindex_detected: false,
-      metadata: { frontmatter: { domains: [spoke] } },
+      metadata: { astro: { frontmatter: { domains: [spoke] } } },
     }];
 
     const out = await getRelatedPostsForBrief(
