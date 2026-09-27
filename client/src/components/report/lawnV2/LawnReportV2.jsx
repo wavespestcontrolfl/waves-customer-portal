@@ -602,25 +602,44 @@ function InsightLine({ label, value, strong }) {
   );
 }
 
+const PLAN_CONDITION_COPY = {
+  review: 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.',
+  hold: 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.',
+};
+const PLAN_CREDIT_COPY = {
+  run: 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.',
+  hold: 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.',
+};
+
 function WeekPlanCallout({ weekPlan, aftercare }) {
   if (!weekPlan?.title) return null;
-  const legacyNeedsReview = Boolean(aftercare?.watering)
-    && aftercare?.neutral !== true && !aftercare?.evidenceSource;
-  const needsReview = aftercare?.needsReview === true || legacyNeedsReview;
-  const canCreditWaterIn = aftercare?.creditableWaterIn === true
-    && aftercare?.evidenceSource === 'product_instruction'
-    && aftercare?.wateringHold !== true
-    && !needsReview;
+  const legacyNeedsReview = [
+    Boolean(aftercare?.watering),
+    aftercare?.neutral !== true,
+    !aftercare?.evidenceSource,
+  ].every(Boolean);
+  const needsReview = [aftercare?.needsReview === true, legacyNeedsReview].some(Boolean);
+  const canCreditWaterIn = [
+    aftercare?.creditableWaterIn === true,
+    aftercare?.evidenceSource === 'product_instruction',
+    aftercare?.wateringHold !== true,
+    !needsReview,
+  ].every(Boolean);
   // Week membership cannot establish whether a timed restriction has ended.
   // Keep the full plan conditional on the recorded restriction and its windows.
-  const planCondition = needsReview
-    ? 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.'
-    : aftercare?.wateringHold === true
-      ? 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.'
-      : null;
-  const credited = canCreditWaterIn && weekPlan.visitInPlanWeek === true
-    && weekPlan.prescribesRun === true && weekPlan.afterTreatment;
+  const planConditionState = [
+    ['review', needsReview],
+    ['hold', aftercare?.wateringHold === true],
+  ].find(([, applies]) => applies)?.[0];
+  const planCondition = PLAN_CONDITION_COPY[planConditionState];
+  const credited = [
+    canCreditWaterIn,
+    weekPlan.visitInPlanWeek === true,
+    weekPlan.prescribesRun === true,
+    Boolean(weekPlan.afterTreatment),
+  ].every(Boolean);
   const shown = credited ? weekPlan.afterTreatment : weekPlan;
+  const planCreditState = weekPlan.prescribesRun === true ? 'run' : 'hold';
 
   return (
     <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
@@ -631,10 +650,8 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
         </div>
       ) : null}
       {canCreditWaterIn && weekPlan.visitInPlanWeek === true ? (
-        <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={weekPlan.prescribesRun === true ? 'run' : 'hold'} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
-          {weekPlan.prescribesRun === true
-            ? 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.'
-            : 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.'}
+        <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={planCreditState} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
+          {PLAN_CREDIT_COPY[planCreditState]}
         </div>
       ) : null}
       <div data-testid="lawn-week-plan-title" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{shown.title}</div>
