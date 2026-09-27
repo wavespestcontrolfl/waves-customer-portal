@@ -130,6 +130,14 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
     expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
   });
 
+  test('the afternoon sweep retries the attempted 3-day day-two episode without starting a new one', async () => {
+    await fixture({ marker: visit });
+    await fixture();
+    await annual.checkAndSendPaymentReminders({ today: tomorrow, retryStartedOnly: true });
+    expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test.each([
     { first_visit_date: tomorrow }, { customer_id: randomUUID() }, { prepay_invoice_id: randomUUID() },
   ])('a changed episode loses the conditional claim and cannot restamp evidence: %j', async (change) => {
@@ -149,22 +157,22 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
     expect(renderSmsTemplate.mock.calls[0][2]).toMatchObject({ entity_type: 'annual_prepay_term' });
   });
 
-  test('an unfinished explicit 1-day episode resumes once on visit day with the same stage', async () => {
-    const f = await fixture({ firstVisit: today });
+  test('an unfinished explicit 1-day episode retries on the day before, even without an arrival hour', async () => {
+    const f = await fixture({ firstVisit: tomorrow });
     await annual.sendPaymentPendingReminder(f.term, 1);
     const attempted = await mockPg('annual_prepay_terms').where({ id: f.id }).first();
-    expect(dateOnlyString(attempted.payment_reminder_1d_attempted_for)).toBe(today);
+    expect(dateOnlyString(attempted.payment_reminder_1d_attempted_for)).toBe(tomorrow);
     expect(attempted.payment_reminder_1d_claimed_at).toBeNull();
     renderSmsTemplate.mockClear();
-    await annual.checkAndSendPaymentReminders({ today });
+    await annual.checkAndSendPaymentReminders({ today, retryStartedOnly: true });
     expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test.each([
-    [3, tomorrow, visit, { marker: visit }],
-    [1, today, today, { marker1d: today }],
-  ])('an attempted %i-day episode reaches its held final Email guard on the bounded resume day', async (daysOut, scanDate, firstVisit, marker) => {
+    [3, tomorrow, visit, { marker: visit }, false],
+    [1, today, tomorrow, { marker1d: tomorrow }, true],
+  ])('an attempted %i-day episode reaches its held final Email guard on the bounded retry day', async (daysOut, scanDate, firstVisit, marker, retryStartedOnly) => {
     const f = await fixture({ firstVisit, ...marker });
     const delivery = require('../services/billing-reminder-delivery');
     const progress = jest.spyOn(delivery, 'reminderProgress').mockResolvedValue([]);
@@ -180,7 +188,7 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
       return { sent: true, deliveryOutcome: 'accepted' };
     });
     try {
-      await expect(annual.checkAndSendPaymentReminders({ today: scanDate })).resolves.toEqual({ sent: 1 });
+      await expect(annual.checkAndSendPaymentReminders({ today: scanDate, retryStartedOnly })).resolves.toEqual({ sent: 1 });
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
         annual_prepay_term_id: f.id, days_out: daysOut, first_visit_date: firstVisit,
@@ -192,11 +200,29 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
 
   test.each([
     ['never attempted', { marker1d: null }],
-    ['moved visit', { marker1d: today, firstVisit: etDateString(addETDays(new Date(), 2)) }],
-    ['cleared choice', { marker1d: today, channels: null }],
-  ])('does not resume a %s 1-day episode on visit day', async (_label, opts) => {
-    await fixture({ firstVisit: today, ...opts });
+    ['moved visit', { marker1d: tomorrow, firstVisit: etDateString(addETDays(new Date(), 2)) }],
+    ['cleared choice', { marker1d: tomorrow, channels: null }],
+    ['legacy choice', { marker1d: tomorrow, channels: [] }],
+  ])('the afternoon sweep does not start a %s 1-day episode', async (_label, opts) => {
+    await fixture({ firstVisit: tomorrow, ...opts });
+    await annual.checkAndSendPaymentReminders({ today, retryStartedOnly: true });
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('visit-day retry does not select even a previously marked 1-day episode', async () => {
+    await fixture({ firstVisit: today, marker1d: today });
     await annual.checkAndSendPaymentReminders({ today });
+    await annual.checkAndSendPaymentReminders({ today, retryStartedOnly: true });
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the afternoon sweep leaves a claimed explicit episode to its current sender', async () => {
+    const f = await fixture({ firstVisit: tomorrow, marker1d: tomorrow });
+    await mockPg('annual_prepay_terms').where({ id: f.id })
+      .update({ payment_reminder_1d_claimed_at: new Date() });
+    await annual.checkAndSendPaymentReminders({ today, retryStartedOnly: true });
     expect(renderSmsTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });

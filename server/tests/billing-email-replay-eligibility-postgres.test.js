@@ -213,8 +213,10 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
   }, 15000);
 
   test.each([
-    [1, 0, true], [1, 0, false], [3, 2, true], [3, 2, false],
-  ])('held annual %i-day final guard on resume offset %i requires persisted attempt: %s', async (daysOut, offset, attempted) => {
+    [1, 0, true, false], [1, 0, false, false],
+    [1, 1, true, true], [1, 1, false, true],
+    [3, 2, true, true], [3, 2, false, false],
+  ])('held annual %i-day final guard on offset %i with attempt=%s allows=%s', async (daysOut, offset, attempted, allowed) => {
     delete process.env.GATE_COLLECTIONS_POLICY;
     const termId = randomUUID();
     const invoiceId = randomUUID();
@@ -233,7 +235,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     });
     await mockPg.transaction(async (held) => {
       const result = await check({ database: held });
-      if (attempted) expect(result).toEqual({ ok: true });
+      if (allowed) expect(result).toEqual({ ok: true });
       else expect(result).toMatchObject({ ok: false, reason: 'annual-prepay-reminder-window-passed' });
     });
   });

@@ -154,8 +154,11 @@ function validAnnualPrepayReminderPin(meta) {
 function annualPrepayReminderWindowOpen(firstVisitDate, daysOut, term, now) {
   const stage = Number(daysOut);
   if (etDateString(addETDays(now, stage)) === firstVisitDate) return true;
-  const resumeOffset = stage === 3 ? 2 : 0;
-  return etDateString(addETDays(now, resumeOffset)) === firstVisitDate
+  // A one-day notice still says the first visit is ahead. On visit day the
+  // promised arrival hour may already have passed (or may be unknown), even
+  // while this unpaid term remains payment_pending. Its retry runs later on
+  // the actual day-before date, never on visit day.
+  return stage === 3 && etDateString(addETDays(now, 2)) === firstVisitDate
     && dateOnlyString(term[`payment_reminder_${stage}d_attempted_for`]) === firstVisitDate;
 }
 

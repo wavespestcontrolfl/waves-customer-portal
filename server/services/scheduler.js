@@ -6890,6 +6890,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Retry only started explicit pre-visit payment episodes while their visit
+  // is still ahead. The usual 10:12 sweep may release a claim after a
+  // transient provider/read failure; waiting until tomorrow could send
+  // "before your first visit" copy after the promised arrival time. Do not
+  // open a new episode or enter the legacy fallback during this recovery.
+  cron.schedule('12 15 * * *', async () => {
+    try {
+      await runExclusive('renewal-reminders', async () => {
+        const result = await require('./annual-prepay-renewals')
+          .checkAndSendPaymentReminders({ retryStartedOnly: true });
+        logger.info(`Annual prepay payment reminder retry done: ${result.sent} sent`);
+      });
+    } catch (err) {
+      logger.error(`Annual prepay payment reminder retry failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // Plan-hold lifecycle (cancel-flow C2, ruling C-4): 7-day restart texts,
   // then auto-resume — visits were already moved to the resume date when the

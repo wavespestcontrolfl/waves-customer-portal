@@ -19,6 +19,9 @@ jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons:
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 jest.mock('../services/intelligence-bar/threads', () => ({ purgeExpiredThreads: jest.fn().mockResolvedValue({ deleted: 0 }) }));
 jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest.fn().mockResolvedValue(1) }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  checkAndSendPaymentReminders: jest.fn().mockResolvedValue({ sent: 0 }),
+}));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
@@ -58,6 +61,16 @@ test('the existing IB retention tick purges tasks and threads while their write 
   expect(runExclusive).toHaveBeenCalledWith('ib-thread-retention', expect.any(Function));
   expect(require('../services/intelligence-bar/threads').purgeExpiredThreads).toHaveBeenCalledTimes(1);
   expect(require('../services/intelligence-bar/tasks').purgeExpiredTasks).toHaveBeenCalledTimes(1);
+});
+
+test('the afternoon payment reminder tick retries only started episodes under the renewal lease', async () => {
+  initScheduledJobs();
+  const registration = cron.schedule.mock.calls.find(([expression]) => expression === '12 15 * * *');
+  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+  await registration[1]();
+  expect(runExclusive).toHaveBeenCalledWith('renewal-reminders', expect.any(Function));
+  expect(require('../services/annual-prepay-renewals').checkAndSendPaymentReminders)
+    .toHaveBeenCalledWith({ retryStartedOnly: true });
 });
 
 test.each([false, true])('handoff alerts stay registered with cronJobs off and autoDispatch=%s', async (autoDispatch) => {

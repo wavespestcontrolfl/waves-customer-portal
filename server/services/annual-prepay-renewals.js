@@ -8217,10 +8217,10 @@ async function pendingExplicitEpisodeTerms(stageTerms, date) {
   }
 }
 
-async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
+async function checkAndSendPaymentReminders({ today = etDateString(), retryStartedOnly = false } = {}) {
   if (!(await annualPrepayTableExists())) return { sent: 0 };
   // Flip any paid-but-pending terms first so they never remind.
-  await activatePaidPendingTerms();
+  if (!retryStartedOnly) await activatePaidPendingTerms();
   let sent = 0;
 
   for (const daysOut of PAYMENT_REMINDER_DAYS) {
@@ -8249,10 +8249,13 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
           : `${attemptColumn} = term_start`);
       })
       .select('*');
-    const terms = (await stageTerms(target)).map((term) => ({ term, resume: false }));
-    if (cols[attemptColumn]) {
-      const resumeDate = daysOut === 3 ? addDaysYmd(today, 2) : today;
-      terms.push(...(await pendingExplicitEpisodeTerms(stageTerms, resumeDate))
+    const terms = retryStartedOnly
+      ? (cols[attemptColumn]
+        ? (await pendingExplicitEpisodeTerms(stageTerms, target)).map((term) => ({ term, resume: true }))
+        : [])
+      : (await stageTerms(target)).map((term) => ({ term, resume: false }));
+    if (daysOut === 3 && cols[attemptColumn]) {
+      terms.push(...(await pendingExplicitEpisodeTerms(stageTerms, addDaysYmd(today, 2)))
         .map((term) => ({ term, resume: true })));
     }
 

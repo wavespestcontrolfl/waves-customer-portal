@@ -782,7 +782,7 @@ describe('durable annual attempt evidence', () => {
     const resume = query({ rows: [{ ...BASE_TERM }] });
     if (failure === 'scan') resume.select.mockImplementation(() => Promise.reject(new Error('resume unreadable')));
     setDbQueues({ 'annual_prepay_terms as t': [query()], annual_prepay_terms: [query({ columnInfo: cols }),
-      query(), resume, query({ rows: [{ ...BASE_TERM }] }), query(),
+      query(), resume, query({ rows: [{ ...BASE_TERM }] }),
       query({ returning: [{ ...BASE_TERM }] }), query()],
       ...(failure === 'choice' ? { notification_prefs: [query({ firstError: new Error('choice unreadable') })] } : {}),
       invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
