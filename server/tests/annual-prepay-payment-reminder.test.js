@@ -686,27 +686,31 @@ describe('explicit annual payment reminder channels', () => {
   });
 });
 
-describe('durable annual 3-day attempt evidence', () => {
-  const cols = { ...REMINDER_COLS, first_visit_date: {}, payment_reminder_3d_attempted_for: {} };
+describe('durable annual attempt evidence', () => {
+  const cols = { ...REMINDER_COLS, first_visit_date: {},
+    payment_reminder_3d_attempted_for: {}, payment_reminder_1d_attempted_for: {} };
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
     _private.resetCachesForTests();
   });
 
-  test.each([['explicit', ['email'], '2026-07-11'], ['legacy', undefined, null]])(
-    '%s invoice-read failure releases the claim with the correct durable evidence', async (_label, channels, marker) => {
+  test.each([
+    [3, 'explicit', ['email'], '2026-07-11'], [3, 'legacy', undefined, null],
+    [1, 'explicit', ['email'], '2026-07-11'], [1, 'legacy', undefined, null],
+  ])(
+    '%i-day %s invoice-read failure releases the claim with the correct durable evidence', async (daysOut, _label, channels, marker) => {
       const claim = query({ returning: [{ ...BASE_TERM }] });
       const release = query();
       const invoice = query({ firstError: new Error('invoice unreadable') });
       setDbQueues({ annual_prepay_terms: [query({ columnInfo: cols }), claim, release],
         notification_prefs: [query({ first: { billing_channels: channels } })], invoices: [invoice] });
-      await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 3))
+      await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, daysOut))
         .rejects.toThrow('invoice unreadable');
-      expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ payment_reminder_3d_attempted_for: marker }));
+      expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ [`payment_reminder_${daysOut}d_attempted_for`]: marker }));
       expect(claim.update.mock.invocationCallOrder[0]).toBeLessThan(invoice.first.mock.invocationCallOrder[0]);
       expect(claim.whereRaw).toHaveBeenCalledWith('COALESCE(first_visit_date, term_start) = ?', ['2026-07-11']);
-      expect(release.update).toHaveBeenCalledWith(expect.objectContaining({ payment_reminder_3d_claimed_at: null }));
+      expect(release.update).toHaveBeenCalledWith(expect.objectContaining({ [`payment_reminder_${daysOut}d_claimed_at`]: null }));
     },
   );
 
@@ -736,7 +740,8 @@ describe('durable annual 3-day attempt evidence', () => {
     const resume = query({ rows: [{ ...BASE_TERM }] });
     if (failure === 'scan') resume.select.mockImplementation(() => Promise.reject(new Error('resume unreadable')));
     setDbQueues({ 'annual_prepay_terms as t': [query()], annual_prepay_terms: [query({ columnInfo: cols }),
-      query(), resume, query({ rows: [{ ...BASE_TERM }] }), query({ returning: [{ ...BASE_TERM }] }), query()],
+      query(), resume, query({ rows: [{ ...BASE_TERM }] }), query(),
+      query({ returning: [{ ...BASE_TERM }] }), query()],
       ...(failure === 'choice' ? { notification_prefs: [query({ firstError: new Error('choice unreadable') })] } : {}),
       invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
       invoice_followup_sequences: [query()], customers: [query({ first: { ...CUSTOMER } })], customer_interactions: [query()] });

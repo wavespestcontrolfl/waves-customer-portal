@@ -62,26 +62,33 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
   });
   afterAll(async () => { await mockPg?.destroy(); if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); } });
 
-  async function fixture({ channels = ['email'], marker = null, firstVisit = visit } = {}) {
+  async function fixture({ channels = ['email'], marker = null, marker1d = null, firstVisit = visit } = {}) {
     const customerId = randomUUID(); const invoiceId = randomUUID(); const id = randomUUID();
     await mockPg('customers').insert({ id: customerId, first_name: 'Synthetic', phone: '+12025550123' });
     await mockPg('notification_prefs').insert({ customer_id: customerId, billing_channels: channels === null ? null : JSON.stringify(channels) });
     await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'draft', total: 392.04, token: randomUUID() });
     await mockPg('annual_prepay_terms').insert({ id, customer_id: customerId, prepay_invoice_id: invoiceId,
-      status: 'payment_pending', term_start: visit, first_visit_date: firstVisit, payment_reminder_3d_attempted_for: marker });
+      status: 'payment_pending', term_start: visit, first_visit_date: firstVisit,
+      payment_reminder_3d_attempted_for: marker, payment_reminder_1d_attempted_for: marker1d });
     return { id, customerId, term: await mockPg('annual_prepay_terms').where({ id }).first() };
   }
 
-  test('up/down is idempotent, adds a nullable DATE without backfilling attempt evidence', async () => {
+  test('up/down is idempotent, adds nullable DATE markers without backfilling attempt evidence', async () => {
     const f = await fixture();
     await migration.up(mockPg);
     expect((await mockPg('annual_prepay_terms').columnInfo()).payment_reminder_3d_attempted_for)
       .toMatchObject({ type: 'date', nullable: true });
-    expect((await mockPg('annual_prepay_terms').where({ id: f.id }).first()).payment_reminder_3d_attempted_for).toBeNull();
+    expect((await mockPg('annual_prepay_terms').columnInfo()).payment_reminder_1d_attempted_for)
+      .toMatchObject({ type: 'date', nullable: true });
+    const before = await mockPg('annual_prepay_terms').where({ id: f.id }).first();
+    expect(before.payment_reminder_3d_attempted_for).toBeNull();
+    expect(before.payment_reminder_1d_attempted_for).toBeNull();
     await migration.down(mockPg); await migration.down(mockPg);
     expect(await mockPg.schema.hasColumn('annual_prepay_terms', 'payment_reminder_3d_attempted_for')).toBe(false);
+    expect(await mockPg.schema.hasColumn('annual_prepay_terms', 'payment_reminder_1d_attempted_for')).toBe(false);
     await migration.up(mockPg); await migration.up(mockPg);
     expect((await mockPg('annual_prepay_terms').where({ id: f.id }).first()).payment_reminder_3d_attempted_for).toBeNull();
+    expect((await mockPg('annual_prepay_terms').where({ id: f.id }).first()).payment_reminder_1d_attempted_for).toBeNull();
   });
 
   test('an invoice read failure leaves an explicit attempt resumable two days out', async () => {
@@ -140,5 +147,28 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
     // The marked explicit 3-day attempt alone resumes; there is no 1-day attempt.
     expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
     expect(renderSmsTemplate.mock.calls[0][2]).toMatchObject({ entity_type: 'annual_prepay_term' });
+  });
+
+  test('an unfinished explicit 1-day episode resumes once on visit day with the same stage', async () => {
+    const f = await fixture({ firstVisit: today });
+    await annual.sendPaymentPendingReminder(f.term, 1);
+    const attempted = await mockPg('annual_prepay_terms').where({ id: f.id }).first();
+    expect(dateOnlyString(attempted.payment_reminder_1d_attempted_for)).toBe(today);
+    expect(attempted.payment_reminder_1d_claimed_at).toBeNull();
+    renderSmsTemplate.mockClear();
+    await annual.checkAndSendPaymentReminders({ today });
+    expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['never attempted', { marker1d: null }],
+    ['moved visit', { marker1d: today, firstVisit: etDateString(addETDays(new Date(), 2)) }],
+    ['cleared choice', { marker1d: today, channels: null }],
+  ])('does not resume a %s 1-day episode on visit day', async (_label, opts) => {
+    await fixture({ firstVisit: today, ...opts });
+    await annual.checkAndSendPaymentReminders({ today });
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

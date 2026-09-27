@@ -7934,8 +7934,8 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   ].find(([, refused]) => refused);
   if (termRefusal) return { sent: false, reason: termRefusal[0] };
 
-  const attemptColumn = 'payment_reminder_3d_attempted_for';
-  const trackAttempt = Number(daysOut) === 3 && Boolean(cols[attemptColumn]);
+  const attemptColumn = `payment_reminder_${Number(daysOut)}d_attempted_for`;
+  const trackAttempt = Boolean(cols[attemptColumn]);
   let explicitAttempt = false;
   if (trackAttempt) {
     try {
@@ -8182,8 +8182,8 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   }
 }
 
-// Resume only an attempted 3-day episode; a failed lookup must not stop
-// the normal 1-day pass. Live stored choices still govern the resumed send.
+// Resume only an attempted episode; a failed lookup must not stop the
+// exact-date passes. Live stored choices still govern the resumed send.
 async function pendingExplicitEpisodeTerms(stageTerms, date) {
   try {
     const candidates = await stageTerms(date, true);
@@ -8197,7 +8197,7 @@ async function pendingExplicitEpisodeTerms(stageTerms, date) {
     }
     return terms;
   } catch (err) {
-    logger.warn(`[annual-prepay] 2-day resume scan skipped: ${err.message}`);
+    logger.warn(`[annual-prepay] optional resume scan skipped: ${err.message}`);
     return [];
   }
 }
@@ -8214,6 +8214,7 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
     const cols = await annualPrepayColumns();
     if (!cols[sentCol] || !cols[claimCol]) continue; // migration not run yet
     const target = addDaysYmd(today, daysOut);
+    const attemptColumn = `payment_reminder_${daysOut}d_attempted_for`;
     const stageTerms = (date, resume = false) => db('annual_prepay_terms')
       .where({ status: PAYMENT_PENDING_STATUS })
       .whereNotNull('prepay_invoice_id')
@@ -8229,13 +8230,14 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
       })
       .modify((query) => {
         if (resume) query.whereRaw(cols.first_visit_date
-          ? 'payment_reminder_3d_attempted_for = COALESCE(first_visit_date, term_start)'
-          : 'payment_reminder_3d_attempted_for = term_start');
+          ? `${attemptColumn} = COALESCE(first_visit_date, term_start)`
+          : `${attemptColumn} = term_start`);
       })
       .select('*');
     const terms = (await stageTerms(target)).map((term) => ({ term, resume: false }));
-    if (daysOut === 3 && cols.payment_reminder_3d_attempted_for) {
-      terms.push(...(await pendingExplicitEpisodeTerms(stageTerms, addDaysYmd(today, 2)))
+    if (cols[attemptColumn]) {
+      const resumeDate = daysOut === 3 ? addDaysYmd(today, 2) : today;
+      terms.push(...(await pendingExplicitEpisodeTerms(stageTerms, resumeDate))
         .map((term) => ({ term, resume: true })));
     }
 
