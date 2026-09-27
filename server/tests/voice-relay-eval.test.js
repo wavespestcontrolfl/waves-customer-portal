@@ -6351,7 +6351,7 @@ describe('voice relay eval — named spoken checks', () => {
       expect([text, unrelatedAbsence.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical' })])]);
       expect([text, replay._internals.scenarioStatus({ checks: unrelatedAbsence })]).toEqual([text, 'fail']);
     }
-    for (const loss of ['Lo siento, esa hora ya no está disponible.', 'La hora que eligió ya no está disponible.', 'El sábado 3 de octubre a las nueve de la mañana ya no está disponible.']) {
+    for (const loss of ['Lo siento, esa hora ya no está disponible.', 'La hora que eligió ya no está disponible.', 'El sábado 3 de octubre a las nueve de la mañana ya no está disponible.', 'Esa hora del sábado 3 de octubre a las nueve de la mañana ya no está disponible.']) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
         kind: 'agent', text: `${loss} No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.`,
       }] }));
