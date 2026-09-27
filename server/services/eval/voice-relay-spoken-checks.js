@@ -65,8 +65,11 @@ const SPANISH_PENDING_STATUS_RE = /^(?=[\s\S]*\b(?:cita|visita|solicitud|hora|ho
 const SPANISH_PENDING_AUXILIARY = '(?:est[aá]|qued[oó]|fue|ha\\s+sido)';
 const SPANISH_DENIED_REQUEST_RE = new RegExp(`\\bno\\s+${SPANISH_PENDING_AUXILIARY}\\s+(?:(?:confirmad|reservad|agendad|programad)[a-záéíóúñü]*\\s+ni\\s+(?:${SPANISH_PENDING_AUXILIARY}\\s+)?)?solicitad[a-záéíóúñü]*`, 'i');
 const SPANISH_NON_PENDING_NEGATION_RE = /\b(?:nunca|jam[aá]s|tampoco)\b|\bno\s+(?!(?:est[aá]|qued[oó]|fue|ha\s+sido)(?![a-záéíóúñü]))/i;
-const SPANISH_COMPLETED_ASSERTION_RE = /(?<![a-záéíóúñü])(?:(?:se\s+)?(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg|lleg|recib|ofrec|escrib|devolv)(?:ó|ió|aron|ieron|aba|aban|ía|ían)|(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg)é|(?:recib|ofrec|escrib|devolv)í|(?:he|has|ha|han|hemos|había|habían|fue|fueron)(?:\s+sido)?\s+(?:enviad|mandad|preparad|entregad|recibid|ofrecid|llamad|contactad|comunicad|confirmad)[oa]s?|(?:he|has|ha|han|hemos|había|habían|fue|fueron)(?:\s+sido)?\s+(?:escrito|devuelto|hecho|puesto)|(?:dio|dieron|puso|pusieron|hizo|hicieron))(?![a-záéíóúñü])/i;
-const SPANISH_FUTURE_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:${SPANISH_ASSERTION_VERB}|${SPANISH_IRREGULAR_FUTURE_STEM})(?:é|ás|á|emos|éis|án)|va(?:mos|n)?\\s+a\\s+${SPANISH_ASSERTION_VERB}(?:le|les|nos|se)?)(?![a-záéíóúñü])`, 'i');
+const SPANISH_PARTICIPLE = '(?:[a-záéíóúñü]+(?:ad|id)[oa]s?|abiert[oa]s?|cubiert[oa]s?|dich[oa]s?|escrit[oa]s?|hech[oa]s?|muert[oa]s?|puest[oa]s?|rot[oa]s?|vist[oa]s?|vuelt[oa]s?)';
+const SPANISH_PAST_AUXILIARY = '(?:(?:he|has|ha|hemos|hab[eé]is|han|hab[ií]a(?:s|mos|n)?)(?:\\s+sido)?|fui|fuiste|fue|fuimos|fuisteis|fueron|era|eras|[eé]ramos|erais|eran)';
+const SPANISH_ASSERTION_PARTICIPLE = '(?:(?:enviad|mandad|preparad|entregad|recibid|ofrecid|llamad|contactad|comunicad|confirmad)[oa]s?|escrit[oa]s?|devuelt[oa]s?|hech[oa]s?|puest[oa]s?)';
+const SPANISH_COMPLETED_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:se\\s+)?(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg|lleg|recib|ofrec|escrib|devolv)(?:ó|ió|aron|ieron|aba|aban|ía|ían)|(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg)é|(?:recib|ofrec|escrib|devolv)í|${SPANISH_PAST_AUXILIARY}\\s+${SPANISH_ASSERTION_PARTICIPLE}|(?:dio|dieron|puso|pusieron|hizo|hicieron))(?![a-záéíóúñü])`, 'i');
+const SPANISH_FUTURE_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:${SPANISH_ASSERTION_VERB}|${SPANISH_IRREGULAR_FUTURE_STEM})(?:é|ás|á|emos|éis|án)|ser(?:é|ás|á|emos|éis|án)\\s+${SPANISH_PARTICIPLE}|va(?:mos|n)?\\s+a\\s+${SPANISH_ASSERTION_VERB}(?:le|les|nos|se)?)(?![a-záéíóúñü])`, 'i');
 const SPANISH_GROUNDED_CONTINUATION_RE = /\b((?:el|su)\s+t[eé]cnico)\b[^;]*;\s*((?:llega|viene|estar[aá])\s+hoy\b[^.!?]*)/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
@@ -77,11 +80,11 @@ const SPANISH_PREDICATE_BOUNDARY_RE = /[.!?;]|\b(?:y|pero|aunque|sino)\b/i;
 // the polarity or tense of the surrounding assertion. Date appositives do
 // not begin with either marker and remain intact.
 const SPANISH_PARENTHETICAL_ASIDE_RE = /,\s*(?:como|seg[uú]n)\b[^,;.!?]{0,80},/gi;
-const SPANISH_PARTICIPLE = '(?:[a-záéíóúñü]+(?:ado|ido)|abierto|cubierto|dicho|escrito|hecho|muerto|puesto|roto|visto|vuelto)';
 const SPANISH_TARGET_PARTICIPLE_RE = new RegExp(`^\\s*${SPANISH_PARTICIPLE}\\b`, 'i');
-// A perfect auxiliary governs each bare participle in its coordinated list,
-// including an intervening object: "he revisado la solicitud y enviado…".
-const SPANISH_SHARED_PERFECT_PREFIX_RE = new RegExp(`\\b(?:he|has|ha|han|hemos|hab[ií]a(?:mos|n|s)?)\\s+${SPANISH_PARTICIPLE}\\b[^.!?;]{0,80}\\by\\s*$`, 'i');
+// A completed haber/ser auxiliary governs each bare participle in its
+// coordinated list, including an intervening object. Future será forms are
+// intentionally absent: "será preparado y enviado" remains prospective.
+const SPANISH_SHARED_PAST_PREFIX_RE = new RegExp(`\\b${SPANISH_PAST_AUXILIARY}\\s+${SPANISH_PARTICIPLE}\\b[^.!?;]{0,80}\\by\\s*$`, 'i');
 
 function spanishClaimIsUncertain(claim) {
   if (clauseIsEpistemicallyHedged(claim) || SPANISH_UNCERTAINTY_RE.test(claim)) return true;
@@ -130,15 +133,15 @@ function assertedSpokenMatch(text, re, { prospective = false } = {}) {
     const match = global.exec(claim);
     if (!match) continue;
     const beforeMatch = claim.slice(0, match.index);
-    const sharedPerfect = SPANISH_TARGET_PARTICIPLE_RE.test(match[0])
-      ? beforeMatch.match(SPANISH_SHARED_PERFECT_PREFIX_RE) : null;
-    const prefix = sharedPerfect ? sharedPerfect[0] : beforeMatch.split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
+    const sharedPast = SPANISH_TARGET_PARTICIPLE_RE.test(match[0])
+      ? beforeMatch.match(SPANISH_SHARED_PAST_PREFIX_RE) : null;
+    const prefix = sharedPast ? sharedPast[0] : beforeMatch.split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
     const evidence = `${prefix}${claim.slice(match.index, match.index + match[0].length + 1)}`;
     const completedForms = [...evidence.matchAll(new RegExp(SPANISH_COMPLETED_ASSERTION_RE.source, 'gi'))];
     const futureForms = [...evidence.matchAll(new RegExp(SPANISH_FUTURE_ASSERTION_RE.source, 'gi'))];
     const completedAt = completedForms.reduce((last, form) => form.index, -1);
     const futureAt = futureForms.reduce((last, form) => form.index, -1);
-    const completed = prospective && (Boolean(sharedPerfect) || completedAt > futureAt);
+    const completed = prospective && (Boolean(sharedPast) || completedAt > futureAt);
     if (!denied && !uncertain && !completed) return match;
   }
   return null;
