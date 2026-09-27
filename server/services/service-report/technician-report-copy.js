@@ -465,13 +465,19 @@ function containsSubordinateAccessCredential(text) {
 
 const REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT = String.raw`(?:(?:the|a|an)\s+)?(?:(?:your|our|their|customer['’]s)\s+)?(?:(?!(?:turf|soil|lawn|area|ground|field|near|by|at|around|beside|along)\b)[a-z][a-z'’\-]*\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)`;
 const REPORT_NUMERIC_ACCESS_ACTION_LINK_TEXT = String.raw`(?:(?:(?:to|for)|(?:will|would|should|shall|must|might|may|can|could)(?:\s+(?:now|currently|still|today|temporarily|again|recently|just|always|directly|immediately|automatically|not|never))?)\s+)?`;
+// Input instructions can place a connector between the credential and the
+// access action. Screen that whole relationship before measurement masking.
+const REPORT_INPUT_ACTION_TEXT = String.raw`(?:enter(?:s|ed|ing)?|typ(?:e|es|ed|ing)|press(?:es|ed|ing)?|punch(?:es|ed|ing)?|input(?:s|ted|ting)?|tr(?:y|ies|ied|ying))`;
+const REPORT_INPUT_ACCESS_LINK_TEXT = String.raw`(?:before|after|when|(?:and\s+)?then)`;
+const REPORT_DIRECT_ACCESS_ACTION_TEXT = String.raw`(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)`;
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock|alarm)\b\s*(?:is|:|=|was|were|reads?)\s*\d{3,8}\s*(?:gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)\b/i,
   /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*${REPORT_STRUCTURED_DATE_TEXT}\b`, 'i'),
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing)|spray(?:ed|ing)?|dust(?:ed|ing)?|clean(?:ed|ing)?)\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
   new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?${REPORT_NUMERIC_ACCESS_ACTION_LINK_TEXT}(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`, 'i'),
-  new RegExp(String.raw`\b(?:enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
+  new RegExp(String.raw`\b${REPORT_INPUT_ACTION_TEXT}\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
+  new RegExp(String.raw`\b${REPORT_INPUT_ACTION_TEXT}\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}(?:\s+|(?=,)))?(?:,\s*)?${REPORT_INPUT_ACCESS_LINK_TEXT}\s+(?:(?:we|you|they|the\s+technician|the\s+customer)\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`, 'i'),
   new RegExp(String.raw`\b(?:use|using)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s+(?:to|for)\s+(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b`, 'i'),
   /\b(?:use|using|enter|entering|type|typing|press|pressing|input(?:ting)?|try|trying)\s+unit\s*\d{3,8}\b[^\n.!?]{0,12}\b(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,

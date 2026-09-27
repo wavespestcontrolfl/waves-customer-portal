@@ -169,6 +169,10 @@ const CREDENTIAL_CASES = {
     'Inspected the keypad and entered 2468 ml for access',
     'Inspected the keypad and treated the surrounding 100 square feet, then entered 8842 at the keypad',
     'Serviced the lockbox and applied 100 ml, then typed 8842 at the keypad',
+    'Enter 2468 ml before unlocking the door',
+    'Type 8842 oz after opening the side gate',
+    'Input 2468 ft when we access the garage',
+    'Press 8842 ml, then unlock the rear door',
   ],
 };
 
@@ -253,6 +257,9 @@ const LEGITIMATE_CASES = {
     'Inspected the keypad and treated the surrounding 100 square feet',
     'Inspected the keypad and treated 100 square feet',
     'Serviced the lockbox and applied 100 ml around the mounting plate',
+    'Enter 100 ml in the application log before treating around the rear door',
+    'Input 100 ml in the service record, then treated the hinge near the side gate',
+    'Type 100 ml into the service note after applying product near the garage door',
   ],
 };
 
