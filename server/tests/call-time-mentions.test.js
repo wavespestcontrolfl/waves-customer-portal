@@ -61,7 +61,7 @@ describe('extractHourMentions', () => {
   });
 
   test('a range counts its start, reading the end\'s am/pm across noon', () => {
-    expect(hours('Two to four, or between eight and ten pm, or 11 to 1 pm.')).toEqual([[14, false], [20, false], [11, false]]);
+    expect(hours('Two to four, or between eight and ten pm, or 11 to 1 pm, or 2 pm to 4 pm.')).toEqual([[14, false], [20, false], [11, false], [14, false]]);
   });
 
   test('minutes or a half/quarter lead-in put a time off the hour', () => {

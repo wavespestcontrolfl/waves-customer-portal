@@ -209,11 +209,14 @@ function minuteTokensAfter(toks, i) {
   return MINUTE_WORDS.has(toks[i + 1]) && Object.hasOwn(SPELLED_NUMBERS, toks[i + 2]) ? 2 : 1;
 }
 
-// "Two to four", "2 through 4", "between two and four": a range whose start
-// is the hour at `i`. The index of its end, or -1.
-function rangeEndAfter(toks, i) {
-  const joined = toks[i + 1] === 'to' || toks[i + 1] === 'through' || (toks[i + 1] === 'and' && toks[i - 1] === 'between');
-  return joined && hourNumber(toks[i + 2]) != null ? i + 2 : -1;
+// "Two to four", "2 pm to 4 pm", "between two and four": a range whose start
+// is the hour at `i`, its minutes ending at `after`. The index of its end, or
+// -1.
+function rangeEndAfter(toks, i, after) {
+  let j = after;
+  while (HOUR_FILLER.has(toks[j])) j += 1;
+  const joined = toks[j] === 'to' || toks[j] === 'through' || (toks[j] === 'and' && toks[i - 1] === 'between');
+  return joined && hourNumber(toks[j + 1]) != null ? j + 1 : -1;
 }
 
 // "Two hours", "two and a half hours", "two or three hours", "two to three
@@ -272,8 +275,8 @@ function extractHourMentions(turnText) {
       if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: false, pos: offset + i, end: offset + i + 1 });
       const n = hourNumber(toks[i]);
       if (n == null || i === rangeEnd) continue;
-      rangeEnd = rangeEndAfter(toks, i);
       const after = i + 1 + minuteTokensAfter(toks, i);
+      rangeEnd = rangeEndAfter(toks, i, after);
       const offHour = after > i + 1 || (['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]));
       const period = periodAfter(toks, after);
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';

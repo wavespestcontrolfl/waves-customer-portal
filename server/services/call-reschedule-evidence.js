@@ -109,7 +109,8 @@ const REFUSAL_MARKERS = [
 // acknowledgment ("okay", "sounds good") can answer anything ("I need to ask
 // my husband" — "Okay") and never affirms on its own.
 const COMMITMENT_MARKERS = [
-  'i ll do', 'i will do', 'we ll do', 'we will do', 'let s do that', 'let s do it', 'you re all set', 'you are all set',
+  'i ll do that', 'i will do that', 'we ll do that', 'we will do that', 'i ll do it', 'we ll do it', 'let s do that', 'let s do it',
+  'you re all set', 'you are all set',
   'we ll see you', 'i ll see you', 'we will see you', 'i will see you',
   'we ll see him', 'we ll see her', 'we ll see them',
   'i ll put you down', 'we ll put you down', 'i will put you down', 'we will put you down',
@@ -217,11 +218,25 @@ function answersClosingQuestion(turns, idx) {
   return agentIdx >= 0 && sentenceSpans(turns[agentIdx].raw).some((sentence) => sentence.question && isClosingQuestion(sentence.ns));
 }
 
-// After the agent's commitment, a caller question other than a closing one
-// ("can we do three?") means the slot is still being talked over.
+// Words that can only be about when: an hour from two to twelve ("one" also
+// counts things — "one more question"), noon, am/pm, a part of the day, a
+// weekday, a month ("may" is also a verb), today, tomorrow.
+const TIME_WORDS = new Set([
+  'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+  'noon', 'midnight', 'am', 'pm', 'morning', 'afternoon', 'evening', 'today', 'tomorrow',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+]);
+function talksTime(ns) {
+  return ns.split(' ').some((tok) => TIME_WORDS.has(tok) || /^(?:[1-9]|1[0-2])$/.test(tok));
+}
+
+// After the agent's commitment the caller only closes the call: a caller
+// turn naming a time or day again ("make that three") or asking anything
+// but a closing question ("can we do three?") is still on the slot.
 function callerReopensSlot(turns, affirmIdx) {
-  return turns.slice(affirmIdx + 1).some((t) => !t.agent
-    && sentenceSpans(t.raw).some((sentence) => sentence.question && !isClosingQuestion(sentence.ns)));
+  return turns.slice(affirmIdx + 1).some((t) => !t.agent && (talksTime(t.ns)
+    || sentenceSpans(t.raw).some((sentence) => sentence.question && !isClosingQuestion(sentence.ns))));
 }
 
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you

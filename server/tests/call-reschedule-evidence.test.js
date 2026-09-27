@@ -13,7 +13,7 @@ function evidence(transcript, confirmedStartAt = THURSDAY_2PM) {
 
 describe('rescheduleAgreementEvidence', () => {
   test('day and hour agreed in separate exchanges both resolve to the slot', () => {
-    const r = evidence('Caller: Can we move my visit?\nAgent: Would Thursday work for you?\nCaller: Thursday is fine.\nAgent: Great, we will do two o clock then.');
+    const r = evidence('Caller: Can we move my visit?\nAgent: Would Thursday work for you?\nCaller: Thursday is fine.\nAgent: Great, we will see you at two o clock then.');
     expect(r).toMatchObject({ ok: true, reason: 'agreement_established' });
   });
 
@@ -156,11 +156,12 @@ describe('rescheduleAgreementEvidence', () => {
   // A bare acknowledgment answers whatever came before it ("I need to ask my
   // husband" — "Okay"); only the agent committing to the slot affirms it.
   test('only an agent commitment affirms the slot, never a bare acknowledgment', () => {
-    for (const reply of ['Okay, we also have a special on mosquito service this month.', 'All right. Yep.', 'Okay, Thursday at two.', 'Sounds good.', 'Okay, please hold.']) {
+    for (const reply of ['Okay, we also have a special on mosquito service this month.', 'All right. Yep.', 'Okay, Thursday at two.', 'Sounds good.', 'Okay, please hold.',
+      'I will do my best.', 'I will do what I can.']) {
       expect(evidence(`Caller: Can we do Thursday at two?\nAgent: ${reply}`)).toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
     }
     expect(evidence('Agent: Would Thursday at two work?\nCaller: I need to ask my husband.\nAgent: Okay, we will see you then.').ok).toBe(false);
-    for (const reply of ['We will do two o clock then.', 'Okay, you are all set for Thursday at two.', 'Great, I will put you down.']) {
+    for (const reply of ['We will do that, two o clock then.', 'Okay, you are all set for Thursday at two.', 'Great, I will put you down.']) {
       expect(evidence(`Caller: Can we do Thursday at two?\nAgent: ${reply}`).ok).toBe(true);
     }
   });
@@ -187,7 +188,7 @@ describe('rescheduleAgreementEvidence', () => {
   // "No" to the proposal, or a slot the agent turns down while saying okay.
   test('a negation on the slot, however politely acknowledged, is not an agreement', () => {
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you then. Oh, but not Thursday.')).toMatchObject({ ok: false, reason: 'slot_refused' });
-    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, I will do what I can, I don\'t have that.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, we will see you then. Oh, I don\'t have that.')).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you, there are no Thursday openings.')).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence('Agent: Would Thursday at two work?\nCaller: No.\nAgent: Okay, we will see you then.')).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence('Caller: I can\'t do Thursday at two.\nAgent: Okay, we will see you then.')).toMatchObject({ ok: false, reason: 'slot_refused' });
@@ -270,10 +271,15 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence(`${agreed}\nAgent: Actually, we cannot move it.\nCaller: Okay.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence(`${agreed}\nCaller: Actually three instead.\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence(`${agreed}\nCaller: Can we do three?\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed}\nCaller: Make that three.\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed}\nCaller: Thanks, and one more thing, my name is spelled with a C.`).ok).toBe(true);
     expect(evidence(`${agreed} Anything else?\nCaller: Is there anything else I need to do before then?`).ok).toBe(true);
   });
 
-  test('a range takes its am/pm from its end', () => {
+  test('a range takes its am/pm from its end, and an am/pm on its start keeps it one range', () => {
+    const fromTwo = 'Caller: Can we move my visit?\nAgent: We will see you Thursday from 2 pm to 4 pm.';
+    expect(evidence(fromTwo, '2026-09-24T16:00:00-04:00')).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+    expect(evidence(fromTwo).ok).toBe(true);
     const evening = 'Caller: Can we move my visit?\nAgent: We will see you Thursday between eight and ten pm.';
     expect(evidence(evening, '2026-09-24T08:00:00-04:00')).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
     expect(evidence(evening, '2026-09-24T20:00:00-04:00').ok).toBe(true);
