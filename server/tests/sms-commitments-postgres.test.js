@@ -1770,7 +1770,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
     const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
     expect(verify).toHaveBeenCalledTimes(1);
-    expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ payment_source: 'invoice', id: invoice.id });
+    expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ payment_source: 'invoice', invoice_id: invoice.id });
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
@@ -1801,7 +1801,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }), created_at: before, updated_at: after });
     const commitment = { kind: 'other', description: 'Did my ACH payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
-    expect(evidence.records.filter((r) => r.type === 'payment' && r.payment_source === 'invoice').map((r) => r.id)).toEqual([invoice.id]);
+    expect(evidence.records.filter((r) => r.type === 'payment' && r.payment_source === 'invoice').map((r) => r.invoice_id)).toEqual([invoice.id]);
   });
 
   test('R2 rule 4: a staff-recorded ledger prepayment with no invoice is loaded as payment evidence the model may weigh', async () => {
@@ -1982,9 +1982,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
-    expect(witness).toMatchObject({ id: invoice.id, payment_id: payment.id });
+    expect(witness).toMatchObject({ id: payment.id, invoice_id: invoice.id });
     const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
-    expect(grounded).toMatchObject({ verdict: 'fulfilled', linked_record_type: 'payment_row', linked_record_id: payment.id });
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', record_id: payment.id, linked_record_type: 'invoice', linked_record_id: invoice.id });
     const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
     await mockPg.transaction(async (trx) => {
       expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(true);
@@ -2015,7 +2015,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(evening.getTime() + 1000));
     const row = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
-    expect(row.text).toContain(`paid ${etDateString(evening)}`);
+    expect(row.text).toContain(`received ${etDateString(evening)}`);
     expect(row.text).not.toContain(evening.toISOString().slice(0, 10));
   });
 
@@ -2045,7 +2045,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(Date.now() + 60000));
     const payments = evidence.records.filter((r) => r.type === 'payment');
     const linked = payments.find((r) => r.payment_source === 'invoice');
-    expect(linked).toMatchObject({ id: invoice.id, payment_id: manual.id, property_id: context.properties[0].id });
+    expect(linked).toMatchObject({ id: manual.id, invoice_id: invoice.id, property_id: context.properties[0].id });
     expect(admissibleWitness(linked, commitment)).toBe(true);
     expect(payments.filter((r) => r.payment_source === 'ledger').map((r) => r.id)).toEqual([prepayment.id]);
   });
@@ -2080,9 +2080,9 @@ postgres('SMS commitments on PostgreSQL', () => {
       sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.payment_source === 'invoice');
-    expect(witness.text).toBe(`Invoice WPC-2026-0902 (Quarterly Pest Control) paid ${etDateString(settled)} — $118.75`);
+    expect(witness.text).toBe(`Payment of $118.75 toward invoice WPC-2026-0902 (Quarterly Pest Control) received ${etDateString(settled)}; the invoice is paid in full`);
     const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
-    expect(grounded).toMatchObject({ verdict: 'fulfilled', linked_record_type: 'payment_row', linked_record_id: payment.id });
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', record_id: payment.id, linked_record_type: 'invoice', linked_record_id: invoice.id });
     expect(new Date(grounded.matched_at).getTime()).toBe(settled.getTime());
   });
 
@@ -2101,7 +2101,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment')).toEqual([]);
     const [own] = await mockPg('payments').insert(settledRow(message.customer_id)).returning('id');
     expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment'))
-      .toMatchObject([{ id: invoice.id, payment_id: own.id }]);
+      .toMatchObject([{ id: own.id, invoice_id: invoice.id }]);
   });
 
   test('Codex #4996 r1: each invoice of a combined charge cites its own allocation row; a sibling\'s row never vouches for an invoice, and a row naming no invoice still links by its PaymentIntent', async () => {
@@ -2120,7 +2120,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const commitment = { kind: 'other', description: 'Did both payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     for (let read = 0; read < 2; read += 1) {
       const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
-      expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.id, r.payment_id])))
+      expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.invoice_id, r.id])))
         .toEqual({ [first.id]: firstPaid.id, [second.id]: secondPaid.id, [legacy.id]: legacyPaid.id });
     }
   });
@@ -2206,6 +2206,24 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toEqual([70, 71, 72].map((seconds) => at(seconds).getTime()));
   });
 
+  test('Codex #4996 r3 pre-push: two installments toward one invoice after the question are two witnesses, each its own payment', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 60000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0962',
+      title: 'Termite Bond', total: 300, subtotal: 300, line_items: '[]', status: 'sent' }).returning('id');
+    const installment = (amount, at) => ({ customer_id: message.customer_id, amount, status: 'paid', payment_date: etDateString(at),
+      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: at });
+    const [first, second] = await mockPg('payments').insert([installment(100, after), installment(150, new Date(after.getTime() + 30000))]).returning('id');
+    const commitment = { kind: 'other', description: 'Did you get my $100 payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witnesses = evidence.records.filter((r) => r.payment_source === 'invoice');
+    expect(witnesses.map((r) => r.id)).toEqual([second.id, first.id]);
+    expect(new Set(witnesses.map((r) => r.ref)).size).toBe(2);
+    expect(witnesses.find((r) => r.id === first.id).text).toContain('Payment of $100.00 toward invoice WPC-2026-0962');
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: `payment:${first.id}`, quote: 'Payment of $100.00' }, evidence, commitment);
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', record_id: first.id, linked_record_type: 'invoice', linked_record_id: invoice.id });
+  });
+
   test('Codex #4996 r3: a partial payment on an invoice still open is money landing, and reads as partial', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
@@ -2216,8 +2234,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     const commitment = { kind: 'other', description: 'Did you get my $50?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.payment_source === 'invoice');
-    expect(witness).toMatchObject({ id: invoice.id, payment_id: payment.id,
-      text: `Partial payment of $50.00 toward invoice WPC-2026-0961 (Quarterly Pest Control) received ${etDateString(after)}` });
+    expect(witness).toMatchObject({ id: payment.id, invoice_id: invoice.id,
+      text: `Payment of $50.00 toward invoice WPC-2026-0961 (Quarterly Pest Control) received ${etDateString(after)}` });
     expect(witness).not.toHaveProperty('paid_in_full');
     expect(admissibleWitness(witness, commitment)).toBe(true);
     expect(evidence.records.filter((r) => r.payment_source === 'ledger')).toEqual([]);
@@ -2249,9 +2267,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     const commitment = { kind: 'other', description: 'Did you get my cash payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const payments = evidence.records.filter((r) => r.type === 'payment');
-    expect(payments.map((r) => r.id)).toEqual([laterInvoice]);
+    expect(payments.map((r) => r.invoice_id)).toEqual([laterInvoice]);
     expect(new Date(payments[0].settled_at).getTime()).toBe(after.getTime());
-    expect(payments[0].text).toContain(`paid ${etDateString(after)}`);
+    expect(payments[0].text).toContain(`received ${etDateString(after)}`);
   });
 
   test('Codex #4996 r2: a customer-level Stripe charge such as the monthly autopay is payment evidence; one an invoice claims by its PaymentIntent, or names through a dispute, counts once, on the invoice', async () => {
@@ -2274,7 +2292,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(ledger.map((r) => r.id)).toEqual([autopay.id]);
     expect(ledger[0]).toMatchObject({ property_id: null, text: `Payment of $89.00 recorded ${etDateString(after)} (monthly autopay)` });
     expect(admissibleWitness(ledger[0], commitment)).toBe(true);
-    expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.id, r.payment_id])))
+    expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.invoice_id, r.id])))
       .toEqual({ [claimed.id]: claimedPaid.id, [disputed.id]: disputedPaid.id });
   });
 
@@ -2447,7 +2465,7 @@ postgres('SMS commitments on PostgreSQL', () => {
         stripe_payment_intent_id: 'pi_ach', metadata: JSON.stringify({ invoice_id: invoice.id, payment_state: 'paid', settled_event_at: minutes(2).toISOString() }),
         created_at: minutes(-60), updated_at: minutes(30) });
       expect(await tick(minutes(31))).toMatchObject({ scanned: 1 });
-      expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ id: invoice.id, payment_source: 'invoice' });
+      expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ invoice_id: invoice.id, payment_source: 'invoice' });
     });
 
     test('another customer\'s payment, and a deposit being refunded, are not events', async () => {

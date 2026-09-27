@@ -235,8 +235,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     // #4996: P1-A manual-payment linkage, P1-C settlement time, P2 exact-
     // match preference, P2 estimate deposits).
     payment: (() => {
-      // A paid `payments` row settled (not merely created) after the
-      // request, tied to THIS invoice — exact metadata naming it, OR the one
+      // How a paid `payments` row settled (not merely created) after the
+      // request is tied to an invoice — exact metadata naming it, OR the one
       // durable link a manually recorded self-pay settlement leaves (below),
       // OR a shared PaymentIntent on a row that names no invoice at all
       // (rule 3, rule 5, rule 8). A combined-balance charge writes one row
@@ -266,45 +266,34 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         ELSE COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at) END`;
       const settledAtSql = settledAt('p');
       return Promise.all([
-        // Account-credit coverage (invoice paid_at stamped with no payments
-        // row — admin-invoices.js apply-credit) never matches any branch
-        // below, so it is never money landing. Payer-billed invoices
-        // (invoices.payer_id) and payer-billed payments
-        // (payments.metadata.payer_id) are excluded — that money is not the
-        // customer's own (rule 5, plus p.customer_id = pinv.customer_id,
-        // Codex round 1 P2 customer scope). A property-scoped ask needs the
-        // invoice's own visit's property (rule 6); an office invoice with no
-        // visit link has none and never vouches for a scoped ask. Unlike a
-        // delivered notice (whose content was fixed at send, #4816 r49),
-        // money settles the invoice for its visit, so the visit's property
-        // is the payment's property even if the visit was later switched:
-        // invoices carry no property of their own to snapshot.
-        // Settled in full or not: a partial payment (a prepayment covering
-        // part of the bill, an installment) leaves paid_at null but is still
-        // money landing on this invoice (Codex #4996 r3).
-        conn('invoices as pinv').where({ 'pinv.customer_id': customerId }).whereNull('pinv.payer_id')
+        // Every settled payment toward one of this customer's invoices, one
+        // record each: two installments after the question are two answers,
+        // never one kept and one dropped (pre-push audit); paid in full or
+        // not (a partial prepayment or an installment leaves paid_at null,
+        // Codex #4996 r3). The record is the payments row, the row a dispute
+        // reverses first (rule 8); its invoice rides along (paymentLink).
+        // Account-credit coverage (paid_at stamped with no payments row,
+        // admin-invoices.js apply-credit) never matches, so it is never money
+        // landing. Payer-billed invoices and payments are not the customer's
+        // own (rule 5). A property-scoped ask needs the invoice's own visit's
+        // property (rule 6): an office invoice with no visit has none, and
+        // the visit's property is the payment's even if the visit later
+        // moved — invoices carry no property of their own to snapshot (unlike
+        // a delivered notice, #4816 r49). A row matching two invoices (a
+        // PaymentIntent naming none, shared by both) counts once, exact or
+        // manual links first.
+        conn.select('*').from(conn('payments as p')
+          .joinRaw(`JOIN invoices pinv ON pinv.customer_id = p.customer_id AND pinv.payer_id IS NULL
+            AND (${exactMatchSql} OR ${manualMatchSql} OR ${sharedPiSql})`)
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
-          // The settling payment rides along in one LATERAL pick, so its id
-          // (revalidation's lock target, rule 8), amount and settlement
-          // instant (P1-C: this — not invoices.paid_at, a separate wall-
-          // clock stamp — is when the money actually landed) all come from
-          // the SAME row, ranked exact/manual match first, then latest
-          // settlement, then id (deterministic, Codex round 1 P2).
-          .joinRaw(`LEFT JOIN LATERAL (
-              SELECT p.id, p.amount, ${settledAtSql} AS settled_at
-              FROM payments p
-              WHERE p.status = 'paid' AND p.customer_id = pinv.customer_id
-                AND COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''
-                AND ${settledAtSql} > ? AND ${settledAtSql} <= ?
-                AND (${exactMatchSql} OR ${manualMatchSql} OR ${sharedPiSql})
-              ORDER BY (${exactMatchSql} OR ${manualMatchSql}) DESC, ${settledAtSql} DESC, p.id DESC
-              LIMIT 1
-            ) best_payment ON true`, [after, now])
-          .whereNotNull('best_payment.id')
-          .orderBy('best_payment.settled_at', 'desc').limit(LIMIT + 1)
-          .select('pinv.id', 'pinv.title', 'pinv.invoice_number', 'pinv_visit.property_id as property_id',
-            'best_payment.id as payment_id', 'best_payment.amount as payment_amount', 'best_payment.settled_at as settled_at',
-            conn.raw('pinv.paid_at IS NOT NULL as paid_in_full')),
+          .where({ 'p.customer_id': customerId, 'p.status': 'paid' })
+          .whereRaw("COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''")
+          .whereRaw(`${settledAtSql} > ? AND ${settledAtSql} <= ?`, [after, now])
+          .distinctOn('p.id').orderBy('p.id').orderByRaw(`(${exactMatchSql} OR ${manualMatchSql}) DESC, pinv.id`)
+          .select('p.id', 'p.amount as payment_amount', conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id',
+            'pinv.title', 'pinv.invoice_number', 'pinv_visit.property_id as property_id', conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
+          .as('invoice_payments'))
+          .orderBy([{ column: 'settled_at', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(LIMIT + 1),
         // Money tied to no invoice (rule 4): off-gateway prepayments staff
         // record (cash/check/Zelle/Venmo, admin-customers.js POST
         // /:id/credits), and customer-level Stripe charges such as the
@@ -389,16 +378,12 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .modify((q) => whereDeliveredReceiptEmail(q, customerId, after, now))
           .select('rem.id', 'rem.sent_at', 'rem.recipient_email_snapshot', 'red.id as deposit_id', 'red.estimate_id', 'red.amount',
             'estimates.property_id as property_id'),
-      ]).then(([invoicesPaid, ledger, paymentSms, deposits, invoiceReceiptEmails, depositReceiptEmails]) => {
+      ]).then(([invoicePayments, ledger, paymentSms, deposits, invoiceReceiptEmails, depositReceiptEmails]) => {
         const legs = [
-          invoicesPaid.map(({ paid_in_full: paidInFull, ...row }) => {
-            const label = `${row.invoice_number || row.id}${row.title ? ` (${row.title})` : ''}`;
-            const amount = row.payment_amount != null ? `$${Number(row.payment_amount).toFixed(2)}` : null;
-            const day = etDateString(new Date(row.settled_at));
-            return { ...row, payment_source: 'invoice',
-              text: paidInFull ? `Invoice ${label} paid ${day}${amount ? ` — ${amount}` : ''}`
-                : `Partial payment${amount ? ` of ${amount}` : ''} toward invoice ${label} received ${day}` };
-          }),
+          invoicePayments.map(({ paid_in_full: paidInFull, ...row }) => ({ ...row, payment_source: 'invoice',
+            text: `Payment of $${Number(row.payment_amount).toFixed(2)} toward invoice ${row.invoice_number || row.invoice_id}`
+              + `${row.title ? ` (${row.title})` : ''} received ${etDateString(new Date(row.settled_at))}`
+              + `${paidInFull ? '; the invoice is paid in full' : ''}` })),
           ledger.map(({ monthly_autopay: autopay, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
             text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.method ? ` (${row.method})` : ''}${autopay ? ' (monthly autopay)' : ''}` })),
           paymentSms.map((row) => ({ ...row, payment_source: 'sms' })),
@@ -739,13 +724,11 @@ function witnessTime(witness, commitment) {
 }
 
 // The row a payment witness also depends on, held at close with it: the
-// payments row that settled an invoice (a dispute reverses it before the
-// invoice), the invoice a receipt email receipts, the deposit a deposit
-// receipt email receipts (a refund claims it apart from the estimate —
-// pre-push audit), or the estimate a deposit is on. A deposit's estimate is
-// held too, with the lead that admitted it (revalidateSmsFulfillment).
+// invoice a payment settles or a receipt email receipts, the deposit a
+// deposit receipt email receipts (a refund claims it apart from the estimate
+// — pre-push audit), or the estimate a deposit is on. A deposit's estimate
+// is held too, with the lead that admitted it (revalidateSmsFulfillment).
 function paymentLink(witness) {
-  if (witness.payment_source === 'invoice') return witness.payment_id ? { linked_record_type: 'payment_row', linked_record_id: witness.payment_id } : {};
   if (witness.invoice_id) return { linked_record_type: 'invoice', linked_record_id: witness.invoice_id };
   if (witness.deposit_id) return { linked_record_type: 'deposit', linked_record_id: witness.deposit_id };
   if (witness.estimate_id) return { linked_record_type: 'estimate', linked_record_id: witness.estimate_id };
@@ -826,11 +809,10 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
     // means a racing refund/void/chargeback either loses this row to us or
     // leaves us nothing to hold — never a fulfilled verdict grounded on
     // reversed money (rule 8, Codex #4816 r13 P1).
-    payment: { invoice: 'invoices', ledger: 'payments', sms: 'sms_log', deposit: 'estimate_deposits', email: 'email_messages' }[verdict.payment_source],
-    // Linked rows (paymentLink): the settling payments row behind an
-    // invoice-source payment, and the invoice or deposit a receipt email
-    // receipts.
-    payment_row: 'payments', invoice: 'invoices', deposit: 'estimate_deposits' };
+    payment: { invoice: 'payments', ledger: 'payments', sms: 'sms_log', deposit: 'estimate_deposits', email: 'email_messages' }[verdict.payment_source],
+    // Linked rows (paymentLink): the invoice a payment settles or a receipt
+    // email receipts, and the deposit a deposit receipt email receipts.
+    invoice: 'invoices', deposit: 'estimate_deposits' };
   const table = tables[verdict.record_type];
   if (!table || !verdict.record_id || !verdict.evidence_hash) return false;
   // Customer/source locks are already held. Estimate writers lock estimate
