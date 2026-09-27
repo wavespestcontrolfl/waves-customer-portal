@@ -20,6 +20,10 @@ const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
 
 // A confirmed booking with a high-enough confidence; flags injected per test.
+// A complete saved address (street AND ZIP), the shape failOpenKnownCustomer
+// builds from a real customer row — the fail-open address paths require it.
+const ON_FILE = Object.freeze({ hasAddress: true, addressLine1: '100 Synthetic St', addressZip: '34202' });
+
 function extraction(flags, overall = 0.9) {
   return {
     triage_flags: flags,
@@ -70,13 +74,13 @@ describe('canAutoRoute fail-open booking', () => {
     const blocked = canAutoRoute(ex, {});
     expect(blocked.allowed).toBe(false);
     const open = canAutoRoute(ex, {
-      failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true },
+      failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE,
     });
     expect(open.allowed).toBe(true);
   });
 
   test('a new lead with a validated on-file address (addressOnly) clears the address flags but keeps every confidence check (codex #4685 r1 P1)', () => {
-    const addressOnly = { hasAddress: true, addressOnly: true };
+    const addressOnly = { ...ON_FILE, addressOnly: true };
     // Address flags alone: the on-file address satisfies them, booking proceeds.
     const addr = canAutoRoute(extraction(['address_unverifiable', 'missing_service_address', 'caller_phone_missing']), {
       failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly,
@@ -94,7 +98,7 @@ describe('canAutoRoute fail-open booking', () => {
     const lowOut = canAutoRoute(low, { failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly });
     expect(lowOut.allowed).toBe(false);
     expect(lowOut.reason).toBe('low_confidence');
-    const establishedOut = canAutoRoute(low, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    const establishedOut = canAutoRoute(low, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
     expect(establishedOut.allowed).toBe(true);
   });
 
@@ -111,7 +115,7 @@ describe('canAutoRoute fail-open booking', () => {
     // accept — must stay blocked (AV still governs new addresses).
     const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
     ex.property = { service_address: { street_line_1: '9999 Nonexistent Rd' } };
-    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'low_confidence_address']));
   });
@@ -124,7 +128,7 @@ describe('canAutoRoute fail-open booking', () => {
     for (const partial of [{ city: 'Sarasota' }, { zip: '34231' }, { unit: 'Apt 4B' }, { postal_code: '34292' }]) {
       const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
       ex.property = { service_address: partial };
-      const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+      const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
       expect(r.allowed).toBe(false);
       expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
     }
@@ -137,7 +141,7 @@ describe('canAutoRoute fail-open booking', () => {
     // on-file primary instead of the stated property.
     const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
     ex.property = { service_address: { raw_text: '9999 Nonexistent Road, Venice' } };
-    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
   });
@@ -155,7 +159,7 @@ describe('canAutoRoute fail-open booking', () => {
   test('existing customer who did NOT restate an address (uses on-file) IS failed open', () => {
     const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
     ex.property = { service_address: {} }; // nothing given → on-file address used
-    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
     expect(r.allowed).toBe(true);
   });
 
@@ -164,14 +168,14 @@ describe('canAutoRoute fail-open booking', () => {
     // on-file-address recovery dark for a confirmed known-customer booking.
     const ex = extraction(['address_unverifiable', 'missing_service_address'], 0.9);
     ex.property = { service_address: { state: 'FL' } };
-    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
     expect(r.allowed).toBe(true);
   });
 
   test('community-only service_address ("the Lakewood Ranch property") IS new-address evidence — stays blocked (P2)', () => {
     const ex = extraction(['address_unverifiable', 'missing_service_address'], 0.9);
     ex.property = { service_address: { subdivision_or_community: 'Lakewood Ranch' } };
-    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
   });
@@ -194,7 +198,7 @@ describe('canAutoRoute fail-open booking', () => {
     // appointmentBlockingFlags, but still rides `flags` for its own card.
     const ex = extraction(['caller_phone_missing', 'name_email_mismatch']);
     ex.scheduling = { status: 'tentative' };
-    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19419603120', knownCustomer: ON_FILE });
     expect(r.allowed).toBe(false);
     expect(r.reason).toBe('triage_flags');
     expect(r.appointmentBlockingFlags).toEqual(['caller_phone_missing']);
@@ -210,7 +214,7 @@ describe('canAutoRoute fail-open booking', () => {
       if (hard === 'caller_not_authorized') {
         ex.caller = { relationship_to_property: 'tenant', on_site_authorization: false };
       }
-      const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });
+      const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19419603120', knownCustomer: ON_FILE });
       expect(r.allowed).toBe(false);
     }
   });
@@ -290,6 +294,38 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(true);
     expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
+  });
+
+  // codex #4919: an agent-committed ARRIVAL WINDOW range binder (bind on the
+  // window's first bound, "this <weekday>" same-day exception, relative-day
+  // binding) was tried across rounds 1-6 and SPLIT OUT to
+  // wip/call-window-evidence-binder for future work — round 7 found 3 more
+  // P1s in that expansion. On this branch the evidence grammar is back to
+  // main's: a committed window quote ("between 6 and 9") names no single
+  // weekday+hour the binder recognizes, so it still fails to bind and the
+  // hard flag stays in review, same as any other unrecognized phrasing.
+  test('a committed ARRIVAL WINDOW quote ("between 6 and 9") does not demote commercial_requires_quote — hard-flagged window calls go to review', () => {
+    const turn = "We'll be there Sunday between 6 and 9.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-08-02T18:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
+  // Same for "this <weekday>" (the same-day exception) — main's bare-weekday
+  // grammar has no "this" concept at all, so it still fails to bind.
+  test('a "this <weekday>" same-day quote does not demote commercial_requires_quote — main has no same-day exception', () => {
+    const turn = "We'll be there this Thursday at 6 pm.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-07-30T18:00:00-04:00'; // the call's OWN day (Thursday)
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
   });
 
   test('an agreed price WITHOUT an agent commitment does not clear commercial_requires_quote', () => {
@@ -2110,6 +2146,27 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);
   });
 
+  // codex #4919: a committed ARRIVAL WINDOW range-collapse binder ("between
+  // 6 and 9" binds its first bound; "this <weekday>" resolves the same-day
+  // ambiguity; relative-day binding) was tried across rounds 1-6 and SPLIT
+  // OUT to wip/call-window-evidence-binder — round 7 found 3 more P1s in
+  // that expansion. quoteBindsConfirmedSlot is back to main's plain
+  // weekday+time grammar: none of these phrasings name a single weekday
+  // this parser recognizes plus a matching hour, so all fail to bind — a
+  // hard-flagged window/relative-day/"this <weekday>" call goes to review,
+  // not an auto-demotion. Call is Thursday 2026-07-30 15:50 ET.
+  test.each([
+    ['We will see you Sunday between 6 pm and 9 pm.', '2026-08-02T18:00:00-04:00', false],
+    ['We will see you Sunday 6 to 9.', '2026-08-02T18:00:00-04:00', false],
+    ['We will be there tonight between 6 and 9.', '2026-07-30T18:00:00-04:00', false],
+    ['We will be there tomorrow at 9.', '2026-07-31T09:00:00-04:00', false],
+    ['We will be there this Thursday between 6 and 9.', '2026-07-30T18:00:00-04:00', false],
+    ['We will be there Sunday between 6:00 and 9:00 PM.', '2026-08-02T18:00:00-04:00', false],
+  ])('ARRIVAL WINDOW / relative-day / "this <weekday>" quotes do not bind on main\'s grammar — %s @ %s → %s', (sentence, startAt, expected) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);
+  });
+
   // Codex round 14 (review of c0f0cd2a59): three P1s.
   // P1 (:1413) — a conditional's consequent is guilty unless it is a known-
   // benign anchored shape; present-tense and comma-less forms included.
@@ -2730,7 +2787,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     // address — AV has nothing on THIS call to validate.
     const ex = extraction(['missing_service_address'], 0.9);
     ex.property = { service_address: {} };
-    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE });
     expect(r.allowed).toBe(true);
   });
 
@@ -2863,5 +2920,31 @@ describe('V2 decision version bookkeeping', () => {
     const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
     expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
     expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
+  });
+});
+
+describe('a saved address with a street but no ZIP never stands in (either call direction)', () => {
+  const { hasCompleteOnFileAddress, dispatchesToOnFileAddress } = require('../services/call-triage-flags');
+  const noZip = { hasAddress: true, addressLine1: '100 Synthetic St', addressZip: null };
+
+  test('hasCompleteOnFileAddress needs street AND ZIP', () => {
+    expect(hasCompleteOnFileAddress(ON_FILE)).toBe(true);
+    expect(hasCompleteOnFileAddress(noZip)).toBe(false);
+    expect(hasCompleteOnFileAddress({ hasAddress: true, addressZip: '34202' })).toBe(false);
+    expect(hasCompleteOnFileAddress(null)).toBe(false);
+  });
+
+  test('a confirmed booking keeps its address flags when the saved address lacks a ZIP', () => {
+    const ex = extraction(['address_unverifiable', 'missing_service_address']);
+    const held = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: noZip });
+    expect(held.allowed).toBe(false);
+    expect(held.appointmentBlockingFlags).toEqual(expect.arrayContaining(['missing_service_address']));
+    expect(canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: ON_FILE }).allowed).toBe(true);
+  });
+
+  test('dispatchesToOnFileAddress is false for an incomplete saved address', () => {
+    const ex = extraction([]);
+    expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: noZip })).toBe(false);
+    expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: ON_FILE })).toBe(true);
   });
 });

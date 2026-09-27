@@ -79,6 +79,8 @@ function queues({ deposits, ledgerRows }) {
     estimate_deposits: [chain({ rows: ledgerRows })],
     invoices: [chain({ first: UNPAID_INVOICE }), chain({ rows: [] }), chain({ rows: [] }), chain({ rows: [] })],
     annual_prepay_terms: [chain({ rows: [PENDING_TERM] })],
+    // The paid decided-lapse check (coveredTermsAsOf): none.
+    'annual_prepay_terms as t': [chain({ rows: [] })],
     scheduled_services: [
       chain({ rows: VISITS }), chain({ rows: [] }),
       chain({ rows: [{ id: 'v-1', customer_id: 'cust-1', recurring_pattern: 'quarterly' }] }), chain({ update: 1 }),

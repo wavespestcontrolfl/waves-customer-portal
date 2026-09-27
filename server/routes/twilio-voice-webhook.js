@@ -3564,7 +3564,7 @@ router.post('/call-status', async (req, res) => {
           status: CallStatus,
           duration_seconds: parseInt(CallDuration || 0),
           source: VOICE_RELAY_SANDBOX_SOURCE,
-          metadata: JSON.stringify({ relay_sandbox: true, source: 'status_callback' }),
+          metadata: JSON.stringify({ relay_sandbox: true, source: 'status_callback', inserted_on_status: CallStatus || null }),
         });
         return;
       }
@@ -3585,6 +3585,11 @@ router.post('/call-status', async (req, res) => {
           numberType: numberConfig?.type || 'unknown',
           domain: numberConfig?.domain || null,
           source: 'status_callback',
+          // Which lifecycle event created the row: a non-terminal one
+          // (initiated/ringing/in-progress) means created_at is near the
+          // call's START, not post-call (codex #4919 round-14 P1; read by
+          // call-timeline.js createdAfterTheCall).
+          inserted_on_status: CallStatus || null,
         }),
       });
 

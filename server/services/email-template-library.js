@@ -824,26 +824,33 @@ async function renderVersion(versionId, payload = {}, opts = {}) {
 }
 
 async function createDraftVersion(templateKey, technicianId) {
-  const template = await db('email_templates').where({ template_key: templateKey }).first();
-  if (!template) throw new Error('template not found');
-  const latest = await db('email_template_versions')
-    .where({ template_id: template.id })
-    .orderBy('version_number', 'desc')
-    .first();
-  const source = template.active_version_id
-    ? await db('email_template_versions').where({ id: template.active_version_id }).first()
-    : latest;
-  const [draft] = await db('email_template_versions').insert({
-    template_id: template.id,
-    version_number: (latest?.version_number || 0) + 1,
-    status: 'draft',
-    subject: source?.subject || template.name,
-    preview_text: source?.preview_text || null,
-    blocks: JSON.stringify(normalizeBlocks(source?.blocks || [])),
-    text_body: source?.text_body || null,
-    created_by: technicianId || null,
-  }).returning('*');
-  return draft;
+  // One transaction holding the template row lock (Codex #4918 r7 P2):
+  // publishVersion and the 20260926* migrations lock this row before they
+  // write a version, so the max(version_number) read and the insert below
+  // must sit under the same lock, or a concurrent publisher can take the
+  // same number and one side fails the (template_id, version_number) unique.
+  return db.transaction(async (trx) => {
+    const template = await trx('email_templates').where({ template_key: templateKey }).forUpdate().first();
+    if (!template) throw new Error('template not found');
+    const latest = await trx('email_template_versions')
+      .where({ template_id: template.id })
+      .orderBy('version_number', 'desc')
+      .first();
+    const source = template.active_version_id
+      ? await trx('email_template_versions').where({ id: template.active_version_id }).first()
+      : latest;
+    const [draft] = await trx('email_template_versions').insert({
+      template_id: template.id,
+      version_number: (latest?.version_number || 0) + 1,
+      status: 'draft',
+      subject: source?.subject || template.name,
+      preview_text: source?.preview_text || null,
+      blocks: JSON.stringify(normalizeBlocks(source?.blocks || [])),
+      text_body: source?.text_body || null,
+      created_by: technicianId || null,
+    }).returning('*');
+    return draft;
+  });
 }
 
 async function publishVersion(versionId, technicianId) {
@@ -908,6 +915,83 @@ function dedupedResultForExistingMessage(message) {
 
 function shouldRetryExistingMessage(message) {
   return !DEDUPE_STATUSES.has(String(message?.status || '').toLowerCase());
+}
+
+const PROVIDER_HANDOFF_PENDING = 'pending';
+const PROVIDER_HANDOFF_STARTED = 'started';
+const PROVIDER_HANDOFF_REJECTED = 'rejected';
+const PROVIDER_RETRY_DEFINITELY_UNSENT_PHASES = new Set([
+  PROVIDER_HANDOFF_PENDING,
+  PROVIDER_HANDOFF_REJECTED,
+]);
+
+function providerHandoffPhaseMatchesAttempt(message) {
+  const sendAttemptToken = String(message?.send_attempt_token || '');
+  const handoffAttemptToken = String(message?.provider_handoff_attempt_token || '');
+  return !!sendAttemptToken && !!handoffAttemptToken && sendAttemptToken === handoffAttemptToken;
+}
+
+function providerRetryDefinitelyUnsent(message) {
+  const phase = String(message?.provider_handoff_phase || '').toLowerCase();
+  if (PROVIDER_RETRY_DEFINITELY_UNSENT_PHASES.has(phase)) {
+    return providerHandoffPhaseMatchesAttempt(message);
+  }
+  if (phase || message?.provider_handoff_attempt_token) return false;
+  const legacyMarker = String(message?.error_message || '');
+  return legacyMarker === 'provider_handoff_pending'
+    || legacyMarker.startsWith('Provider request not started: ');
+}
+
+// The provider retry worker owns every scheduled row and queued claim. A
+// direct idempotent send may reclaim an exhausted row only when its durable
+// phase positively proves that no ambiguous provider handoff survived.
+function providerRetryHoldErrorForExistingMessage(message) {
+  if (!message) return null;
+  const status = String(message.status || '').toLowerCase();
+  const phase = String(message.provider_handoff_phase || '').toLowerCase();
+  const retryCount = Number(message.provider_retry_count || 0);
+  const definitelyUnsent = providerRetryDefinitelyUnsent(message);
+  const hasPhaseEvidence = !!phase || !!message.provider_handoff_attempt_token;
+
+  if (status === 'queued') {
+    const providerWorkerOwned = retryCount > 0
+      || message.provider_retry_next_at || message.provider_retry_exhausted_at;
+    if (!providerWorkerOwned && phase !== PROVIDER_HANDOFF_STARTED
+        && (!hasPhaseEvidence || definitelyUnsent)) return null;
+    return providerRetryHoldError(message, 'provider_retry_in_progress');
+  }
+  if (status !== 'failed') return null;
+  if (message.provider_retry_next_at) {
+    return providerRetryHoldError(message, 'provider_retry_scheduled', true);
+  }
+  const ambiguous = !definitelyUnsent
+    && (hasPhaseEvidence || message.provider_retry_exhausted_at || retryCount > 0);
+  if (!ambiguous) return null;
+  const reason = message.provider_retry_exhausted_at
+    ? 'provider_retry_exhausted'
+    : 'provider_retry_ambiguous';
+  return providerRetryHoldError(message, reason);
+}
+
+function providerRetryHoldError(message, reason, retryable = false) {
+  const providerOutcome = {
+    sent: false,
+    held: true,
+    retryable,
+    providerAttempted: false,
+    deliveryOutcome: 'uncertain',
+    reason,
+    emailMessageId: message.id,
+  };
+  return Object.assign(new Error(`email send held by ${reason}`), {
+    code: 'EMAIL_PROVIDER_RETRY_HELD',
+    status: 409,
+    held: true,
+    retryable,
+    deliveryOutcome: 'uncertain',
+    reason,
+    providerOutcome,
+  });
 }
 
 // Postgres unique_violation (email_messages.idempotency_key). Two overlapping
@@ -1002,6 +1086,50 @@ async function resolveIdempotencyCollision(err, idempotencyKey) {
     return dedupedResultForExistingMessage(existing);
   }
   throw inFlightCollisionError(idempotencyKey);
+}
+
+// Claim a direct retry only while the row still matches the exact attempt and
+// provider-rail evidence observed by the preflight read. This protects both
+// the normal queued transition and the suppression-block transition.
+function retryClaimQuery(message) {
+  const query = db('email_messages')
+    .where({ id: message.id, status: message.status })
+    .whereNull('provider_retry_next_at');
+
+  if (message.provider_retry_exhausted_at == null) {
+    query.whereNull('provider_retry_exhausted_at');
+  } else {
+    query.where({ provider_retry_exhausted_at: message.provider_retry_exhausted_at });
+    if (message.error_message == null) query.whereNull('error_message');
+    else query.where({ error_message: message.error_message });
+  }
+  if (message.send_attempt_token == null) query.whereNull('send_attempt_token');
+  else query.where({ send_attempt_token: message.send_attempt_token });
+  if (message.provider_handoff_phase == null) query.whereNull('provider_handoff_phase');
+  else query.where({ provider_handoff_phase: message.provider_handoff_phase });
+  if (message.provider_handoff_attempt_token == null) query.whereNull('provider_handoff_attempt_token');
+  else query.where({ provider_handoff_attempt_token: message.provider_handoff_attempt_token });
+  return query;
+}
+
+async function resolveRetryClaimLoss(retryMessage, idempotencyKey) {
+  const current = await db('email_messages').where({ id: retryMessage.id }).first();
+  if (current && !shouldRetryExistingMessage(current)) {
+    return dedupedResultForExistingMessage(current);
+  }
+  throw inFlightCollisionError(idempotencyKey);
+}
+
+function clearedProviderRetryState(message) {
+  if (!message || (!message.provider_retry_exhausted_at && !message.provider_handoff_phase
+      && !message.provider_handoff_attempt_token && Number(message.provider_retry_count || 0) === 0)) return {};
+  return {
+    provider_retry_count: 0,
+    provider_retry_next_at: null,
+    provider_retry_exhausted_at: null,
+    provider_handoff_phase: null,
+    provider_handoff_attempt_token: null,
+  };
 }
 
 function assertTemplateSendable(template, { test = false } = {}) {
@@ -1155,6 +1283,8 @@ async function sendTemplate({
     if (existing && !shouldRetryExistingMessage(existing)) {
       return dedupedResultForExistingMessage(existing);
     }
+    const providerRetryHold = providerRetryHoldErrorForExistingMessage(existing);
+    if (providerRetryHold) throw providerRetryHold;
     // A concurrent caller may have committed a `queued` row that is still
     // mid-flight (queued, not yet dispatched to SendGrid). Reclaiming it as a
     // retry here would re-send and duplicate, so surface a retryable collision;
@@ -1306,10 +1436,12 @@ async function sendTemplate({
         status: 'blocked',
         error_message: reason,
         updated_at: new Date(),
+        ...clearedProviderRetryState(retryMessage),
       };
       let blocked;
       if (retryMessage) {
-        [blocked] = await db('email_messages').where({ id: retryMessage.id }).update(blockedPayload).returning('*');
+        [blocked] = await retryClaimQuery(retryMessage).update(blockedPayload).returning('*');
+        if (!blocked) return await resolveRetryClaimLoss(retryMessage, idempotencyKey);
       } else {
         try {
           [blocked] = await db('email_messages').insert(blockedPayload).returning('*');
@@ -1336,10 +1468,14 @@ async function sendTemplate({
     error_message: null,
     queued_at: new Date(),
     updated_at: new Date(),
+    ...clearedProviderRetryState(retryMessage),
+    provider_handoff_phase: PROVIDER_HANDOFF_PENDING,
+    provider_handoff_attempt_token: sendAttemptToken,
   };
   let message;
   if (retryMessage) {
-    [message] = await db('email_messages').where({ id: retryMessage.id }).update(queuedPayload).returning('*');
+    [message] = await retryClaimQuery(retryMessage).update(queuedPayload).returning('*');
+    if (!message) return await resolveRetryClaimLoss(retryMessage, idempotencyKey);
   } else {
     try {
       [message] = await db('email_messages').insert(queuedPayload).returning('*');
@@ -1361,8 +1497,12 @@ async function sendTemplate({
       // reclaimed the row owns a new token and must never be marked
       // failed by this one (0 rows → leave it alone; still no dispatch).
       [aborted] = await db('email_messages')
-        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
-        .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+          provider_handoff_phase: PROVIDER_HANDOFF_PENDING,
+          provider_handoff_attempt_token: sendAttemptToken })
+        .update({ status: 'failed', error_message: reason,
+          provider_handoff_phase: PROVIDER_HANDOFF_PENDING,
+          provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
     } catch (err) {
       logger.warn(`[email-template-library] abort bookkeeping failed for ${templateKey}: ${err.message}`);
     }
@@ -1378,8 +1518,12 @@ async function sendTemplate({
     let blocked;
     try {
       [blocked] = await db('email_messages')
-        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
-        .update({ status: 'failed', error_message: ANNUAL_OFFER_WITHHELD_REASON, updated_at: new Date() }).returning('*');
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+          provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
+          provider_handoff_attempt_token: sendAttemptToken })
+        .update({ status: 'failed', error_message: ANNUAL_OFFER_WITHHELD_REASON,
+          provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
+          provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
     } catch (err) {
       logger.warn(`[email-template-library] annual offer guard bookkeeping failed for ${templateKey}: ${err.message}`);
     }
@@ -1402,8 +1546,12 @@ async function sendTemplate({
     let failed;
     try {
       [failed] = await db('email_messages')
-        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
-        .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+          provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
+          provider_handoff_attempt_token: sendAttemptToken })
+        .update({ status: 'failed', error_message: reason,
+          provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
+          provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
     } catch (bookkeepingErr) {
       logger.warn(`[email-template-library] annual offer guard failure bookkeeping failed for ${templateKey}: ${bookkeepingErr.message}`);
     }
@@ -1423,9 +1571,13 @@ async function sendTemplate({
   }
 
   let providerAccepted = false;
+  let providerHandoffStarted = false;
+  let markerWriteFailed = false;
   let result;
   const recordAcceptance = () => db('email_messages')
-    .where({ id: message.id, send_attempt_token: sendAttemptToken })
+    .where({ id: message.id, send_attempt_token: sendAttemptToken,
+      provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
+      provider_handoff_attempt_token: sendAttemptToken })
     .update({
       provider_message_id: result.messageId,
       sent_at: new Date(),
@@ -1488,6 +1640,20 @@ async function sendTemplate({
     // dispatchToProvider always either sends or reports a real,
     // non-throwing outcome.
     const dispatchToProvider = async (database) => {
+      // Durable immediately before entering sendOne. A dedicated connection
+      // keeps the marker visible even when the caller is holding authority
+      // locks on its own transaction through the provider request.
+      const marked = await require('../models/marker-db')()('email_messages')
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+          provider_handoff_phase: PROVIDER_HANDOFF_PENDING,
+          provider_handoff_attempt_token: sendAttemptToken })
+        .update({ provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
+          provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() })
+        .catch((err) => { markerWriteFailed = true; throw err; });
+      if (Number(marked) !== 1) {
+        throw inFlightCollisionError(idempotencyKey || message.id);
+      }
+      providerHandoffStarted = true;
       try {
         const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds, database);
         if (providerResult?.withheldLinksRewritten?.length) {
@@ -1579,6 +1745,17 @@ async function sendTemplate({
       return { sent: true, providerAttempted: true, providerAccepted: true,
         bookkeepingFailed, message: recorded || { ...message, provider_message_id: result.messageId }, rendered };
     }
+    const definiteRejection = providerHandoffStarted && (
+      err?.code === 'SENDGRID_NOT_CONFIGURED' || sendgrid.isDefiniteRejection(err)
+    );
+    const expectedFailurePhase = providerHandoffStarted
+      ? PROVIDER_HANDOFF_STARTED
+      : PROVIDER_HANDOFF_PENDING;
+    const expectedFailurePhases = markerWriteFailed && !providerHandoffStarted
+      ? [PROVIDER_HANDOFF_PENDING, PROVIDER_HANDOFF_STARTED] : [expectedFailurePhase];
+    const recordedFailurePhase = definiteRejection
+      ? PROVIDER_HANDOFF_REJECTED
+      : expectedFailurePhase;
     let webhookAcceptance = null;
     const recovered = await db.transaction(async (trx) => {
       const current = await trx('email_messages').where({ id: message.id }).first();
@@ -1591,11 +1768,20 @@ async function sendTemplate({
       }
       // Hold the row through failure classification so retries cannot claim an
       // intermediate failure; read events AFTER stamping to include late evidence.
-      const [failed] = await trx('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-        status: 'failed',
-        error_message: persistedErrorMessage.slice(0, 1000),
-        updated_at: new Date(),
-      }).returning('id');
+      // A marker UPDATE can commit before its acknowledgement is lost. This
+      // invocation never entered sendOne when that write threw, so its matching
+      // started phase can safely return to pending instead of staying queued.
+      const [failed] = await trx('email_messages')
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+          provider_handoff_attempt_token: sendAttemptToken })
+        .whereIn('provider_handoff_phase', expectedFailurePhases)
+        .update({
+          status: 'failed',
+          error_message: persistedErrorMessage.slice(0, 1000),
+          provider_handoff_phase: recordedFailurePhase,
+          provider_handoff_attempt_token: sendAttemptToken,
+          updated_at: new Date(),
+        }).returning('id');
       // If a webhook already moved the row to a terminal status, the send actually
       // reached SendGrid — report success (deduped) so callers don't retry a send
       // that landed (and may already have triggered bounce recovery).

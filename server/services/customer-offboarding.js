@@ -89,6 +89,19 @@ async function invoicesCarryingDepositCredit(row, customerId) {
   return [...found.values()];
 }
 
+// A PAID decided lapse — the renewal declined (e.g. online, #4940) while the
+// year was paid — is status 'cancelled' yet still collected annual money:
+// its paid year runs to term_end, so the status-only exclusion above must
+// not let it through (Codex #4940 r12 P1). Billing's own paid test
+// (coveredTermsAsOf, no date window: paid, not refunded or voided).
+async function paidDecidedLapseBlockers(customerId) {
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  const lapses = await coveredTermsAsOf(db, null)
+    .where({ 't.customer_id': customerId, 't.status': 'cancelled', 't.renewal_decision': 'cancel' })
+    .select('t.id');
+  return lapses.map(() => 'annual prepay term is paid through its term (renewal declined, money collected) — out of scope for signup cancellation');
+}
+
 // Everything the confirm modal shows, and every reason the run would be
 // refused. Re-run by the POST handler immediately before executing so a
 // stale modal can't authorize a run the current state forbids.
@@ -181,6 +194,8 @@ async function previewCancelSignup(customerId) {
       }
     }
   }
+
+  blockers.push(...await paidDecidedLapseBlockers(customerId));
 
   // Live tracker states lead the legacy status column (track-transitions
   // flips track_state first, status sync is best-effort) — a visit with a

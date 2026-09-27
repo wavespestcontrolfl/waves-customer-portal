@@ -38,33 +38,41 @@ describe('revised rodent pricing rules', () => {
     expect(fromUnlimited.price).toBe(350);
     expect(fromUnlimited.name).toBe('Rodent Trapping - Standard');
     expect(fromUnlimited.rodentTrappingPlan).toBe('standard');
-    expect(fromUnlimited.unlimitedCallbacks).toBe(true);
+    expect(fromUnlimited.unlimitedCallbacks).toBe(false);
 
     expect(priceRodentTrapping(baseInput(), { upgradeToUnlimited: true }).price).toBe(350);
   });
 
-  test('callbacks are unlimited — callback counts never bill', () => {
+  // Owner ruling 2026-09-26: $350 covers setup + 1 trap check; visit 3+ is
+  // the office-booked $95 catalog row, never an estimate line — so callback
+  // counts on the estimate still never add dollars (or a bundle discount).
+  test('$350 covers setup + 1 check; extra checks are not priced on the estimate', () => {
     expect(priceRodentTrapping(baseInput(), { extraCallbackCount: 0 }).price).toBe(350);
     expect(priceRodentTrapping(baseInput(), { callbacksUsed: 2, extraCallbackCount: 2 })).toMatchObject({
       price: 350,
       extraCallbackAllowed: false,
       extraCallbackPrice: 0,
-      unlimitedCallbacks: true,
-      includedCallbacks: 'unlimited',
+      unlimitedCallbacks: false,
+      includedCallbacks: 1,
+      includedFollowUps: 1,
+      additionalCheckPrice: 95,
     });
     const withRequestedExtras = priceRodentTrapping(baseInput(), { callbacksUsed: 2, extraCallbackCount: 1 });
-    expect(withRequestedExtras.warnings.join(' ')).toMatch(/no longer apply/i);
+    expect(withRequestedExtras.warnings.join(' ')).toMatch(/Rodent Trap Check - Additional/);
+    // Legacy explicit trap-check rows on saved estimates were sold as
+    // included — grandfathered at $0.
     expect(priceRodentTrappingFollowups(1, { callbacksUsed: 2 })).toMatchObject({
       price: 0,
       included: true,
-      unlimitedCallbacks: true,
     });
   });
 
   test('invoice descriptions use revised trapping copy', () => {
     const standard = priceRodentTrapping(baseInput(), { plan: 'standard' });
 
-    expect(standard.invoiceDescription).toMatch(/unlimited callbacks\/checks/i);
+    expect(standard.invoiceDescription).toMatch(/setup visit and 1 trap check/i);
+    expect(standard.invoiceDescription).toContain('Additional trap checks are $95 each');
+    expect(standard.invoiceDescription).not.toMatch(/unlimited/i);
     expect(standard.invoiceDescription).toContain('same active trapping job');
     expect(standard.invoiceDescription).not.toContain('$125');
     // Owner 2026-08-27: the line reads as the plan's promise, not a recap of
