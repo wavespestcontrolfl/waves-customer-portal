@@ -186,7 +186,7 @@
       ],
       "category": "insect",
       "next_photo": {
-        "ask": "A close-up of the nest shape and a wide shot of where it's attached, taken from a few feet away.",
+        "ask": "Use zoom from a safe distance to show the insect or nest and its location. Do not approach, touch, or disturb the nest.",
         "why": "Nest shape and location separate paper wasps, yellowjackets, and bees, which are handled very differently."
       }
     },
@@ -270,7 +270,7 @@
       ],
       "category": "other",
       "next_photo": {
-        "ask": "A close-up from the side showing how many legs there are per body segment, next to a coin.",
+        "ask": "Use zoom from a safe distance for a side view showing the legs and body segments. Do not handle it or place objects beside it.",
         "why": "Leg count per segment separates millipedes, centipedes, and pillbugs."
       }
     },

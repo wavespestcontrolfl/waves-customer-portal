@@ -669,6 +669,16 @@ describe('loader API surface', () => {
     expect(built.nextPhoto.photo_can_confirm).toBe(true);
   });
 
+  test.each(['ground wasp', 'centipede'])('the generic %s fallback asks for distance instead of handling or approaching', (name) => {
+    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
+    const { node } = catalog.resolveName(name);
+    const candidate = resolveCandidate({ off_catalog_name: name, group_id: node.id, confidence: 0.95 });
+    const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
+    expect(built.answer).toMatchObject({ level: 'group', node_id: node.id });
+    expect(built.nextPhoto.ask).toMatch(/zoom from a safe distance/i);
+    expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up|a few feet away/i);
+  });
+
   test('nextPhoto falls back to the first look-alike photo for an entry, with its rationale (Codex r3 P1)', () => {
     const np = catalog.nextPhoto('fire-ant');
     const firstLookAlike = catalog.getEntry('fire-ant').look_alikes[0];
