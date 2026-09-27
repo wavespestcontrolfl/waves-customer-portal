@@ -332,6 +332,36 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.getByRole('button', { name: /price needs a refresh/i })).toBeDisabled();
   });
 
+  // Codex round 4 P1: a CONFIRMED no-charge prediction ('no_charge' with
+  // reason 'fully_discounted' — hasAuthoritativeZeroPrice's genuine $0 net)
+  // never carries grossAmount by design (it is 0 either way), and the
+  // missing-grossAmount refresh guard above must not fire for it just
+  // because a leftover prepaidAmount happens to be on the row — that
+  // would permanently disable Charge for a legitimately free visit, even
+  // once a chargeable extra is stacked on top.
+  it('never blocks checkout on the missing-grossAmount guard for a confirmed fully-discounted $0 visit', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            // No grossAmount — 'no_charge' never carries one.
+            prediction: { kind: 'no_charge', amount: 0, reason: 'fully_discounted', conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /price needs a refresh/i })).not.toBeInTheDocument();
+  });
+
   // Codex round-2 P1 (on the P2 fix above): predictionFromAttachedInvoice
   // (admin-schedule.js) never carries grossAmount for an attached invoice —
   // that's a legitimate, CURRENT payload shape, not a legacy/stale one.

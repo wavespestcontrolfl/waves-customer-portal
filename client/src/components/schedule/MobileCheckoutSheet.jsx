@@ -153,8 +153,19 @@ export default function MobileCheckoutSheet({
   // against it), so the legacy fallback stays exactly as safe as before.
   const predictionAmount = service.billingLane?.prediction?.amount;
   const predictionGrossAmount = service.billingLane?.prediction?.grossAmount;
+  const predictionKind = service.billingLane?.prediction?.kind || null;
   const usingUnpricedPrediction = !hasOwnPrice && !service.isCallback;
+  // Codex round 4 P1: only 'invoice' / 'auto_charge' / 'prepaid' kinds ever
+  // net a recorded prepayment against a gross base (see the block comment
+  // above) and so are the only ones whose MISSING grossAmount is actually
+  // stale/unsafe. A CONFIRMED no-charge kind ('no_charge', 'covered_*',
+  // 'payer') legitimately has no grossAmount — it is null/0 either way —
+  // so a leftover positive prepaidAmount on a fully-discounted $0 visit
+  // (hasAuthoritativeZeroPrice's 'no_charge'/'fully_discounted' kind never
+  // carries grossAmount by design) must not permanently disable Charge for
+  // it, including for a chargeable extra stacked on top.
   const priceNeedsRefresh = usingUnpricedPrediction
+    && ['invoice', 'auto_charge', 'prepaid'].includes(predictionKind)
     && predictionGrossAmount == null
     && predictionAmount != null
     && prepaidAmount > 0;
@@ -286,7 +297,6 @@ export default function MobileCheckoutSheet({
   // without it `price` below falls through to predictionGrossAmount /
   // predictionAmount, making this sheet preview a positive, chargeable
   // total the mint endpoint's payer guard then refuses outright.
-  const predictionKind = service.billingLane?.prediction?.kind || null;
   const payerBilled = !!service.billedToPayer || predictionKind === 'payer';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
   // A processing invoice is money already in flight (e.g. a pending ACH
