@@ -34,6 +34,22 @@ describe('scheduler content registry maintenance', () => {
     expect(parsePositiveEnvInt('bad', 300)).toBe(300);
   });
 
+  test('refreshes Astro-only registry rows by default so direct posts can become verified live', async () => {
+    delete process.env.CONTENT_REGISTRY_LIVE_STATUS_STATUSES;
+    const registry = {
+      runContentRegistrySync: jest.fn().mockResolvedValue({ ok: true, sync_run_id: 'sync-astro', summary: {} }),
+    };
+    const liveStatus = {
+      runContentRegistryLiveStatusCheck: jest.fn().mockResolvedValue({ ok: true, summary: {} }),
+    };
+
+    await runContentRegistryMaintenance({ registry, liveStatus });
+
+    expect(liveStatus.runContentRegistryLiveStatusCheck).toHaveBeenCalledWith(expect.objectContaining({
+      statuses: expect.arrayContaining(['astro_only']),
+    }));
+  });
+
   test('runs GitHub-backed sync before live status refresh', async () => {
     process.env.CONTENT_REGISTRY_GITHUB_REF = 'main';
     process.env.CONTENT_REGISTRY_LIVE_STATUS_STATUSES = 'matched,conflict';
