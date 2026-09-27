@@ -19,7 +19,14 @@ const APPOINTMENT_CLAIM_RE = new RegExp(
 );
 const CLOCK_TIME_RE = new RegExp(String.raw`(?<!\d)\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
 const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b|\bno\s+longer\s+(?:scheduled|booked|set)\b|\b(?:will|[’']ll)\s+(?:not|never)\s+(?:return|arrive|be\s+back|come\s+back|check\s+back|follow[-\s]+up)\b|\bcancell?ed\b/i;
-const AFTERCARE_TIME_RE = new RegExp(String.raw`\b(?:keep|leave|avoid|do not)\b[^.!?]*?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
+// Exempt one short aftercare instruction ending in an until-time. Never cross
+// a clause boundary, appointment action, or earlier clock time: those signals
+// must remain visible to the temporal validator even when the sentence starts
+// with an instruction verb ("Leave the gate open ... who will arrive at 8 PM").
+const AFTERCARE_TIME_RE = new RegExp(
+  String.raw`\b(?:keep|leave|avoid|do not)\b(?:(?!\b(?:arriv(?:e|es|ed|ing|al)|return(?:s|ed|ing)?|be\s+back|come\s+back|check\s+back|follow[-\s]+up)\b|\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z]))[^\n,.!?;]){1,100}?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`,
+  'gi',
+);
 
 function normalizeWindowText(value) {
   return String(value || '').replace(/\s*([ap])\.?m\.?(?![a-z])/gi, ' $1M')
