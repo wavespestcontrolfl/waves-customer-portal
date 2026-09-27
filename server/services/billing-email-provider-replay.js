@@ -40,7 +40,7 @@ function refusal(block) {
   };
 }
 
-async function runBillingEmailProviderReplayHandoff(message, dispatch) {
+async function runBillingEmailProviderReplayHandoff(message, dispatch, { providerBoundaryCheck = null } = {}) {
   if (!isBillingEmailProviderReplay(message)) return { handled: false };
   const context = readStoredBillingReplayContext(message);
   if (!context) {
@@ -64,18 +64,21 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
     },
     recipientEmail: clean(message.recipient_email_snapshot).toLowerCase(),
     templateKey: clean(message.template_key),
-    preSendCheck: async ({ database }) => {
+    preSendCheck: async ({ database, providerBoundary }) => {
       const verdict = await billingEmailReplayEligible(context, database);
-      return verdict?.eligible === true ? { ok: true } : {
-        ok: false,
-        // The authority keeps only code/reason/retryable, so a resendable
-        // refusal rides in the code (see BILLING_REPLAY_RESENDABLE).
-        code: verdict?.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
-        reason: verdict?.reason || 'Billing replay is no longer eligible',
-        retryable: verdict?.retryable === true,
-      };
+      if (verdict?.eligible !== true) {
+        return {
+          ok: false,
+          // Preserve main's definitely-unsent, resendable refusal contract.
+          code: verdict?.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
+          reason: verdict?.reason || 'Billing replay is no longer eligible',
+          retryable: verdict?.retryable === true,
+        };
+      }
+      return providerBoundary && typeof providerBoundaryCheck === 'function'
+        ? providerBoundaryCheck({ database }) : { ok: true };
     },
-    dispatch: (database) => dispatch(database),
+    dispatch: (database, providerBoundaryCheck) => dispatch(database, providerBoundaryCheck),
     state,
   });
 

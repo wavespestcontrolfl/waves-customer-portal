@@ -104,14 +104,11 @@ async function claimDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {})
 function expectedEmailSkip(result) {
   // 'receipt_opted_out' is the payment_receipt=false kill switch (migration
   // 104) — the customer opted out of payment receipts entirely, so the email
-  // leg is skipped on purpose, exactly like the no-recipient case.
-  // 'email_opted_out' is the portal-wide email_enabled=false opt-out — the
-  // transactional_required stream bypasses suppression-group filtering, so
-  // senders must honor it themselves (the deposit / no-show email legs
-  // already do; the SMS leg carries the receipt for these customers).
+  // leg is skipped on purpose, exactly like the no-recipient case. The
+  // portal-wide email switch never skips a receipt email (owner ruling
+  // 2026-09-26: payment emails cannot be turned off).
   return result?.error === 'No receipt recipient email'
     || result?.error === 'receipt_opted_out'
-    || result?.error === 'email_opted_out'
     || result?.error === 'billing_email_not_selected';
 }
 
@@ -252,11 +249,10 @@ async function processReceiptDeliveryJob(job) {
     // delivers. Payer-billed invoices are exempt: their receipt goes to the
     // third-party payer's AP inbox, which the homeowner's prefs don't govern.
     // No receipt_sent_at stamp on this path (the stamp below requires a
-    // delivered email) — nothing was sent. The portal-wide switch and the
-    // receipt channel choice are read by the shared billing email authority
-    // inside sendReceiptEmail (owner ruling 2026-09-27), which reports them
-    // as the same expected skips ('email_opted_out',
-    // 'billing_email_not_selected').
+    // delivered email) — nothing was sent. The receipt channel choice is read
+    // by the shared billing email authority inside sendReceiptEmail (owner
+    // ruling 2026-09-27), which reports an unselected Email as the expected
+    // 'billing_email_not_selected' skip.
     let receiptKillSwitch = false;
     let prefsLookupFailed = false;
     if (!invoice.payer_id) {
