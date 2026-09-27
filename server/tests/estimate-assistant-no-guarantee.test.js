@@ -1017,6 +1017,37 @@ describe('estimate assistant no-guarantee context', () => {
       .toEqual(['Purchased termite bond: 5-year term with re-treatment coverage.']);
   });
 
+  test.each(['none', '10yr'])('the top-level legacy result.tmBait selector (%s) governs an older paid engine bond', (selected) => {
+    // readV1Shape reads result.tmBait as well as result.results.tmBait; the
+    // current decision there outranks a historical engine row (Codex #4982).
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 45 },
+      estData: {
+        result: { tmBait: { selectedBondTerm: selected },
+          recurring: { services: [{ service: 'termite_bait', name: 'Termite Bait Monitoring', mo: 30 }] } },
+        engineResult: { lineItems: [{ service: 'termite_bond', name: 'Termite Bond (5-Year Term)', bondTerm: '5yr', bondYears: 5, monthly: 15 }] },
+      },
+      noGuaranteeClaims: true,
+    });
+    const terms = context.recurringServices.flatMap((row) => row.purchasedTerms || []);
+    expect(terms).not.toContain('Purchased termite bond: 5-year term with re-treatment coverage.');
+    if (selected === 'none') expect(terms).toEqual([]);
+  });
+
+  test('a scheduling question that says "return" is not a guarantee question', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 45 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 45, included: [
+        { service: 'termite_bait', label: 'Termite Bait Monitoring' },
+      ] }] },
+      noGuaranteeClaims: true,
+    });
+    expect(answerEstimateQuestionFallback('When will you return for the next scheduled treatment?', context))
+      .toMatch(/Pick one of the available times/);
+    expect(answerEstimateQuestionFallback('What happens if the termites come back?', context))
+      .toContain('Termite Service: No guarantee.');
+  });
+
   test('matching legacy bond snapshots retain purchased coverage without a selector', () => {
     const context = buildEstimateAssistantContext({
       estimate: { monthly_total: 18 },

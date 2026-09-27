@@ -254,6 +254,8 @@ function selectedBondTermsFromEstimateData(parsedData, rawServices, frequency) {
     ['engineInputs', 'options', 'termiteBondTerm'],
     ['engineRequest', 'options', 'termiteBondTerm'],
     ['result', 'results', 'tmBait', 'selectedBondTerm'],
+    // readV1Shape's top-level legacy form (result.tmBait) is current too.
+    ['result', 'tmBait', 'selectedBondTerm'],
     ['results', 'tmBait', 'selectedBondTerm'],
   ].flatMap((path) => {
     const source = path.slice(0, -1).reduce((value, key) => value?.[key], parsedData);
@@ -1656,7 +1658,16 @@ function withoutEstimateWideTerms(context = {}) {
 // answer takes it: the fallback answers it first, and answerEstimateQuestion
 // routes it there before the live models, so no model picks which service a
 // question means. servedModelAnswer covers any other wording.
-const GUARANTEE_QUESTION_PATTERN = /\b(guarantees?|callbacks?|re-?treat\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\w*|annual inspection|coverage|come(?:s|ing)? back|came back|return(?:s|ed|ing)?|treat(?:ed|ing)? (?:it |them |the \w+ )?again)\b/i;
+// Recurrence wording counts only with a pest as its subject: "When will you
+// return for the next treatment?" is a scheduling question.
+const RECURRING_PEST = '(?:termites|pests|bugs|(?:cock)?roach(?:es)?|ants|spiders|rodents|rats|mice|mosquito(?:e)?s|fleas|ticks|wasps|bees|beetles)';
+const GUARANTEE_QUESTION_PATTERN = new RegExp(
+  '\\b(?:guarantees?|callbacks?|re-?treat\\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\\w*|annual inspection|coverage'
+  + `|${RECURRING_PEST}(?:\\s+(?:ever|still|just|then))?\\s+(?:come|comes|coming|came)\\s+back`
+  + `|${RECURRING_PEST}(?:\\s+(?:ever|still|just|then))?\\s+return(?:s|ed|ing)?`
+  + '|treat(?:ed|ing)?\\s+(?:it|them|the\\s+\\w+)\\s+again)\\b',
+  'i',
+);
 function answersWithServiceTerms(question, context = {}) {
   return withoutEstimateWideTerms(context) && GUARANTEE_QUESTION_PATTERN.test(cleanText(question));
 }
