@@ -98,7 +98,10 @@ async function runInner({ now = new Date() } = {}) {
   // A call whose refresh FAILED — the call threw, or any of its lookups did
   // (`failed` in the summary) — is not verified either way. Carry forward
   // its existing reminder version while independently verified work proceeds.
-  const callIds = [...new Set(rows.map((r) => r.call_log_id))];
+  // Calls holding a promise kept by a booking for its promised slot are
+  // judged again too: that proof can lapse (visit cancelled or moved, call
+  // relinked) with nothing open on the call to bring it here.
+  const callIds = [...new Set([...rows.map((r) => r.call_log_id), ...await commitments.listSlotKeptCallIds(db, now)])];
   const unverifiedCalls = new Set();
   let refreshed = 0;
   for (const id of callIds) {
@@ -111,7 +114,7 @@ async function runInner({ now = new Date() } = {}) {
       logger.warn(`[call-commitments-watchdog] ${r.failed} fulfillment lookup(s) failed for call ${id} — retaining prior reminder evidence`);
       unverifiedCalls.add(id);
     }
-    refreshed += r.fulfilled || 0;
+    refreshed += (r.fulfilled || 0) + (r.reopened || 0);
   }
   if (refreshed > 0) rows = await listAllOpenWaves(now);
   let candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));

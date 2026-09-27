@@ -398,7 +398,10 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
     await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
 
-    // Kept through the call's customer: a relink reopens it, and only it.
+    // Kept by the booking, never final: every refresh judges it again and
+    // it reopens the moment the booking, the confirmed slot or the call's
+    // customer stops supporting it — then keeps again when they do (codex
+    // #5081 r2 P2, r5 P1/P2). A canonical proof is not revisited.
     const [kept] = await db('call_commitments').insert({
       call_log_id: call.id, commitment_key: 'waves:schedule_visit:slot', party: 'waves', kind: 'schedule_visit', description: 'Put the caller on the schedule for 3',
       due_at: threePm, due_type: 'floor', source: 'ai', status: 'fulfilled', fulfilled_at: new Date(),
@@ -409,16 +412,40 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       source: 'ai', status: 'fulfilled', fulfilled_at: new Date(),
       fulfillment: JSON.stringify({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_from_this_call' }),
     }).returning('id');
-    expect(await cc.reopenSlotBookingProofs(db, call.id)).toBe(1);
-    expect(await db('call_commitments').where({ id: kept.id }).first('status', 'fulfillment', 'fulfilled_at')).toEqual({ status: 'open', fulfillment: null, fulfilled_at: null });
+    const statusOf = async () => (await db('call_commitments').where({ id: kept.id }).first('status', 'fulfilled_at', 'fulfillment'));
+    const lapses = async (change, restore) => {
+      await change();
+      expect(await cc.refreshFulfillment(db, call.id)).toMatchObject({ reopened: 1 });
+      const lapsed = await statusOf();
+      expect(lapsed).toMatchObject({ status: 'open', fulfilled_at: null });
+      expect(lapsed.fulfillment?.strength).not.toBe('direct');
+      await restore();
+      await cc.refreshFulfillment(db, call.id);
+      expect(await statusOf()).toMatchObject({ status: 'fulfilled', fulfillment: expect.objectContaining({ record_id: atSlot.id, basis: 'visit_booked_at_the_promised_time' }) });
+    };
+    expect(await cc.refreshFulfillment(db, call.id)).toMatchObject({ reopened: 0 });
+    expect((await statusOf()).status).toBe('fulfilled');
+    expect(await cc.listSlotKeptCallIds(db)).toContain(call.id);
+    const visitTo = (patch) => () => db('scheduled_services').where({ id: atSlot.id }).update(patch);
+    await lapses(visitTo({ status: 'cancelled' }), visitTo({ status: 'pending' }));
+    await lapses(visitTo({ status: 'rescheduled' }), visitTo({ status: 'pending' }));
+    await lapses(visitTo({ window_start: '16:30' }), visitTo({ window_start: '15:00' }));
+    // A reprocess rewrote the confirmed slot.
+    await lapses(() => scheduling({ status: 'confirmed', confirmed_start_at: parseETDateTime(`${day}T16:00`).toISOString() }), () => scheduling({ status: 'confirmed', confirmed_start_at: threePm }));
+    // The office moved the call to another customer.
+    const [elsewhere] = await db('customers').insert({ first_name: 'Elsewhere', phone: '+15555550173' }).returning('id');
+    cleanup.customerIds.push(elsewhere.id);
+    await lapses(() => db('call_log').where({ id: call.id }).update({ customer_id: elsewhere.id }), () => db('call_log').where({ id: call.id }).update({ customer_id: cust.id }));
     expect((await db('call_commitments').where({ id: linked.id }).first('status')).status).toBe('fulfilled');
-    // A commitments pass — a reprocess of the same recording may rewrite the
-    // stated or confirmed slot — reopens it too (codex #5081 r2 P2).
-    await db('call_commitments').where({ id: kept.id }).update({ status: 'fulfilled', fulfilled_at: new Date(),
-      fulfillment: JSON.stringify({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_at_the_promised_time' }) });
-    await cc.upsertCommitments(db, call.id, []);
-    expect((await db('call_commitments').where({ id: kept.id }).first('status')).status).toBe('open');
-    expect((await db('call_commitments').where({ id: linked.id }).first('status')).status).toBe('fulfilled');
+    // A human verdict stands: the office's review is never re-judged.
+    await db('call_commitments').where({ id: kept.id }).update({ human_state: 'confirmed' });
+    await db('scheduled_services').where({ id: atSlot.id }).update({ status: 'cancelled' });
+    expect(await cc.refreshFulfillment(db, call.id)).toMatchObject({ reopened: 0 });
+    expect((await statusOf()).status).toBe('fulfilled');
+    expect(await cc.listSlotKeptCallIds(db)).not.toContain(call.id);
+    // Past its slot by a day, the sweep leaves it.
+    await db('call_commitments').where({ id: kept.id }).update({ human_state: null });
+    expect(await cc.listSlotKeptCallIds(db, new Date(Date.parse(threePm) + 25 * 60 * 60 * 1000))).not.toContain(call.id);
   });
 
   test('a refresh racing a relink never keeps the promise with the previous customer\'s booking (pre-push audit P1 on 23ab49bc0f)', async () => {
@@ -445,7 +472,6 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const relink = await db.transaction();
     try {
       await relink('call_log').where({ id: call.id }).update({ customer_id: second.id });
-      await cc.reopenSlotBookingProofs(relink, call.id);
       const refreshing = cc.refreshFulfillment(db, call.id, call); // `call` still names the first customer
       await new Promise((resolve) => setTimeout(resolve, 300));
       await relink.commit();

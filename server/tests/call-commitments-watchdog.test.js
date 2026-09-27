@@ -9,12 +9,12 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), ga
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
-  return { ...actual, listOpenCommitments: jest.fn(), refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })), stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)) };
+  return { ...actual, listOpenCommitments: jest.fn(), refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })), listSlotKeptCallIds: jest.fn(async () => []), stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)) };
 });
 
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
-const { listOpenCommitments, refreshFulfillment, stillOpenIds, OVERDUE_IMPLICIT_DAYS } = require('../services/call-commitments');
+const { listOpenCommitments, refreshFulfillment, listSlotKeptCallIds, stillOpenIds, OVERDUE_IMPLICIT_DAYS } = require('../services/call-commitments');
 const { runCallCommitmentsWatchdog, AGGREGATE_THRESHOLD } = require('../services/call-commitments-watchdog');
 
 const NOW = new Date('2026-09-05T15:00:00Z');
@@ -118,6 +118,19 @@ test('fulfillment is refreshed for every candidate call before paging; a promise
   expect(out).toMatchObject({ overdue: 1, alerted: 1 });
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toContain('call-commitment-overdue:b:');
+});
+
+test('a call holding a promise kept by a booking for its promised slot is refreshed too, and a promise that lapsed is re-listed and can ring (codex #5081 r5)', async () => {
+  listOpenCommitments
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([row('k', { call_log_id: 'call-kept' })]);
+  listSlotKeptCallIds.mockResolvedValueOnce(['call-kept']);
+  refreshFulfillment.mockResolvedValueOnce({ fulfilled: 0, reopened: 1 });
+  const out = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(listSlotKeptCallIds).toHaveBeenCalledWith(expect.anything(), NOW);
+  expect(refreshFulfillment).toHaveBeenCalledWith(expect.anything(), 'call-kept');
+  expect(listOpenCommitments).toHaveBeenCalledTimes(2);
+  expect(out).toMatchObject({ overdue: 1 });
 });
 
 test('a call whose fulfillment refresh FAILED is left out of the bell — its promise may already be kept — and reported as unverified', async () => {

@@ -515,18 +515,6 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           updated_at: new Date(),
         });
       if (!relinked) return null;
-      // A promise kept by a booking for its promised slot was matched through
-      // the call's customer: every relink reopens it, in this transaction,
-      // for the next fulfillment refresh to re-judge. Unconditional — the
-      // `call` snapshot above predates this transaction, so a concurrent
-      // relink could make "unchanged" wrong; a same-customer save just
-      // reopens a proof the next refresh restores. Behind the commitments
-      // gate like every other commitments write (off = nothing written):
-      // with the gate off nothing re-judges a reopened promise, so it would
-      // sit in Owed until the gate came back (codex #5081 r3 P1).
-      const promisesReopened = require('../config/feature-gates').isEnabled('callCommitments')
-        ? await require('../services/call-commitments').reopenSlotBookingProofs(trx, call.id)
-        : 0;
       let leadsUnlinked = 0;
       if (!customerId && call.twilio_call_sid) {
         leadsUnlinked = await trx('leads').where({ twilio_call_sid: call.twilio_call_sid }).update({ twilio_call_sid: null, updated_at: new Date() });
@@ -591,7 +579,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
           .update({ review_status: null });
       }
-      return { timelineRows: rows, timelineCreated: created, repaired, leadsUnlinked, leadsReconciled, promisesReopened };
+      return { timelineRows: rows, timelineCreated: created, repaired, leadsUnlinked, leadsReconciled };
     });
     if (moved?.notFound) return res.status(404).json({ error: 'Customer not found' });
     if (!moved) {
@@ -619,8 +607,21 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           : 'voice_message_rehome_failed: the recording is still in the previous customer\'s thread; retry the unlink');
       }
     }
+    // A promise kept by a booking for its promised slot was matched through
+    // the call's customer: re-judge the call's promises now that the link
+    // committed. Gate off writes nothing — the commitments sweep judges it
+    // once the gate is back (listSlotKeptCallIds). Best-effort: a failed
+    // refresh leaves it to that sweep.
+    let promisesReopened = 0;
+    if (require('../config/feature-gates').isEnabled('callCommitments')) {
+      const refreshed = await require('../services/call-commitments').refreshFulfillment(db, call.id).catch((e) => {
+        logger.warn(`[call-recordings] promise refresh after relink failed for call ${call.id}: ${e.message}`);
+        return {};
+      });
+      promisesReopened = refreshed.reopened || 0;
+    }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
-    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, promises_reopened: moved.promisesReopened, warnings });
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, promises_reopened: promisesReopened, warnings });
   } catch (err) { next(err); }
 });
 

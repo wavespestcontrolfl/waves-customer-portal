@@ -22,7 +22,6 @@ jest.mock('../services/call-commitments', () => ({
   addHumanCommitment: jest.fn(),
   listOpenCommitments: jest.fn(),
   refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
-  reopenSlotBookingProofs: jest.fn(() => Promise.resolve(0)),
   COMMITMENT_KINDS: ['callback', 'send_estimate', 'send_report'],
   OVERDUE_IMPLICIT_DAYS: 3,
   OVERDUE_IMPLICIT_ESTIMATE_HOURS: 24,
@@ -476,11 +475,11 @@ describe('PUT /calls/:id/customer', () => {
     expect(JSON.stringify(timeline.wheres)).toContain(CALL_ID);
     expect(require('../services/conversations').syncVoiceMessageForCall).toHaveBeenCalledWith(SID);
   });
-  test('every relink reopens promises kept through the call\'s customer, inside the relink transaction — even one whose snapshot says the customer is unchanged (codex #5081 r1 P2, pre-push audit P1)', async () => {
-    const { reopenSlotBookingProofs } = require('../services/call-commitments');
+  test('every relink re-judges the call\'s promises once the link commits, while the commitments gate is on — even when the snapshot says the customer is unchanged (codex #5081 r1 P2, r3 + r5 P1)', async () => {
+    const { refreshFulfillment } = require('../services/call-commitments');
     for (const previous of ['old-customer', CUSTOMER_ID]) {
-      reopenSlotBookingProofs.mockClear();
-      reopenSlotBookingProofs.mockResolvedValueOnce(1);
+      refreshFulfillment.mockClear();
+      refreshFulfillment.mockResolvedValueOnce({ fulfilled: 0, reopened: 1 });
       mockDb([{ id: CALL_ID, customer_id: previous, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
       await withServer(async (base) => {
         const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
@@ -488,13 +487,13 @@ describe('PUT /calls/:id/customer', () => {
         expect((await res.json()).promises_reopened).toBe(1);
       });
       expect(db.transaction).toHaveBeenCalledTimes(1);
-      expect(reopenSlotBookingProofs).toHaveBeenCalledWith(db, CALL_ID);
+      expect(refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
     }
   });
 
-  test('with the commitments gate off a relink writes no commitment (codex #5081 r3 P1)', async () => {
-    const { reopenSlotBookingProofs } = require('../services/call-commitments');
-    reopenSlotBookingProofs.mockClear();
+  test('with the commitments gate off a relink writes no commitment — the sweep re-judges once the gate is back (codex #5081 r3 + r5 P1)', async () => {
+    const { refreshFulfillment } = require('../services/call-commitments');
+    refreshFulfillment.mockClear();
     isEnabled.mockReturnValue(false);
     mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
     await withServer(async (base) => {
@@ -502,7 +501,18 @@ describe('PUT /calls/:id/customer', () => {
       expect(res.status).toBe(200);
       expect((await res.json()).promises_reopened).toBe(0);
     });
-    expect(reopenSlotBookingProofs).not.toHaveBeenCalled();
+    expect(refreshFulfillment).not.toHaveBeenCalled();
+  });
+
+  test('a failed re-judge after a relink is logged, not surfaced — the sweep retries it', async () => {
+    const { refreshFulfillment } = require('../services/call-commitments');
+    refreshFulfillment.mockRejectedValueOnce(new Error('db hiccup'));
+    mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+      expect((await res.json()).promises_reopened).toBe(0);
+    });
   });
 
   test('an unlink removes the call\'s derived timeline entry and reports a failed thread re-home instead of hiding it', async () => {
@@ -635,7 +645,7 @@ describe('PUT /calls/:id/customer', () => {
       expect((await res.json()).reason).toBe('already_processing');
     });
     expect(require('../services/conversations').syncVoiceMessageForCall).not.toHaveBeenCalled();
-    expect(require('../services/call-commitments').reopenSlotBookingProofs).not.toHaveBeenCalled();
+    expect(require('../services/call-commitments').refreshFulfillment).not.toHaveBeenCalled();
   });
 
   test('validates the target customer under its row lock INSIDE the relink transaction, customers before call_log (codex #3736 gh-r6 P2)', async () => {

@@ -944,10 +944,6 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
         [callLogId, recordingSid],
       );
     }
-    // A slot proof rests on inputs this very pass may rewrite even from the
-    // same recording — the promise's stated time and the call's confirmed
-    // slot — so it reopens for the next refresh to re-judge.
-    await reopenSlotBookingProofs(trx, callLogId);
     // Reuse quote-family identities before the insert so a re-extraction
     // that adds an optional subject field cannot bypass a prior dismissal,
     // fulfillment, or uncertain delivery tied to an older suffixed key.
@@ -1447,8 +1443,8 @@ function whereEstimateCustomerOwnership(query, customerId) {
 
 // The basis of a scheduling promise kept by a booking for its promised slot
 // (resolveFulfillment). The visit is found through the call's CUSTOMER and
-// the slot through inputs a reprocess rewrites, so a relink or a new
-// commitments pass reopens it (reopenSlotBookingProofs).
+// the slot through inputs a reprocess rewrites, so every refresh judges it
+// again (refreshFulfillment; listSlotKeptCallIds feeds the sweep).
 const SLOT_BOOKING_BASIS = "visit_booked_at_the_promised_time";
 
 // A promise's stated time as a bookable slot — its ET day and minute of the
@@ -1883,6 +1879,16 @@ async function refreshFulfillment(conn, callLogId, call = null) {
   // confirm protects the promise from a later extraction withdrawing it,
   // and the card's own conversation evidence must still close it.
   const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereRaw(...refreshableVerdictSql());
+  // A promise kept by a booking for its promised slot rests on facts that
+  // move after it is kept — the call's customer (a relink), the stated or
+  // confirmed slot (a reprocess), the visit itself (cancelled, moved,
+  // rescheduled) — so it is never final: every refresh judges it again,
+  // read before the open rows are settled below. Untouched AI rows only;
+  // a human verdict stands.
+  const kept = await conn("call_commitments")
+    .where({ call_log_id: callLogId, status: "fulfilled" })
+    .whereNull("human_state")
+    .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS]);
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -1925,8 +1931,8 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         // A slot proof was found through the call's CUSTOMER: it is written
         // only while the call still has that customer, read under a share
         // lock in this same statement — a relink either waits for this write
-        // (and its reopenSlotBookingProofs then undoes it) or has already
-        // moved the call (and nothing is written).
+        // (and the refresh after it re-judges the row) or has already moved
+        // the call (and nothing is written).
         .modify((q) => {
           if (proof.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
@@ -1948,25 +1954,56 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
-  return { checked: open.length, fulfilled, hinted, cleared, failed };
+  let reopened = 0;
+  for (const c of kept) {
+    const proof = await resolveFulfillment(conn, c, row).catch((err) => {
+      logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
+      return LOOKUP_FAILED;
+    });
+    if (proof === LOOKUP_FAILED) { failed += 1; continue; }
+    const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
+    const stillKept = proof?.strength === "direct";
+    if (stillKept && proof.basis === prior?.basis && proof.record_id === prior?.record_id) continue;
+    const unchanged = (q) => q
+      .where({ id: c.id, status: "fulfilled" })
+      .whereNull("human_state")
+      .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS])
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at]);
+    if (stillKept) {
+      // Kept by another record now (another visit at the slot, or a
+      // canonical proof): same customer guard as the open-row write above.
+      await unchanged(conn("call_commitments"))
+        .modify((q) => {
+          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          q.whereExists(function callStillHasThatCustomer() {
+            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
+        .update({ fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
+      continue;
+    }
+    // No longer kept: owed again, carrying whatever hint the facts support.
+    reopened += await unchanged(conn("call_commitments"))
+      .update({ status: "open", fulfillment: proof ? JSON.stringify(proof) : null, fulfilled_at: null, updated_at: new Date() });
+  }
+  return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened };
 }
 
-// A promise kept by a booking for its promised slot rests on the call's
-// customer, the promise's stated time and the call's confirmed slot.
-// refreshFulfillment never revisits a kept row, so whenever one of those
-// can change — the office relinks or unlinks the call, or a commitments
-// pass (re)writes the call — it reopens here and the next refresh judges
-// it again. Untouched AI rows only — a human verdict stands. Returns the count.
-async function reopenSlotBookingProofs(conn, callLogId) {
-  const result = await conn.raw(
-    `UPDATE call_commitments
-        SET status = 'open', fulfillment = NULL, fulfilled_at = NULL, updated_at = NOW()
-      WHERE call_log_id = ? AND status = 'fulfilled' AND human_state IS NULL
-        AND fulfillment ->> 'basis' = ?`,
-    [callLogId, SLOT_BOOKING_BASIS],
-  );
-  return result?.rowCount || 0;
+// Calls holding a promise kept by a booking for its promised slot whose slot
+// has not yet passed by a day — the periodic sweep refreshes them beside the
+// calls with open promises, so a visit cancelled or moved after the promise
+// was kept (or a relink made while the commitments gate was off) is judged
+// again. Past the slot the booking has done its job.
+async function listSlotKeptCallIds(conn, now = new Date()) {
+  const rows = await conn("call_commitments")
+    .distinct("call_log_id")
+    .where({ status: "fulfilled" })
+    .whereNull("human_state")
+    .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS])
+    .where("due_at", ">", new Date(now.getTime() - 24 * 60 * 60 * 1000));
+  return rows.map((r) => r.call_log_id);
 }
+
 
 
 // ── Queue reads (the Owed tab, Customer 360, the lead card, the bell) ─────
@@ -2754,7 +2791,7 @@ module.exports = {
   normalizeRow,
   resolveFulfillment,
   refreshFulfillment,
-  reopenSlotBookingProofs,
+  listSlotKeptCallIds,
   applyHumanUpdate,
   editRestatesRow,
   callbackEditEventMetadata,
