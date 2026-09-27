@@ -1577,6 +1577,16 @@ against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
 its own estimatePdfLimiter (10 per 5 min)).
+Guarantee rule for the estimate page, its proposal document and Ask Waves
+(owner 2026-09-26/27): a guarantee line that covers the whole estimate
+appears only when every service carries it. An estimate with termite work
+states no callback, money-back, satisfaction or no-contract terms for any
+service; its termite work states "no guarantee" except the terms of a
+termite bond, trenching warranty or pre-slab warranty option the customer
+selected. Where no estimate-wide terms apply, Ask Waves answers every
+guarantee question with one per-service list under these rules, never infers
+from a question's wording which service is meant, and never serves a model
+answer that makes a plan-terms claim.
 `/data`'s optional `estimate.noGuaranteeClaims: true` (copy-audit follow-up
 to #4874, 2026-09-26; termite gets no generic estimate-wide guarantee)
 is the page's guarantee decision, `serviceMixMakesNoGuaranteeClaim` in this

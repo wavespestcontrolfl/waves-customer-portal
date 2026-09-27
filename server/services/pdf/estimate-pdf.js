@@ -23,7 +23,7 @@ const {
 const { formatDisplayDate } = require('../../utils/date-only');
 const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
 const { formatUnitPrice, formatQuantity } = require('../../../shared/proposal-bid.cjs');
-const { proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../estimate-proposal-billing');
+const { proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../estimate-proposal-billing');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -487,7 +487,9 @@ function termsBlock(ctx, proposal, totals, y) {
   // operator terms that may state the opposite. The neutral licensed-line
   // above stays — it makes no plan claims.
   const structuredTermLines = commercialTermLines(proposal.commercialTerms);
-  if (!ctx.noGuaranteeClaims && !proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length) {
+  // The canned sentence is a recurring residential pest term: an all-pest
+  // residential proposal only (proposalCallbackTermsEligible).
+  if (ctx.callbackTermsEligible && !proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length) {
     lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
   }
   lines.push(...structuredTermLines);
@@ -591,6 +593,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     // this document rendered before (codex #3120 r3).
     suppressPlanTotals: proposal.enabled !== true && quotesPerApplication(proposal),
     noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposal, estimate?.id),
+    callbackTermsEligible: proposalCallbackTermsEligible(proposal, estimate?.id),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 

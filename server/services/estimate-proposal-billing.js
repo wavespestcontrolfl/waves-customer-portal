@@ -60,6 +60,27 @@ function proposalMakesNoGuaranteeClaim(proposal, estimateId = null) {
   }
 }
 
+// Whether a proposal document may print the canned IPM/callback sentence.
+// It is a recurring residential pest term (AGENTS.md estimate truth scope),
+// so only a residential proposal (never an authored, enabled one) whose every
+// row is pest work qualifies. Rodent, commercial, mixed, termite and unknown
+// scope stay terms-neutral.
+function proposalCallbackTermsEligible(proposal, estimateId = null) {
+  if (!proposal || typeof proposal !== 'object' || proposal.enabled === true) return false;
+  if (proposalMakesNoGuaranteeClaim(proposal, estimateId)) return false;
+  const { serviceKeysFromText } = require('./estimate-service-lines');
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const rows = [
+    ...list(proposal.buildings).flatMap((building) => list(building?.lineItems)),
+    ...list(proposal.correctiveWork),
+    ...list(proposal.programs),
+  ];
+  return rows.length > 0 && rows.every((row) => {
+    const lanes = serviceKeysFromText(row?.service, row?.serviceKey, row?.description, row?.label, row?.name);
+    return lanes.length === 1 && lanes[0] === 'pest';
+  });
+}
+
 // An estimate with no customer_id still links at accept through the SAME
 // phone matcher the accept path uses, so an existing member can be on the
 // other end of an unlinked estimate. Mirrors estimateCustomerPreservesMonthly
@@ -252,6 +273,7 @@ module.exports = {
   estimateBillsPerApplication,
   estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,
+  proposalCallbackTermsEligible,
   proposalMakesNoGuaranteeClaim,
   resolveLivePricing,
   resolveProposalBillingContext,

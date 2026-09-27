@@ -122,8 +122,30 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
         },
       },
     };
+    // An authored (enabled) proposal is commercial, and commercial scope is
+    // terms-neutral (AGENTS.md estimate truth scope), so even without
+    // authored terms it prints no canned callback guarantee.
     const untouched = await buildEstimateProposalPDFBuffer(legacyNoTerms, { billsPerApplication: false });
-    expect(extractPdfText(untouched)).toContain('callback guarantee between scheduled visits');
+    expect(extractPdfText(untouched)).not.toContain('callback guarantee between scheduled visits');
+  });
+
+  test.each([
+    ['rodent', [{ displayName: 'Rodent Bait Stations', monthlyPrice: 40 }], [{ service: 'rodent_bait', name: 'Rodent Bait Stations' }]],
+    ['pest + rodent', [{ displayName: 'Pest Control', monthlyPrice: 55 }, { displayName: 'Rodent Bait Stations', monthlyPrice: 40 }],
+      [{ service: 'pest_control', name: 'Pest Control' }, { service: 'rodent_bait', name: 'Rodent Bait Stations' }]],
+  ])('a synthesized %s proposal is terms-neutral: no canned callback guarantee', async (_name, lineItems, recurringServices) => {
+    const neutral = {
+      id: `synthesized-${_name.replace(/\W+/g, '-')}`,
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 95,
+      annual_total: 1140,
+      onetime_total: 0,
+      estimate_data: { lineItems, result: { recurringServices } },
+    };
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(neutral, { billsPerApplication: false }));
+    expect(text).toContain('Rodent Bait Stations');
+    expect(text).not.toContain('callback guarantee between scheduled visits');
   });
 
   test.each(['Termite trenching', 'WDO inspection'])(

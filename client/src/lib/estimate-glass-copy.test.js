@@ -179,6 +179,21 @@ describe('termite work never carries a guarantee (owner ruling; server estimateM
 });
 
 describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring estimate)', () => {
+  it('neutralizes every claim-bearing field it renders, not only the hero subline (Codex #4982)', () => {
+    // The trap-only pack's aiBody promises an extra callback allowance; with
+    // an intelligence payload the page renders it in the Waves AI card.
+    const trapOnly = { heroSub: 'Setup and monitoring are shown separately.',
+      aiBody: 'The priced lines separate setup, scheduled monitoring, and any additional callback allowance included in the plan.',
+      askChips: ['What is included in setup?', 'What happens if I need an extra callback?'] };
+    const stripped = glassPackWithoutGuarantee(trapOnly);
+    expect(stripped.heroSub).toBe(trapOnly.heroSub);
+    expect(stripped.aiBody).not.toMatch(/callback/i);
+    expect(stripped.askChips).toEqual(['What is included in setup?']);
+    // A pack with no claim in any field is returned as is.
+    const plain = { heroSub: 'Priced from your property.', aiBody: 'We measured your home.' };
+    expect(glassPackWithoutGuarantee(plain)).toBe(plain);
+  });
+
   it.each([
     'Rain re-spray guarantee',
     'Retreat warranty applies',

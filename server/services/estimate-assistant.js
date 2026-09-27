@@ -1639,15 +1639,33 @@ function serviceTermsFromRows(rowGroups = [], oneTimeRows = []) {
   });
 }
 
-// A guarantee question on an estimate without estimate-wide terms. Only the
-// deterministic per-service answer takes it: the fallback answers it first,
-// and answerEstimateQuestion routes it there before the live models, so no
-// model picks which service a question means.
-const GUARANTEE_QUESTION_PATTERN = /\b(guarantees?|callbacks?|re-?treat\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\w*|annual inspection)\b/i;
+// An estimate without estimate-wide terms: termite or unclassifiable work
+// (noGuaranteeClaims), or a recurring plan whose services don't share one
+// recurring-terms lane.
+function withoutEstimateWideTerms(context = {}) {
+  return context.guarantees?.noGuaranteeClaims === true
+    || (context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true);
+}
+
+// A guarantee question on such an estimate, including recurrence wording
+// ("What if the termites come back?"). Only the deterministic per-service
+// answer takes it: the fallback answers it first, and answerEstimateQuestion
+// routes it there before the live models, so no model picks which service a
+// question means. servedModelAnswer covers any other wording.
+const GUARANTEE_QUESTION_PATTERN = /\b(guarantees?|callbacks?|re-?treat\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\w*|annual inspection|coverage|come(?:s|ing)? back|came back|return(?:s|ed|ing)?|treat(?:ed|ing)? (?:it |them |the \w+ )?again)\b/i;
 function answersWithServiceTerms(question, context = {}) {
-  const neutralRecurringTerms = context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true;
-  return (context.guarantees?.noGuaranteeClaims === true || neutralRecurringTerms)
-    && GUARANTEE_QUESTION_PATTERN.test(cleanText(question));
+  return withoutEstimateWideTerms(context) && GUARANTEE_QUESTION_PATTERN.test(cleanText(question));
+}
+
+// On an estimate without estimate-wide terms, a model answer that makes a
+// plan-terms claim (callbacks, money-back, satisfaction, no-contract, free
+// re-service) is never served: the deterministic answer for the same question
+// is. Setup and prepay refund wording is not a plan-terms claim.
+function servedModelAnswer(answer, source, question, context) {
+  if (withoutEstimateWideTerms(context) && PLAN_TERMS_COPY.test(answer)) {
+    return { answer: answerEstimateQuestionFallback(question, context), source: 'fallback' };
+  }
+  return { answer, source };
 }
 
 // The guarantee answer for an estimate without estimate-wide terms: the same
@@ -1947,14 +1965,14 @@ async function answerEstimateQuestion({
   // deterministic template — the customer always gets an answer.
   try {
     const openAiAnswer = await answerWithOpenAI(cleanQuestion, context);
-    if (openAiAnswer) return { answer: openAiAnswer, source: 'openai' };
+    if (openAiAnswer) return servedModelAnswer(openAiAnswer, 'openai', cleanQuestion, context);
   } catch (err) {
     logger.warn(`[estimate-assistant] OpenAI answer failed: ${err.message}`);
   }
 
   try {
     const aiAnswer = await answerWithAnthropic(cleanQuestion, context);
-    if (aiAnswer) return { answer: aiAnswer, source: 'anthropic' };
+    if (aiAnswer) return servedModelAnswer(aiAnswer, 'anthropic', cleanQuestion, context);
   } catch (err) {
     logger.warn(`[estimate-assistant] AI answer failed: ${err.message}`);
   }

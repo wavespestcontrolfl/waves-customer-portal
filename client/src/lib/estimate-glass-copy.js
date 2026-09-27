@@ -447,8 +447,25 @@ export function copyHasPlanTermsClaim(text) {
 }
 
 export function glassPackWithoutGuarantee(pack) {
-  if (!pack || !copyHasPlanTermsClaim(pack.heroSub)) return pack;
-  return { ...pack, heroSub: GLASS_PACKS.bundle.heroSub };
+  if (!pack) return pack;
+  // Every field the page renders from a pack, not only the hero subline: a
+  // claim-bearing string (heroSub, eyebrow, the Waves AI card's aiTitle and
+  // aiBody) falls back to the bundle pack's own field, and a claim-bearing
+  // ask chip is dropped. ctaMicro has its own path (glassCtaMicroForKeys).
+  const neutral = GLASS_PACKS.bundle;
+  let changed = false;
+  const out = { ...pack };
+  for (const [key, value] of Object.entries(pack)) {
+    if (key === 'ctaMicro') continue;
+    if (typeof value === 'string' && copyHasPlanTermsClaim(value)) {
+      out[key] = copyHasPlanTermsClaim(neutral[key]) ? null : (neutral[key] ?? null);
+      changed = true;
+    } else if (Array.isArray(value) && value.some((item) => copyHasPlanTermsClaim(item))) {
+      out[key] = value.filter((item) => !copyHasPlanTermsClaim(item));
+      changed = true;
+    }
+  }
+  return changed ? out : pack;
 }
 
 export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false, preserveServiceHero = false, noGuarantee = false } = {}) {

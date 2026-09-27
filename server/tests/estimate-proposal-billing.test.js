@@ -32,6 +32,7 @@ const LIVE_BUNDLE = { source: 'live_rebuild', frequencies: [REBUILT] };
 const {
   estimateBillsPerApplication,
   estimateSoldAsAnnualPrepay,
+  proposalCallbackTermsEligible,
   proposalMakesNoGuaranteeClaim,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
@@ -125,6 +126,26 @@ describe('proposalMakesNoGuaranteeClaim', () => {
   it('fails closed when the canonical policy cannot classify the estimate', () => {
     mockEstimateMakesNoGuaranteeClaim.mockImplementationOnce(() => { throw new Error('classification unavailable'); });
     expect(proposalMakesNoGuaranteeClaim({ buildings: [] }, 'e1')).toBe(true);
+  });
+});
+
+describe('proposalCallbackTermsEligible', () => {
+  const building = (...descriptions) => ({ name: 'Home', lineItems: descriptions.map((description) => ({ description, amount: 55 })) });
+
+  it('allows the canned callback sentence only on an all-pest residential proposal', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(true);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Rodent Bait Stations')] }, 'e1')).toBe(false);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control', 'Rodent Bait Stations')] }, 'e1')).toBe(false);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [] }, 'e1')).toBe(false);
+    // An authored (enabled) proposal is commercial: terms-neutral.
+    expect(proposalCallbackTermsEligible({ enabled: true, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('never allows it where the proposal makes no guarantee claim', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
   });
 });
 
