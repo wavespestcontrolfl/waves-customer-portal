@@ -1,7 +1,10 @@
 /**
  * Promise-chaser bell — rings staff when a LEAD calls back on a number that
  * still carries an open, unkept Waves promise (a callback, a quote, a time
- * to come out) from an earlier UNBOOKED call.
+ * to come out) from an earlier UNBOOKED call. "Unbooked" is enforced
+ * explicitly (BOOKED_STATUSES below, against the promise's own originating
+ * call) — a genuinely separate promise on a call that DID result in an
+ * appointment is not this alert's scope, even though it is still open.
  *
  * Event-driven, unlike the one-hour SLA pager (followup-sla-watcher.js),
  * which fires on a timer once a promise's own deadline passes — this one
@@ -32,6 +35,12 @@ const commitments = require('./call-commitments');
 const { whereNotBlockedCall } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { SLA_KINDS, followedUpIds, WHAT } = require('./followup-sla-watcher');
+
+// The rule's own scope: "an earlier call ... ended UNBOOKED". Same live
+// statuses repeat-caller-bell's BOOKED_SQL treats as booked — a call that
+// resulted in an appointment is not the audit's unbooked-call pattern, even
+// if a genuinely separate promise on it is still open.
+const BOOKED_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site', 'completed'];
 
 // What we promised, and when — the two facts the alert body must carry.
 function describePromise(row) {
@@ -71,13 +80,25 @@ async function ringPromiseChaserIfNeeded(callSid) {
     })).filter((r) => SLA_KINDS.includes(r.kind) && String(r.call_log_id) !== String(call.id));
     if (!rows.length) return false;
 
+    // Scope to calls that ended UNBOOKED (the rule's own trigger, and the
+    // audit's pattern) — a call that resulted in an appointment is excluded
+    // even when a genuinely separate promise on it is still open, same as
+    // repeat-caller-bell's own booked-window exclusion.
+    const candidateCallIds = [...new Set(rows.map((r) => r.call_log_id))];
+    const bookedCallIds = new Set((await db('scheduled_services')
+      .whereIn('source_call_log_id', candidateCallIds)
+      .whereIn('status', BOOKED_STATUSES)
+      .pluck('source_call_log_id')).map(String));
+    const unbooked = rows.filter((r) => !bookedCallIds.has(String(r.call_log_id)));
+    if (!unbooked.length) return false;
+
     // Refresh the fulfillment proof for the candidate calls first — nothing
     // stamps it until someone opens the queue (the SLA pager's own rule). A
     // call whose proof could not be verified (thrown, or refreshFulfillment's
     // own per-commitment `failed` count) is excluded below — an unverified
     // lookup proves nothing, and ringing on it risks a false alert for a
     // promise that was actually just kept.
-    const callIds = [...new Set(rows.map((r) => r.call_log_id))];
+    const callIds = [...new Set(unbooked.map((r) => r.call_log_id))];
     const unverified = new Set();
     for (const id of callIds) {
       const result = await commitments.refreshFulfillment(db, id).catch((err) => {
@@ -86,8 +107,8 @@ async function ringPromiseChaserIfNeeded(callSid) {
       });
       if (result.failed > 0) unverified.add(id);
     }
-    const live = await commitments.stillOpenIds(db, rows.map((r) => r.id), { now });
-    let open = rows.filter((r) => live.has(r.id) && !unverified.has(r.call_log_id));
+    const live = await commitments.stillOpenIds(db, unbooked.map((r) => r.id), { now });
+    let open = unbooked.filter((r) => live.has(r.id) && !unverified.has(r.call_log_id));
     if (!open.length) return false;
 
     // followedUpIds needs each row's call-ended time (promisedAt's basis) —

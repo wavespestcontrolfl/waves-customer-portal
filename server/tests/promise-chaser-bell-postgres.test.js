@@ -132,6 +132,26 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
+  test('a call that itself ended booked never rings, even with a separate open promise on it', async () => {
+    const customerId = randomUUID();
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+    await mockConn('customers').insert({ id: customerId, phone: PHONE });
+    // Booked FROM the earlier call itself (source_call_log_id) — the rule's
+    // own "ended unbooked" scope, distinct from "booked SINCE" below.
+    await mockConn('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, source_call_log_id: earlier.id,
+      scheduled_date: new Date(now + 86400000), service_type: 'pest_control', status: 'confirmed',
+      created_at: earlier.created_at, updated_at: earlier.created_at,
+    });
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
   test('a lead who has since booked does not ring', async () => {
     const customerId = randomUUID();
     const earlier = callRow(240);
