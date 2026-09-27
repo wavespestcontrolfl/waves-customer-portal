@@ -30,6 +30,7 @@ const {
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
   cleanedNameTokens: contactGapNameTokens,
+  IDENTITY_MISMATCH: CONTACT_IDENTITY_MISMATCH,
 } = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
@@ -9102,6 +9103,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     let contactFillLastName = null;
     let contactFillEmail = null;
     let acceptContactView = null;
+    // The estimate's own first name (pre-fill) — the identity an existing
+    // profile must match before the accept card may fill it.
+    let acceptContactFirstName = null;
 
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
@@ -10812,6 +10816,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ? await trx('customers').where({ id: lockedContact.customer_id }).first('last_name', 'email')
             : null;
           const lockedGaps = computeContactGaps({ estimate: lockedContact, linkedCustomer: linkedCustomerForGaps });
+          acceptContactFirstName = contactGapNameTokens(lockedContact.customer_name)[0] || null;
           if (sanitizedContactLastName && lockedGaps.lastName) contactFillLastName = sanitizedContactLastName;
           if (sanitizedContactEmail && lockedGaps.email) contactFillEmail = sanitizedContactEmail;
           const contactWrite = {};
@@ -10867,9 +10872,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // customer's own standing value, so the estimate copy is harmless.
       const applyAcceptContactEmailFill = async (targetCustomerId) => {
         if (!contactFillEmail) return;
-        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail);
+        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail, { expectedFirstName: acceptContactFirstName });
         const reason = claim?.emailDroppedReason || '';
-        if (claim && !claim.emailApplied && reason && reason !== 'email already on file' && reason !== 'email filled concurrently') {
+        // An identity mismatch keeps the value on the estimate: it belongs
+        // to whoever the estimate is addressed to, just not this profile.
+        if (claim && !claim.emailApplied && reason
+          && !['email already on file', 'email filled concurrently', CONTACT_IDENTITY_MISMATCH].includes(reason)) {
           await trx('estimates').where({ id: estimate.id }).where('customer_email', contactFillEmail).update({ customer_email: null });
           if (acceptContactView && acceptContactView.customer_email === contactFillEmail) acceptContactView.customer_email = null;
           contactFillEmail = null;
@@ -10882,7 +10890,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // already fenced this row since acceptPreLockedCommsId === customerId
       // here). Never overwrites a real value already on file.
       if (customerId) {
-        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
+        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedFirstName: acceptContactFirstName });
         await applyAcceptContactEmailFill(customerId);
       }
       // Grouped multi-property accept: a sibling estimate in the same group
@@ -10927,7 +10935,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
           // Sibling's existing customer: same guarded, never-overwrite fill.
-          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedFirstName: acceptContactFirstName });
           await applyAcceptContactEmailFill(customerId);
         }
       }
@@ -10966,7 +10974,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // Reused an existing profile: fill its last_name/email ONLY if
           // blank/the 'Customer' placeholder — same guarded helpers as the
           // already-linked branch above, now under this authoritative lock.
-          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedFirstName: acceptContactFirstName });
           await applyAcceptContactEmailFill(customerId);
         } else {
           const nameParts = ((acceptContactView ? acceptContactView.customer_name : estimate.customer_name) || 'New Customer').split(' ');

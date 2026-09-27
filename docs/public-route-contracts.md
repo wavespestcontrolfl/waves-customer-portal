@@ -380,8 +380,13 @@ than dropping the input. Customer resolution (phone match) runs on the
 pre-fill identity, so a submitted email never steers which profile the accept
 lands on; an authored proposal's `preparedFor` that matched the old name moves
 with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
-matched/linked/new customer gets `last_name` only when blank or `'Customer'`
-and `email` only when blank (whitespace-only counts as blank). Only fields the
+new customer is created with the supplied values; an EXISTING matched, linked
+or grouped-sibling profile is filled only when the estimate's own first name
+matches the profile's (an estimate addressed to a tenant under a landlord's
+record keeps the values on the estimate only), and then `last_name` only when
+blank or `'Customer'` and `email` only when blank (whitespace-only counts as
+blank). Each existing-profile fill stamps `customers.updated_at`, and a surname
+fill runs `propagateCustomerNameChange` in the same transaction. Only fields the
 server's own `contactGaps` verdict flags are ever written — a value for a field
 the page never offered is ignored. The customer email fill runs through the
 shared email-claim guard (`backfillCustomerEmailInTrx`: row lock, then the

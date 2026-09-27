@@ -1608,6 +1608,13 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
   // clearAllMocks keeps queued *Once values; a test whose accept never
   // reaches conversion would otherwise leak its queued result into the next.
   beforeEach(() => EstimateConverter.convertEstimate.mockReset());
+  // The name fan-out has its own suites and uses SQL this fake knex does
+  // not model; here we only assert the accept invokes it.
+  let nameFanoutSpy;
+  beforeEach(() => {
+    nameFanoutSpy = jest.spyOn(require('../services/customer-contact-fanout'), 'propagateCustomerNameChange').mockResolvedValue({});
+  });
+  afterEach(() => nameFanoutSpy.mockRestore());
 
   function conversionOk(customerId = 'cust-1') {
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
@@ -1928,6 +1935,58 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     const res = await putAccept('tok-contact-17-x0123456789', { contactEmail: 'someone@example.com' });
     expect(res.status).toBe(200);
     expect(storedEstimate().customer_id).toBe('cust-addr');
+  });
+
+  test('an estimate addressed to someone else under the account (tenant under landlord) never fills the account holder', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-18',
+      token: 'tok-contact-18-x0123456789',
+      customer_id: 'cust-landlord',
+      customer_phone: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-landlord', first_name: 'Pat', last_name: null, email: null, phone: null }];
+    conversionOk('cust-landlord');
+
+    const res = await putAccept('tok-contact-18-x0123456789', { contactLastName: 'Sample', contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-landlord');
+    expect(cust.last_name).toBeNull();
+    expect(cust.email).toBeNull();
+    // The values stay with the estimate they were typed on.
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+    expect(storedEstimate().customer_email).toBe('testy@example.com');
+  });
+
+  test('an existing-profile fill stamps updated_at and runs the name fan-out', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-19',
+      token: 'tok-contact-19-x0123456789',
+      customer_id: 'cust-stamp',
+      customer_phone: null,
+      customer_name: 'Pat',
+      customer_email: null,
+    }));
+    const oldStamp = new Date('2026-01-01T00:00:00Z');
+    db.__state.tables.customers = [{ id: 'cust-stamp', first_name: 'Pat', last_name: 'Customer', email: null, phone: null, updated_at: oldStamp }];
+    conversionOk('cust-stamp');
+    const spy = nameFanoutSpy;
+    {
+      const res = await putAccept('tok-contact-19-x0123456789', { contactLastName: 'Sample', contactEmail: 'pat@example.com' });
+      expect(res.status).toBe(200);
+      const cust = db.__state.tables.customers.find((c) => c.id === 'cust-stamp');
+      expect(cust.last_name).toBe('Sample');
+      expect(cust.email).toBe('pat@example.com');
+      expect(new Date(cust.updated_at).getTime()).toBeGreaterThan(oldStamp.getTime());
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          before: expect.objectContaining({ id: 'cust-stamp', last_name: 'Customer' }),
+          after: expect.objectContaining({ id: 'cust-stamp', last_name: 'Sample' }),
+        }),
+        expect.anything(),
+      );
+    }
   });
 
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {

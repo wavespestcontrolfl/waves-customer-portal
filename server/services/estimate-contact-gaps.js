@@ -98,30 +98,61 @@ function sanitizeContactEmail(raw) {
   return { value: normalized, error: null };
 }
 
-// Guarded fills for an EXISTING customer row — self-contained (the gap
-// check runs on the row-locked value with the SAME normalized predicates
-// computeContactGaps uses: whitespace-only is blank, 'Customer' matches
-// case-insensitively), so a field the page asked for is never silently
+// Fills for an EXISTING customer row (the linked, grouped-sibling or
+// phone-matched profile the accept lands on). Three rules, each the same
+// mechanism an operator edit uses (codex #5102 r5):
+//   - IDENTITY: only when the estimate's own first name matches the
+//     profile's — an estimate addressed to someone else under this account
+//     (a tenant under the landlord's record) keeps its values on the
+//     estimate and never renames or re-addresses the account holder.
+//   - VERSION: every fill stamps customers.updated_at, the optimistic-lock
+//     version operator confirmations compare against.
+//   - FAN-OUT: a surname fill runs propagateCustomerNameChange in this
+//     transaction, so open leads / estimates / enrollments / contracts
+//     holding the old placeholder follow it.
+// The gap check runs on the row-locked value with the SAME predicates
+// computeContactGaps uses, so a field the page asked for is never silently
 // dropped, and a real value is never overwritten.
-async function fillExistingCustomerLastName(trx, customerId, lastName) {
-  if (!customerId || !lastName) return;
-  const row = await trx('customers').where({ id: customerId }).forUpdate().first('last_name');
-  if (!row || hasRealLastName(row.last_name)) return;
-  await trx('customers').where({ id: customerId }).update({ last_name: lastName });
+const IDENTITY_MISMATCH = 'estimate contact is not this profile';
+
+function firstNameKey(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function identityMatches(row, expectedFirstName) {
+  const expected = firstNameKey(expectedFirstName);
+  return !!expected && firstNameKey(row?.first_name) === expected;
+}
+
+async function fillExistingCustomerLastName(trx, customerId, lastName, { expectedFirstName } = {}) {
+  if (!customerId || !lastName) return { applied: false, reason: null };
+  const row = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'first_name', 'last_name');
+  if (!row || hasRealLastName(row.last_name)) return { applied: false, reason: 'last name already on file' };
+  if (!identityMatches(row, expectedFirstName)) return { applied: false, reason: IDENTITY_MISMATCH };
+  await trx('customers').where({ id: customerId }).update({ last_name: lastName, updated_at: new Date() });
+  await require('./customer-contact-fanout').propagateCustomerNameChange({
+    before: row,
+    after: { ...row, last_name: lastName },
+  }, trx);
+  return { applied: true, reason: null };
 }
 
 // Email goes through the shared email-claim guard (customer row lock, then
 // the 'customer-email:' advisory lock, then the undone-merge holder
 // recheck) in a savepoint — the same serialization every other automated
-// blank-email backfill takes, so a racing merge undo cannot leave this
-// customer holding an address it just restored to the merged-away row.
-async function fillExistingCustomerEmail(trx, customerId, email) {
+// blank-email backfill takes. A blank → address backfill has no old copies
+// to retarget (the call-capture backfill likewise skips the email fan-out).
+async function fillExistingCustomerEmail(trx, customerId, email, { expectedFirstName } = {}) {
   if (!customerId || !email) return null;
+  const row = await trx('customers').where({ id: customerId }).first('id', 'first_name');
+  if (!row) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
+  if (!identityMatches(row, expectedFirstName)) return { emailApplied: false, emailDroppedReason: IDENTITY_MISMATCH };
   const { backfillCustomerEmailInTrx } = require('./customer-email-fanout');
   return backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
 }
 
 module.exports = {
+  IDENTITY_MISMATCH,
   hasEmail,
   cleanedNameTokens,
   CONTACT_LAST_NAME_MAX,

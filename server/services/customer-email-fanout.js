@@ -1693,8 +1693,15 @@ async function backfillCustomerEmailInTrx(trx, { customerId, email, source = 'in
       if (!current) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
       if (String(current.email || '').trim()) return { emailApplied: false, emailDroppedReason: 'email already on file' };
       const replaceExpectedEmail = current.email ? current.email : null;
+      // The write stamps updated_at (the optimistic-lock version operator
+      // confirmations compare) only when the email actually lands.
       return claimGuardedCustomerUpdateInTrx(sp, {
-        customerId, updates: { email }, emailKeyNorm, replaceExpectedEmail,
+        customerId,
+        updates: { email },
+        emailKeyNorm,
+        replaceExpectedEmail,
+        applyWithEmailInTrx: (inner) => inner('customers').where({ id: customerId })
+          .update({ email, updated_at: new Date() }),
       });
     });
   } catch (e) {
