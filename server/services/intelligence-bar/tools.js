@@ -297,7 +297,8 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     name: 'create_appointment',
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
-time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
+time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
+This tool sets no price. It refuses a visit that would then complete with no invoice (a customer billed per visit, one-time, annual prepay, or per application with no fee on file) unless the visit type is free (appointment, estimate, re-service, follow-up); tell the user to book those from the Schedule screen with a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -2427,6 +2428,52 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
+// ADMIN-BUG-R12: this tool has no price input and stamps no price, so a
+// booking for a customer whose billing needs a number ON THE VISIT (per-visit
+// and one-time lanes, annual prepay, per-application with no fee on file, a
+// member with no monthly rate, a legacy row with no membership tier) would
+// complete with no invoice. The verdict is the Schedule screen's own
+// billable-amount booking gate — one classifier, never a local lane list — so
+// dues-covered members, per-application customers with a fee, and
+// free-by-design visit types (appointment / estimate / re-service /
+// follow-up) still book here. Returns the model-facing refusal, or null when
+// the booking bills or is free.
+function ibBookingBillingRefusal(customer, serviceType) {
+  // Lazy: the route module is large and requires services that require this
+  // module (same avoid-a-route-load-cycle pattern as schedule-tools).
+  const { recurringWithoutBillableAmount } = require('../../routes/admin-schedule');
+  // Below its recurring early return, the gate asks a question that does not
+  // depend on recurrence: would completing a visit at this price, for this
+  // customer, cut an invoice (or be dues-covered, or free by design)? Asked
+  // for ONE visit at a $0 floor with the stamps this insert writes: no
+  // create-invoice flag, no callback marker, and no typed one-time profile
+  // (that mint trigger needs a PRICED visit, so it cannot change a $0 verdict).
+  const verdict = recurringWithoutBillableAmount({
+    isRecurring: true,
+    recurringFloorPrice: 0,
+    customer,
+    createInvoiceOnComplete: false,
+    typedOneTimeBilling: false,
+    isCallback: false,
+    serviceType,
+  });
+  if (!verdict) return null;
+  const remedy = verdict.fix?.perApplicationFee
+    ? 'Set a per-application fee on the customer profile, or book it from the Schedule screen with a visit price'
+    : 'Book it from the Schedule screen with a visit price';
+  return `This visit would complete with no invoice: the Intelligence Bar books without a price, and this customer's billing needs one on the visit. ${remedy}. Nothing was booked.`;
+}
+
+// Proposal-time twin for the confirm-card route: reads the customer and asks
+// the same verdict, so a booking that would be refused never reaches a card.
+// A read error THROWS (the caller fails the proposal closed); a missing
+// customer returns null — the route's own customer pin refuses that case.
+async function ibBookingBillingRefusalFor(customerId, serviceType) {
+  const customer = await db('customers').where({ id: customerId }).first();
+  if (!customer) return null;
+  return ibBookingBillingRefusal(customer, serviceType);
+}
+
 async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
@@ -2475,6 +2522,11 @@ async function createAppointment(input, actionContext = {}) {
   if (customer.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
   }
+  // Refused before any lock or write when the visit could never bill
+  // (ADMIN-BUG-R12); re-asserted on the locked row inside the booking
+  // transaction below, since this read is unlocked.
+  const billingRefusal = ibBookingBillingRefusal(customer, service_type);
+  if (billingRefusal) return { error: billingRefusal };
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
   // unordered ILIKE silently picked an arbitrary tech on multiple matches,
@@ -2558,6 +2610,16 @@ async function createAppointment(input, actionContext = {}) {
       err.customerNoLongerLive = true;
       throw err;
     }
+    // The billing verdict on the LOCKED row (ADMIN-BUG-R12): a lane, rate or
+    // fee edit committed since the preflight must not slip an unbillable
+    // visit through. The customer row stays locked through the insert, so
+    // the verdict holds for the row this booking writes against.
+    const lockedBillingRefusal = ibBookingBillingRefusal(lockedCustomer, service_type);
+    if (lockedBillingRefusal) {
+      const err = new Error('booking_unbillable');
+      err.bookingUnbillable = lockedBillingRefusal;
+      throw err;
+    }
     // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
     // ran before this transaction opened.
     await assertAssignableTechnician(technician_id, { conn: trx, date: dateStr });
@@ -2635,6 +2697,9 @@ async function createAppointment(input, actionContext = {}) {
   } catch (err) {
     if (err && err.customerNoLongerLive) {
       return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
+    }
+    if (err && err.bookingUnbillable) {
+      return { error: err.bookingUnbillable, preview_changed: true };
     }
     if (err && err.previewChanged) {
       return {
@@ -3424,4 +3489,6 @@ async function resolveActiveTechnicianById(id) {
   return applyAssignable(db('technicians').where('technicians.id', id)).first();
 }
 
-module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS };
+module.exports = {
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingBillingRefusalFor,
+};
