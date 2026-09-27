@@ -370,6 +370,11 @@ describe('invoice follow-up email sidecar', () => {
     const [update] = sequenceUpdate.update.mock.calls[0];
     expect(update).not.toHaveProperty('status');
     expect(update.next_touch_at).toEqual(new Date(Date.now() + 30 * 60 * 1000));
+    // The attempt never left, so its unkeyed ledger row must not fill the
+    // collections window the held retry is judged by.
+    expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ reason: 'billing_email_context_unavailable', never_contacted: true }),
+    );
   });
 
   test.each([
@@ -403,9 +408,11 @@ describe('invoice follow-up email sidecar', () => {
     const [update] = sequenceUpdate.update.mock.calls[0];
     expect(update).not.toHaveProperty('status');
     expect(update.next_touch_at).toEqual(new Date(Date.now() + 30 * 60 * 1000));
-    expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
-      expect.anything(), expect.not.objectContaining({ resolved: true }),
-    );
+    // An explicit selection's keyed reservation is excluded from its own
+    // step's consult, so it is not stamped never_contacted.
+    const [[, stamp]] = require('../services/collections/contact-ledger').markSendFailed.mock.calls;
+    expect(stamp).not.toHaveProperty('resolved');
+    expect(stamp).not.toHaveProperty('never_contacted');
   });
 
   test.each([
@@ -421,6 +428,9 @@ describe('invoice follow-up email sidecar', () => {
       { ok: false, skipped: true, reason: 'invoice_payer_billed' }],
     ['an invoice moved to another customer before dispatch', { code: 'INVOICE_CUSTOMER_MISMATCH', blocked: true, reason: 'moved' },
       { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'INVOICE_CUSTOMER_MISMATCH' }],
+    // A profile merge soft-deletes the loser the sequence was loaded for.
+    ['the loaded customer merged away before dispatch', { code: 'CUSTOMER_NOT_FOUND', blocked: true, reason: 'gone' },
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'CUSTOMER_NOT_FOUND' }],
   ])('%s at the handoff maps onto the sequence outcome', async (_label, block, expected) => {
     const sequence = followupRow();
     setDbQueues({
