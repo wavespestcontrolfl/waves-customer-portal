@@ -139,16 +139,21 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
       try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
     }
     metadata = metadata && typeof metadata === 'object' ? metadata : {};
-    let hasOpenPr = false;
+    let hasParkedPr = false;
     if (row.status === 'pending_review') {
-      hasOpenPr = Boolean(await trx('autonomous_runs')
+      // Keep the queue row parked until the poller has retired both records.
+      // astro_pr_retired_at can be stamped before that bookkeeping commits;
+      // treating the PR as absent in that window changes the queue state and
+      // prevents the poller's claim/status CAS from ever converging.
+      hasParkedPr = Boolean(await trx('autonomous_runs')
         .where('opportunity_id', row.id)
+        .where('outcome', 'completed_pending_review')
+        .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
         .whereNotNull('astro_pr_url')
-        .whereNull('astro_pr_retired_at')
         .whereNull('published_url')
         .first('id'));
     }
-    const terminal = row.status === 'pending' || (row.status === 'pending_review' && !hasOpenPr);
+    const terminal = row.status === 'pending' || (row.status === 'pending_review' && !hasParkedPr);
     await trx('opportunity_queue').where('id', row.id).update({
       signal_metadata: JSON.stringify({
         ...metadata,
