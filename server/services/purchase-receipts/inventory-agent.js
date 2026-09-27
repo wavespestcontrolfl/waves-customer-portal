@@ -169,8 +169,15 @@ function hasConflictingClaim(claims, matchedClaim) {
   return claims.some((c) => {
     if (c === matchedClaim) return false;
     const converted = convertInventoryQuantity(c.value, c.unit, matchedClaim.unit);
-    return converted != null && !sizesAgree(converted, matchedClaim.value);
+    return converted != null && !claimValuesAgree(matchedClaim.unit, converted, matchedClaim.value);
   });
+}
+
+// Measured sizes agree within sizesAgree's rounding tolerance ("1 Gallon
+// (128 fl oz)"); a count is discrete and agrees only exactly — "100 Tablets
+// / 99 Tablets" is two different counts, not one (2026-09-27 pre-push audit).
+function claimValuesAgree(unit, a, b) {
+  return unit === 'each' ? a === b : sizesAgree(a, b);
 }
 
 // A number of two or more followed by a container word — "4 Boxes",
@@ -273,7 +280,7 @@ function validateReading(reading, { rawTitle, lineQuantity }) {
   const multipack = parseMultipack(title);
   const afterMultipack = multipack ? multipack.rest : title;
   const claims = parsedSizeClaims(afterMultipack);
-  const matchedClaim = claims.find((c) => c.unit === claimedUnit && sizesAgree(c.value, claimedNumber));
+  const matchedClaim = claims.find((c) => c.unit === claimedUnit && claimValuesAgree(claimedUnit, c.value, claimedNumber));
   const leftover = matchedClaim ? stripFirstOccurrence(afterMultipack, matchedClaim.matchText) : afterMultipack;
   const lineQty = Number(lineQuantity);
 

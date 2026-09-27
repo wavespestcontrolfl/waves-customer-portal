@@ -240,6 +240,27 @@ describe('validateReading — a numeric container quantity is never skipped', ()
   });
 });
 
+describe('validateReading — counts agree only exactly', () => {
+  // 2026-09-27 pre-push audit: the measured-size 1% tolerance let "100
+  // Tablets / 99 Tablets" validate as 100 each.
+  test('two different counts in one title are a conflict, however close', () => {
+    expect(validateReading({ size_number: 100, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Mosquito Dunks 100 Tablets / 99 Tablets', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'conflicting_size_claims' });
+  });
+
+  test('a count reading must equal the title count exactly', () => {
+    expect(validateReading({ size_number: 99, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Mosquito Dunks 100 Tablets', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
+    expect(validateReading({ size_number: 100, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Mosquito Dunks 100 Tablets', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, amount: 100 });
+  });
+
+  test('measured restatements still agree within rounding', () => {
+    expect(validateReading({ size_number: 1, size_unit: 'gal', pack_count: 1 }, { rawTitle: 'Bifen XTS 1 Gallon (128 fl oz)', lineQuantity: 1 }))
+      .toMatchObject({ ok: true });
+  });
+});
+
 describe('validateReading — a count is whole items', () => {
   // Codex round 8: 'each' is a discrete item count (inventory-units.js).
   test('a fractional count size never validates', () => {
