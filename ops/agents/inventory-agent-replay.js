@@ -93,7 +93,7 @@ function parseLimit(raw) {
 
 const server = (relative) => path.join(__dirname, '..', '..', 'server', relative);
 const { classifyItem, lineDisposition, handedOffBy, AGENT_HANDOFF_STATUSES } = require(server('services/purchase-receipts/receipt-processor'));
-const { loadMatchCatalog } = require(server('services/purchase-receipts/product-matcher'));
+const { loadMatchCatalog, normalizeForMatch } = require(server('services/purchase-receipts/product-matcher'));
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { amazonEmailLines, siteOneInvoiceLines, authenticated } = require(server('services/purchase-receipts/sweep'));
@@ -418,13 +418,28 @@ async function agentProposal(conn, line, found, state, { recordEffects = true } 
   return text;
 }
 
-// Would the receipt rules log this line once the earlier proposals' catalog
-// changes were all made? (Asked before this line's own proposal is added.)
-async function coveredByEarlierProposal(conn, line, state) {
-  const { products, aliases, containerSizes } = state.proposals;
-  if (line.forcedStatus || !(products.length || aliases.length || containerSizes.size)) return false;
-  const found = await classifyItem(line.item, conn, catalogWithProposals(await loadMatchCatalog(conn), state.proposals));
-  return found.status === 'logged';
+// How the earlier proposals' catalog changes, all made, would reach this
+// line (asked before its own proposal is added): 'rules' when the receipt
+// rules would then take it; 'context' when they change anything the agent's
+// decision reads for it — its match (status or product), or a product whose
+// name or alias shares a word with the title, which is what the candidate
+// list and the duplicate-name check are built from; null when none do.
+// Deliberately broad: a mark only says the answer might differ.
+async function earlierProposalReach(savedCatalog, line, found, proposals) {
+  const { products, aliases, containerSizes } = proposals;
+  if (line.forcedStatus || !(products.length || aliases.length || containerSizes.size)) return null;
+  const catalog = catalogWithProposals(savedCatalog, proposals);
+  const after = await classifyItem(line.item, null, catalog);
+  if (after.status === 'logged') return 'rules';
+  if (after.status !== found.status || (after.productId || null) !== (found.productId || null)) return 'context';
+  const titleWords = new Set(normalizeForMatch(line.item.title).split(' ').filter(Boolean));
+  const touched = new Set([...products.map((p) => p.id), ...containerSizes.keys(), ...aliases.map((a) => a.productId)]);
+  const names = [
+    ...catalog.products.filter((p) => touched.has(p.id)).map((p) => p.name),
+    ...catalog.aliasRows.filter((row) => touched.has(row.id)).map((row) => row.alias_name),
+  ];
+  const sharesWord = names.some((name) => normalizeForMatch(name).split(' ').some((word) => word && titleWords.has(word)));
+  return sharesWord ? 'context' : null;
 }
 
 // The shipment hand-off rule (receipt-processor.js handedOffBy) applied to
@@ -474,16 +489,16 @@ async function replayLine(conn, line, state) {
     return settledRow(state, line, disposition.status, disposition.product ? `matched: ${disposition.product.name}` : '');
   }
   state.handedToAgent += 1;
-  const dependent = await coveredByEarlierProposal(conn, line, state);
-  // A dependent line's proposal happens only if the earlier change does NOT
-  // survive, so its own change never joins the all-survive view.
-  const proposal = await agentProposal(conn, line, found, state, { recordEffects: !dependent });
-  if (!dependent) return { line, status: `agent (${found.status})`, text: proposal };
+  const reach = await earlierProposalReach(await loadMatchCatalog(conn), line, found, state.proposals);
+  // A dependent line's proposal is only the answer when the earlier changes
+  // do NOT all survive, so its own change never joins the all-survive view.
+  const proposal = await agentProposal(conn, line, found, state, { recordEffects: !reach });
+  if (!reach) return { line, status: `agent (${found.status})`, text: proposal };
   state.dependsOnEarlier += 1;
-  return {
-    line, status: `agent (${found.status})`,
-    text: `the receipt rules take it IF an earlier proposal's catalog change survives; otherwise: ${proposal}`,
-  };
+  const lead = reach === 'rules'
+    ? "the receipt rules take it IF an earlier proposal's catalog change survives; otherwise"
+    : "an earlier proposal's catalog change, if it survives, can change this decision; against the saved catalog";
+  return { line, status: `agent (${found.status})`, text: `${lead}: ${proposal}` };
 }
 
 function printReport(rows, state, siteOneFailures) {
@@ -500,8 +515,8 @@ function printReport(rows, state, siteOneFailures) {
   console.log('Proposals are what the agent would PROPOSE; the live apply step can still hold one under its own checks '
     + '(a nearby manual restock or count, the catalog changing underneath, an application unit already in use).');
   console.log('Every line is decided against the saved catalog. '
-    + `${state.dependsOnEarlier} line(s) the receipt rules would take instead IF an earlier proposal's catalog change survives the live checks; `
-    + 'their decision above is for when it does not.');
+    + `${state.dependsOnEarlier} line(s) an earlier proposal's catalog change reaches (the rules would take it, or its match or `
+    + 'related products change) are marked; their decision above is against the saved catalog, for when that change does not survive.');
   // An incomplete replay never passes for a complete one: each gap is
   // listed and the run exits 1.
   if (state.llmFailures) {
@@ -568,5 +583,5 @@ if (require.main === module) {
 }
 
 module.exports = {
-  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, recordedOwners, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, recordedOwners, inQueueOrder, tableOnlyLines, emptyProposals, earlierProposalReach, recordProposal, catalogWithProposals, replayLine,
 };

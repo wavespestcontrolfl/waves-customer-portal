@@ -10,7 +10,7 @@
  * script does anything else) is for.
  */
 const {
-  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, recordedOwners, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, recordedOwners, inQueueOrder, tableOnlyLines, emptyProposals, earlierProposalReach, recordProposal, catalogWithProposals, replayLine,
 } = require('../../ops/agents/inventory-agent-replay');
 const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
 
@@ -264,6 +264,37 @@ describe('tableOnlyLines', () => {
 test('the telemetry gates stay set to false once the server modules have loaded', () => {
   expect([process.env.GATE_LLM_CALL_LEDGER, process.env.GATE_LLM_CALL_TRACES, process.env.GATE_LLM_DISPATCH_METRICS])
     .toEqual(['false', 'false', 'false']);
+});
+
+// Codex round 10: an earlier proposal reaches a later line not only when
+// the rules would then take it, but whenever it changes what the agent's
+// decision reads — its match, or a product sharing a word with the title
+// (the candidate list and the duplicate-name check).
+describe('earlierProposalReach', () => {
+  const saved = () => ({ products: [{ id: 'p-taurus', name: 'Taurus SC', container_size: null, active: true }], aliasRows: [] });
+  const newAlpine = () => {
+    const proposals = emptyProposals();
+    recordProposal(proposals, {
+      outcome: { decision: { status: 'logged', kind: 'new_product', newProduct: { name: 'Alpine WSG', category: 'insecticide', containerSize: '500 g' } } },
+      found: { status: 'unmatched', productId: null },
+      title: 'Alpine WSG Insecticide 500 g',
+    });
+    return proposals;
+  };
+  const reach = (title, proposals) => earlierProposalReach(saved(), { item: { title, quantity: 1 } }, { status: 'unmatched', productId: null }, proposals);
+
+  test('rules when the change makes the line match and log', async () => {
+    expect(await reach('Syngenta Alpine WSG 500 g', newAlpine())).toBe('rules');
+  });
+
+  test('context when a proposed product shares a word with a title it does not match', async () => {
+    expect(await reach('Alpine Fly Bait 2 lb', newAlpine())).toBe('context');
+  });
+
+  test('nothing for an unrelated title, or with no proposals', async () => {
+    expect(await reach('Chromebook charger', newAlpine())).toBeNull();
+    expect(await reach('Alpine WSG 500 g', emptyProposals())).toBeNull();
+  });
 });
 
 // Codex round 5: the hand-off rule applies to the lines the replay has
