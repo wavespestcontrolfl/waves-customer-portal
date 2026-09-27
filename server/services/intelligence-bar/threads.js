@@ -79,9 +79,10 @@ async function appendExchange({ actorId, threadId, expectedSeq, context, userTex
         .slice(-SEED_TURN_LIMIT);
       if (seeds.length) {
         await trx('ib_thread_turns').insert(
-          // seeded: these rows get the current time, not their real age, so
-          // recent-turn grounding (recentOperatorTurns) skips them.
-          seeds.map((t, i) => ({ thread_id: thread.id, seq: i + 1, role: t.role, content: t.content, seeded: true })),
+          // Seed rows carry the current time, not their real age, so they are
+          // not live turns (live_turn defaults false) and recent-turn
+          // grounding (recentOperatorTurns) skips them.
+          seeds.map((t, i) => ({ thread_id: thread.id, seq: i + 1, role: t.role, content: t.content })),
         );
       }
     }
@@ -93,8 +94,8 @@ async function appendExchange({ actorId, threadId, expectedSeq, context, userTex
     if (threadId && (!Number.isInteger(expectedSeq) || expectedSeq !== tail)) return null;
     const nextSeq = tail + 1;
     await trx('ib_thread_turns').insert([
-      { thread_id: thread.id, seq: nextSeq, role: 'user', content: String(userText) },
-      { thread_id: thread.id, seq: nextSeq + 1, role: 'assistant', content: String(assistantText) },
+      { thread_id: thread.id, seq: nextSeq, role: 'user', content: String(userText), live_turn: true },
+      { thread_id: thread.id, seq: nextSeq + 1, role: 'assistant', content: String(assistantText), live_turn: true },
     ]);
     await trx('ib_threads').where('id', thread.id)
       .update({ last_active_at: trx.fn.now(), updated_at: trx.fn.now() });
@@ -194,14 +195,17 @@ function operatorText(content) {
  * refuses prior-turn grounding entirely when it has no valid bound to pass —
  * this only enforces whatever bound it IS given.
  */
+const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes = 30, maxSeq = null } = {}) {
-  if (!actorId || !threadId) return [];
+  // Nothing to read when threads are off, or for a missing actor or a
+  // malformed thread id (never sent to the uuid column).
+  if (!threadsEnabled() || !actorId || !THREAD_ID_RE.test(String(threadId || ''))) return [];
   const thread = await db('ib_threads').where({ id: threadId, admin_actor_id: actorId }).first();
   if (!thread) return [];
   let query = db('ib_thread_turns')
     .where('thread_id', threadId)
     .where('role', 'user')
-    .where('seeded', false)
+    .where('live_turn', true)
     .where('created_at', '>=', db.raw("NOW() - (? || ' minutes')::interval", [maxAgeMinutes]));
   if (Number.isInteger(maxSeq)) query = query.where('seq', '<=', maxSeq);
   // Continuation turns are excluded before the limit, so they never crowd

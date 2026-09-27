@@ -957,7 +957,6 @@ function isCandidateToken(token) {
   return token.length >= 4 && !/^[0-9]+$/.test(token) && !GENERIC_PRODUCT_WORDS.has(token);
 }
 
-const UUID_RE_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Spoken percent (Codex round-2 P2): "20 percent"/"per cent"/"pct" is the
 // same concentration qualifier as "20%" — a voice-typed "We bought Southern
@@ -1161,6 +1160,9 @@ function qualifierConflict(rawText, phrases, identityNames) {
 const CLOSED_VOCAB = new Set([
   // pronouns/determiners
   'i', 'we', 'you', 'it', 'its', 's', 'this', 'that', 'these', 'those',
+  // contraction fragments once the apostrophe is dropped ("we've", "we're",
+  // "we'll", "I'm", "we'd"); "n't" leaves "didn"/"don", which stay outside
+  're', 've', 'll', 'm', 'd',
   'a', 'an', 'the', 'some', 'more', 'another', 'our', 'your', 'my', 'me', 'us', 'them', 'they',
   // auxiliaries/filler
   'can', 'could', 'would', 'will', 'please', 'just', 'also', 'now', 'go', 'ahead', 'do', 'did',
@@ -1337,9 +1339,11 @@ async function productsNamedIn(rawText) {
 // word: "We ordered Taurus SC" never adds stock before it arrives.
 // create_restock_request orders more, so it needs an ordering word and no
 // receipt word: "We received Taurus SC" never opens a request.
-const RECEIPT_WORDS = new Set(['bought', 'buy', 'purchase', 'purchased', 'picked', 'received', 'receive', 'restocked',
+// Only completed-purchase or receipt words count for adjust_stock: "please
+// buy Taurus SC" asks for an order, so "buy" is an ordering word.
+const RECEIPT_WORDS = new Set(['bought', 'purchased', 'picked', 'received', 'receive', 'restocked',
   'delivered', 'arrived', 'came', 'add', 'added', 'adding', 'put', 'got', 'log', 'logged', 'record', 'recorded']);
-const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock']);
+const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock', 'buy']);
 // A receipt phrase grounds only a restock: a count correction or a write-off
 // from the same words is never inferred.
 // `texts` run newest first: the current prompt, any bare turns the look-back
@@ -1361,14 +1365,25 @@ function operationMatches(toolName, texts, preview) {
   return false;
 }
 
+const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
+
 async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null } = {}) {
+  const grounded = await groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName });
+  if (grounded?.productId) return { productId: grounded.productId };
+  return grounded?.mismatch ? { ...TARGET_UNAVAILABLE, code: 'target_relationship_mismatch' } : TARGET_UNAVAILABLE;
+}
+
+async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
   if (!preview?.product?.id) return null;
   // `texts` are the operator's words the grounding rests on (this prompt,
   // plus the prior turn that named the product): they must also ask for the
   // same operation as the tool (operationMatches).
-  const decide = (named, texts) => {
-    if (named.size !== 1) return null; // 0 = nothing to ground on; 2+ = ambiguous, refuse
-    const [id] = named;
+  // `result` is productsNamedIn's { named, conflict } for one text. A
+  // conflict or 2+ products refuses; exactly one grounds when it is the
+  // preview's product and the words ask for this tool's operation.
+  const decide = (result, texts) => {
+    if (result.conflict || result.named.size !== 1) return null;
+    const [id] = result.named;
     if (id !== preview.product.id) return { mismatch: true };
     return operationMatches(toolName, texts, preview) ? { productId: id } : null;
   };
@@ -1381,34 +1396,21 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
   // CLOSED_VOCAB). Qualifier conflicts are checked across the same spans, so
   // a concentration after a colon ("Taurus SC: 20%") still refuses.
   const current = await productsNamedIn(prompt);
-  // A qualifier conflict ("Taurus 20% SC" against a "Taurus 10% SC" catalog
-  // row) never grounds, on this text or any other — never fall back either.
-  if (current.conflict) return null;
-  const fromCurrent = decide(current.named, [prompt]);
-  if (fromCurrent) return fromCurrent;
-  if (current.named.size > 0) return null; // current prompt named something (ambiguous) — never fall back
-  if (!isBareFollowUp(prompt)) return null;
-  // A stale tab's view of the thread must never ground off turns it never
-  // saw (Codex round-2 P2, two tabs on one thread): `observedSeq` is the
-  // requesting tab's own OBSERVED tail seq, threaded in from the route's
-  // thread_seq. A missing or invalid observed seq refuses prior-turn
-  // grounding entirely — it never falls back to reading the newest server
-  // turns blind.
-  if (!Number.isInteger(observedSeq)) return null;
+  // A prompt that names anything (or carries a conflict) stands on its own.
+  if (current.conflict || current.named.size) return decide(current, [prompt]);
+  // A stale tab never grounds off turns it never saw (two tabs on one
+  // thread): observedSeq is the requesting tab's own tail seq, from the
+  // route's thread_seq. Without one there is no prior-turn grounding at all.
+  if (!isBareFollowUp(prompt) || !Number.isInteger(observedSeq)) return null;
   const IbThreads = require('./threads');
-  if (!IbThreads.threadsEnabled() || !actorId || !UUID_RE_THREAD.test(String(threadId || ''))) return null;
-  // Newest first (recentOperatorTurns' own contract) and resolved ONE AT A
-  // TIME, never concatenated: a turn ending "...Demand" and the next-older
-  // turn beginning "CS..." must never combine into a phantom "Demand CS" —
-  // joining them would let a qualifier (or a name) spill across a turn
-  // boundary that was never actually adjacent in what the operator said.
+  // Newest first and resolved ONE AT A TIME, never concatenated: a turn
+  // ending "...Demand" and the next-older turn beginning "CS..." must never
+  // combine into a phantom "Demand CS".
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30, maxSeq: observedSeq });
   const skipped = [];
   for (const turn of turns) {
     const turnResult = await productsNamedIn(turn);
-    if (turnResult.conflict) return null; // a conflict on any prior turn refuses outright
-    if (turnResult.named.size > 1) return null; // that turn alone is ambiguous — refuse, don't guess
-    if (turnResult.named.size === 1) return decide(turnResult.named, [prompt, ...skipped, turn]);
+    if (turnResult.conflict || turnResult.named.size) return decide(turnResult, [prompt, ...skipped, turn]);
     // Named nothing. Only a bare reply ("yes", "1 bottle") has no opinion
     // and may be skipped; any other turn ("Actually use Unlisted Chemical
     // instead") may be a correction this catalog can't read, so the scan
@@ -1422,14 +1424,14 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId = null, threadId = null, threadSeq = null }) {
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq }) {
   const { targetClause, UUID_RE } = require('./task-context');
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
   // The anchored inventory grammar below excludes communication/note intents.
   const clause = String(toolName === 'update_restock_request' ? targetClause(prompt, true) : prompt)
     .trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
-  const unavailable = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
+  const unavailable = TARGET_UNAVAILABLE;
   const inventoryPage = /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '');
   const query = new URLSearchParams(typeof pageData.search === 'string' ? pageData.search : '');
   const quantity = '(?:[0-9]+(?:\\.[0-9]+)?|one|two|three|four|five|six|seven|eight|nine|ten|zero)';
@@ -1481,12 +1483,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // No pattern matched at all, so the operator named no target the grammar
   // can read: this is the one place the free-phrasing fallback runs (and,
   // for a bare follow-up like "1 bottle", recent operator turns).
-  if (!selected) {
-    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
-    if (fallback?.productId) return { productId: fallback.productId };
-    if (fallback?.mismatch) return { ...unavailable, code: 'target_relationship_mismatch' };
-    return unavailable;
-  }
+  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
   let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
   let literal = null;
   const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);

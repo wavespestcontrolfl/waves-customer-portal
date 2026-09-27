@@ -8,6 +8,7 @@
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+process.env.GATE_IB_THREADS = 'true';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -30,9 +31,9 @@ function makeThreadsDb({ threads = [], turns = [] }) {
       const api = {
         where(colOrFn, op, val) {
           if (arguments.length === 2) {
-            // where(col, val); a row without `seeded` is an ordinary turn (the
-            // column's default is false).
-            rows = rows.filter((r) => (colOrFn === 'seeded' ? Boolean(r.seeded) : r[colOrFn]) === op);
+            // where(col, val); a fixture row without `live_turn` stands for an
+            // ordinary live turn, so only an explicit false is filtered.
+            rows = rows.filter((r) => (colOrFn === 'live_turn' ? r.live_turn !== false : r[colOrFn]) === op);
           } else if (arguments.length === 3 && op === '>=' && val && val.__minAgeMinutes != null) {
             const cutoff = Date.now() - val.__minAgeMinutes * 60000;
             rows = rows.filter((r) => new Date(r.created_at).getTime() >= cutoff);
@@ -133,16 +134,29 @@ describe('IbThreads.recentOperatorTurns', () => {
     expect(result).toEqual(['ok', 'yes', 'We bought a jug of Alpine WSG']);
   });
 
-  test('turns seeded from client history (no real age) are skipped', async () => {
+  test('turns that are not live (seeded from client history, or written before live_turn existed) are skipped', async () => {
     const IbThreads = withThreadsModule({
       threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
       turns: [
-        { thread_id: THREAD_ID, seq: 1, role: 'user', content: 'We bought a jug of Alpine WSG', seeded: true, created_at: minutesAgo(1) },
+        { thread_id: THREAD_ID, seq: 1, role: 'user', content: 'We bought a jug of Alpine WSG', live_turn: false, created_at: minutesAgo(1) },
         { thread_id: THREAD_ID, seq: 3, role: 'user', content: 'yes', created_at: minutesAgo(1) },
       ],
     });
     const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
     expect(result).toEqual(['yes']);
+  });
+
+  test('threads off: nothing is read', async () => {
+    const IbThreads = withThreadsModule({
+      threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
+      turns: [{ thread_id: THREAD_ID, seq: 1, role: 'user', content: 'We bought a jug of Alpine WSG', created_at: minutesAgo(1) }],
+    });
+    process.env.GATE_IB_THREADS = 'false';
+    try {
+      expect(await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 })).toEqual([]);
+    } finally {
+      process.env.GATE_IB_THREADS = 'true';
+    }
   });
 
   test('an assistant-only mention never comes back, even when it is the most recent turn', async () => {
