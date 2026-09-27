@@ -364,6 +364,19 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for the shell and any burrow already visible. Never approach or disturb the animal or its burrow; do not handle or block either.",
         "why": "Shell shape and a burrow nearby point to a protected gopher tortoise versus another turtle."
+      },
+      "generic_guidance": {
+        "referral": "protected_leave_alone",
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://myfwc.com/wildlifehabitats/wildlife/gopher-tortoise/"
+        ]
       }
     },
     {

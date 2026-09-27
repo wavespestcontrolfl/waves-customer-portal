@@ -160,6 +160,6 @@ website's `/pest-identifier/` pages, or anywhere else — these need to happen:
    mint approval as part of an unrelated species edit.
 3. Confirm the hard service rules (termite suggestive-only, honey bee
    referral, rodent/bed bug inspection-first, wildlife never auto-priced,
-   venomous-snake handling) still read correctly once real customers can see
-   them — the jest suite enforces the rules mechanically, but it can't judge
-   tone.
+   protected-turtle no-treatment routing, venomous-snake handling) still read
+   correctly once real customers can see them — the jest suite enforces the
+   rules mechanically, but it can't judge tone.

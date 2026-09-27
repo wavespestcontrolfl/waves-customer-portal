@@ -1186,6 +1186,9 @@ function pickVerifiedWinner(a, b) {
 }
 
 function combineEscalation(geminiCandidates, escalationResult, contextSlugs, hiddenKind = null) {
+  const visibleGeminiCandidates = hiddenKind
+    ? geminiCandidates.filter((candidate) => candidate.entry?.kind !== hiddenKind)
+    : geminiCandidates;
   // Codex round-0 P1 (round 4): `dispatch()` does not locally validate a
   // provider's JSON against the requested schema — an `ok:true` response
   // whose `candidates` field isn't an array (or is missing) must be
@@ -1195,11 +1198,8 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs, hid
     // OpenAI unavailable (or answered something invalid) — Gemini's result
     // stands, capped from reading pretty_sure by `unansweredTrigger` inside
     // `buildAnswer`.
-    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false, openaiStoodInAlone: false };
+    return { finalCandidates: visibleGeminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false, openaiStoodInAlone: false };
   }
-  const visibleGeminiCandidates = hiddenKind
-    ? geminiCandidates.filter((c) => c.entry?.kind !== hiddenKind)
-    : geminiCandidates;
   const openaiCandidates = dedupeCandidates(
     sanitizedCandidatesOf(validLegJson(escalationResult, 'escalation')).filter(isValidEscalationCandidate).map(resolveCandidate)
       .map((c) => stripUncontextedTraits(c, contextSlugs)),

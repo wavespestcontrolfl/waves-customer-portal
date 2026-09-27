@@ -1480,6 +1480,47 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     });
   });
 
+  test('gate on: a real draft gopher-tortoise climb stores protected no-treatment routing', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor('gopher-tortoise');
+    expect(engineResult).toMatchObject({
+      v2: {
+        tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'turtles' },
+        entry: null,
+        referral: { kind: 'protected_leave_alone' },
+      },
+      v1: {
+        species_slug: null,
+        service_line: 'none',
+        urgency: 'low',
+        report_contract: {
+          service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+        },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('referral');
+      expect(body.result.label).toBeNull();
+      expect(body.v2.answer.headline).toBe('Looks like a turtle or tortoise');
+      expect(body.v2.answer.headline).not.toMatch(/gopher/i);
+      expect(body.v2.referral.text).toMatch(/protected by Florida law|no treatment is needed/i);
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'low' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({
+        service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+      });
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('referral');
+      expect(detail.v2.referral.kind).toBe('protected_leave_alone');
+    });
+  });
+
   test.each(['subterranean-termite', 'drywood-termite'])('gate on: a draft %s result preserves termite inspection and structural-risk data', async (slug) => {
     mockGateState.photoIdV2 = true;
     const engineResult = realCatalogV2ResultFor(slug);

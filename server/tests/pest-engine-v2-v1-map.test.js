@@ -180,6 +180,28 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
   });
 
+  test('a high-confidence draft gopher tortoise climb keeps protected no-treatment guidance', () => {
+    const built = answerFor('gopher-tortoise', { approved: false });
+    expect(built).toMatchObject({
+      answer: { level: 'group', node_id: 'turtles', wording: 'group_only' },
+      entry: null,
+      topEntrySlug: null,
+      referral: { kind: 'protected_leave_alone' },
+    });
+    expect(built.answer.headline).toBe('Looks like a turtle or tortoise');
+    expect(built.answer.headline).not.toMatch(/gopher/i);
+    expect(built.referral.text).toMatch(/protected by Florida law/i);
+    expect(built.referral.text).toMatch(/leave it undisturbed|no treatment is needed/i);
+
+    const mapped = mapToV1(built);
+    expect(mapped).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'low' });
+    expect(mapped.report_contract).toMatchObject({
+      identification: { slug: null, category: 'wildlife', contested: true },
+      safety: { stinging: false, venomous: false, disease_vector: false, structural_threat: false },
+      service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
+    });
+  });
+
   test('low-confidence and mixed-wildlife results do not receive bat-specific guidance', () => {
     const base = {
       disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,

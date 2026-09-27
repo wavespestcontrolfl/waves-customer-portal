@@ -777,6 +777,31 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.v2.candidates.map(candidate => candidate.slug)).not.toContain(hiddenSlug);
   });
 
+  test.each([
+    ['invalid', { ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: {} } }],
+    ['timed out', { ok: false, reason: 'openai_timeout' }],
+  ])('an organism read cannot restore a sign candidate when escalation is %s', async (_outcome, escalationResult) => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'termite-mud-tubes', confidence: 0.95 }], undefined, 'organism'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'termite-mud-tubes', confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce(escalationResult);
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result.ok).toBe(true);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(result.v2.answer).toMatchObject({ level: 'unknown', node_id: null });
+    expect(result.v2.entry).toBeNull();
+    expect(result.v2.candidates).toEqual([]);
+    expect(result.v2.answer.headline).not.toMatch(/termite/i);
+    expect(result.v1).toMatchObject({ species_slug: null, service_line: 'pest', urgency: 'low' });
+    expect(result.v1.report_contract.safety).toMatchObject({
+      disease_vector: false, structural_threat: false,
+    });
+  });
+
   test('agreement carries the WINNING side\'s own trait evidence, not Gemini\'s stale/empty verify — Codex round-0 P1 (PR-2b wiring round 2)', async () => {
     dispatch
       .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))

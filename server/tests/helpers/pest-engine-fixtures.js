@@ -116,6 +116,7 @@ const FIXTURE = buildFixtureCatalog({
   },
   groups: [
     { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant', next_photo: { ask: 'Ant group node photo', why: 'Ant group why' } },
+    { id: 'termites', label: 'Termites', category: 'insect', generic: 'termite activity' },
     { id: 'wasps-bees', label: 'Wasps, bees & hornets', category: 'insect', generic: 'a stinging insect' },
     { id: 'rodents', label: 'Rats & mice', category: 'insect', generic: 'a rat, mouse, or other rodent' },
     { id: 'turtles', label: 'Turtles & tortoises', category: 'wildlife', generic: 'a turtle or tortoise' },
@@ -215,6 +216,19 @@ const FIXTURE = buildFixtureCatalog({
       service: { line: 'pest', key: null, label: 'Rodent Inspection', inspection_first: true, referral: null },
       urgency: 'high', verification: [],
     }),
+    {
+      slug: 'termite-mud-tubes', common_name: 'Termite Mud Tubes', scientific_name: 'Subterranean termites (sign)', kind: 'sign',
+      group: 'termites', subgroup: null, verdict: 'call', role: 'structural_pest', risk: 'property', action: 'inspection',
+      safety_line: null,
+      safety: { stings: false, venomous: false, structural: true, toxic_to_pets: false, disease_vector: false, irritant: false },
+      range: 'common', active_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      traits: ['Packed-earth tubes on a foundation', 'Hollow covered tunnel'],
+      look_alikes: [],
+      copy: { what_it_means: 'A sign consistent with termite activity.', fact: 'Subterranean termites use mud tubes to retain moisture.' },
+      links: {},
+      service: { line: 'termite', key: null, label: 'Termite Inspection', inspection_first: true, referral: null },
+      urgency: 'high', review: DRAFT, verification: [],
+    },
     ownerApproved({
       slug: 'gopher-tortoise', common_name: 'Gopher Tortoise', scientific_name: 'Gopherus polyphemus', kind: 'organism',
       group: 'turtles', subgroup: null, verdict: 'ally', role: 'protected_wildlife', risk: 'low', action: 'report',

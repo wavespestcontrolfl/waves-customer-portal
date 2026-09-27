@@ -418,6 +418,25 @@ describe('index.json — groups, subgroups, next_photo', () => {
     }
   });
 
+  test('the turtles fallback retains the shared protected-wildlife no-treatment contract', () => {
+    const node = catalog.getGroup('turtles');
+    const descendants = allEntries.filter((entry) => entry.group === node.id);
+    expect(descendants.length).toBeGreaterThan(0);
+    expect(node.generic_guidance).toMatchObject({
+      referral: 'protected_leave_alone',
+      compatibility: {
+        serviceLine: 'none', serviceKey: null, serviceLabel: 'No Treatment Needed',
+        inspectionRequired: false, urgency: 'low',
+      },
+    });
+    expect(descendants.every((entry) => entry.safety.protected === true)).toBe(true);
+    expect(descendants.every((entry) => entry.service.line === 'none')).toBe(true);
+    expect(descendants.every((entry) => entry.service.key === null)).toBe(true);
+    expect(descendants.every((entry) => entry.service.label === 'No Treatment Needed')).toBe(true);
+    expect(descendants.every((entry) => entry.service.inspection_first === false)).toBe(true);
+    expect(descendants.every((entry) => entry.service.referral === 'protected_leave_alone')).toBe(true);
+  });
+
   test('every look_alike_groups entry names real groups', () => {
     for (const lag of index.look_alike_groups) {
       for (const g of lag.groups) expect(groupIds.has(g)).toBe(true);
