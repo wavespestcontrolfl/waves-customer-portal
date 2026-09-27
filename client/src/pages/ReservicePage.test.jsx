@@ -186,6 +186,82 @@ describe('ReservicePage states', () => {
 
     expect(await screen.findByText(/you're covered/)).toBeInTheDocument();
   });
+
+  it('shows address-review recovery with no selectable times when browse is blocked', async () => {
+    stubFetch({ get: jsonResponse(bookablePayload({
+      availability: null,
+      location_review_required: true,
+    })) });
+    renderPage();
+
+    expect(await screen.findByText(/confirm your service address before we can schedule this re-service online/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose .* on/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pick a time below/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Your re-service is covered at/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Text or call/i).length).toBeGreaterThan(0);
+  });
+
+  it('clears stale slots when staff review lands during a date search', async () => {
+    const fetchMock = stubFetch({
+      findSlots: jsonResponse({
+        error: 'We need to confirm your service address before we can schedule this re-service online. Text or call us and we’ll take care of it.',
+        code: 'LOCATION_REVIEW_REQUIRED',
+      }, 409),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'Tuesday afternoon' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByText(/confirm your service address before we can schedule this re-service online/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose .* on/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pick a time below/i)).not.toBeInTheDocument();
+    const search = fetchMock.mock.calls.find(([url]) => String(url).includes('/find-slots'));
+    expect(JSON.parse(search[1].body)).toEqual({ query: 'Tuesday afternoon', lane: 'pest' });
+  });
+
+  it('clears a selected slot when staff review lands during confirm and does not re-offer it', async () => {
+    const fetchMock = stubFetch({
+      post: jsonResponse({
+        error: 'We need to confirm your service address before we can schedule this re-service online. Text or call us and we’ll take care of it.',
+        code: 'LOCATION_REVIEW_REQUIRED',
+      }, 409),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).not.toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/confirm your service address before we can schedule this re-service online/i).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pick a time below/i)).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url, opts]) => !String(url).includes('/ui-flags') && opts?.method !== 'POST')).toHaveLength(1);
+  });
+
+  it('keeps the ordinary slot-race refresh contract and offers the replacement time', async () => {
+    const replacement = bookablePayload().availability;
+    replacement.days[0].slots[0] = {
+      ...replacement.days[0].slots[0], start_time: '14:00', end_time: '14:45', start_label: '2:00 PM', end_label: '2:45 PM',
+    };
+    stubFetch({
+      post: jsonResponse({
+        error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: replacement,
+      }, 409),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+
+    expect(await screen.findByText(/That time was just taken/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 2:00 PM on Sunday, July 12/ })).toBeInTheDocument();
+  });
 });
 
 

@@ -20,6 +20,8 @@ jest.mock('../services/billing-lane', () => ({
 }));
 jest.mock('../services/invoice-helpers', () => ({
   invoiceAmountDue: jest.fn((inv) => Number(inv.total)),
+  isInvoiceCollectibleStatus: jest.fn((status) => !['paid', 'void'].includes(status)),
+  invoiceWithdrawnFromCustomer: jest.fn(() => false),
 }));
 jest.mock('../services/payer', () => ({
   resolveForInvoice: jest.fn(async () => ({ payerId: null })),
@@ -94,15 +96,16 @@ const OVERDUE_INVOICE = {
 };
 
 // { claimChain } so tests can assert the claim was or wasn't attempted.
-function armOneVisit() {
-  const claimChain = chain({ result: 1 });
+function armOneVisit({ claimed = 1 } = {}) {
+  const claimChain = chain({ result: claimed });
+  const releaseChain = chain({ result: 1 });
   setDbQueues({
     sms_templates: [chain({ first: { is_active: true } })],
-    scheduled_services: [chain({ result: [VISIT] }), claimChain],
+    scheduled_services: [chain({ result: [VISIT] }), claimChain, releaseChain],
     invoices: [chain({ result: [OVERDUE_INVOICE] })],
     activity_log: [chain({ result: [] })],
   });
-  return { claimChain };
+  return { claimChain, releaseChain };
 }
 
 function permitChannels(permitted) {
@@ -115,9 +118,51 @@ function permitChannels(permitted) {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.PREVISIT_BALANCE_REMINDER = 'true';
+  require('../services/invoice-helpers').invoiceWithdrawnFromCustomer.mockImplementation(() => false);
   collectionsChannelVerdict.mockResolvedValue({ permitted: true, eligibleInvoiceIds: null });
   AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient.mockResolvedValue({ recipient: { email: 'taylor@example.com' } });
   AccountMembershipEmail.sendPrevisitBalanceReminder.mockResolvedValue({ ok: true });
+});
+
+test('an incomplete recent-contact snapshot fails closed before claiming or sending', async () => {
+  const claimChain = chain({ result: 1 });
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    scheduled_services: [chain({ result: [VISIT] }), claimChain],
+    invoices: [chain({ result: [OVERDUE_INVOICE] })],
+    activity_log: [chain({ result: Promise.reject(new Error('activity read unavailable')) })],
+  });
+
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
+    .resolves.toMatchObject({ sent: 0, skipped: 1 });
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+});
+
+test('the shared fresh selector preserves only the complete eligible balance', async () => {
+  permitChannels({ sms: true, email: false });
+  require('../services/invoice-helpers').invoiceWithdrawnFromCustomer
+    .mockImplementation((invoice) => invoice.id === 'inv-withdrawn');
+  const now = new Date('2026-08-14T15:00:00Z');
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    scheduled_services: [chain({ result: [VISIT] }), chain({ result: 1 })],
+    invoices: [chain({ result: [
+      OVERDUE_INVOICE,
+      { ...OVERDUE_INVOICE, id: 'inv-paid', status: 'paid', total: '500.00' },
+      { ...OVERDUE_INVOICE, id: 'inv-withdrawn', total: '400.00' },
+      { ...OVERDUE_INVOICE, id: 'inv-zero', total: '0.00' },
+      { ...OVERDUE_INVOICE, id: 'inv-recent', total: '300.00', last_reminder_at: now },
+      { ...OVERDUE_INVOICE, id: 'inv-legacy', total: '200.00' },
+    ] })],
+    activity_log: [chain({ result: [{ metadata: { invoiceId: 'inv-legacy' } }] })],
+  });
+
+  await expect(runSweep({ now })).resolves.toMatchObject({ sent: 1, skipped: 0 });
+  expect(require('../services/sms-template-renderer').renderSmsTemplate)
+    .toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amount: '96.60' }));
+  expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-9'] }));
 });
 afterEach(() => {
   delete process.env.PREVISIT_BALANCE_REMINDER;
@@ -134,13 +179,85 @@ test('both channels policy-denied ⇒ skipped BEFORE the one-per-appointment cla
   expect(ContactLedger.recordContact).not.toHaveBeenCalled();
 });
 
+test('losing the appointment claim prevents every ledger entry and send', async () => {
+  const { claimChain, releaseChain } = armOneVisit({ claimed: 0 });
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
+    .resolves.toMatchObject({ sent: 0, skipped: 1 });
+  expect(claimChain.whereNull).toHaveBeenCalledWith('balance_reminder_sent_at');
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+  expect(releaseChain.update).not.toHaveBeenCalled();
+});
+
+test.each([
+  [true, true, false],
+  [true, false, false],
+  [false, true, false],
+  [false, false, true],
+])('Text delivered=%s, Email delivered=%s leaves claim released=%s', async (smsDelivered, emailDelivered, released) => {
+  const { releaseChain } = armOneVisit();
+  sendCustomerMessage.mockResolvedValueOnce({ sent: smsDelivered, blocked: !smsDelivered });
+  AccountMembershipEmail.sendPrevisitBalanceReminder.mockResolvedValueOnce({ ok: emailDelivered });
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
+    .resolves.toMatchObject({ sent: released ? 0 : 1, skipped: released ? 1 : 0 });
+  expect(ContactLedger.recordContact.mock.calls.map(([input]) => input.channel)).toEqual(['sms', 'email']);
+  expect(releaseChain.update).toHaveBeenCalledTimes(released ? 1 : 0);
+  if (released) expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+});
+
+test.each([
+  ['sms', 'payer resolve failed', ['inv-9']],
+  ['email', 'candidate bound hit', []],
+])('an incomplete %s balance snapshot (%s) skips before the claim', async (incompleteChannel, reason, eligibleInvoiceIds) => {
+  const { claimChain } = armOneVisit();
+  collectionsChannelVerdict.mockImplementation(async ({ channel }) => ({
+    permitted: true,
+    eligibleInvoiceIds: channel === incompleteChannel ? eligibleInvoiceIds : ['inv-9'],
+    ...(channel === incompleteChannel ? { balanceIncomplete: reason } : {}),
+  }));
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 0, skipped: 1 });
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+test('late dues do not authorize a reminder from an incomplete empty invoice snapshot', async () => {
+  const claimChain = chain({ result: 1 });
+  require('../services/billing-lane').resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+  require('../services/billing-lane').monthlyDuesCollected.mockResolvedValueOnce(false);
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    scheduled_services: [chain({ result: [{ ...VISIT, monthly_rate: '69.00', billing_day: 1 }] }), claimChain],
+    invoices: [chain({ result: [] })],
+    activity_log: [chain({ result: [] })],
+  });
+  collectionsChannelVerdict.mockResolvedValue({
+    permitted: true, eligibleInvoiceIds: [], balanceIncomplete: 'payer resolve failed',
+  });
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
+    .resolves.toMatchObject({ sent: 0, skipped: 1 });
+  expect(collectionsChannelVerdict).toHaveBeenCalledTimes(2);
+  expect(collectionsChannelVerdict).toHaveBeenCalledWith(expect.objectContaining({ offLedgerBalanceCents: 6900 }));
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+});
+
 test('sms allowed + email denied ⇒ SMS only, hasEmailLeg declared false, one sms ledger row recorded before the send', async () => {
   armOneVisit();
   permitChannels({ sms: true, email: false });
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ hasEmailLeg: false }));
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    hasEmailLeg: false,
+    withSmsHandoff: expect.any(Function),
+    providerPreSendCheck: expect.any(Function),
+  }));
+  expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('preSendCheck');
   expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
   const channels = ContactLedger.recordContact.mock.calls.map(([args]) => args.channel);
   expect(channels).toEqual(['sms']);
@@ -162,18 +279,9 @@ test('sms denied + email allowed ⇒ email only, its own ledger row recorded bef
 });
 
 test('an unavailable ledger on the email leg skips that email (record-then-send), and the claim releases when no leg lands', async () => {
-  armOneVisit();
+  const { releaseChain } = armOneVisit();
   permitChannels({ sms: false, email: true });
   ContactLedger.recordContact.mockRejectedValueOnce(new Error('ledger down'));
-  // The failed-visit release re-queries scheduled_services once more.
-  const releaseChain = chain({ result: 1 });
-  const originalImpl = db.getMockImplementation();
-  db.mockImplementation((table) => {
-    if (table === 'scheduled_services') {
-      try { return originalImpl(table); } catch { return releaseChain; }
-    }
-    return originalImpl(table);
-  });
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 0, skipped: 1 });
   expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();

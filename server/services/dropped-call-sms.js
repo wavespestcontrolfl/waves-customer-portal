@@ -112,12 +112,17 @@ function detectDroppedMidIntake({ durationSeconds, transcription, extracted = {}
  * Whether the caller is a prospect the automatic text may go to. A customer
  * record CREATED FROM THIS CALL is still a new prospect (Step 3 mints one
  * for any named live caller, address or not) — only a PRE-EXISTING linked
- * customer is excluded. Inbound only: the transactional consent basis is
- * "they called us", and on outbound legs to_phone is the prospect's own
- * number. call_nature must be POSITIVELY 'new_lead' (fail closed).
+ * customer is excluded. Inbound only by default: the transactional consent
+ * basis is "they called us", and on outbound legs to_phone is the
+ * prospect's own number. `outboundEligible` (owner ruling 2026-09-26,
+ * GATE_CALL_OUTBOUND_RETURN_MESSAGES) lets an OUTBOUND return call through
+ * on the SAME terms once the processor has confirmed prior contact — the
+ * caller passes it as false whenever the gate is off, so this stays exactly
+ * `isOutbound !== true` off-gate. call_nature must be POSITIVELY 'new_lead'
+ * (fail closed).
  */
-function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, v2Status, callNature, doNotContactRequested } = {}) {
-  return isOutbound !== true
+function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, outboundEligible = false, v2Status, callNature, doNotContactRequested } = {}) {
+  return (isOutbound !== true || outboundEligible === true)
     && (!customerId || createdCustomerFromCall === true)
     && v2Status === 'valid'
     && callNature === 'new_lead'
@@ -188,6 +193,38 @@ function callbackClause(dialedLine) {
   const digits = String(dialedLine || '').replace(/\D/g, '').replace(/^1/, '');
   if (digits.length !== 10) return '';
   return ` at (${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+// The Waves-managed line the customer actually SAW ring on an OUTBOUND call
+// (codex pre-push r1 P1 on PR #5012): call.to_phone on an outbound call is
+// the customer's OWN number (never the number to tell them to call back on),
+// and on a lead-webhook-auto-bridge call it's the STAFF cell the bridge
+// dialed first — never a number to expose to the customer either. The
+// caller ID the customer saw is call.from_phone on an ordinary outbound
+// call (the line WE dialed from), or the bridge's own recorded
+// `metadata.bridgeCallerId` (server/routes/lead-webhook.js — the SAME main
+// line the customer-facing lead leg actually dials) for the bridge source.
+// Validated against the number registry — a real managed line, never a
+// tech line, a staff-forward cell, or the AI-assistant toll-free line
+// (findByNumber reports it as a location, the SAME exclusion the fromNumber
+// selection below already applies — codex pre-push r2 P1: this predicate
+// had omitted it, so callback_clause could still point the customer at the
+// AI line even though fromNumber would have refused it) — so a
+// malformed/unregistered/toll-free candidate (or an inbound call, where
+// this is never called) returns null: the caller then omits the clause /
+// skips the fromNumber override rather than expose or invent a number.
+function outboundWavesCallerId(call = {}) {
+  let metadata = call?.metadata;
+  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
+  const candidate = call?.source === 'lead-webhook-auto-bridge'
+    ? (metadata && typeof metadata === 'object' ? metadata.bridgeCallerId : null)
+    : (call?.from_phone || null);
+  return (candidate
+    && candidate !== TWILIO_NUMBERS.tollFree?.number
+    && !!TWILIO_NUMBERS.findByNumber(candidate)
+    && !TWILIO_NUMBERS.isTechLine(candidate)
+    && !TWILIO_NUMBERS.isStaffForwardNumber(candidate))
+    ? candidate : null;
 }
 
 // Boundary source is the shared customer-SMS window module — this fence
@@ -429,9 +466,18 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     logger.warn(`[dropped-call-sms] line-type pre-check failed (continuing): ${e.code || e.name || 'lookup_error'}`);
   }
 
+  // The Waves-managed line the CUSTOMER saw ring (codex pre-push r1 P1 on
+  // PR #5012): on an outbound return call, call.to_phone is the customer's
+  // OWN number (or, on a lead-webhook-auto-bridge call, the staff cell the
+  // bridge dialed first) — outboundWavesCallerId resolves the real managed
+  // line instead. Inbound is unaffected (call.to_phone is the dialed office
+  // line, exactly as before).
+  const isOutbound = String(call?.direction || '').toLowerCase().startsWith('outbound');
+  const wavesCallerId = isOutbound ? outboundWavesCallerId(call) : call.to_phone;
+
   const body = await renderSmsTemplate(MESSAGE_TYPE, {
     first_name: capitalizeName(extracted.first_name) || 'there',
-    callback_clause: callbackClause(call.to_phone),
+    callback_clause: callbackClause(wavesCallerId),
   }, {
     workflow: MESSAGE_TYPE,
     entity_type: 'lead',
@@ -474,17 +520,18 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     metadata: {
       original_message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
-      // Reply from the line the prospect just dialed (matches the
-      // {callback_clause} in the body); only when it's one of OUR managed
+      // Reply from the SAME line the prospect saw ring (matches the
+      // {callback_clause} in the body — wavesCallerId above, never
+      // call.to_phone on outbound); only when it's one of OUR managed
       // numbers AND not the AI-assistant toll-free line — a reply to that
       // line enters the AI chat flow instead of the human comms inbox
       // (codex P1), and never a per-tech line — automated texts stay on the
       // location lines (#4053). Otherwise the location-aware default applies.
-      ...(call.to_phone
-        && call.to_phone !== TWILIO_NUMBERS.tollFree?.number
-        && !TWILIO_NUMBERS.isTechLine(call.to_phone)
-        && TWILIO_NUMBERS.findByNumber(call.to_phone)
-        ? { fromNumber: call.to_phone } : {}),
+      ...(wavesCallerId
+        && wavesCallerId !== TWILIO_NUMBERS.tollFree?.number
+        && !TWILIO_NUMBERS.isTechLine(wavesCallerId)
+        && TWILIO_NUMBERS.findByNumber(wavesCallerId)
+        ? { fromNumber: wavesCallerId } : {}),
     },
   });
 
@@ -812,5 +859,5 @@ module.exports = {
   detectDroppedMidIntake,
   eligibleNewProspect,
   MIN_CALL_SECONDS,
-  _private: { callbackClause, withinSendWindowET, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
+  _private: { callbackClause, outboundWavesCallerId, withinSendWindowET, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
 };
