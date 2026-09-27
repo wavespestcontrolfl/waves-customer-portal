@@ -21,6 +21,11 @@
  *                          then runs `dispatch(trx)` while those rows are
  *                          still held, so nothing can change under the
  *                          provider request.
+ *   providerPreSendCheck(claimMeta) — returns the replay's predicate at the
+ *                          TRUE provider boundary: twilio.js runs it after
+ *                          every other await (the executor's own work, the
+ *                          pipeline's fresh checks), immediately before its
+ *                          request, on the connection it holds.
  *   dispatch(claimMeta) — replace the frozen-body replay with a fresh,
  *                          guarded canonical send. It must return the same
  *                          canonical send outcome as the default dispatcher;
@@ -934,10 +939,22 @@ const REGISTRY = {
         // a quote sent, a lead assigned, a do-not-contact or not-a-prospect
         // call, or a conversation since the voicemail stops the queued text.
         if (meta.voicemail_phone) {
+          // A row queued before the originating call's id and time rode
+          // along carries only its sid: resolve it, so the voicemail's own
+          // call is still read by id (its text may go to a spoken callback
+          // number that call's row does not carry) and still opens the
+          // window.
+          let originCallId = meta.call_log_id || null;
+          let callAt = meta.call_created_at ? new Date(meta.call_created_at) : null;
+          if ((!originCallId || !callAt) && meta.call_sid) {
+            const origin = await conn('call_log').where({ twilio_call_sid: meta.call_sid }).first('id', 'created_at');
+            originCallId = originCallId || origin?.id || null;
+            callAt = callAt || (origin?.created_at ? new Date(origin.created_at) : null);
+          }
           const { autoTextHoldReason } = require('./auto-text-holds');
           const hold = await autoTextHoldReason(meta.voicemail_phone, {
-            callAt: meta.call_created_at ? new Date(meta.call_created_at) : undefined,
-            originCallId: meta.call_log_id || null,
+            callAt: callAt || undefined,
+            originCallId,
             excludeMessageTypes: ['voicemail_quote_link'],
             dbi: conn,
           });
@@ -948,31 +965,28 @@ const REGISTRY = {
         return failClosed('voicemail-text-back', meta.lead_id, err);
       }
     },
-    // The same recheck at the provider handoff: the executor runs recheck
-    // early, then its own recipient and policy work, so a hold that lands
-    // during those awaits (a text, a lead assigned, an estimate sent, a
-    // do-not-contact correction) still stops the queued text here,
-    // immediately before the provider request. Same shape as the
-    // recruiting and visit-summary handoffs. A confirmed hold or stale lead
-    // is a terminal refusal (onTerminal releases both claims); a read that
-    // failed (recheck fails closed as retryable) stays retryable, so the
-    // executor puts the row back on its bounded retry rail instead.
-    async smsHandoff(meta, dispatch) {
-      return db.transaction(async (trx) => {
-        const again = await REGISTRY.voicemail_lead_sms_deferred.recheck(meta, { conn: trx });
-        if (!again || again.eligible === false) {
-          const retryable = again?.retryable === true;
-          return {
-            sent: false,
-            blocked: true,
-            deliveryOutcome: 'not_sent',
-            code: retryable ? 'VOICEMAIL_TEXT_CHECK_FAILED_AT_HANDOFF' : 'VOICEMAIL_TEXT_STALE_AT_HANDOFF',
-            reason: (again && again.reason) || 'ineligible',
-            ...(retryable ? { retryable: true } : {}),
-          };
-        }
-        return dispatch(trx);
-      });
+    // The same recheck at the true provider boundary: the executor runs
+    // recheck early, then its own recipient and policy work, and the
+    // pipeline its fresh contact / suppression / consent checks — a hold
+    // that lands during any of those awaits (a text, a lead assigned, an
+    // estimate sent, a do-not-contact correction) still stops the queued
+    // text here, run by twilio.js immediately before its request. A
+    // confirmed hold or stale lead is a terminal refusal (onTerminal
+    // releases both claims); a read that failed (recheck fails closed as
+    // retryable) stays retryable, so the executor puts the row back on its
+    // bounded retry rail instead.
+    providerPreSendCheck(meta) {
+      return async ({ dbi } = {}) => {
+        const again = await REGISTRY.voicemail_lead_sms_deferred.recheck(meta, { conn: dbi || db });
+        if (again && again.eligible !== false) return { ok: true };
+        const retryable = again?.retryable === true;
+        return {
+          ok: false,
+          code: retryable ? 'VOICEMAIL_TEXT_CHECK_FAILED_AT_BOUNDARY' : 'VOICEMAIL_TEXT_STALE_AT_BOUNDARY',
+          reason: (again && again.reason) || 'ineligible',
+          ...(retryable ? { retryable: true } : {}),
+        };
+      };
     },
     async finalize(meta) {
       // Claim settlement (lead stamp 'sent' + phone-claim outcome 'sent') —
@@ -1628,6 +1642,12 @@ function deferredSmsHandoff(entryPoint, claimMeta = {}) {
   return (dispatch) => entry.smsHandoff(claimMeta, dispatch);
 }
 
+// undefined = no provider-boundary predicate registered for this entry.
+function deferredProviderPreSendCheck(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  return typeof entry?.providerPreSendCheck === 'function' ? entry.providerPreSendCheck(claimMeta) : undefined;
+}
+
 // null = no finalize registered. { ok:false } rides the durable
 // finalize_only retry rail for durableFinalize entry points.
 async function finalizeDeferredReplay(entryPoint, claimMeta = {}, ctx = {}) {
@@ -1799,6 +1819,7 @@ module.exports = {
   dispatchDeferredReplay,
   replaysWithoutPhone,
   deferredSmsHandoff,
+  deferredProviderPreSendCheck,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   runTerminalHookDurably,

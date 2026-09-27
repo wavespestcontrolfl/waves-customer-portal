@@ -274,43 +274,45 @@ describe('deferred-replay registry', () => {
       expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toMatchObject({ eligible: false, retryable: true });
     });
 
-    describe('rechecked again at the provider handoff (the executor\'s early recheck runs before its own awaits)', () => {
-      const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
-      const handoffTrx = () => {
-        const trx = jest.fn(() => firstChain({ id: 'lead-1', status: 'new' }));
-        db.transaction = jest.fn(async (fn) => fn(trx));
-        return trx;
-      };
+    describe('rechecked again at the true provider boundary (twilio.js runs it immediately before its request)', () => {
+      const { deferredProviderPreSendCheck, deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
+      const boundaryConn = () => jest.fn(() => firstChain({ id: 'lead-1', status: 'new' }));
 
-      test('a hold that lands after the early recheck stops the queued text before dispatch; the reads run on the handoff transaction', async () => {
-        const trx = handoffTrx();
+      test('the entry registers the provider-boundary predicate and no locked handoff; other entries get none', () => {
+        expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)).toBeUndefined();
+        expect(deferredProviderPreSendCheck('voicemail_lead_sms_deferred', meta)).toEqual(expect.any(Function));
+        expect(deferredProviderPreSendCheck('estimate_extension_deferred', {})).toBeUndefined();
+      });
+
+      test('a hold that lands after the early recheck refuses at the boundary — terminal — reading on the connection Twilio holds', async () => {
+        const conn = boundaryConn();
         autoTextHoldReason.mockResolvedValueOnce('lead_assigned');
-        const dispatch = jest.fn();
-        const refused = await deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch);
-        expect(refused).toMatchObject({ sent: false, blocked: true, code: 'VOICEMAIL_TEXT_STALE_AT_HANDOFF', reason: 'lead_assigned' });
-        // A confirmed hold is terminal (onTerminal releases the claims), never retried.
-        expect(refused.retryable).toBeUndefined();
-        expect(dispatch).not.toHaveBeenCalled();
-        expect(trx).toHaveBeenCalledWith('leads');
-        expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', expect.objectContaining({ originCallId: 'call-7', dbi: trx }));
+        const verdict = await deferredProviderPreSendCheck('voicemail_lead_sms_deferred', meta)({ channel: 'sms', dbi: conn });
+        expect(verdict).toEqual({ ok: false, code: 'VOICEMAIL_TEXT_STALE_AT_BOUNDARY', reason: 'lead_assigned' });
+        expect(conn).toHaveBeenCalledWith('leads');
+        expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', expect.objectContaining({ originCallId: 'call-7', dbi: conn }));
       });
 
-      test('no hold at the handoff dispatches on the handoff transaction', async () => {
-        const trx = handoffTrx();
-        const dispatch = jest.fn(async () => ({ sent: true }));
-        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toEqual({ sent: true });
-        expect(dispatch).toHaveBeenCalledWith(trx);
+      test('no hold at the boundary: the text goes', async () => {
+        expect(await deferredProviderPreSendCheck('voicemail_lead_sms_deferred', meta)({ channel: 'sms', dbi: boundaryConn() }))
+          .toEqual({ ok: true });
       });
 
-      test('an unreadable hold check at the handoff holds the send and stays retryable — the executor retries it instead of dropping the text', async () => {
-        handoffTrx();
+      test('an unreadable hold check refuses as retryable — the executor retries it instead of dropping the text', async () => {
         autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
-        const dispatch = jest.fn();
-        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toMatchObject({
-          sent: false, blocked: true, retryable: true, code: 'VOICEMAIL_TEXT_CHECK_FAILED_AT_HANDOFF',
-        });
-        expect(dispatch).not.toHaveBeenCalled();
+        expect(await deferredProviderPreSendCheck('voicemail_lead_sms_deferred', meta)({ channel: 'sms', dbi: boundaryConn() }))
+          .toEqual({ ok: false, code: 'VOICEMAIL_TEXT_CHECK_FAILED_AT_BOUNDARY', reason: 'recheck-failed', retryable: true });
       });
+    });
+
+    test('a row queued before the origin keys rode along resolves its call from the sid — read by id, window from its time', async () => {
+      const legacy = { lead_id: 'lead-1', voicemail_phone: '+19415550101', call_sid: 'CA-legacy' };
+      const callAt = new Date('2026-09-26T23:30:00.000Z');
+      db.mockReturnValueOnce(firstChain({ id: 'lead-1', status: 'new' }));
+      db.mockReturnValueOnce(firstChain({ id: 'call-legacy', created_at: callAt }));
+      expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', legacy)).toEqual({ eligible: true });
+      expect(db).toHaveBeenCalledWith('call_log');
+      expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', expect.objectContaining({ originCallId: 'call-legacy', callAt }));
     });
   });
 

@@ -387,12 +387,6 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
       && Boolean(input.metadata?.followThroughCommitmentId))
-    // The deferred voicemail quote-link replay re-runs the owner's text
-    // holds on its handoff transaction immediately before the provider
-    // request (deferred-replay-registry voicemail_lead_sms_deferred).
-    || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
-      && input.entryPoint === 'scheduled_sms_cron'
-      && input.metadata?.original_message_type === 'voicemail_quote_link')
     // Recruiting texts hold the application row through the provider
     // request: the deferred replay (deferred-replay-registry
     // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js

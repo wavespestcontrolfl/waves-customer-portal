@@ -4091,6 +4091,13 @@ function initScheduledJobs() {
               .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
                 customer_id: msg.customer_id || claimMeta.customer_id || null,
                 to_phone: msg.to_phone || null }),
+            // An entry's own predicate at the true provider boundary
+            // (twilio.js runs it immediately before its request); undefined
+            // for entries that register none.
+            providerPreSendCheck: require('./messaging/deferred-replay-registry')
+              .deferredProviderPreSendCheck(claimMeta.entry_point, { ...claimMeta,
+                customer_id: msg.customer_id || claimMeta.customer_id || null,
+                to_phone: msg.to_phone || null }),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,

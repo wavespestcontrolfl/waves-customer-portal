@@ -568,19 +568,14 @@ test('promised reschedule link can use the locked SMS handoff only with its deli
   expect(sendViaTwilio).not.toHaveBeenCalled();
 });
 
-test('the deferred voicemail quote-link replay can use the locked SMS handoff, and only as that scheduled replay', async () => {
+test('the deferred voicemail quote-link replay carries its provider-boundary predicate through to the provider — no locked handoff needed', async () => {
+  const providerPreSendCheck = jest.fn();
   const replay = { ...BASE_INPUT, purpose: 'missed_call_followup', entryPoint: 'scheduled_sms_cron',
     consentBasis: { status: 'transactional_allowed', source: 'voicemail_text_back' },
-    metadata: { original_message_type: 'voicemail_quote_link' }, withSmsHandoff: jest.fn() };
+    metadata: { original_message_type: 'voicemail_quote_link' }, providerPreSendCheck };
   expect((await sendCustomerMessage(replay)).sent).toBe(true);
-  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
-  sendViaTwilio.mockClear();
-  // Not the immediate send, and not another missed-call follow-up type.
-  for (const other of [{ entryPoint: 'voicemail_lead_sms' }, { metadata: { original_message_type: 'missed_call_text_back' } }]) {
-    expect(await sendCustomerMessage({ ...replay, ...other }))
-      .toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
-  }
-  expect(sendViaTwilio).not.toHaveBeenCalled();
+  expect(sendViaTwilio.mock.calls[0][1].providerPreSendCheck).toBe(providerPreSendCheck);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toBeFalsy();
 });
 
 test.each([
