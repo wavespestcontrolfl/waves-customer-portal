@@ -15,7 +15,8 @@
  * Everything here is best-effort and fails soft: if the network is slow or the
  * upstreams are down, getWeatherSignals resolves to { hasWeather: false } and
  * the forecast degrades to its pure seasonal baseline. Results are cached per
- * rounded coordinate for 3 hours so a popular embed can't hammer NWS/MRMS.
+ * rounded coordinate for 3 hours (never past ET midnight, when "yesterday"
+ * moves) so a popular embed can't hammer NWS/MRMS.
  */
 
 const logger = require('../logger');
@@ -26,7 +27,9 @@ const NWS_UA = 'WavesPestControl-PestForecast/1.0 (+https://www.wavespestcontrol
 const CACHE_TTL = 3 * 60 * 60 * 1000; // 3 hours
 const TIMEOUT_MS = 4000;
 
-const _cache = new Map(); // key -> { at, value }
+const _cache = new Map(); // key -> { at, day, value }
+// Last measured MRMS reading per coordinate, for the ET day it measured.
+const _rainMemo = new Map(); // key -> { day, inches }
 
 function cacheKey(lat, lng) {
   return `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
@@ -73,31 +76,35 @@ async function fetchNwsForecast(lat, lng) {
 }
 
 /**
- * Yesterday's measured rainfall (inches) at a coordinate, or null. Yesterday
- * is the ET calendar day before today — the most recent CLOSED day; MRMS's
- * current day is only a partial "so far" accumulation. Never throws: the
- * NWS signal stands on its own, so any MRMS problem degrades to NWS-only.
- * Logged once per cache fill (not per request).
+ * Measured rainfall (inches) for `day` — yesterday, the most recent CLOSED ET
+ * day; MRMS's current day is only a partial "so far" accumulation — at a
+ * coordinate, or null. A closed day's total doesn't change, so a reading
+ * already measured for `day` is reused when a later lookup the same day fails
+ * or comes back empty, rather than dropping a known total (a missing reading
+ * can read as "dry"); it is never reused for any other day. Never throws: the
+ * NWS signal stands on its own. Logged once per cache fill (not per request).
  */
-async function fetchRecentRainIn(lat, lng, key) {
+async function fetchRecentRainIn(lat, lng, key, day) {
+  const known = _rainMemo.get(key);
+  const lastGood = known && known.day === day ? known.inches : null;
   try {
-    const day = etDateString(addETDays(new Date(), -1));
     const rain = await fetchMrmsDailyRain({ latitude: lat, longitude: lng, start: day, end: day });
     if (!rain) {
       logger.warn?.(`[pest-forecast/weather] MRMS rainfall unavailable for ${key} (${day})`);
-      return null;
+      return lastGood;
     }
     const inches = rain.days.find((d) => d.date === day)?.inches;
     // A null day is a GAP (IEM backfills late), not a measured dry day —
     // Number(null) === 0 would inject a phantom 0" and falsely flag "dry".
     if (inches == null || !Number.isFinite(Number(inches))) {
       logger.info?.(`[pest-forecast/weather] MRMS has no rainfall yet for ${key} (${day})`);
-      return null;
+      return lastGood;
     }
+    _rainMemo.set(key, { day, inches: Number(inches) });
     return Number(inches);
   } catch (err) {
     logger.warn?.(`[pest-forecast/weather] MRMS lookup failed for ${key}: ${err.message}`);
-    return null;
+    return lastGood;
   }
 }
 
@@ -111,13 +118,18 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
     return flags({ hasWeather: false });
   }
 
+  const now = new Date();
+  const today = etDateString(now);
   const key = cacheKey(lat, lng);
   const hit = _cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.value;
+  // An entry never outlives its ET day: "yesterday" moves at midnight.
+  if (hit && hit.day === today && now.getTime() - hit.at < CACHE_TTL) return hit.value;
 
   // SWFL points also get yesterday's measured rainfall. Started before the
   // NWS lookup so a cache fill waits for the slower of the two, not both.
-  const rainLookup = region === 'sw' ? fetchRecentRainIn(lat, lng, key) : Promise.resolve(null);
+  const rainLookup = region === 'sw'
+    ? fetchRecentRainIn(lat, lng, key, etDateString(addETDays(now, -1)))
+    : Promise.resolve(null);
 
   let base = { hasWeather: false, tempHighF: null, precipChance: null, recentRainIn: null, source: null };
   try {
@@ -135,7 +147,7 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
   }
 
   const value = flags(base);
-  _cache.set(key, { at: Date.now(), value });
+  _cache.set(key, { at: now.getTime(), day: today, value });
   return value;
 }
 
@@ -158,6 +170,6 @@ function flags(b) {
   };
 }
 
-function _clearCache() { _cache.clear(); } // test hook
+function _clearCache() { _cache.clear(); _rainMemo.clear(); } // test hook
 
 module.exports = { getWeatherSignals, flags, _clearCache };

@@ -7,12 +7,14 @@
  *
  * computeForecast() is pure (location + signals + date in, payload out) so the
  * model is unit-testable without the network. getForecast() wraps it with the
- * live weather lookup and a 3-hour per-location response cache.
+ * live weather lookup and a 3-hour per-location response cache that never
+ * outlives the ET day (the rain signal is "yesterday's" measured total).
  */
 
 const { scorePests } = require('./pests');
 const { resolveLocation } = require('./locations');
 const { getWeatherSignals } = require('./weather');
+const { etDateString } = require('../../utils/datetime-et');
 
 const SITE = 'https://www.wavespestcontrol.com';
 const LANDING = `${SITE}/tools/pest-pressure-forecast/`;
@@ -23,7 +25,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
 const CACHE_TTL = 3 * 60 * 60 * 1000; // 3 hours
-const _cache = new Map(); // slug -> { at, value }
+const _cache = new Map(); // slug -> { at, day, value }
 
 // Portal runs on Eastern Time end-to-end; derive the calendar month/day there
 // so the seasonal curve and the "as of" label don't shift around UTC midnight.
@@ -124,12 +126,14 @@ function computeForecast(location, signals, date) {
  */
 async function getForecast({ location, zip } = {}, { now } = {}) {
   const loc = resolveLocation({ location, zip });
+  const at = Date.now();
+  const today = etDateString(new Date(at));
   const cached = _cache.get(loc.slug);
-  if (cached && Date.now() - cached.at < CACHE_TTL) return cached.value;
+  if (cached && cached.day === today && at - cached.at < CACHE_TTL) return cached.value;
 
   const signals = await getWeatherSignals({ lat: loc.lat, lng: loc.lng, region: loc.region });
   const value = computeForecast(loc, signals, now || new Date());
-  _cache.set(loc.slug, { at: Date.now(), value });
+  _cache.set(loc.slug, { at, day: today, value });
   return value;
 }
 

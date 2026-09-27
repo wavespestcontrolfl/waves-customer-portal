@@ -11,7 +11,10 @@
  * mrms-qpe's own fetch/parse contract is covered by rain-engine-mrms.test.js;
  * this suite mocks it and pins the enrichment: a measured reading (0"
  * included) → 'nws+mrms'; a gap or an outage degrades to NWS-only, never a
- * phantom 0"; "yesterday" is the ET calendar day, not UTC's.
+ * phantom 0"; "yesterday" is the ET calendar day, not UTC's. Freshness: no
+ * cache carries a reading past ET midnight (when "yesterday" moves), and a
+ * day's measured reading survives a later same-day outage instead of being
+ * dropped — a missing reading can read as "dry".
  */
 
 jest.mock('../services/mrms-qpe');
@@ -19,6 +22,7 @@ jest.mock('../services/mrms-qpe');
 const { fetchMrmsDailyRain } = require('../services/mrms-qpe');
 const logger = require('../services/logger');
 const { getWeatherSignals, _clearCache } = require('../services/pest-forecast/weather');
+const forecast = require('../services/pest-forecast/forecast');
 
 const BRADENTON = { lat: 27.4989, lng: -82.5748, region: 'sw' };
 
@@ -58,7 +62,9 @@ describe('getWeatherSignals MRMS rainfall enrichment (public pest forecast)', ()
   beforeEach(() => {
     jest.useFakeTimers({ ...ONLY_DATE, now: MIDDAY_ET });
     _clearCache();
+    forecast._clearCache();
     jest.clearAllMocks();
+    fetchMrmsDailyRain.mockReset();
     mockNws();
     warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
     infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
@@ -175,5 +181,75 @@ describe('getWeatherSignals MRMS rainfall enrichment (public pest forecast)', ()
     await getWeatherSignals(BRADENTON);
 
     expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(1);
+  });
+
+  describe('freshness', () => {
+    // 11:30 PM ET on 07-15, then 12:30 AM ET on 07-16 — one hour apart, well
+    // inside the 3h cache lifetime, but "yesterday" moved from 07-14 to 07-15.
+    const BEFORE_MIDNIGHT = new Date('2026-07-16T03:30:00Z');
+    const AFTER_MIDNIGHT = new Date('2026-07-16T04:30:00Z');
+    // Past the 3h cache lifetime but still the same ET day (3:01 PM ET).
+    const SAME_DAY_AFTER_TTL = new Date(MIDDAY_ET.getTime() + (3 * 60 + 1) * 60 * 1000);
+
+    test('the weather cache never carries yesterday\'s rain past ET midnight', async () => {
+      jest.setSystemTime(BEFORE_MIDNIGHT);
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', 0.9));
+      const before = await getWeatherSignals(BRADENTON);
+
+      jest.setSystemTime(AFTER_MIDNIGHT);
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-15', 0.05));
+      const after = await getWeatherSignals(BRADENTON);
+
+      expect(fetchMrmsDailyRain.mock.calls.map(([args]) => args.start)).toEqual(['2026-07-14', '2026-07-15']);
+      expect(before.recentRainIn).toBeCloseTo(0.9, 5);
+      expect(after.recentRainIn).toBeCloseTo(0.05, 5);
+    });
+
+    test('the forecast response cache is recomputed after ET midnight too', async () => {
+      jest.setSystemTime(BEFORE_MIDNIGHT);
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', 0.9));
+      const before = await forecast.getForecast({ location: 'bradenton-fl' });
+
+      jest.setSystemTime(AFTER_MIDNIGHT);
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-15', 0.05));
+      const after = await forecast.getForecast({ location: 'bradenton-fl' });
+
+      expect(before.weather.recent_rain_in).toBeCloseTo(0.9, 5);
+      expect(after.weather.recent_rain_in).toBeCloseTo(0.05, 5);
+    });
+
+    test.each([
+      ['an outage', () => fetchMrmsDailyRain.mockResolvedValueOnce(null)],
+      ['a rejection', () => fetchMrmsDailyRain.mockRejectedValueOnce(new Error('socket hang up'))],
+      ['a late gap', () => fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', null))],
+    ])('%s later the same day reuses the day\'s measured reading — it never flips a wet week dry', async (_label, failNextLookup) => {
+      mockNws({ precipChance: 10 });
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', 0.9));
+      const first = await getWeatherSignals(BRADENTON);
+
+      jest.setSystemTime(SAME_DAY_AFTER_TTL);
+      failNextLookup();
+      const later = await getWeatherSignals(BRADENTON);
+
+      expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(2);
+      expect(first.wet).toBe(true);
+      expect(later.recentRainIn).toBeCloseTo(0.9, 5);
+      expect(later.source).toBe('nws+mrms');
+      expect(later.wet).toBe(true);
+      expect(later.dry).toBe(false);
+    });
+
+    test('a measured reading is never reused for a different day', async () => {
+      jest.setSystemTime(BEFORE_MIDNIGHT);
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', 0.9));
+      await getWeatherSignals(BRADENTON);
+
+      jest.setSystemTime(AFTER_MIDNIGHT);
+      fetchMrmsDailyRain.mockResolvedValueOnce(null);
+      const after = await getWeatherSignals(BRADENTON);
+
+      expect(after.recentRainIn).toBeNull();
+      expect(after.source).toBe('nws');
+    });
   });
 });
