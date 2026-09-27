@@ -434,11 +434,21 @@ const TRIGGER_REGISTRY = {
     priority: 'high',
     group: 'Communication',
     allowContactDetails: true,
-    build: (p) => ({
-      title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
-      body: `${p.name || p.phone || 'A lead'} is calling in now. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
-      link: '/admin/communications#tab=calls',
-    }),
+    build: (p) => {
+      const who = p.name || p.phone || 'A lead';
+      // liveCall (the two /voice call sites): the caller is still on the
+      // line, so "is calling in now" is true. A durable retry (the sweep,
+      // viaSweep) lands after the call has already ended — its copy says
+      // when they called instead, never a false "now".
+      const calledClause = p.liveCall === false
+        ? `${who} called${p.calledAtLabel ? ` ${p.calledAtLabel}` : ''}.`
+        : `${who} is calling in now.`;
+      return {
+        title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
+        body: `${calledClause} We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
+        link: '/admin/communications#tab=calls',
+      };
+    },
   },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger

@@ -4762,9 +4762,13 @@ function initScheduledJobs() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
+      // Retries any promise-chaser claim a prior attempt left 'pending'
+      // (a thrown lookup, a notification insert/push failure, a process
+      // restart) — same durable-retry slot as the two sweeps above.
+      Promise.resolve().then(() => require('./promise-chaser-bell').sweepPromiseChasers()),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 

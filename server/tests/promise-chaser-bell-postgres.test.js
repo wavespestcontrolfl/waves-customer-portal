@@ -17,7 +17,7 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const { triggerNotification } = require('../services/notification-triggers');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
-const { ringPromiseChaserIfNeeded } = require('../services/promise-chaser-bell');
+const { ringPromiseChaserIfNeeded, markScreenFailed, sweepPromiseChasers } = require('../services/promise-chaser-bell');
 
 jest.setTimeout(30000);
 // Synthetic caller — never a real customer's number.
@@ -209,7 +209,7 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('gate off is a hard no-op — no query, no ring', async () => {
+  test('gate off is a hard no-op — no query, no ring, no claim written', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
     const back = callRow(0);
@@ -218,9 +218,124 @@ const OUR_NUMBER = '+19415550100';
     gates.promiseChaserBell = false;
     try {
       expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+      expect(await sweepPromiseChasers()).toBe(0);
     } finally {
       gates.promiseChaserBell = true;
     }
     expect(triggerNotification).not.toHaveBeenCalled();
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toBeUndefined();
+  });
+
+  test('a failed attempt leaves the claim pending; the durable sweep retries it with past-tense copy', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // A notification insert failure — triggerNotification's own contract
+    // (never throws) surfaces this as a resolved error, not a rejection.
+    triggerNotification.mockResolvedValueOnce({ error: 'synthetic notification insert failure' });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+
+    const pending = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(pending.metadata.promise_chaser).toMatchObject({ status: 'pending' });
+
+    // A same-second retry is refused (the lease is still fresh, same idiom
+    // as missed-call-bell / repeat-caller-bell) — prove that before aging
+    // the lease out so the sweep can reclaim it.
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+
+    const meta = pending.metadata;
+    meta.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(meta) });
+
+    expect(await sweepPromiseChasers()).toBe(1);
+    expect(triggerNotification).toHaveBeenCalledTimes(2);
+    const [, retryPayload] = triggerNotification.mock.calls[1];
+    // A durable retry lands after the call has ended — never "calling in now".
+    expect(retryPayload.liveCall).toBe(false);
+    expect(retryPayload.calledAtLabel).toBeTruthy();
+
+    const settled = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung' });
+  });
+
+  test('a promise closed between the snapshot and dispatch is caught by the live re-check', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    const [, , opts] = triggerNotification.mock.calls[0];
+    expect(typeof opts.shouldContinue).toBe('function');
+    expect(typeof opts.beforePush).toBe('function');
+    expect(await opts.shouldContinue()).toBe(true);
+    expect(await opts.beforePush()).toBe(true);
+
+    // Staff dismiss the commitment right in the gap the check exists for.
+    await mockConn('call_commitments').where({ id: commitment.id }).update({ status: 'dismissed', human_state: 'dismissed' });
+    expect(await opts.shouldContinue()).toBe(false);
+    expect(await opts.beforePush()).toBe(false);
+  });
+
+  test("a promise on another customer's call on the same number is excluded; an unlinked one is kept", async () => {
+    const callerCustomerId = randomUUID();
+    const otherCustomerId = randomUUID();
+    await mockConn('customers').insert([{ id: callerCustomerId, phone: PHONE }, { id: otherCustomerId, phone: PHONE }]);
+
+    // Older promise, but tied to a DIFFERENT customer's call — excluded.
+    const otherCall = callRow(300, { customer_id: otherCustomerId });
+    const otherCommitment = commitmentRow(otherCall.id);
+    // Younger promise, on an UNLINKED call from the same number — kept.
+    const unlinkedCall = callRow(240);
+    const unlinkedCommitment = commitmentRow(unlinkedCall.id);
+
+    const back = callRow(0, { customer_id: callerCustomerId });
+    await mockConn('call_log').insert([otherCall, unlinkedCall, back]);
+    await mockConn('call_commitments').insert([otherCommitment, unlinkedCommitment]);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect(triggerNotification.mock.calls[0][1].commitmentId).toBe(unlinkedCommitment.id);
+  });
+
+  test('a screen-failed call is marked skipped without ever ringing', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // The caller never pressed a key — markScreenFailed settles the claim
+    // without ever attempting a ring.
+    expect(await markScreenFailed(back.twilio_call_sid)).toBe(true);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'screen_failed' });
+  });
+
+  test('a screened caller who presses a key still rings — the deferred fire once the screen passes', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // Nothing fired while a challenge would have been outstanding (the
+    // webhook never calls this until ?screened=1 arrives) — this call
+    // stands in for that deferred fire.
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const [, payload] = triggerNotification.mock.calls[0];
+    expect(payload.liveCall).toBe(true);
   });
 });

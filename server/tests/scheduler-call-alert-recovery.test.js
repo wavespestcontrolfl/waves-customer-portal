@@ -20,34 +20,38 @@ jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() })
 
 jest.mock('../services/missed-call-bell', () => ({ sweepMissedCalls: jest.fn() }));
 jest.mock('../services/repeat-caller-bell', () => ({ sweepRepeatCallers: jest.fn() }));
+jest.mock('../services/promise-chaser-bell', () => ({ sweepPromiseChasers: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
 const { sweepMissedCalls } = require('../services/missed-call-bell');
 const { sweepRepeatCallers } = require('../services/repeat-caller-bell');
+const { sweepPromiseChasers } = require('../services/promise-chaser-bell');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
+
+const SWEEPS = { missed: sweepMissedCalls, repeat: sweepRepeatCallers, 'promise-chaser': sweepPromiseChasers };
 
 beforeEach(() => {
   jest.clearAllMocks();
   isEnabled.mockImplementation(name => name === 'cronJobs');
 });
 
-test.each(['missed', 'repeat'])('one call-alert tick starts both sweeps when %s recovery is still pending', async pending => {
+test.each(['missed', 'repeat', 'promise-chaser'])('one call-alert tick starts every sweep when %s recovery is still pending', async pending => {
   let rejectPending;
-  const blocked = pending === 'missed' ? sweepMissedCalls : sweepRepeatCallers;
-  const other = pending === 'missed' ? sweepRepeatCallers : sweepMissedCalls;
+  const others = Object.entries(SWEEPS).filter(([key]) => key !== pending).map(([, fn]) => fn);
+  const blocked = SWEEPS[pending];
   blocked.mockReturnValue(new Promise((_, reject) => { rejectPending = reject; }));
-  other.mockResolvedValue(1);
+  others.forEach((fn) => fn.mockResolvedValue(1));
   initScheduledJobs();
-  const registrations = cron.schedule.mock.calls.filter(([, callback]) => /sweepMissedCalls|sweepRepeatCallers/.test(String(callback)));
+  const registrations = cron.schedule.mock.calls.filter(([, callback]) => /sweepMissedCalls|sweepRepeatCallers|sweepPromiseChasers/.test(String(callback)));
   expect(registrations).toHaveLength(1);
   const [expression, tick, options] = registrations[0];
   expect(expression).toBe('*/2 * * * *');
   expect(options).toEqual({ timezone: 'America/New_York' });
   const running = tick();
   await Promise.resolve();
-  expect(other).toHaveBeenCalledTimes(1);
+  others.forEach((fn) => expect(fn).toHaveBeenCalledTimes(1));
   rejectPending(new Error('synthetic sweep failure'));
   await expect(running).resolves.toBeUndefined();
   expect(blocked).toHaveBeenCalledTimes(1);

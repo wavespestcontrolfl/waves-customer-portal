@@ -162,6 +162,20 @@ describe('notification trigger push tags', () => {
     });
   });
 
+  test('promise-chaser copy says "calling in now" live, and states when they called on a durable retry', () => {
+    const live = TRIGGER_REGISTRY.promise_chaser.build({
+      name: 'Fixture Lead', what: 'callback', when: 'Sep 26, 2:00 PM',
+    });
+    expect(live.body).toBe('Fixture Lead is calling in now. We still owe them a callback promised Sep 26, 2:00 PM.');
+
+    const retry = TRIGGER_REGISTRY.promise_chaser.build({
+      name: 'Fixture Lead', what: 'callback', when: 'Sep 26, 2:00 PM',
+      liveCall: false, calledAtLabel: 'Sep 26, 4:15 PM',
+    });
+    expect(retry.body).toBe('Fixture Lead called Sep 26, 4:15 PM. We still owe them a callback promised Sep 26, 2:00 PM.');
+    expect(retry.body).not.toContain('calling in now');
+  });
+
   test('bundle quote trigger distinguishes inquiry from self-applied bundle', () => {
     const inquiry = TRIGGER_REGISTRY.bundle_quote_requested.build({
       customerName: 'Existing Appointment Demo',
