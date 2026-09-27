@@ -127,7 +127,13 @@ const UNNAMED_SAFETY_CLAUSES = Object.freeze({
   // Venomous biters (snakes, widows, recluse): a bite needs care now.
   venomousBite: 'If anyone is bitten, call 911 or get emergency medical care right away, even if it seems minor at first; for a sting or scratch, wash the area and call a doctor, and call 911 for trouble breathing or a severe reaction.',
   general: 'If anyone is bitten, stung or scratched, wash the area and call a doctor; call 911 for trouble breathing or a severe reaction.',
+  // Wild mammals that bite (raccoons, bats, squirrels, opossums).
+  rabies: 'Wild mammals can carry rabies: if one bites or scratches anyone, wash the wound with soap and water and see a doctor or call the health department right away.',
+  irritant: 'If it touches bare skin or anything from it gets in the eyes, wash the skin with soap and water or rinse the eyes with clean water right away, and call a doctor if pain, redness or vision trouble lasts.',
+  allergen: 'People with allergies or asthma can react more strongly; call 911 for trouble breathing.',
+  vector: 'Wash your hands after any contact, and if anyone gets sick after a bite or contact, tell their doctor about it.',
   pets: 'If a pet bites, licks or mouths it, call your vet right away.',
+  protected: "It may be protected by law, so don't harm, trap or move it or its nest or burrow.",
 });
 const UNNAMED_SAFETY_LINE = `${UNNAMED_SAFETY_CLAUSES.base} ${UNNAMED_SAFETY_CLAUSES.general}`;
 const UNNAMED_NEXT_PHOTO = Object.freeze({
@@ -160,17 +166,37 @@ function isVenomousBiter(entry) {
   return !!safety.venomous && !!safety.bites && !safety.stings && entry.risk === 'medical';
 }
 
+function isRabiesRisk(entry) {
+  return !!entry.safety?.bites && catalog.lineage(entry.slug).some((rung) => rung.id === 'wild-mammals');
+}
+
+// Each hazard an entry can carry, and the fixed clause that covers it. A
+// node's line includes every clause any member triggers, so no exposure a
+// draft entry's own prose would have covered goes unanswered.
+const HAZARD_CLAUSES = [
+  ['rabies', isRabiesRisk],
+  ['irritant', (entry) => !!entry.safety?.irritant],
+  ['allergen', (entry) => !!entry.safety?.allergen],
+  ['vector', (entry) => !!entry.safety?.disease_vector],
+  ['pets', (entry) => !!entry.safety?.toxic_to_pets],
+  ['protected', (entry) => !!entry.safety?.protected],
+];
+
+function clausesFor(entry) {
+  return HAZARD_CLAUSES.filter(([, applies]) => applies(entry)).map(([key]) => key);
+}
+
 // An unknown answer (no node) could be anything, so it is triaged for the
 // whole catalog.
 function unnamedSafetyLineFor(nodeId) {
   const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : catalog.listEntries();
-  const pets = members.some((entry) => !!entry.safety?.toxic_to_pets);
-  if (nodeId && !pets && !members.some(keepsDistance)) return null;
+  const extra = new Set(members.flatMap(clausesFor));
+  if (nodeId && !extra.size && !members.some(keepsDistance)) return null;
   return [
     UNNAMED_SAFETY_CLAUSES.base,
     members.some(isVenomousBiter) ? UNNAMED_SAFETY_CLAUSES.venomousBite : UNNAMED_SAFETY_CLAUSES.general,
-    pets ? UNNAMED_SAFETY_CLAUSES.pets : null,
-  ].filter(Boolean).join(' ');
+    ...HAZARD_CLAUSES.filter(([key]) => extra.has(key)).map(([key]) => UNNAMED_SAFETY_CLAUSES[key]),
+  ].join(' ');
 }
 
 const URGENCY_ORDER = ['low', 'moderate', 'high'];
@@ -1597,10 +1623,11 @@ module.exports = {
   UNNAMED_SAFETY_CLAUSES,
   UNNAMED_NEXT_PHOTO,
   NO_PHOTO_CONFIRMS,
+  HAZARD_CLAUSES,
   escalateBelow,
   toImages,
   _test: {
     candidateContextFor, mergeVerify, combineEscalation, showsConflict, normalizeEvidenceKind,
-    V2_TO_V1_SLUG, v1IdentityFor, pairBetween,
+    V2_TO_V1_SLUG, v1IdentityFor, pairBetween, unnamedSafetyLineFor,
   },
 };

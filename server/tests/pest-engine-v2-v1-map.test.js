@@ -3,7 +3,7 @@
 // v1 identity that is true of it (pre-push audit on Codex #4916 r3).
 const catalog = require('../services/species-catalog');
 const {
-  buildAnswer, mapToV1, UNNAMED_SAFETY_LINE, UNNAMED_SAFETY_CLAUSES, UNNAMED_NEXT_PHOTO, _test: { v1IdentityFor },
+  buildAnswer, mapToV1, UNNAMED_SAFETY_LINE, UNNAMED_SAFETY_CLAUSES, UNNAMED_NEXT_PHOTO, HAZARD_CLAUSES, _test: { v1IdentityFor },
 } = require('../services/photo-id-v2/pest-engine');
 
 function approvedClone(entry) {
@@ -73,10 +73,10 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   // still tells the customer to keep their distance and call for medical
   // help when the answered node has anything under it that keeps distance.
   // The line is triaged for the node's worst member (Codex #5106 r1): the
-  // fire-ants node holds the pet-toxic little fire ant; widow spiders are
+  // fire-ants node holds the allergen, pet-toxic little fire ant; widow spiders are
   // venomous biters, so a bite gets emergency care, not "call a doctor".
   test.each([
-    ['fire-ant', 'fire-ants', `${UNNAMED_SAFETY_LINE} ${UNNAMED_SAFETY_CLAUSES.pets}`],
+    ['fire-ant', 'fire-ants', [UNNAMED_SAFETY_LINE, UNNAMED_SAFETY_CLAUSES.allergen, UNNAMED_SAFETY_CLAUSES.pets].join(' ')],
     ['black-widow', 'widow-spiders', `${UNNAMED_SAFETY_CLAUSES.base} ${UNNAMED_SAFETY_CLAUSES.venomousBite}`],
   ])('a draft medical-risk %s climb carries visible generic safety guidance', (slug, nodeId, line) => {
     const built = answerFor(slug, { approved: false });
@@ -94,6 +94,27 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
 
   test('a draft cane toad keeps a vet instruction for pets', () => {
     expect(answerFor('cane-toad', { approved: false }).genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.pets);
+  });
+
+  // Codex #5106 r2: withholding a draft's own prose must not drop first aid
+  // for any hazard it carries. Every hazard flag on every entry maps to a
+  // fixed clause, and a draft climb's line carries all of its clauses.
+  test.each(catalog.listEntries().map((entry) => [entry.slug]))('a draft %s climb covers each of its own hazards', (slug) => {
+    const entry = catalog.getEntry(slug);
+    const line = answerFor(slug, { approved: false }).genericSafetyLine;
+    if (entry.safety?.bites || entry.safety?.stings) expect(line).toMatch(/If anyone is bitten/);
+    for (const [key, applies] of HAZARD_CLAUSES) {
+      if (applies(entry)) expect(line).toContain(UNNAMED_SAFETY_CLAUSES[key]);
+    }
+  });
+
+  test('a draft walkingstick keeps the rinse-your-eyes first aid', () => {
+    expect(answerFor('two-striped-walkingstick', { approved: false }).genericSafetyLine)
+      .toContain(UNNAMED_SAFETY_CLAUSES.irritant);
+  });
+
+  test('a draft raccoon keeps rabies guidance', () => {
+    expect(answerFor('raccoon', { approved: false }).genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.rabies);
   });
 
   // Codex #5106 r1: the cottonmouth / water snake pair is photo_can_confirm
