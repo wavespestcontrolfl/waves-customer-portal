@@ -47,6 +47,9 @@ const { THRESHOLDS } = require('./scoring-config');
 // db-wide, so it also serializes across multiple app instances. 0x57415645 =
 // "WAVE" in ASCII; a fixed key shared by every publishing entry point.
 const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+// Keep a transient gate outage from consuming both bounded attempts in the
+// same batch. The normal daily runner will pick the row up after this floor.
+const INFRASTRUCTURE_RETRY_BACKOFF_MS = 60 * 60 * 1000;
 
 // Lazy loaders — keeps the runner usable on any branch in the stack.
 function lazy(name, path) {
@@ -1199,10 +1202,8 @@ class AutonomousRunner {
       // SERP) still route to review — those are content-risk signals a
       // redraft can't clear — as do the named-competitor and trust-build
       // paths below. Gate INFRA failures (module/corpus unavailable, thrown
-      // evaluate — the shapes that carry `.error`) also still park: a
-      // redraft can't fix a broken gate, and silently skipping would hide
-      // an engine fault (same fail-closed posture as the *_unavailable
-      // paths above).
+      // evaluate — the shapes that carry `.error`) get one delayed retry for
+      // unattended supporting blogs; other lanes stay visible for review.
       // content-quality-gate reports some infrastructure failures INSIDE
       // hard_failures (evaluator_threw:*, pii_scan_unavailable:*,
       // no_previous_version_to_compare) rather than as a top-level .error —
@@ -1211,6 +1212,14 @@ class AutonomousRunner {
         && qualityResult.hard_failures.some((f) => /^(evaluator_threw:|pii_scan_unavailable|no_previous_version_to_compare)/.test(String(f?.reason ?? f)));
       const gateInfraError = Boolean(uniquenessResult?.error || qualityResult?.error
         || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
+      if (!gatesPass && !brief.human_review_required && gateInfraError
+        && run.action_type === 'new_supporting_blog') {
+        return this._infrastructureRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken,
+          skipReason: 'gate_infrastructure_error',
+          notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+        });
+      }
       if (!gatesPass && !brief.human_review_required && !gateInfraError) {
         const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
         // Guardrails P2 nudges from the PASSING guardrails run still ride
@@ -1230,11 +1239,13 @@ class AutonomousRunner {
         });
       }
       // Remaining combinations are genuine human decisions (gate infra
-      // errors, router-flagged briefs, named-competitor, trust-build ramp).
+      // errors outside unattended blogs, router-flagged briefs,
+      // named-competitor, trust-build ramp).
       // affiliate_review OUTRANKS named_competitor_review: the latter is an
       // email-approvable kind, and every affiliate-bearing draft must stay in
       // the script-only lane (Codex r1 P1).
-      const reason = !gatesPass ? 'gate_fail'
+      const reason = gateInfraError ? 'gate_infrastructure_error'
+        : !gatesPass ? 'gate_fail'
         : affiliateReview ? 'affiliate_review'
         : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
@@ -1944,6 +1955,59 @@ class AutonomousRunner {
     });
     await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
     return finalized;
+  }
+
+  async _infrastructureRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes }) {
+    const alreadyRetried = Boolean(opp.signal_metadata?.infrastructure_retry);
+    if (!alreadyRetried) {
+      const retryAt = new Date(Date.now() + INFRASTRUCTURE_RETRY_BACKOFF_MS);
+      let recorded = false;
+      try {
+        recorded = await this._recordInfrastructureRetry(opp, skipReason, retryAt, claimToken);
+      } catch (err) {
+        logger.warn(`[autonomous-runner] infrastructure-retry record failed for ${opp.id}: ${err.message}`);
+      }
+      if (recorded) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'deferred_infrastructure_retry',
+          skip_reason: skipReason,
+          reviewer_notes: `${notes} — deferred for one autonomous retry after infrastructure recovery.`,
+        });
+        await this._deferClaimOrThrow(queue, opp.id, retryAt, { claimToken });
+        return finalized;
+      }
+    }
+    const finalized = await finalize(run, t0, {
+      outcome: 'skipped_gate_fail',
+      skip_reason: skipReason,
+      reviewer_notes: alreadyRetried
+        ? `${notes} — infrastructure failed again after the bounded retry; skipped.`
+        : `${notes} — could not record the bounded infrastructure retry; skipped.`,
+    });
+    await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
+    return finalized;
+  }
+
+  async _recordInfrastructureRetry(opp, skipReason, retryAt, claimToken) {
+    const retry = {
+      at: new Date().toISOString(),
+      retry_after: retryAt.toISOString(),
+      skip_reason: skipReason,
+    };
+    const updated = await db('opportunity_queue')
+      .where('id', opp.id)
+      .where('status', 'claimed')
+      .where('claimed_at', claimToken)
+      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'infrastructure_retry')")
+      .update({
+        signal_metadata: db.raw(
+          "jsonb_set(COALESCE(signal_metadata, '{}'::jsonb), '{infrastructure_retry}', ?::jsonb, true)",
+          [JSON.stringify(retry)]
+        ),
+        updated_at: new Date(),
+      });
+    return updated > 0;
   }
 
   /**
