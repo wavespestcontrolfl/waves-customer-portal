@@ -209,8 +209,10 @@ const PRODUCER_RULES = Object.freeze({
   late_payment_email: (meta) => require('../workflows/balance-reminder').latePaymentEmailStillOwed({
     customerId: meta.customer_id, invoiceId: meta.invoice_id, renderedTotal: meta.rendered_balance,
   }),
+  // The step it rendered is the event key's tail (invoice_followup:<invoice>:<step>).
   invoice_followup_email: (meta) => require('../invoice-followups').followupEmailStillOwed({
     sequenceId: meta.followup_sequence_id, invoiceId: meta.invoice_id,
+    stepId: String(meta.notificationEventKey || '').slice(`invoice_followup:${meta.invoice_id}:`.length),
   }),
 });
 

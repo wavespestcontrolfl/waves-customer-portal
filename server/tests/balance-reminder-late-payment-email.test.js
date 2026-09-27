@@ -413,6 +413,19 @@ describe('late-payment email sidecar', () => {
     expect(dispatch).toHaveBeenCalledWith('authority-trx');
   });
 
+  test('an invoice-amount email pins the invoice amount its retry rechecks on the invoice', async () => {
+    setDbQueues({ invoices: [chain({ first: invoice() })], customer_interactions: [chain()] });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true });
+    await BalanceReminder.sendLatePaymentEmail({
+      customer: customer(), invoice: invoice(), balance: { totalBalance: 75, oldestDueDate: '2026-05-19' },
+      smsTemplateKey: 'late_payment_30d', invoiceTitle: 'Quarterly Pest Control', serviceDateClause: '',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1', amountScope: 'invoice',
+    });
+    const context = EmailTemplates.sendTemplate.mock.calls[0][0].billingReplayContext;
+    expect(context).toMatchObject({ rendered_amount: '75.00' });
+    expect(context).not.toHaveProperty('rendered_balance');
+  });
+
   test('an unreadable billing context is a retryable not-sent, never a blind send', async () => {
     setDbQueues({ invoices: [chain({ first: invoice() })] });
     BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('preferences unavailable'));
@@ -980,6 +993,19 @@ describe('latePaymentEmailStillOwed (a stored late-payment email\'s provider ret
     jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
     setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
     await expect(ask()).resolves.toEqual({ owed: true });
+  });
+
+  test('an invoice-amount email checks only its own invoice\'s dunning stops, not the account total', async () => {
+    const readBalance = jest.spyOn(BalanceReminder, 'getCustomerBalance');
+    setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
+    await expect(BalanceReminder.latePaymentEmailStillOwed({ customerId: 'cust-1', invoiceId: 'inv-1' }))
+      .resolves.toEqual({ owed: true });
+    expect(readBalance).not.toHaveBeenCalled();
+    expect(InvoiceFollowUps.hasActiveSequence.mock.calls).toEqual([['inv-1']]);
+    InvoiceFollowUps.isDunningStopped.mockResolvedValue(true);
+    setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
+    await expect(BalanceReminder.latePaymentEmailStillOwed({ customerId: 'cust-1', invoiceId: 'inv-1' }))
+      .resolves.toEqual({ owed: false, reason: 'dunning-stopped' });
   });
 
   test.each([

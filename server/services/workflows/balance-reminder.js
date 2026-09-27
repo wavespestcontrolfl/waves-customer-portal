@@ -513,6 +513,9 @@ class BalanceReminder {
     invoiceTitle,
     serviceDateClause,
     payUrl,
+    // "account": amount_due is the customer's overdue total (this workflow).
+    // "invoice": it is this invoice's amount due (late-payment-checker.js).
+    amountScope = "account",
   }) {
     const config = LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE[smsTemplateKey];
     if (!config) return { ok: false, skipped: true, reason: "no_email_template_mapping" };
@@ -596,9 +599,11 @@ class BalanceReminder {
           category: "billing",
           source_entry_point: "late_payment_email",
           notificationEventKey: `late_payment:${latestInvoice.id}:${config.stageDays}`,
-          // The account total this email shows (payload.amount_due): a retry
-          // refuses once the customer's overdue total differs.
-          rendered_balance: Number(balance.totalBalance || latestInvoice.total || 0).toFixed(2),
+          // The amount this email shows (payload.amount_due): a retry refuses
+          // once it differs. An account total is rechecked by this sender's
+          // own rule; an invoice amount by invoiceStillCollectible.
+          [amountScope === "invoice" ? "rendered_amount" : "rendered_balance"]:
+            Number(balance.totalBalance || latestInvoice.total || 0).toFixed(2),
         },
         withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey: config.templateKey, dispatch, state,
@@ -617,15 +622,20 @@ class BalanceReminder {
   }
 
   // Whether a stored late-payment email is still true to send: the
-  // customer's overdue total is still the one it showed, and none of this
+  // customer's overdue total is still the one it showed (an invoice-scoped
+  // email has no renderedTotal; its amount is rechecked on the invoice), and
+  // none of this
   // sender's dunning stops (an active follow-up sequence, stopped dunning, a
   // payment plan, a pending micro-deposit verification) has started since.
   // A provider retry of the stored email asks this before it re-runs the
   // shared billing email check (billing-email-replay-eligibility.js).
   async latePaymentEmailStillOwed({ customerId, invoiceId, renderedTotal }) {
-    const balance = await this.getCustomerBalance(customerId);
-    if (!balance || balance.totalBalance.toFixed(2) !== renderedTotal) return { owed: false, reason: "balance-changed" };
-    if (await customerDunningStopped(balance, invoiceId, { throwOnError: true })) {
+    let scope = { invoiceIds: [] };
+    if (renderedTotal != null) {
+      scope = await this.getCustomerBalance(customerId);
+      if (!scope || scope.totalBalance.toFixed(2) !== renderedTotal) return { owed: false, reason: "balance-changed" };
+    }
+    if (await customerDunningStopped(scope, invoiceId, { throwOnError: true })) {
       return { owed: false, reason: "dunning-stopped" };
     }
     return { owed: true };

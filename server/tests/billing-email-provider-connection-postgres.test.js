@@ -141,7 +141,7 @@ postgres('billing Email provider preparation on its held connection', () => {
     });
     // A follow-up email's provider retry re-checks its sequence.
     await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
-      table.uuid('id').primary(); table.text('status');
+      table.uuid('id').primary(); table.text('status'); table.integer('step_index');
     });
   }, 30000);
 
@@ -331,7 +331,7 @@ postgres('billing Email provider preparation on its held connection', () => {
     await mockPg('invoices').insert({
       id: invoiceId, customer_id: customerId, credit_applied: 0, line_items: JSON.stringify([]), ...invoice,
     });
-    await mockPg('invoice_followup_sequences').insert({ id: sequenceId, status: sequenceStatus });
+    await mockPg('invoice_followup_sequences').insert({ id: sequenceId, status: sequenceStatus, step_index: 2 });
     // No invoice-channel choice: the shared check keeps Email.
     await mockPg('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: true });
     const event = `invoice_followup:${invoiceId}:d7_reminder`;

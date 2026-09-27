@@ -2027,12 +2027,16 @@ async function isDunningStopped(invoiceId, database = db) {
 // sequence is not paused (an admin or an autopay hold) or stopped, and the
 // invoice has not moved to a micro-deposit verification (fireTouch sends the
 // verification copy instead). A completed sequence still counts: its final
-// touch completes it the moment it fires. A provider retry of the stored
-// email asks this before it re-runs the shared billing email check
-// (billing-email-replay-eligibility.js).
-async function followupEmailStillOwed({ sequenceId, invoiceId }) {
-  const seq = await db('invoice_followup_sequences').where({ id: sequenceId }).first('status');
+// touch completes it the moment it fires. A later step sent since (an
+// operator's "send now") supersedes it: the sequence sits at most one step
+// past the one it rendered (the touch advances it; a held SMS leg keeps it).
+// A provider retry of the stored email asks this before it re-runs the
+// shared billing email check (billing-email-replay-eligibility.js).
+async function followupEmailStillOwed({ sequenceId, invoiceId, stepId }) {
+  const seq = await db('invoice_followup_sequences').where({ id: sequenceId }).first('status', 'step_index');
   if (!seq || ['paused', 'autopay_hold', 'stopped'].includes(String(seq.status || ''))) return { owed: false, reason: 'sequence-not-active' };
+  const rendered = config.steps.findIndex((step) => step.id === stepId);
+  if (rendered < 0 || Number(seq.step_index) > rendered + 1) return { owed: false, reason: 'sequence-advanced' };
   if (gates.divertMicrodepositDunning) {
     const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'stripe_payment_intent_id');
     if (invoice?.stripe_payment_intent_id

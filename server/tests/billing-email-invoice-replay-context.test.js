@@ -95,10 +95,13 @@ describe('late-payment Email replay pin', () => {
 
   // The email shows the account total; invoiceStillCollectible compares
   // rendered_amount with the invoice's own amount, so the two pins differ.
-  test('pins the rendered account balance, not the invoice amount', () => {
+  test('pins exactly one amount: the account balance or the invoice amount it showed', () => {
     expect(sanitizeBillingReplayContext({ ...late, rendered_balance: '129.00' }))
       .toEqual({ ...late, rendered_balance: '129.00' });
-    expect(sanitizeBillingReplayContext({ ...late, rendered_amount: '129.00' })).toBeNull();
+    expect(sanitizeBillingReplayContext({ ...late, rendered_amount: '75.00' }))
+      .toEqual({ ...late, rendered_amount: '75.00' });
+    expect(sanitizeBillingReplayContext(late)).toBeNull();
+    expect(sanitizeBillingReplayContext({ ...late, rendered_balance: '129.00', rendered_amount: '75.00' })).toBeNull();
     expect(sanitizeBillingReplayContext({ ...late, rendered_balance: '129' })).toBeNull();
   });
 });

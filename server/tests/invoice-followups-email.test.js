@@ -744,19 +744,46 @@ describe('followupEmailStillOwed (a stored follow-up email\'s provider retry)', 
     ['stopped', { owed: false, reason: 'sequence-not-active' }],
   ])('a %s sequence answers %j', async (status, expected) => {
     gates.divertMicrodepositDunning = false;
-    setDbQueues({ invoice_followup_sequences: [chain({ first: { status } })] });
-    await expect(InvoiceFollowUps.followupEmailStillOwed({ sequenceId: 'seq-1', invoiceId: 'inv-1' }))
+    setDbQueues({ invoice_followup_sequences: [chain({ first: { status, step_index: 1 } })] });
+    await expect(InvoiceFollowUps.followupEmailStillOwed({ sequenceId: 'seq-1', invoiceId: 'inv-1', stepId: 'd3_friendly' }))
       .resolves.toEqual(expected);
+  });
+
+  // An operator's "send now" moved the sequence past the step this email
+  // rendered: the older, softer notice no longer goes out.
+  test.each([
+    ['held at the rendered step', 'active', 0, { owed: true }],
+    ['one past it (the touch advanced it)', 'active', 1, { owed: true }],
+    ['a later step sent since', 'active', 2, { owed: false, reason: 'sequence-advanced' }],
+    ['exhausted by a later send', 'completed', 4, { owed: false, reason: 'sequence-advanced' }],
+  ])('a d3 email retry with the sequence %s', async (_label, status, stepIndex, expected) => {
+    gates.divertMicrodepositDunning = false;
+    setDbQueues({ invoice_followup_sequences: [chain({ first: { status, step_index: stepIndex } })] });
+    await expect(InvoiceFollowUps.followupEmailStillOwed({ sequenceId: 'seq-1', invoiceId: 'inv-1', stepId: 'd3_friendly' }))
+      .resolves.toEqual(expected);
+  });
+
+  test('the final step\'s retry still counts once it completed the sequence', async () => {
+    gates.divertMicrodepositDunning = false;
+    setDbQueues({ invoice_followup_sequences: [chain({ first: { status: 'completed', step_index: 4 } })] });
+    await expect(InvoiceFollowUps.followupEmailStillOwed({ sequenceId: 'seq-1', invoiceId: 'inv-1', stepId: 'd30_final' }))
+      .resolves.toEqual({ owed: true });
+  });
+
+  test('an unknown step refuses', async () => {
+    setDbQueues({ invoice_followup_sequences: [chain({ first: { status: 'active', step_index: 1 } })] });
+    await expect(InvoiceFollowUps.followupEmailStillOwed({ sequenceId: 'seq-1', invoiceId: 'inv-1', stepId: 'd99' }))
+      .resolves.toEqual({ owed: false, reason: 'sequence-advanced' });
   });
 
   test('a micro-deposit verification that began since the send refuses the regular dunning copy', async () => {
     gates.divertMicrodepositDunning = true;
     setDbQueues({
-      invoice_followup_sequences: [chain({ first: { status: 'active' } })],
+      invoice_followup_sequences: [chain({ first: { status: 'active', step_index: 1 } })],
       invoices: [chain({ first: { id: 'inv-1', stripe_payment_intent_id: 'pi_1' } })],
     });
     jest.spyOn(StripeService, 'isInvoiceAwaitingMicrodepositVerification').mockResolvedValue(true);
-    await expect(InvoiceFollowUps.followupEmailStillOwed({ sequenceId: 'seq-1', invoiceId: 'inv-1' }))
+    await expect(InvoiceFollowUps.followupEmailStillOwed({ sequenceId: 'seq-1', invoiceId: 'inv-1', stepId: 'd3_friendly' }))
       .resolves.toEqual({ owed: false, reason: 'microdeposit-verification-pending' });
     expect(StripeService.isInvoiceAwaitingMicrodepositVerification)
       .toHaveBeenCalledWith({ id: 'inv-1', stripe_payment_intent_id: 'pi_1' }, { throwOnError: true });

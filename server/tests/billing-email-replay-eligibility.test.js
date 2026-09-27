@@ -230,9 +230,11 @@ describe('a moved sender\'s own rules before the shared check', () => {
   test('the follow-up engine answers for a follow-up email with its own sequence rules', async () => {
     InvoiceFollowUps.followupEmailStillOwed.mockResolvedValueOnce({ owed: false, reason: 'sequence-not-active' });
     await expect(billingEmailReplayProducerRefusal({ customer_id: customerId, invoice_id: 'inv-1',
-      source_entry_point: 'invoice_followup_email', followup_sequence_id: 'seq-1' }))
+      source_entry_point: 'invoice_followup_email', followup_sequence_id: 'seq-1',
+      notificationEventKey: 'invoice_followup:inv-1:d7_reminder' }))
       .resolves.toEqual({ eligible: false, reason: 'sequence-not-active', resendable: true });
-    expect(InvoiceFollowUps.followupEmailStillOwed).toHaveBeenCalledWith({ sequenceId: 'seq-1', invoiceId: 'inv-1' });
+    expect(InvoiceFollowUps.followupEmailStillOwed)
+      .toHaveBeenCalledWith({ sequenceId: 'seq-1', invoiceId: 'inv-1', stepId: 'd7_reminder' });
   });
 
   test('a routed notice carries no producer rule here', async () => {

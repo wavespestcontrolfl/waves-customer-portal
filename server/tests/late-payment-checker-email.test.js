@@ -167,6 +167,8 @@ describe('late-payment checker email sidecar', () => {
       smsTemplateKey: 'late_payment_14d',
       invoiceTitle: 'Quarterly Pest Control',
       payUrl: 'https://portal.wavespestcontrol.com/l/pay123',
+      // This email shows the invoice's own amount due, so its retry pins it.
+      amountScope: 'invoice',
     }));
   });
 

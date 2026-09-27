@@ -16,9 +16,9 @@ const SENDER_BINDINGS = Object.freeze({
   late_payment_email: Object.freeze({
     category: 'billing',
     categoryTag: 'billing',
-    // rendered_balance is the ACCOUNT total the email shows; rendered_amount
-    // stays the invoice-amount pin invoiceStillCollectible compares.
-    pins: ['invoice_id', 'rendered_balance'],
+    // Plus exactly one amount pin (see complete()): rendered_balance for an
+    // account-total email, rendered_amount for an invoice-amount one.
+    pins: ['invoice_id'],
     templates: new Set([
       'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
       'billing_late_payment_60_day', 'billing_late_payment_90_day',
@@ -119,6 +119,8 @@ function complete(context) {
   if (context.source_entry_point === 'invoice_followup_sequence') {
     return has('invoice_id', 'followup_sequence_id', 'rendered_amount', 'collections_ledger_id');
   }
+  if (context.source_entry_point === 'late_payment_email'
+    && (context.rendered_balance != null) === (context.rendered_amount != null)) return false;
   const binding = SENDER_BINDINGS[context.source_entry_point];
   if (binding) return has(...binding.pins) && context.category === binding.category;
   return has('invoice_id', 'collections_ledger_id');

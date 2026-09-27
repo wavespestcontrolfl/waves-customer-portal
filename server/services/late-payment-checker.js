@@ -771,6 +771,7 @@ const LatePaymentService = {
                 serviceDateClause: dateClause,
                 payUrl,
                 initialPrefs: prefs,
+                amountScope: 'invoice',
               });
             }
           } catch (emailErr) {
