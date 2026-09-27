@@ -290,11 +290,12 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
       calledAtLabel: call.created_at ? `${formatETDate(new Date(call.created_at))} ${formatETTime(new Date(call.created_at))}` : null,
     }, { dedupeKey, shouldContinue: stillEligible, beforePush: stillEligible });
 
-    // triggerNotification never throws — a swallowed bell-insert failure or
-    // a failed push surfaces as stats.retryable (often with no stats.error
-    // at all) rather than a caught exception. Either signal leaves the
-    // claim pending; only a definitive, non-retryable outcome may settle.
-    if (stats?.error || stats?.retryable) return false; // leave pending — retry
+    // triggerNotification never throws — a swallowed bell-insert failure, a
+    // failed push, or a failed preferences lookup surfaces as stats.retryable
+    // / stats.prefsUnavailable (often with no stats.error at all) rather than
+    // a caught exception. Any of these leaves the claim pending; only a
+    // definitive, non-retryable outcome may settle.
+    if (stats?.error || stats?.retryable || stats?.prefsUnavailable) return false; // leave pending — retry
     // Genuine delivery only — a deliberate non-send (every admin opted out,
     // the bell policy silenced the category, or stillEligible just blocked
     // a promise that closed in the race window) is still a settled, non-

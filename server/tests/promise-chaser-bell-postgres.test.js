@@ -288,6 +288,23 @@ const OUR_NUMBER = '+19415550100';
     expect(row.metadata.promise_chaser).toMatchObject({ status: 'pending' });
   });
 
+  test('a failed preferences lookup (prefsUnavailable, no error, no retryable) also leaves the claim pending', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // The real dispatcher's own shape when the notification_preferences
+    // query itself throws — fails closed, no bell, no push, no `.error` or
+    // `.retryable`, just `prefsUnavailable: true`.
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, prefsUnavailable: true });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'pending' });
+  });
+
   test('a bell that succeeded but whose push failed retries the push (never re-inserts the bell, never loses the push)', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
