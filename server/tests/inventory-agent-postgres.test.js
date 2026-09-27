@@ -570,6 +570,46 @@ jest.setTimeout(30000);
     expect(await bellsFor(handed.lineId)).toHaveLength(1);
   });
 
+  test('an alias removed while the model decides rolls the apply back as product_changed', async () => {
+    const [product] = await mockConn('products_catalog').insert({
+      name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const [alias] = await mockConn('product_aliases').insert({ product_id: product.id, alias_name: 'Bifen Pro Concentrate' }).returning('*');
+    const line = await pendingLine({ raw_title: 'Bifen Insecticide Concentrate 96 oz', quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'the alias names it', product_id: product.id, new_product: null,
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    const llm = async () => {
+      await mockConn('product_aliases').where({ id: alias.id }).del();
+      return { ok: true, json: decision };
+    };
+    await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(await stockOf(product.id)).toBe(0);
+  });
+
+  test('draining a line whose shipment was handed to a person closes it quietly', async () => {
+    const line = await pendingLine();
+    await mockConn('purchase_receipt_lines').where({ id: line.id }).update({ agent_decision: { handoffFrom: 'needs_size' } });
+    const [other] = await mockConn('emails').insert({
+      gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com',
+      subject: 'Delivered: 1 item', received_at: RECEIVED_AT,
+    }).returning('*');
+    await mockConn('purchase_receipt_lines').insert({
+      vendor: 'amazon', order_number: 'unknown', shipment_key: 'ship-2', line_no: 1,
+      raw_title: 'Bifen XTS Insecticide 96 oz', quantity: 2, status: 'no_order_number', email_id: other.id,
+    });
+    process.env.GATE_INVENTORY_AGENT = 'false';
+    const { drainAgentQueue } = require('../services/purchase-receipts/inventory-agent');
+    await drainAgentQueue({ conn: mockConn, notifyAdmin });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.status).toBe('skipped');
+    expect(saved.agent_decision).toMatchObject({ reason: 'shipment_handed_to_person' });
+    expect(await bellsFor(line.id)).toHaveLength(0);
+  });
+
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
     const [bare] = await mockConn('products_catalog').insert({
       name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,
