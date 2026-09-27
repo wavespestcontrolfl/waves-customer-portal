@@ -220,6 +220,10 @@ async function buildRecapContext(serviceId, knex = db) {
       }),
       hasPhone: !!svc.cust_phone,
       category: profile?.category || null,
+      // The live completion profile key, so a client routed from a stale
+      // schedule row (the tech Fast Complete sheet) can confirm this is
+      // still the visit type it was opened for.
+      serviceKey: profile?.serviceKey || null,
     },
     timeline,
     products,
@@ -1419,4 +1423,6 @@ module.exports = {
   buildRecapContext,
   draftRecapMessage,
   submitRecap,
+  // Shared with completeScheduledService's expectedVisit guard.
+  recapVisitIdentityChanged,
 };
