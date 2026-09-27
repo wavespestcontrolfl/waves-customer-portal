@@ -1523,7 +1523,8 @@ function isBoraCareIntent(question = '') {
 }
 
 function purchasedServiceSubtype(row = {}) {
-  const serviceText = cleanText([row.service, row.label].filter(Boolean).join(' ')).toLowerCase();
+  const serviceText = cleanText([row.service, row.label].filter(Boolean).join(' ')).toLowerCase()
+    .replace(/[_-]+/g, ' ');
   if (/\bbond\b/.test(serviceText)) return 'bond';
   if (/\btrench(?:ing|ed)?\b/.test(serviceText)) return 'trenching';
   return null;

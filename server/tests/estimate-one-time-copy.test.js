@@ -865,6 +865,14 @@ describe('server-rendered page', () => {
           warrantyTier: 'none', warrantyAdder: 0 },
       ],
       ['Front Trenching']],
+    ['changed-price label reservation',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 700 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900 },
+      ],
+      [{ service: 'trenching', label: 'Front Trenching', amount: 900,
+        warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
+      ['Front Trenching']],
   ])('public projection assigns warranty evidence to one distinct trenching job: %s', (
     _name, projectedRows, savedRows, purchasedLabels,
   ) => {
@@ -876,6 +884,24 @@ describe('server-rendered page', () => {
     expect(contract.oneTimeBreakdown.items
       .filter((row) => row.copy.includes.includes('Annual inspection during the warranty period'))
       .map((row) => row.label)).toEqual(purchasedLabels);
+  });
+
+  test('live engine rows keep their own warranty decision when display identities are identical', () => {
+    const rows = [
+      { service: 'trenching', label: 'Termite Trenching', amount: 900,
+        warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      { service: 'trenching', label: 'Termite Trenching', amount: 900,
+        warrantyTier: 'none', warrantyAdder: 0 },
+    ];
+    const contract = attachPublicPricingContract(
+      { source: 'engine_invocation', snapshotHit: false, frequencies: [],
+        oneTimeBreakdown: { total: 1800, items: rows } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      {},
+    );
+    expect(contract.oneTimeBreakdown.items.map((row) => (
+      row.copy.includes.includes('Annual inspection during the warranty period')
+    ))).toEqual([true, false]);
   });
 
   test.each([

@@ -201,7 +201,7 @@ describe('estimate assistant no-guarantee context', () => {
   });
 
   test.each(['pricing', 'saved'])('%s purchased warranty scope survives without allowing arbitrary warranty prose', (source) => {
-    const row = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
+    const row = { service: 'termite_trenching', label: 'Front foundation', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat', warrantyAdder: 100, detail: 'Guaranteed termite-free forever' };
     const input = (item) => ({
       estimate: { onetime_total: 1200 },
@@ -353,6 +353,14 @@ describe('estimate assistant no-guarantee context', () => {
         { service: 'trenching', label: 'Rear foundation', amount: 900,
           warrantyTier: 'none', warrantyAdder: 0 },
       ],
+      ['Front foundation']],
+    ['changed-price label reservation',
+      [
+        { service: 'trenching', label: 'Front foundation', amount: 700 },
+        { service: 'trenching', label: 'Rear foundation', amount: 900 },
+      ],
+      [{ service: 'trenching', label: 'Front foundation', amount: 900,
+        warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
       ['Front foundation']],
   ])('pricing reconciliation assigns warranty evidence to one distinct trenching job: %s', (
     _name, pricedRows, savedRows, purchasedLabels,

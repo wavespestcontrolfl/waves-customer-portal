@@ -65,6 +65,9 @@ function matchingTrenchingWarrantyRow(target, rows = [], targets = [target]) {
   if (identity !== 'termite_trenching') return { row: null, ambiguous: false };
   const candidates = rows.filter((row) => trenchingServiceIdentity(row) === identity);
   if (!candidates.length) return { row: null, ambiguous: false };
+  // A priced engine row is its own authoritative evidence. It must not become
+  // ambiguous merely because a sibling job has the same display identity.
+  if (candidates.includes(target)) return { row: target, ambiguous: false };
   const peers = targets.filter((row) => trenchingServiceIdentity(row) === identity);
   const label = String(target?.label || target?.displayName || target?.name || '').trim().toLowerCase();
   const sameLabel = candidates.filter((row) => (
@@ -79,6 +82,16 @@ function matchingTrenchingWarrantyRow(target, rows = [], targets = [target]) {
   const targetAmount = target?.amount ?? target?.price ?? target?.total;
   const amount = Number(targetAmount);
   const sameAmount = candidates.filter((row) => {
+    const candidateLabel = String(row.label || row.displayName || row.name || '').trim().toLowerCase();
+    const candidateLabelCount = candidateLabel ? candidates.filter((candidate) => (
+      String(candidate.label || candidate.displayName || candidate.name || '').trim().toLowerCase() === candidateLabel
+    )).length : 0;
+    const boundPeerCount = candidateLabel ? peers.filter((peer) => (
+      String(peer.label || peer.displayName || peer.name || '').trim().toLowerCase() === candidateLabel
+    )).length : 0;
+    // Reserve a unique exact-label row for that peer before considering amount
+    // fallback. This makes the assignment independent of projection order.
+    if (candidateLabel !== label && candidateLabelCount === 1 && boundPeerCount === 1) return false;
     const value = row.amount ?? row.price ?? row.total;
     return value !== '' && value != null && Number(value) === amount;
   });
