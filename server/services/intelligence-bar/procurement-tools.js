@@ -1432,6 +1432,9 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30, maxSeq: observedSeq });
   const skipped = [];
   for (const turn of turns) {
+    // A question never authorizes a write, even as the turn a "Yes" answers:
+    // the look-back stops at it.
+    if (isQuestion(turn)) return null;
     const turnResult = await productsNamedIn(turn);
     if (turnResult.conflict || turnResult.named.size) return decide(turnResult, [prompt, ...skipped, turn]);
     // Named nothing. Only a bare reply ("yes", "1 bottle") has no opinion

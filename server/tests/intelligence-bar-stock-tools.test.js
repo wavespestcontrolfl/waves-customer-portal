@@ -698,6 +698,21 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toMatchObject(expected);
   });
 
+  test.each([
+    ['create_restock_request', 'Did we order Taurus SC?'],
+    ['adjust_stock', 'Did we receive two bottles of Taurus SC?'],
+  ])('%s: a "Yes" after a question never grounds (the look-back stops at "%s")', async (toolName, question) => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([question]);
+    const result = await resolveInventoryWriteTarget({
+      toolName, prompt: 'Yes',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name }, ...(toolName === 'adjust_stock' ? { movement_type: 'restock' } : {}) },
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
   test('an alias that normalizes to nothing never matches (no empty pattern)', async () => {
     setGroundingDb({ products: [TAURUS, ALPINE], aliases: [{ product_id: TAURUS.id, alias_name: '  --  ' }] });
     const result = await resolveInventoryWriteTarget({
