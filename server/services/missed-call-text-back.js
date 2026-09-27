@@ -29,17 +29,19 @@
  *   missed_call_text_settled_at  — terminal
  *   missed_call_text_outcome     — 'sent' or 'skipped:<reason>'
  *
- * One text per phone number EVER, shared with the voicemail-lead lane — a
- * row in voicemail_sms_claims (phone PRIMARY KEY), the permanent per-phone
- * claim services/voicemail-lead-sms.js already takes, so whichever lane
- * texts a number first, the other never does. This lane's rows carry
- * lead_id NULL (every voicemail-lane row has a lead) and the CLAIM_*
- * outcomes below. The claim is taken only at the provider boundary
- * (providerBoundaryCheck, run by Twilio right before the SDK request), so
- * no claim exists for a text that never got that far; a row left by a
- * crash past it is treated as possibly delivered — at most once, never
- * twice. Released only when the pipeline proves nothing was sent and the
- * failure can clear (a hold, a non-terminal provider failure).
+ * One text per phone number EVER — a row in the lane's own
+ * missed_call_text_claims (phone PRIMARY KEY; the voicemail_sms_claims /
+ * dropped_call_sms_claims contract). Owner ruling 2026-09-27: this text and
+ * the voicemail quote-link text stay separate lanes — this one skips anyone
+ * the voicemail lane has claimed or texted (or who left a voicemail), and
+ * the voicemail lane still answers a voicemail left after this text. The
+ * claim is taken only at the provider boundary (providerBoundaryCheck, run
+ * by Twilio right before the SDK request), so no claim exists for a text
+ * that never got that far; a row left by a crash past it is reconciled
+ * against the provider, and otherwise treated as possibly delivered — at
+ * most once, never twice. Released only when the pipeline proves nothing
+ * was sent and the failure can clear (a hold, a non-terminal provider
+ * failure).
  *
  * Timing: every call gets one send slot (SEND_SLOT_MS) from the first
  * moment it may be texted — after the voicemail-landing grace, or at the
@@ -70,16 +72,15 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 
 const GATE = 'missedCallTextBack';
 const MESSAGE_TYPE = 'missed_call_text_back';
-// voicemail-lead-sms.js's provisional outcome: its claim is taken but its
-// text is not out yet, and it deletes the row on a failure that never
-// consumed the one-shot.
+// voicemail-lead-sms.js's provisional claim outcome: its text is not out
+// yet, and it deletes the row on a failure that never consumed its one-shot.
 const VOICEMAIL_CLAIM_IN_FLIGHT = 'claimed';
-// This lane's outcomes on its shared voicemail_sms_claims row (see header).
+// Outcomes on the lane's missed_call_text_claims row (see header).
 const CLAIM = {
-  DISPATCHING: 'missed_call_dispatching', // taken at the provider boundary
-  SENT: 'missed_call_sent',
-  UNCERTAIN: 'missed_call_uncertain', // the provider may hold it
-  BLOCKED: 'missed_call_blocked', // permanent rejection — the number can't take a text
+  DISPATCHING: 'dispatching', // taken at the provider boundary
+  SENT: 'sent',
+  UNCERTAIN: 'uncertain', // the provider may hold it
+  BLOCKED: 'blocked', // permanent rejection — the number can't take a text
 };
 // providerBoundaryCheck's refusal codes, read back off the pipeline result.
 const BOUNDARY = {
@@ -214,11 +215,10 @@ function tooOldToText(row, now = Date.now()) {
   return deadline === null || now > deadline;
 }
 
-// This lane's in-flight claim row — lead_id NULL (a voicemail-lane row always
-// has a lead) and still DISPATCHING. Every write after the boundary insert
-// is fenced on it, so this lane never touches a claim it did not take.
+// This lane's in-flight claim row, still DISPATCHING. Every write after the
+// boundary insert is fenced on it.
 function ownInFlightClaim(phone, dbi = db) {
-  return dbi('voicemail_sms_claims').where({ phone, outcome: CLAIM.DISPATCHING }).whereNull('lead_id');
+  return dbi('missed_call_text_claims').where({ phone, outcome: CLAIM.DISPATCHING });
 }
 function releaseClaim(phone) {
   return ownInFlightClaim(phone).del()
@@ -226,11 +226,12 @@ function releaseClaim(phone) {
 }
 // Keep the claim with its final outcome. `claimed` false means the provider
 // consumed the one-shot without the boundary check ever taking the row (a
-// path that skipped it) — record it anyway so neither lane texts again.
-function keepClaim(phone, outcome, claimed) {
+// path that skipped it) — record it anyway so the number is never texted
+// again.
+function keepClaim(phone, outcome, claimed, callLogId = null) {
   const write = claimed
     ? ownInFlightClaim(phone).update({ outcome })
-    : db('voicemail_sms_claims').insert({ phone, lead_id: null, outcome }).onConflict('phone').ignore();
+    : db('missed_call_text_claims').insert({ phone, outcome, call_log_id: callLogId }).onConflict('phone').ignore();
   return write.catch((err) => logger.warn(`[missed-call-text-back] claim stamp failed for ${maskPhone(phone)} (${err?.code || err?.name || 'error'})`));
 }
 
@@ -307,7 +308,7 @@ async function contactState(phone, row, dbi = db) {
 // → stamp it sent. No answer → leave it for the next pass. Returns the claim
 // row that stands afterwards, or null.
 async function reconcileStaleClaim(phone, claim) {
-  if (claim.lead_id || claim.outcome !== CLAIM.DISPATCHING) return claim;
+  if (claim.outcome !== CLAIM.DISPATCHING) return claim;
   const claimedAt = new Date(claim.created_at).getTime();
   if (!Number.isFinite(claimedAt) || Date.now() - claimedAt < STALE_CLAIM_MS) return claim; // still in flight
   const provider = await require('./twilio').findOutboundMessageSince({ to: phone, sentAfter: claim.created_at });
@@ -317,30 +318,33 @@ async function reconcileStaleClaim(phone, claim) {
     await ownInFlightClaim(phone).where('created_at', '<', new Date(Date.now() - STALE_CLAIM_MS)).del();
     logger.info(`[missed-call-text-back] Released an orphaned claim for ${maskPhone(phone)} — the provider has no message since it`);
   }
-  return (await db('voicemail_sms_claims').where({ phone }).first('lead_id', 'outcome', 'created_at')) || null;
+  return (await db('missed_call_text_claims').where({ phone }).first('outcome', 'created_at')) || null;
 }
 
-// What an existing claim row on the number means for a call: 'in_flight'
-// (the other send is mid-handoff, or an orphan not yet reconciled — it may
-// still be released, so wait and retry inside the send slot), or the
-// consumed one-shot's settle reason.
+// What this lane's existing claim on the number means for a call:
+// 'in_flight' (another attempt is mid-handoff, or an orphan not yet
+// reconciled — it may still be released, so wait and retry inside the send
+// slot), or 'already_sent_to_phone' (the one-shot is consumed).
 function claimState(claim) {
-  if (claim.lead_id) return claim.outcome === VOICEMAIL_CLAIM_IN_FLIGHT ? 'in_flight' : 'voicemail_lead_texted';
   return claim.outcome === CLAIM.DISPATCHING ? 'in_flight' : 'already_sent_to_phone';
 }
 
-// An earlier first-touch text to this number — a settle reason, 'in_flight',
-// or null — as the early skip before any pipeline work (the atomic guarantee
-// is the boundary claim). Reads the shared claim row (this lane's own or the
-// voicemail lane's, a landline stamped there included — a landline stays a
-// landline), then the sms_log history of both lanes' message types — texts
+// An earlier text to this number — a settle reason, 'in_flight', or null —
+// as the early skip before any pipeline work (the atomic guarantee is the
+// boundary claim). This lane's own claim first; then the voicemail lane's
+// claim: that lane is answering a voicemail they left (or found the number
+// is a landline), and this text yields to it (owner ruling 2026-09-27) —
+// waiting while its claim is still provisional, since that lane deletes it
+// if its send fails; then the sms_log history of both lanes' types, texts
 // that actually went out only (deliveredTexts): an unresolved reservation's
 // fate is the claim's business, and a reconciled orphan the provider proved
 // unsent, or a bounced text, must not survive here as a completed one.
 async function priorTextReason(phone) {
-  const found = await db('voicemail_sms_claims').where({ phone }).first('lead_id', 'outcome', 'created_at');
+  const found = await db('missed_call_text_claims').where({ phone }).first('outcome', 'created_at');
   const claim = found && await reconcileStaleClaim(phone, found);
   if (claim) return claimState(claim);
+  const voicemailClaim = await db('voicemail_sms_claims').where({ phone }).first('outcome');
+  if (voicemailClaim) return voicemailClaim.outcome === VOICEMAIL_CLAIM_IN_FLIGHT ? 'in_flight' : 'voicemail_lead_texted';
   const sentBefore = (messageType) => deliveredTexts(db)
     .where({ to_phone: phone, message_type: messageType })
     .first('id');
@@ -348,19 +352,17 @@ async function priorTextReason(phone) {
   return (await sentBefore('voicemail_quote_link')) ? 'voicemail_lead_texted' : null;
 }
 
-// Orphan cleanup, independent of any call: a claim this lane left unresolved
-// blocks BOTH lanes on that number — including the voicemail lane on a later
-// voicemail this lane never sees, and after the call that took it has aged
-// out. Run by every sweep pass, gate on or off (it only resolves this lane's
-// own rows; it sends nothing). Bounded per pass.
+// Orphan cleanup, independent of any call: a claim this lane left
+// unresolved keeps the number from ever being texted, even after the call
+// that took it has aged out. Run by every sweep pass, gate on or off (it
+// only resolves this lane's own rows; it sends nothing). Bounded per pass.
 async function reconcileOrphanedClaims({ limit = 20 } = {}) {
-  const stale = await db('voicemail_sms_claims')
-    .whereNull('lead_id')
+  const stale = await db('missed_call_text_claims')
     .where('outcome', CLAIM.DISPATCHING)
     .where('created_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
     .orderBy('created_at', 'asc')
     .limit(limit)
-    .select('phone', 'lead_id', 'outcome', 'created_at');
+    .select('phone', 'outcome', 'created_at');
   for (const claim of stale) {
     try {
       await reconcileStaleClaim(claim.phone, claim);
@@ -510,13 +512,13 @@ function providerBoundaryCheck(row, phone, attempt) {
       if (contact === 'in_flight') {
         return { ok: false, code: BOUNDARY.SEND_IN_FLIGHT, reason: 'another text to this number is mid-handoff', retryable: true };
       }
-      const claimed = await dbi('voicemail_sms_claims')
-        .insert({ phone, lead_id: null, outcome: CLAIM.DISPATCHING })
+      const claimed = await dbi('missed_call_text_claims')
+        .insert({ phone, outcome: CLAIM.DISPATCHING, call_log_id: row.id })
         .onConflict('phone')
         .ignore()
         .returning('phone');
       if (!claimed?.length) {
-        const holder = await dbi('voicemail_sms_claims').where({ phone }).first('lead_id', 'outcome');
+        const holder = await dbi('missed_call_text_claims').where({ phone }).first('outcome');
         return !holder || claimState(holder) === 'in_flight'
           ? { ok: false, code: BOUNDARY.CLAIM_BUSY, reason: 'another send holds this number', retryable: true }
           : { ok: false, code: BOUNDARY.CLAIMED, reason: 'this number was already texted' };
@@ -578,7 +580,7 @@ const BOUNDARY_SETTLES = {
 
 async function classifySendOutcome(result, phone, attempt, row, { releaseLease, settleFenced }) {
   if (result.sent && isRealProviderSend(result)) {
-    await keepClaim(phone, CLAIM.SENT, attempt.claimed);
+    await keepClaim(phone, CLAIM.SENT, attempt.claimed, row.id);
     await settleFenced('sent');
     logger.info(`[missed-call-text-back] Sent to ${maskPhone(phone)} (call_log ${row.id})`);
     return { outcome: 'sent' };
@@ -586,7 +588,7 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
   if (isAmbiguousProviderOutcome(result)) {
     // The provider may still hold the text — keep the claim (a missed text
     // beats a doubled one) and settle; neither lane retries this number.
-    await keepClaim(phone, CLAIM.UNCERTAIN, attempt.claimed);
+    await keepClaim(phone, CLAIM.UNCERTAIN, attempt.claimed, row.id);
     await settleFenced('skipped:provider_uncertain');
     return { outcome: 'skipped', reason: 'provider_uncertain' };
   }
@@ -756,8 +758,6 @@ module.exports = {
   MESSAGE_TYPE,
   CLAIM,
   BOUNDARY,
-  // voicemail-lead-sms.js resolves a stale claim of this lane's the same way.
-  reconcileStaleClaim,
   MAX_CALL_AGE_MS,
   SEND_SLOT_MS,
   VOICEMAIL_GRACE_MS,
@@ -775,6 +775,7 @@ module.exports = {
     contactState,
     priorTextReason,
     providerBoundaryCheck,
+    reconcileStaleClaim,
     reconcileOrphanedClaims,
   },
 };

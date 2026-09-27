@@ -52,8 +52,8 @@ describe('gate', () => {
   });
 });
 
-describe('one text per number EVER (shared voicemail_sms_claims row)', () => {
-  test('every claim outcome fits the shared table\'s outcome column (varchar 30)', () => {
+describe('one text per number EVER (missed_call_text_claims row)', () => {
+  test('every claim outcome fits the claim table\'s outcome column (varchar 30)', () => {
     for (const outcome of Object.values(CLAIM)) expect(outcome.length).toBeLessThanOrEqual(30);
   });
 });

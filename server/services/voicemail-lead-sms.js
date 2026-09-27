@@ -15,10 +15,7 @@
  *      an atomic per-lead claim on leads.extracted_data for same-lead
  *      idempotency. The phone claim is released ONLY on outcomes that never
  *      consumed the one-shot (template disabled, missing secret, re-queue
- *      failure, unexpected error). The table is shared with the missed-call
- *      text-back (missed-call-text-back.js): a number either lane texted is
- *      never texted by the other. That lane's rows have lead_id NULL; this
- *      lane's always carry the lead, and its release/stamp touch only those.
+ *      failure, unexpected error).
  *   3. Landline pre-check via the shared phone_line_types cache + one paid
  *      Twilio Lookup per uncached number (a voicemail caller can easily be on
  *      a landline — don't burn the one-shot on an undeliverable send).
@@ -124,7 +121,7 @@ async function logActivity(leadId, activityType, description, metadata = {}) {
 // issue is fixed. Best-effort; a leaked claim fails safe (no text, no dup).
 async function releasePhoneClaim(phone) {
   try {
-    await db('voicemail_sms_claims').where({ phone }).whereNotNull('lead_id').del();
+    await db('voicemail_sms_claims').where({ phone }).del();
     return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] phone claim release failed for ${maskPhone(phone)}: ${e.message}`);
@@ -138,7 +135,7 @@ async function releasePhoneClaim(phone) {
 // durable-finalize reason as stampStatus above.
 async function stampPhoneClaim(phone, outcome) {
   try {
-    await db('voicemail_sms_claims').where({ phone }).whereNotNull('lead_id').update({ outcome });
+    await db('voicemail_sms_claims').where({ phone }).update({ outcome });
     return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] phone claim stamp failed for ${maskPhone(phone)}: ${e.message}`);
@@ -161,43 +158,6 @@ async function clearLeadClaim(leadId) {
   } catch (e) {
     logger.warn(`[voicemail-sms] lead claim clear failed for lead ${leadId}: ${e.message}`);
     return false;
-  }
-}
-
-// The missed-call text-back's provisional claim (lead_id NULL): held only
-// across its provider handoff, and deleted if the provider proves nothing
-// was sent — in flight, not a completed text.
-const MISSED_CALL_CLAIM_IN_FLIGHT = 'missed_call_dispatching';
-// Long enough for that handoff to settle either way: a release follows a
-// boundary refusal within milliseconds or a provider error response, and a
-// handoff that hangs past this ends 'uncertain' and keeps its claim.
-const MISSED_CALL_HANDOFF_WAIT_MS = 5000;
-const MISSED_CALL_HANDOFF_POLL_MS = 200;
-
-// The atomic phone claim. A conflict with the missed-call lane's in-flight
-// claim is waited out rather than read as a sent text (if that send fails,
-// skipping here would leave the caller with neither message); a stale one —
-// left by a worker that died mid-handoff — is resolved the way that lane
-// resolves it, against the provider. Any other conflict is a consumed
-// one-shot. True = claimed.
-async function acquirePhoneClaim(phone, leadId) {
-  const deadline = Date.now() + MISSED_CALL_HANDOFF_WAIT_MS;
-  let reconciled = false; // one provider lookup per attempt, not per poll
-  for (;;) {
-    const inserted = await db('voicemail_sms_claims')
-      .insert({ phone, lead_id: leadId, outcome: 'claimed' })
-      .onConflict('phone')
-      .ignore()
-      .returning('phone');
-    if (Array.isArray(inserted) ? inserted.length > 0 : !!inserted) return true;
-    let holder = await db('voicemail_sms_claims').where({ phone }).first('lead_id', 'outcome', 'created_at');
-    if (holder && !holder.lead_id && holder.outcome === MISSED_CALL_CLAIM_IN_FLIGHT && !reconciled) {
-      reconciled = true;
-      holder = await require('./missed-call-text-back').reconcileStaleClaim(phone, holder);
-    }
-    if (holder && (holder.lead_id || holder.outcome !== MISSED_CALL_CLAIM_IN_FLIGHT)) return false;
-    if (Date.now() >= deadline) return false;
-    if (holder) await new Promise((resolve) => setTimeout(resolve, MISSED_CALL_HANDOFF_POLL_MS));
   }
 }
 
@@ -231,7 +191,12 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
   // Fails closed: if the claim can't be taken (conflict OR error), no text.
   let phoneClaimed = false;
   try {
-    phoneClaimed = await acquirePhoneClaim(phone, leadId);
+    const inserted = await db('voicemail_sms_claims')
+      .insert({ phone, lead_id: leadId, outcome: 'claimed' })
+      .onConflict('phone')
+      .ignore()
+      .returning('phone');
+    phoneClaimed = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;
   } catch (e) {
     logger.warn(`[voicemail-sms] phone claim insert failed — skipping (fail closed): ${e.message}`);
     return { sent: false, skipped: 'claim_insert_failed' };
