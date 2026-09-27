@@ -6,7 +6,7 @@ const { etDateString } = require('../utils/datetime-et');
 
 const ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', ...ADDRESS_FIELDS, 'latitude', 'longitude'];
-const reviewEnabled = () => gateEnvValue('GATE_GEOCODE_REVIEW');
+const reviewEnabled = () => typeof gateEnvValue === 'function' && gateEnvValue('GATE_GEOCODE_REVIEW');
 const addressSnapshot = customer => ADDRESS_FIELDS.map(field => customer[field] ?? null);
 const sameAddress = (customer, review) => JSON.stringify(addressSnapshot(customer)) === JSON.stringify(review?.address_snapshot);
 const hasPin = customer => ['latitude', 'longitude'].every(field => customer[field] != null && Number.isFinite(Number(customer[field])) && Number(customer[field]) !== 0);
@@ -129,6 +129,48 @@ function excludeMatchingPrimaryPins(query, customerAlias = 'customers') {
       .whereRaw("jsonb_build_array(COALESCE(p.address_line1, ''), COALESCE(p.address_line2, ''), COALESCE(p.city, ''), COALESCE(p.state, ''), COALESCE(p.zip, '')) = jsonb_build_array(COALESCE(??.address_line1, ''), COALESCE(??.address_line2, ''), COALESCE(??.city, ''), COALESCE(??.state, ''), COALESCE(??.zip, ''))",
         Array(5).fill(customerAlias));
   });
+}
+
+function excludeCustomerAutomaticGeocodeForId(query, customerId) {
+  if (!reviewEnabled()) return query;
+  query.whereNotExists(function () {
+    this.select('r.customer_id').from('customer_geocode_reviews as r')
+      .join('customers as blocked_customer', 'blocked_customer.id', 'r.customer_id')
+      .where({ 'r.customer_id': customerId })
+      .where(function () {
+        this.where('r.status', 'verified').orWhere(function () {
+          this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
+            .whereRaw('r.address_snapshot = jsonb_build_array(blocked_customer.address_line1, blocked_customer.address_line2, blocked_customer.city, blocked_customer.state, blocked_customer.zip)');
+        });
+      });
+  });
+  return query.whereNotExists(function () {
+    this.select('p.id').from('customer_properties as p')
+      .join('customers as primary_customer', 'primary_customer.id', 'p.customer_id')
+      .where({ 'p.customer_id': customerId, 'p.active': true, 'p.is_primary': true })
+      .whereNotNull('p.latitude').whereNotNull('p.longitude')
+      .whereRaw('p.latitude <> 0 AND p.longitude <> 0')
+      .whereRaw("jsonb_build_array(COALESCE(p.address_line1, ''), COALESCE(p.address_line2, ''), COALESCE(p.city, ''), COALESCE(p.state, ''), COALESCE(p.zip, '')) = jsonb_build_array(COALESCE(primary_customer.address_line1, ''), COALESCE(primary_customer.address_line2, ''), COALESCE(primary_customer.city, ''), COALESCE(primary_customer.state, ''), COALESCE(primary_customer.zip, ''))");
+  });
+}
+
+async function reviewedCustomerLocation(customer, conn = db) {
+  if (!customer || !reviewEnabled()) return customer;
+  const [review, primary] = await Promise.all([
+    conn('customer_geocode_reviews').where({ customer_id: customer.id }).first(),
+    conn('customer_properties').where({ customer_id: customer.id, active: true, is_primary: true }).first(),
+  ]);
+  const effective = effectiveCustomer(customer, primary);
+  if (!review || !sameAddress(customer, review)) {
+    return review?.status === 'verified'
+      ? { ...customer, latitude: null, longitude: null, geocode_review_blocked: true }
+      : effective;
+  }
+  if (review.status === 'verified' && samePin(effective, review)) return effective;
+  if (['verified', 'needs_details', 'needs_pin', 'outside_area'].includes(review.status)) {
+    return { ...customer, latitude: null, longitude: null, geocode_review_blocked: true };
+  }
+  return effective;
 }
 
 function blockingPropertyReview(builder, propertyAlias) {
@@ -267,6 +309,7 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
 }
 
 module.exports = { reviewEnabled, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
-  attemptReviewedGeocode, excludeReviewedAddresses, excludeMatchingPrimaryPins, effectiveReview, blocksAutomaticGeocode,
+  attemptReviewedGeocode, excludeReviewedAddresses, excludeMatchingPrimaryPins, excludeCustomerAutomaticGeocodeForId,
+  reviewedCustomerLocation, effectiveReview, blocksAutomaticGeocode,
   filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision, serviceReviewContexts,
   excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId };

@@ -12589,18 +12589,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           .where({ id: customerId })
           .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
         if (!cust) return;
-        const custCoords = (cust.latitude != null && cust.longitude != null)
-          ? { lat: Number(cust.latitude), lng: Number(cust.longitude) }
-          : await geocodeAddress(buildAddress(cust));
+        const review = require('../services/customer-geocode-review');
+        const reviewedCust = await review.reviewedCustomerLocation({ ...cust, id: customerId }, db);
+        if (reviewedCust.geocode_review_blocked) return;
+        const custCoords = (reviewedCust.latitude != null && reviewedCust.longitude != null)
+          ? { lat: Number(reviewedCust.latitude), lng: Number(reviewedCust.longitude) }
+          : await geocodeAddress(buildAddress(reviewedCust));
         if (!custCoords) return;
         const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
         if (!(samePlaceMiles <= 0.15)) return;
-        await db('scheduled_services')
+        let visitUpdate = db('scheduled_services')
           .where({ source_estimate_id: estimate.id })
-          .whereNull('lat')
-          .update({ lat: estCoords.lat, lng: estCoords.lng });
-        if (cust.latitude == null || cust.longitude == null) {
-          await db('customers').where({ id: customerId }).update({
+          .whereNull('lat');
+        visitUpdate = review.excludeCustomerAutomaticGeocodeForId(visitUpdate, customerId);
+        await visitUpdate.update({ lat: estCoords.lat, lng: estCoords.lng });
+        if ((cust.latitude == null || cust.longitude == null)
+          && reviewedCust.latitude == null && reviewedCust.longitude == null) {
+          let customerUpdate = db('customers').where({ id: customerId });
+          customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
+          await customerUpdate.update({
             latitude: custCoords.lat,
             longitude: custCoords.lng,
             updated_at: new Date(),

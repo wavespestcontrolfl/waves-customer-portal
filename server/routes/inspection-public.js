@@ -329,12 +329,15 @@ async function loadTrustedCustomer(dbConn, lead, token) {
   // A verified lead link wins over provenance naming ANOTHER account (Codex
   // #4737 r7 P2 — staff relinked the lead); provenance naming the linked
   // customer's own account (an additional property booked here) wins.
+  let selected;
   if (linked && prospect) {
     const sameAccount = prospect.id === linked.id
       || (Boolean(linked.account_id) && prospect.account_id === linked.account_id);
-    return sameAccount ? prospect : linked;
+    selected = sameAccount ? prospect : linked;
+  } else {
+    selected = linked || prospect;
   }
-  return linked || prospect;
+  return require('../services/customer-geocode-review').reviewedCustomerLocation(selected, dbConn);
 }
 
 // A provenance customer_id can go stale when customer-dedupe.js merges that
@@ -535,6 +538,9 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
   }
   const stored = storedCoordsResolution(custRow);
   if (stored) return stored;
+  if (custRow?.geocode_review_blocked) {
+    return { location: null, address: null, source: null, unresolved: true };
+  }
   let anyAddressText = false;
   for (const { address, source } of storedAddressCandidates(lead, custRow)) {
     anyAddressText = true;
@@ -1395,9 +1401,11 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
   // resolveEligibility's own docblock.
   const eligibility = await resolveEligibility(trx, freshLead, matched, { includeRescheduleUrl: false });
   if (eligibility.state !== 'ok') return { eligibility };
-  if (matched.latitude != null && matched.longitude != null) {
-    return { customer: matched, location: { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) } };
+  const reviewed = await require('../services/customer-geocode-review').reviewedCustomerLocation(matched, trx);
+  if (reviewed.latitude != null && reviewed.longitude != null) {
+    return { customer: reviewed, location: { lat: parseFloat(reviewed.latitude), lng: parseFloat(reviewed.longitude) } };
   }
+  if (reviewed.geocode_review_blocked) return { locationFailure: 'address_unresolved' };
   // A legacy profile with no stored coordinates gets the validated ones
   // (Codex #4737 r3 P1): createSelfBooking reloads the customer's own
   // coordinates for its commit-time travel check. The customer-comms fence
