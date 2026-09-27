@@ -134,6 +134,48 @@ test.each([
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
 });
 
+// #4843 gate checklist: a billing row whose producer stored no replay
+// contract used to retry on the generic path (suppression only). It now
+// re-authorizes its own customer notice through the Email authority.
+test('a billing row with no stored contract retries only through the Email authority', async () => {
+  const unregistered = storedMessage({ payload_snapshot: JSON.stringify({ notification_body: 'Your upcoming payment' }) });
+  const accepted = { ...unregistered, status: 'sent', sent_at: new Date() };
+  query.first = jest.fn(async () => accepted);
+  query.returning = jest.fn(async () => [accepted]);
+  const result = await retryOne(unregistered);
+  expect(result).toMatchObject({ sent: true });
+  expect(authority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
+    input: expect.objectContaining({ customerId: 'customer-1', invoiceId: null,
+      metadata: { billingDeliveryCategory: 'billing', notificationEventKey: event } }),
+  }));
+  expect(billingEmailReplayEligible).not.toHaveBeenCalled();
+  expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ database: heldDatabase }));
+  // No reservation backs an unregistered notice.
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
+});
+
+test('an authority refusal stops an unregistered billing retry before any provider work', async () => {
+  authority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    options.state.boundaryBlock = { code: 'BILLING_PREFERENCES_CHANGED', reason: 'Email is not selected for this billing category' };
+    return { ok: false };
+  });
+  const unregistered = storedMessage({ payload_snapshot: JSON.stringify({ notification_body: 'Your upcoming payment' }) });
+  await expect(retryOne(unregistered)).resolves.toMatchObject({ sent: false, stopped: true });
+  expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
+});
+
+test('an unregistered row that does not carry its notice identity is refused, never resent', async () => {
+  const unregistered = storedMessage({
+    payload_snapshot: JSON.stringify({ notification_body: 'Your upcoming payment' }),
+    idempotency_key: 'billing_channel_email:another-event:email',
+  });
+  await expect(retryOne(unregistered)).resolves.toMatchObject({ sent: false, stopped: true });
+  expect(authority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+});
+
 test('a stale producer reason terminates before provider preparation or a provider request', async () => {
   billingEmailReplayEligible.mockResolvedValue({ eligible: false, reason: 'charge-date-passed', retryable: false });
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true, reason: 'charge-date-passed' });
