@@ -87,7 +87,7 @@ describe('CompletionPanel invoiceAmount — server-computed billingLane.predicti
           kind: 'covered_sibling_invoice',
           amount: null,
           conflictStampedPrice: false,
-          invoiceNumber: 'WPC-2026-0505',
+          invoiceNumber: 'WPC-TEST-0001',
           siblingServiceType: 'Quarterly Pest Control',
         },
       },

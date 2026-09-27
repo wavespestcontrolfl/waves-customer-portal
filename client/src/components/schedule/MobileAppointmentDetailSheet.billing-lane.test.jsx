@@ -233,7 +233,7 @@ describe('MobileAppointmentDetailSheet priced-but-unminted warning', () => {
 describe('MobileAppointmentDetailSheet sibling-covered first-application visit', () => {
   // Prod 2026-09-26: a per-application Silver customer accepted lawn
   // ($56.40/app) + pest ($97.20/app) into one reserved slot. The pest row's
-  // invoice ($153.60) covered the trip; the lawn row was deliberately left
+  // invoice covered the trip; the lawn row was deliberately left
   // unpriced. The sheet showed $74.70 (monthlyRate/12 — meaningless here)
   // and warned "nothing will bill". Both are wrong: this pins the fix.
   const SIBLING_COVERED_SERVICE = {
@@ -254,7 +254,7 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
         amount: null,
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
-        invoiceNumber: 'WPC-2026-0505',
+        invoiceNumber: 'WPC-TEST-0001',
         // Codex round-7 P1: the sibling invoice's status decides "no charge
         // needed" vs "still due — collect on that invoice". This fixture
         // pins the SETTLED case (paid) — see the collectible-status
@@ -269,7 +269,7 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
 
   it('reads "no charge — covered by invoice" instead of the money-gap warning', () => {
     render(<MobileAppointmentDetailSheet service={SIBLING_COVERED_SERVICE} onClose={() => {}} />);
-    expect(screen.getByText(/no charge —.*WPC-2026-0505.*Quarterly Pest Control.*same trip/i)).toBeInTheDocument();
+    expect(screen.getByText(/no charge —.*WPC-TEST-0001.*Quarterly Pest Control.*same trip/i)).toBeInTheDocument();
     expect(screen.queryByText(/Nothing will bill for this visit/i)).not.toBeInTheDocument();
   });
 
@@ -277,7 +277,7 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     render(<MobileAppointmentDetailSheet service={SIBLING_COVERED_SERVICE} onClose={() => {}} />);
     expect(screen.queryByText(/\$74\.70/)).not.toBeInTheDocument();
     // Reads as covered, not as a $0.00 bill with no explanation.
-    expect(screen.getAllByText(/Covered by invoice WPC-2026-0505/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Covered by invoice WPC-TEST-0001/i).length).toBeGreaterThan(0);
   });
 
   // Codex pre-push P2: SIBLING_COVERED_SERVICE carries a real WaveGuard
@@ -292,7 +292,7 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     render(<MobileAppointmentDetailSheet service={SIBLING_COVERED_SERVICE} onClose={() => {}} />);
     expect(screen.queryByText(/Covered by WaveGuard/i)).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Covered by invoice WPC-2026-0505 on the Quarterly Pest Control visit — no charge needed/i),
+      screen.getByText(/Covered by invoice WPC-TEST-0001 on the Quarterly Pest Control visit — no charge needed/i),
     ).toBeInTheDocument();
   });
 });
@@ -323,7 +323,7 @@ describe('MobileAppointmentDetailSheet sibling-covered visit whose sibling invoi
         amount: null,
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
-        invoiceNumber: 'WPC-2026-0505',
+        invoiceNumber: 'WPC-TEST-0001',
         invoiceStatus: 'overdue',
         amountDue: 153.6,
         siblingServiceType: 'Quarterly Pest Control',
@@ -341,10 +341,10 @@ describe('MobileAppointmentDetailSheet sibling-covered visit whose sibling invoi
     expect(link).toHaveAttribute('href', '/admin/invoices/inv-1');
   });
 
-  it('reads "Collect on invoice WPC-2026-0505" in the itemized total, not "Covered by invoice"', () => {
+  it('reads "Collect on invoice WPC-TEST-0001" in the itemized total, not "Covered by invoice"', () => {
     render(<MobileAppointmentDetailSheet service={COLLECTIBLE_SIBLING_SERVICE} onClose={() => {}} />);
-    expect(screen.queryByText(/^Covered by invoice WPC-2026-0505$/)).not.toBeInTheDocument();
-    expect(screen.getAllByText(/Collect on invoice WPC-2026-0505/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^Covered by invoice WPC-TEST-0001$/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Collect on invoice WPC-TEST-0001/i).length).toBeGreaterThan(0);
   });
 });
 
@@ -597,7 +597,7 @@ describe('MobileAppointmentDetailSheet sibling invoice needs-review visit', () =
         amount: null,
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
-        invoiceNumber: 'WPC-2026-0505',
+        invoiceNumber: 'WPC-TEST-0001',
         invoiceStatus: 'refunded',
       },
       unbilledGap: null,

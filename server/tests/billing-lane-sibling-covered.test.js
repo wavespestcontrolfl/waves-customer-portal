@@ -74,7 +74,7 @@ describe('siblingCoveredCompletionPrediction', () => {
       invoice: {
         id: 'inv-1',
         scheduled_service_id: 'svc-pest',
-        invoice_number: 'WPC-2026-0505',
+        invoice_number: 'WPC-TEST-0001',
         status: 'sent',
         total: 153.6,
       },
@@ -91,7 +91,7 @@ describe('siblingCoveredCompletionPrediction', () => {
       kind: 'covered_sibling_invoice',
       amount: null,
       invoiceId: 'inv-1',
-      invoiceNumber: 'WPC-2026-0505',
+      invoiceNumber: 'WPC-TEST-0001',
       invoiceStatus: 'sent',
       amountDue: 153.6,
       siblingServiceType: 'Quarterly Pest Control',
@@ -115,7 +115,7 @@ describe('siblingCoveredCompletionPrediction', () => {
   test('amountDue nets any account credit already applied to the sibling invoice', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: {
-        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-2026-0505',
+        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001',
         status: 'overdue', total: 153.6, credit_applied: 50,
       },
       liveBeside: null,
@@ -131,7 +131,7 @@ describe('siblingCoveredCompletionPrediction', () => {
   test('omits the breakdown when the anchored splits do not reconcile to the invoice total', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: {
-        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-2026-0505', status: 'sent', total: 200,
+        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'sent', total: 200,
       },
       liveBeside: null,
     });
@@ -165,7 +165,7 @@ describe('siblingCoveredCompletionPrediction', () => {
   // prediction (amount: null) tells staff to go resolve it instead.
   test('surfaces a sibling_needs_review prediction for a refunded sibling invoice — never a false "covered" or a stale positive amount', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
-      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-2026-0505', status: 'refunded', total: 153.6 },
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'refunded', total: 153.6 },
       liveBeside: null,
     });
     const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
@@ -176,7 +176,7 @@ describe('siblingCoveredCompletionPrediction', () => {
       amount: null,
       conflictStampedPrice: false,
       invoiceId: 'inv-1',
-      invoiceNumber: 'WPC-2026-0505',
+      invoiceNumber: 'WPC-TEST-0001',
       invoiceStatus: 'refunded',
     });
   });
@@ -206,7 +206,7 @@ describe('siblingCoveredCompletionPrediction', () => {
 
   test('never covers a visit against its OWN invoice (not a sibling)', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
-      invoice: { id: 'inv-1', scheduled_service_id: LAWN_SVC.id, invoice_number: 'WPC-2026-0505', status: 'sent', total: 56.4 },
+      invoice: { id: 'inv-1', scheduled_service_id: LAWN_SVC.id, invoice_number: 'WPC-TEST-0001', status: 'sent', total: 56.4 },
       liveBeside: null,
     });
     const dbConn = fakeDbConn();

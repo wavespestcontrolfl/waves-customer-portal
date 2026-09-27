@@ -100,18 +100,18 @@ describe('visitMoneySummary', () => {
     const collectible = {
       billingLane: {
         prediction: {
-          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-2026-0505', invoiceStatus: 'overdue', amountDue: 153.6,
+          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-TEST-0001', invoiceStatus: 'overdue', amountDue: 153.6,
         },
       },
     };
     const summary = visitMoneySummary(collectible);
     expect(summary.collectNeeded).toBe(true);
-    expect(summary.headline).toBe('Collect on invoice WPC-2026-0505 ($153.60 due)');
+    expect(summary.headline).toBe('Collect on invoice WPC-TEST-0001 ($153.60 due)');
 
     const settled = {
       billingLane: {
         prediction: {
-          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-2026-0505', invoiceStatus: 'paid', amountDue: 153.6,
+          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-TEST-0001', invoiceStatus: 'paid', amountDue: 153.6,
         },
       },
     };

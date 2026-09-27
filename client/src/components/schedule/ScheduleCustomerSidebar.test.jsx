@@ -125,7 +125,7 @@ describe('ScheduleCustomerSidebar sibling-covered visit', () => {
         kind: 'covered_sibling_invoice',
         amount: null,
         invoiceId: 'inv-1',
-        invoiceNumber: 'WPC-2026-0505',
+        invoiceNumber: 'WPC-TEST-0001',
         siblingServiceType: 'Quarterly Pest Control',
       },
     },

@@ -50,7 +50,7 @@ const NEEDS_REVIEW_SERVICE = {
       amount: null,
       conflictStampedPrice: false,
       invoiceId: 'inv-1',
-      invoiceNumber: 'WPC-2026-0505',
+      invoiceNumber: 'WPC-TEST-0001',
       invoiceStatus: 'refunded',
     },
   },

@@ -40,7 +40,7 @@ describe('siblingInvoiceCoverageCopy', () => {
     const copy = siblingInvoiceCoverageCopy({
       kind: 'covered_sibling_invoice',
       invoiceId: 'inv-1',
-      invoiceNumber: 'WPC-2026-0505',
+      invoiceNumber: 'WPC-TEST-0001',
       invoiceStatus: 'paid',
       amountDue: 153.6,
       siblingServiceType: 'Quarterly Pest Control',
@@ -48,7 +48,7 @@ describe('siblingInvoiceCoverageCopy', () => {
     expect(copy.collectible).toBe(false);
     expect(copy.amountDue).toBeNull();
     expect(copy.detail).toBe(
-      'Covered by invoice WPC-2026-0505 on the Quarterly Pest Control visit (same trip) — nothing to collect.',
+      'Covered by invoice WPC-TEST-0001 on the Quarterly Pest Control visit (same trip) — nothing to collect.',
     );
     expect(copy.short).toBe('Covered — nothing to collect');
     expect(copy.invoiceHref).toBe('/admin/invoices/inv-1');
@@ -58,7 +58,7 @@ describe('siblingInvoiceCoverageCopy', () => {
     const copy = siblingInvoiceCoverageCopy({
       kind: 'covered_sibling_invoice',
       invoiceId: 'inv-1',
-      invoiceNumber: 'WPC-2026-0505',
+      invoiceNumber: 'WPC-TEST-0001',
       invoiceStatus: 'sent',
       amountDue: 153.6,
       siblingServiceType: 'Quarterly Pest Control',
@@ -66,9 +66,9 @@ describe('siblingInvoiceCoverageCopy', () => {
     expect(copy.collectible).toBe(true);
     expect(copy.amountDue).toBe(153.6);
     expect(copy.detail).toBe(
-      'Covered by the combined trip invoice — invoice WPC-2026-0505 ($153.60 due) on the Quarterly Pest Control visit is still due. Collect on that invoice, not this visit.',
+      'Covered by the combined trip invoice — invoice WPC-TEST-0001 ($153.60 due) on the Quarterly Pest Control visit is still due. Collect on that invoice, not this visit.',
     );
-    expect(copy.short).toBe('Collect on invoice WPC-2026-0505 ($153.60 due)');
+    expect(copy.short).toBe('Collect on invoice WPC-TEST-0001 ($153.60 due)');
     expect(copy.invoiceHref).toBe('/admin/invoices/inv-1');
   });
 
@@ -80,7 +80,7 @@ describe('siblingInvoiceCoverageCopy', () => {
   });
 
   it('a missing invoiceStatus fails toward settled copy, never a false collect prompt', () => {
-    const copy = siblingInvoiceCoverageCopy({ kind: 'covered_sibling_invoice', invoiceNumber: 'WPC-2026-0505' });
+    const copy = siblingInvoiceCoverageCopy({ kind: 'covered_sibling_invoice', invoiceNumber: 'WPC-TEST-0001' });
     expect(copy.collectible).toBe(false);
     expect(copy.short).toBe('Covered — nothing to collect');
   });
@@ -98,7 +98,7 @@ describe('siblingInvoiceCoverageCopy', () => {
   });
 
   it('omits invoiceHref when the prediction carries no invoiceId', () => {
-    const copy = siblingInvoiceCoverageCopy({ kind: 'covered_sibling_invoice', invoiceStatus: 'sent', invoiceNumber: 'WPC-2026-0505' });
+    const copy = siblingInvoiceCoverageCopy({ kind: 'covered_sibling_invoice', invoiceStatus: 'sent', invoiceNumber: 'WPC-TEST-0001' });
     expect(copy.invoiceHref).toBeNull();
   });
 });

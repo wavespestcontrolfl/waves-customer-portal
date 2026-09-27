@@ -99,14 +99,14 @@ it('reads a still-collectible covered_sibling_invoice prediction as flagged, not
   const collectibleSvc = { id: 'job-collectible', serviceType: 'Every 6 Weeks Lawn Care', estimatedPrice: null,
     billingLane: {
       prediction: {
-        kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-2026-0505', invoiceStatus: 'overdue', amountDue: 153.6,
+        kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-TEST-0001', invoiceStatus: 'overdue', amountDue: 153.6,
       },
     } };
   const collectibleData = { ...data, serviceId: collectibleSvc.id, currentAmount: 97.2, proposedAmount: 97.2, canApply: false, lines: [] };
   render(<CompletionPricingCard service={collectibleSvc} adminFetch={vi.fn().mockResolvedValue({ completionPricing: collectibleData })} onReviewChange={vi.fn()} />);
   expect(await screen.findByText('Combined trip invoice due')).toBeInTheDocument();
   expect(screen.queryByText('Covered application')).not.toBeInTheDocument();
-  expect(screen.getByText('Collect on invoice WPC-2026-0505 ($153.60 due)')).toBeInTheDocument();
+  expect(screen.getByText('Collect on invoice WPC-TEST-0001 ($153.60 due)')).toBeInTheDocument();
   expect(screen.getByText('$0.00')).toBeInTheDocument();
   expect(screen.queryByText('$97.20')).not.toBeInTheDocument();
 });
