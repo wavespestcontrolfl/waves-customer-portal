@@ -498,7 +498,7 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       { id: 'pending', bucket: 'citability_backfill', status: 'pending', page_url: '/blog/termite-guide/?seed=1', signal_metadata: { evidence: 'pending' } },
       { id: 'claimed', bucket: 'citability_backfill', status: 'claimed', page_url: 'https://www.wavespestcontrol.com/blog/termite-guide/', signal_metadata: { evidence: 'claimed' } },
       { id: 'review', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#faq', signal_metadata: { evidence: 'review' } },
-      { id: 'review-open', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#open', signal_metadata: { evidence: 'open-pr' } },
+      { id: 'review-open', bucket: 'citability_backfill', status: 'pending_review', claim_id: 'claim-open', page_url: 'https://wavespestcontrol.com/blog/termite-guide#open', signal_metadata: { evidence: 'open-pr' } },
       { id: 'review-retiring', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#retiring', signal_metadata: { evidence: 'retired-pr-pending-bookkeeping' } },
       { id: 'review-historical', bucket: 'citability_backfill', status: 'pending_review', claim_id: 'claim-new', page_url: 'https://wavespestcontrol.com/blog/termite-guide#historical', signal_metadata: { evidence: 'old-claim-pr' } },
       { id: 'spoke', bucket: 'citability_backfill', status: 'pending', page_url: 'https://sarasota.wavespestcontrol.com/blog/termite-guide/', signal_metadata: {} },
@@ -515,7 +515,11 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
         select: jest.fn(async () => rows),
         first: jest.fn(async () => {
           if (table !== 'autonomous_runs') return undefined;
-          if (['review-open', 'review-retiring'].includes(id)) return { id: `run-${id}` };
+          if (id === 'review-open') {
+            return q.where.mock.calls.some((call) => call[0] === 'queue_claim_id' && call[1] === 'claim-open')
+              ? { id: 'run-review-open' } : undefined;
+          }
+          if (id === 'review-retiring') return { id: `run-${id}` };
           if (id === 'review-historical'
             && !q.where.mock.calls.some((call) => call[0] === 'queue_claim_id' && call[1] === 'claim-new')) return { id: 'run-old-claim' };
           return undefined;
@@ -566,6 +570,9 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
     expect(retiringQuery.where).toHaveBeenCalledWith('outcome', 'completed_pending_review');
     expect(retiringQuery.whereIn).toHaveBeenCalledWith('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge']);
     expect(retiringQuery.whereNull).not.toHaveBeenCalledWith('astro_pr_retired_at');
+    const openQuery = trx.mock.results.find((result) => result.value.first
+      && result.value.where.mock.calls.some((call) => call[0] === 'opportunity_id' && call[1] === 'review-open')).value;
+    expect(openQuery.where).toHaveBeenCalledWith('queue_claim_id', 'claim-open');
     const historicalQuery = trx.mock.results.find((result) => result.value.first
       && result.value.where.mock.calls.some((call) => call[0] === 'opportunity_id' && call[1] === 'review-historical')).value;
     expect(historicalQuery.where).toHaveBeenCalledWith('queue_claim_id', 'claim-new');
@@ -586,11 +593,11 @@ describe('defer() — cap/gate-retry deferral back to pending (exceptions-only r
       ['claimed_at', 'tok'],
     ]));
     const patch = q.update.mock.calls[0][0];
-    expect(patch.status).toBe('pending');
+    expect(patch).toHaveProperty('status');
     expect(patch.claimed_at).toBeNull();
     // 'pending' rows must look pending — the deferral reason lives on the
     // autonomous_runs row, not the queue row.
-    expect(patch.skip_reason).toBeNull();
+    expect(patch).toHaveProperty('skip_reason');
     expect(patch.available_at).toBe(when);
     // expires_at must be pushed past the defer horizon or expireStale()
     // expires the row before it ever becomes claimable again.
@@ -599,10 +606,39 @@ describe('defer() — cap/gate-retry deferral back to pending (exceptions-only r
     // refunded, or repeated cap-window deferrals exhaust the lifetime
     // attempt budget and land in attempts_exhausted review.
     expect(db.raw).toHaveBeenCalledWith('GREATEST(attempt_count - 1, 0)');
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining("THEN 'skipped' ELSE 'pending'"),
+    );
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')"),
+      ['superseded_by_ordinary_page_edit'],
+    );
   });
 
   test('requires a claimToken and a real Date', async () => {
     await expect(queue.defer('opp_defer', new Date('2026-07-20T04:00:00Z'), {})).rejects.toThrow('claimToken');
     await expect(queue.defer('opp_defer', 'monday', { claimToken: 'tok' })).rejects.toThrow('availableAt');
+  });
+});
+
+describe('release() — superseded citability claims cannot return to pending', () => {
+  test('keeps the claim-token CAS and selects a terminal marker disposition atomically', async () => {
+    const q = chain({ updateResult: 1 });
+    db.mockImplementation(() => q);
+
+    await expect(queue.release('opp_release', { claimToken: 'tok' })).resolves.toBe(true);
+
+    expect(q._filters).toEqual(expect.arrayContaining([
+      ['id', 'opp_release'], ['status', 'claimed'], ['claimed_at', 'tok'],
+    ]));
+    const patch = q.update.mock.calls[0][0];
+    expect(patch).toHaveProperty('status');
+    expect(patch).toHaveProperty('skip_reason');
+    expect(patch).toHaveProperty('completed_at');
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining("THEN 'skipped' ELSE 'pending'"));
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')"),
+      ['superseded_by_ordinary_page_edit'],
+    );
   });
 });

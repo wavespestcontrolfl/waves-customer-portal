@@ -131,7 +131,7 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
       ELSE regexp_replace(regexp_replace(split_part(split_part(lower(page_url), '//', 2), '/', 1), '^www[.]', ''), ':.*$', '') END = ?`, [host])
     .whereRaw(`COALESCE(NULLIF(regexp_replace(regexp_replace(split_part(split_part(page_url, chr(63), 1), chr(35), 1), '^[a-z]+://[^/]+', ''), '/+$', ''), ''), '/') = ?`, [path])
     .forUpdate()
-    .select('id', 'page_url', 'status', 'signal_metadata');
+    .select('id', 'page_url', 'status', 'claim_id', 'claimed_at', 'signal_metadata');
   const matched = candidates.filter((row) => pageEditRouteIdentity(row.page_url) === identity);
   for (const row of matched) {
     let metadata = row.signal_metadata;
@@ -437,14 +437,21 @@ class OpportunityQueue {
     if (!claimToken) {
       throw new Error('opportunity-queue.release: claimToken required (pass the claimed_at value returned by claimNext)');
     }
+    const now = new Date();
+    const superseded = "bucket = 'citability_backfill' AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')";
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
       .update({
-        status: 'pending',
+        // The marker can arrive while a worker is composing or dispatching.
+        // Keep the claim-token CAS, but never put that now-unclaimable row
+        // back into pending: terminalize it in this same update instead.
+        status: db.raw(`CASE WHEN ${superseded} THEN 'skipped' ELSE 'pending' END`),
         claimed_at: null,
-        updated_at: new Date(),
+        skip_reason: db.raw(`CASE WHEN ${superseded} THEN ? ELSE skip_reason END`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${superseded} THEN ?::timestamptz ELSE completed_at END`, [now]),
+        updated_at: now,
       });
     return updated > 0;
   }
@@ -467,14 +474,17 @@ class OpportunityQueue {
       throw new Error('opportunity-queue.defer: claimToken required (pass the claimed_at value returned by claimNext)');
     }
     const expiresFloor = new Date(availableAt.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const superseded = "bucket = 'citability_backfill' AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')";
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
       .update({
-        status: 'pending',
+        status: db.raw(`CASE WHEN ${superseded} THEN 'skipped' ELSE 'pending' END`),
         claimed_at: null,
-        skip_reason: null,
+        skip_reason: db.raw(`CASE WHEN ${superseded} THEN ? ELSE NULL END`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${superseded} THEN ?::timestamptz ELSE completed_at END`, [now]),
         available_at: availableAt,
         expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [expiresFloor, expiresFloor]),
         // A deferral is not a failure — refund the attempt claimNext just
@@ -482,7 +492,7 @@ class OpportunityQueue {
         // lifetime attempt budget and land the row in the
         // attempts_exhausted review path this method exists to avoid.
         attempt_count: db.raw('GREATEST(attempt_count - 1, 0)'),
-        updated_at: new Date(),
+        updated_at: now,
       });
     return updated > 0;
   }
