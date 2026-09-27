@@ -393,7 +393,8 @@ const REGISTRY = {
       }
       // Legacy keyless rows never reserved — record at delivery so the 24h
       // window keys off the real send, not the enqueue-time blocked
-      // attempt. durableFinalize retries a failed insert until it lands.
+      // attempt. durableFinalize retries a failed insert until it lands, so
+      // the seven-day spacing re-check stays off: the text already went out.
       const customerId = await resolveFollowupCustomerId(meta);
       if (!customerId) {
         logger.warn(`[deferred-replay] invoice-followup replay delivered but customer unresolved for invoice ${meta.invoice_id} — ledger row skipped`);
@@ -410,6 +411,7 @@ const REGISTRY = {
           original_block_code: meta.original_block_code || null,
           replay: true,
         },
+        enforceSpacing: false,
       });
     },
     durableFinalize: true,

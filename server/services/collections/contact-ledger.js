@@ -19,10 +19,20 @@
  * error here is caught by callers in plain (non-trx) flow, so the
  * caught-error-still-aborts-the-trx trap does not apply. Keep it that way:
  * never call recordContact inside a trx without a SAVEPOINT.
+ *
+ * Seven-day overdue-message spacing (GATE_DUNNING_SPACING, with the policy
+ * gate): the policy read and this reservation are separate steps, so two
+ * rails on different schedules could both pass the read before either
+ * reserved (codex #5108 r1). Under a per-customer lock, a reservation
+ * re-checks for another rail's message and lands in the same transaction; a
+ * hold throws DUNNING_SPACING_HELD, which every caller already treats as
+ * "skip this send for now". enforceSpacing:false is only for recording a
+ * message that has already gone out.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const DunningSpacing = require('./dunning-spacing');
 
 async function recordContact({
   customerId,
@@ -33,10 +43,25 @@ async function recordContact({
   metadata = null,
   occurredAt = new Date(),
   idempotencyKey = null,
+  enforceSpacing = true,
+}) {
+  const entry = { customerId, channel, purpose, invoiceIds, source, metadata, occurredAt, idempotencyKey };
+  if (enforceSpacing && DunningSpacing.reservationGuarded({ channel, source })) {
+    return db.transaction(async (trx) => {
+      const holding = await DunningSpacing.lockedHoldingMessage(trx, { customerId, source, now: new Date(occurredAt) });
+      if (holding) throw DunningSpacing.spacingHeldError(holding);
+      return reserve(trx, entry);
+    });
+  }
+  return reserve(db, entry);
+}
+
+async function reserve(conn, {
+  customerId, channel, purpose, invoiceIds, source, metadata, occurredAt, idempotencyKey,
 }) {
   // Deliberately NOT wrapped: an insert failure must propagate so the caller
   // skips the delivery it was about to make.
-  let query = db('collections_contact_ledger')
+  let query = conn('collections_contact_ledger')
     .insert({
       customer_id: customerId,
       channel,
@@ -56,7 +81,7 @@ async function recordContact({
   const id = first && typeof first === 'object' ? first.id : first;
   if (id) return { id, metadata: metadata || {} };
   if (!idempotencyKey) throw new Error('collections ledger insert returned no id');
-  const existing = await db('collections_contact_ledger')
+  const existing = await conn('collections_contact_ledger')
     .where({ idempotency_key: idempotencyKey })
     .first('id', 'metadata');
   if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
@@ -64,7 +89,7 @@ async function recordContact({
   // occurred_at so the 24h frequency window starts at the actual delivery
   // attempt, not the first failed one. Later timestamp = longer window —
   // the safe direction; a refresh failure propagates (caller holds).
-  await db('collections_contact_ledger')
+  await conn('collections_contact_ledger')
     .where({ id: existing.id })
     .update({ occurred_at: occurredAt });
   const existingMeta = typeof existing.metadata === 'string'
@@ -93,7 +118,7 @@ function applyReservationMatch(query, match = {}) {
   return query;
 }
 
-async function markDelivered(target, { database = db, match = {} } = {}) {
+async function markDelivered(target, { database = db, match = {}, deliveredAt = null } = {}) {
   if (!target) return false;
   try {
     const stamp = async (conn) => {
@@ -104,6 +129,12 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
       applyReservationMatch(query, match);
       const changed = await query.update({
         metadata: conn.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
+        // A message accepted after its reservation (a provider retry) holds
+        // the next one from when it actually went out (codex #5108 r1).
+        // Later only: never shortens a window the reservation already holds.
+        ...(deliveredAt ? {
+          occurred_at: conn.raw('GREATEST(occurred_at, ?::timestamptz)', [new Date(deliveredAt)]),
+        } : {}),
       });
       return Number(changed) === 1;
     };
@@ -137,16 +168,29 @@ async function claimAttempt(entry, refresh = null) {
   if (entry.metadata?.resolved === true) return { allowed: false, resolved: true };
   if (!entry.reused) return { allowed: true };
   if (entry.metadata?.send_failed !== true) return { allowed: false, held: true };
-  const changed = await db('collections_contact_ledger').where({ id: entry.id })
+  const rearm = (conn) => conn('collections_contact_ledger').where({ id: entry.id })
     .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
       JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
     ])
     .update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
+      metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
         JSON.stringify({ ...reservationSnapshot(refresh?.metadata), send_failed: false }),
       ]),
       ...(Array.isArray(refresh?.invoiceIds) ? { invoice_ids: JSON.stringify(refresh.invoiceIds) } : {}),
     });
+  // Re-arming a failed reservation makes it hold other rails' messages
+  // again, so under the spacing gate it takes the same lock and re-check as
+  // a new one: another rail could reserve between the refresh and this claim.
+  const changed = DunningSpacing.spacingEnforced()
+    ? await db.transaction(async (trx) => {
+      const row = await trx('collections_contact_ledger').where({ id: entry.id })
+        .first('customer_id', 'channel', 'source');
+      if (row && DunningSpacing.reservationGuarded(row) && await DunningSpacing.lockedHoldingMessage(trx, {
+        customerId: row.customer_id, source: row.source,
+      })) return 0;
+      return rearm(trx);
+    })
+    : await rearm(db);
   return changed === 1 ? { allowed: true } : { allowed: false, held: true };
 }
 

@@ -7900,6 +7900,9 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       channel: 'sms',
       purpose: 'balance_reminder',
       offLedgerBalanceCents: Math.round(amountDue * 100),
+      // A renewal payment reminder is not an overdue reminder: the seven-day
+      // overdue-message rule neither holds it nor counts it.
+      source: 'annual_prepay_payment_reminder',
       logTag: 'annual-prepay',
     });
     if (!policyPermitted) {

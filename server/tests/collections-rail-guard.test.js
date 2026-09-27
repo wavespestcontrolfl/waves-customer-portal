@@ -46,6 +46,16 @@ describe('gate on', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
     expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'sms', purpose: 'late_payment' }));
     expect(ContactPolicy.evaluate.mock.calls[0][1]).not.toHaveProperty('database');
+    expect(ContactPolicy.evaluate.mock.calls[0][1]).not.toHaveProperty('source');
+  });
+
+  test('the requester\'s ledger source reaches the policy (the seven-day rule exempts some)', async () => {
+    const { collectionsChannelVerdict } = require('../services/collections/rail-guard');
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    await collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', source: 'collections_voice_paylink' });
+    await collectionsChannelVerdict({ ...BASE, source: 'annual_prepay_payment_reminder' });
+    expect(ContactPolicy.evaluate.mock.calls[0][1]).toMatchObject({ source: 'collections_voice_paylink' });
+    expect(ContactPolicy.evaluate.mock.calls[1][1]).toMatchObject({ source: 'annual_prepay_payment_reminder' });
   });
 
   test('forwards an explicitly held database without changing the default call', async () => {

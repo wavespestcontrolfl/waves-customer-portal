@@ -184,3 +184,87 @@ test('retry claim write failures propagate before any provider is authorized', a
   await expect(claimAttempt({ id: 'led-1', reused: true, metadata: { send_failed: true } }))
     .rejects.toThrow('db unavailable');
 });
+
+// Seven-day overdue-message spacing (codex #5108 r1): with both gates on, a
+// reservation re-checks for another rail's message under a per-customer lock
+// and lands in the same transaction. Everything else keeps the plain insert.
+describe('seven-day spacing re-check (GATE_COLLECTIONS_POLICY + GATE_DUNNING_SPACING)', () => {
+  const gatesOn = () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    process.env.GATE_DUNNING_SPACING = 'true';
+  };
+  afterEach(() => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    delete process.env.GATE_DUNNING_SPACING;
+    delete db.transaction;
+  });
+
+  function lockedTrx(rows) {
+    const check = {};
+    for (const method of ['where', 'whereIn', 'whereNot', 'orderBy']) check[method] = jest.fn(() => check);
+    check.select = jest.fn(async () => rows);
+    const insert = insertChain();
+    const trx = jest.fn()
+      .mockReturnValueOnce(check)
+      .mockReturnValue(insert);
+    trx.raw = jest.fn(async () => undefined);
+    db.transaction = jest.fn(async (work) => work(trx));
+    return { trx, check, insert };
+  }
+
+  test('gates off, a call, an exempt source or an already-sent record keeps the plain insert', async () => {
+    db.transaction = jest.fn();
+    const q = insertChain();
+    db.mockReturnValue(q);
+    await recordContact(ARGS);
+    gatesOn();
+    await recordContact({ ...ARGS, channel: 'voice' });
+    await recordContact({ ...ARGS, source: 'collections_voice_paylink' });
+    await recordContact({ ...ARGS, source: 'annual_prepay_payment_reminder' });
+    await recordContact({ ...ARGS, enforceSpacing: false });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(q.insert).toHaveBeenCalledTimes(5);
+  });
+
+  test('another rail\'s message inside the window throws DUNNING_SPACING_HELD before any insert', async () => {
+    gatesOn();
+    const sent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const { trx, check, insert } = lockedTrx([
+      { id: 'led-7', channel: 'email', source: 'late_payment_checker', occurred_at: sent, metadata: null },
+    ]);
+    const held = recordContact({ ...ARGS, idempotencyKey: 'followup-replay:rk-1' });
+    await expect(held).rejects.toMatchObject({ code: 'DUNNING_SPACING_HELD' });
+    await expect(held).rejects.toHaveProperty('nextEligibleAt', expect.any(Date));
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['dunning-spacing', 'cust-1']);
+    expect(check.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(check.whereIn).toHaveBeenCalledWith('channel', ['sms', 'email', 'push']);
+    // The rail's own rows are the policy's business (excludeLedgerIds).
+    expect(check.whereNot).toHaveBeenCalledWith('source', 'invoice_followup_replay');
+    expect(insert.insert).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a failed message of another rail does not hold: the reservation lands inside the locked transaction', async () => {
+    gatesOn();
+    const sent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const { trx, insert } = lockedTrx([
+      { id: 'led-7', channel: 'sms', source: 'late_payment_checker', occurred_at: sent, metadata: { send_failed: true } },
+    ]);
+    await expect(recordContact(ARGS)).resolves.toMatchObject({ id: 'led-1' });
+    expect(trx.raw).toHaveBeenCalledTimes(1);
+    expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-1', source: 'invoice_followup_replay' }));
+    expect(db).not.toHaveBeenCalled();
+  });
+});
+
+test('markDelivered with a delivery time moves occurred_at later, never earlier', async () => {
+  const q = insertChain();
+  db.mockReturnValue(q);
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  const deliveredAt = new Date('2026-09-29T18:05:00Z');
+  await expect(markDelivered({ id: 'led-1' }, { deliveredAt })).resolves.toBe(true);
+  const patch = q.update.mock.calls[0][0];
+  expect(patch.occurred_at).toEqual({ sql: 'GREATEST(occurred_at, ?::timestamptz)', bindings: [deliveredAt] });
+  await markDelivered({ id: 'led-1' });
+  expect(q.update.mock.calls[1][0]).not.toHaveProperty('occurred_at');
+});

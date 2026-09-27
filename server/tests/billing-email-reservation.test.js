@@ -33,7 +33,8 @@ beforeEach(() => {
 });
 
 test('accepted delivery stamps only the fully bound Email reservation', async () => {
-  const { database, query, trx } = acceptedDatabase();
+  const sentAt = new Date('2026-09-29T18:05:00Z');
+  const { database, query, trx } = acceptedDatabase({ id: 'message-1', send_attempt_token: null, sent_at: sentAt });
   await expect(Reservation.markBillingEmailReservationDelivered({ id: 'message-1', sent_at: new Date() }, database))
     .resolves.toBe(true);
   expect(query.whereNull).toHaveBeenCalledWith('send_attempt_token');
@@ -42,7 +43,20 @@ test('accepted delivery stamps only the fully bound Email reservation', async ()
     { database: trx, match: {
       customerId: 'customer-1', channel: 'email', source: 'late_payment_checker',
       notificationEventKey: 'late-payment:invoice-1:14', invoiceId: 'invoice-1',
-    } },
+    }, deliveredAt: sentAt },
+  );
+});
+
+// A provider retry can accept the email hours after its reservation: the
+// seven-day overdue-message window runs from the locked row's acceptance.
+test('delivery is anchored to the current attempt\'s acceptance time', async () => {
+  const deliveredAt = new Date('2026-09-30T02:40:00Z');
+  const { database, trx } = acceptedDatabase({ id: 'message-1', send_attempt_token: null, delivered_at: deliveredAt });
+  await expect(Reservation.markBillingEmailReservationDelivered({ id: 'message-1', delivered_at: deliveredAt }, database))
+    .resolves.toBe(true);
+  expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+    { id: 'email-ledger-1' },
+    expect.objectContaining({ database: trx, deliveredAt }),
   );
 });
 
@@ -60,7 +74,7 @@ test('invoice follow-up replay matches the producer ledger source', async () => 
   expect(query.where).toHaveBeenCalledWith({ send_attempt_token: 'attempt-1' });
   expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
     { id: 'email-ledger-1' },
-    { database: trx, match: expect.objectContaining({ source: 'invoice_followups' }) },
+    { database: trx, match: expect.objectContaining({ source: 'invoice_followups' }), deliveredAt: current.sent_at },
   );
 });
 

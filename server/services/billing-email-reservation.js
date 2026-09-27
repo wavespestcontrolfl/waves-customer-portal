@@ -43,9 +43,12 @@ async function markBillingEmailReservationDelivered(message, database = db) {
       if (!current || !hasAcceptedEvidence(current)) return false;
       const context = replayContext(current);
       if (!context) return false;
+      // The acceptance time, not the reservation's: a provider retry can send
+      // hours after the reservation, and the next overdue message waits for
+      // seven days from the one that actually went out.
       const stamped = await ContactLedger.markDelivered(
         { id: context.collections_ledger_id },
-        { database: trx, match: reservationMatch(context) },
+        { database: trx, match: reservationMatch(context), deliveredAt: acceptedAt(current) },
       );
       // markDelivered is best-effort and converts its own SQL failure to
       // false. Abort this surrounding savepoint as well before the outer
@@ -81,7 +84,11 @@ async function resolveBillingEmailReservationRefusal(message, database = db) {
 }
 
 function hasAcceptedEvidence(message) {
-  return !!(message?.sent_at || message?.delivered_at || message?.opened_at || message?.clicked_at);
+  return !!acceptedAt(message);
+}
+
+function acceptedAt(message) {
+  return message?.sent_at || message?.delivered_at || message?.opened_at || message?.clicked_at || null;
 }
 
 function hasTerminalRefusalEvidence(message) {

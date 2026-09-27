@@ -524,14 +524,16 @@ describe('rolling frequency windows', () => {
       expect(result.allowed).toBe(true);
     });
 
-    test('gate on: a text 3 days ago holds the next message, on any text channel, until 7 days after it', async () => {
+    test('gate on: a text 3 days ago holds the next message, on any text channel, until that weekday next week', async () => {
       process.env.GATE_DUNNING_SPACING = 'true';
       for (const channel of ['sms', 'email', 'push']) {
         armAllowedBaseline({ ledger: [{ id: 'l-1', channel: 'sms', occurred_at: at(3 * DAY) }] });
         const result = await evalText(channel);
         expect(result.allowed).toBe(false);
         expect(result.denialReasons).toEqual(['dunning_within_7d']);
-        expect(result.nextEligibleAt.toISOString()).toBe(new Date(WED_11AM_EDT.getTime() + 4 * DAY).toISOString());
+        // Sent Sunday Aug 9 at 11:00 ET: the next message may go from the
+        // start of Sunday Aug 16 in ET.
+        expect(result.nextEligibleAt.toISOString()).toBe('2026-08-16T04:00:00.000Z');
       }
     });
 
@@ -542,11 +544,20 @@ describe('rolling frequency windows', () => {
       expect(result.denialReasons).toContain('dunning_within_7d');
     });
 
-    test('gate on: 6 days 23 hours ago still holds', async () => {
+    test('gate on: counts ET calendar days, so run-time jitter never pushes a weekly step back a day', async () => {
       process.env.GATE_DUNNING_SPACING = 'true';
-      armAllowedBaseline({ ledger: [{ id: 'l-3', channel: 'push', occurred_at: at(7 * DAY - HOUR) }] });
-      const result = await evalText('sms');
-      expect(result.denialReasons).toContain('dunning_within_7d');
+      // Last Wednesday at 11:00:30 ET is 6 days 23:59:30 before this
+      // Wednesday's 11:00 run, and it no longer holds.
+      armAllowedBaseline({ ledger: [{ id: 'l-3', channel: 'push', occurred_at: at(7 * DAY - 30 * 1000) }] });
+      const sameWeekday = await evalText('sms');
+      expect(sameWeekday.denialReasons).not.toContain('dunning_within_7d');
+      expect(sameWeekday.allowed).toBe(true);
+
+      // Last Thursday at 23:00 ET still holds all of this Wednesday.
+      armAllowedBaseline({ ledger: [{ id: 'l-3', channel: 'push', occurred_at: at(5 * DAY + 12 * HOUR) }] });
+      const lateThursday = await evalText('sms');
+      expect(lateThursday.denialReasons).toEqual(['dunning_within_7d']);
+      expect(lateThursday.nextEligibleAt.toISOString()).toBe('2026-08-13T04:00:00.000Z');
     });
 
     test('gate on: messages that never reached the customer do not count', async () => {
@@ -557,6 +568,35 @@ describe('rolling frequency windows', () => {
         expect(result.denialReasons).not.toContain('dunning_within_7d');
         expect(result.allowed).toBe(true);
       }
+    });
+
+    test('gate on: delivery evidence holds even on a row that also carries a failure stamp', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      armAllowedBaseline({ ledger: [{ id: 'l-4', channel: 'email', occurred_at: at(3 * DAY), metadata: { send_failed: true, delivered: true } }] });
+      const result = await evalText('sms');
+      expect(result.denialReasons).toEqual(['dunning_within_7d']);
+    });
+
+    test('gate on: a pay link asked for on a call and a prepay renewal reminder neither wait nor hold', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      armAllowedBaseline({ ledger: [{ id: 'l-7', channel: 'sms', occurred_at: at(2 * DAY), source: 'late_payment_checker' }] });
+      const payLink = await evalText('sms', 'late_payment', { source: 'collections_voice_paylink' });
+      expect(payLink.denialReasons).not.toContain('dunning_within_7d');
+      expect(payLink.allowed).toBe(true);
+      armAllowedBaseline({ ledger: [{ id: 'l-7', channel: 'sms', occurred_at: at(2 * DAY), source: 'late_payment_checker' }] });
+      const renewal = await evalText('sms', 'balance_reminder', { source: 'annual_prepay_payment_reminder' });
+      expect(renewal.denialReasons).not.toContain('dunning_within_7d');
+
+      for (const source of ['collections_voice_paylink', 'annual_prepay_payment_reminder']) {
+        armAllowedBaseline({ ledger: [{ id: 'l-8', channel: 'sms', occurred_at: at(2 * DAY), source }] });
+        const next = await evalText('email');
+        expect(next.denialReasons).not.toContain('dunning_within_7d');
+        expect(next.allowed).toBe(true);
+      }
+      // Any other requester is held as before.
+      armAllowedBaseline({ ledger: [{ id: 'l-7', channel: 'sms', occurred_at: at(2 * DAY), source: 'late_payment_checker' }] });
+      const followup = await evalText('sms', 'late_payment', { source: 'invoice_followups' });
+      expect(followup.denialReasons).toEqual(['dunning_within_7d']);
     });
 
     test('gate on: a rail\'s own same-run sibling or retry row (excludeLedgerIds) does not hold it', async () => {

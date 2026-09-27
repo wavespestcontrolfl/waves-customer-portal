@@ -39,6 +39,7 @@ async function collectionsChannelVerdict({
   excludeCollectionCaseId = null,
   excludeLedgerIds = [],
   logTag = 'collections',
+  source,
   database,
 }) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
@@ -49,6 +50,7 @@ async function collectionsChannelVerdict({
     const ContactPolicy = require('./contact-policy');
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      ...(source ? { source } : {}),
       ...(database ? { database } : {}),
     });
   } catch (err) {
@@ -87,6 +89,9 @@ async function collectionsChannelPermitted({
   excludeLedgerIds = [],
   logTag = 'collections',
   detail = false,
+  // The requester's ledger source: the seven-day overdue-message rule exempts
+  // messages that are not overdue reminders (dunning-spacing.js).
+  source,
   database,
 }) {
   const answer = (allowed, durable = false, balanceIncomplete = false) => (detail
@@ -98,6 +103,7 @@ async function collectionsChannelPermitted({
     const ContactPolicy = require('./contact-policy');
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      ...(source ? { source } : {}),
       ...(database ? { database } : {}),
     });
   } catch (err) {
