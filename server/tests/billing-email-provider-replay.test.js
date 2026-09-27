@@ -89,6 +89,33 @@ test('a moved sender\'s own "no longer owed" answer settles the retry resendably
   expect(dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
 });
 
+// A stop, a later step or a changed balance landing after the unlocked pass
+// still refuses: the sender's rules run again on the held connection at
+// every locked recheck, the provider boundary included.
+test('a moved sender\'s rules re-run on the held connection at the provider boundary', async () => {
+  const heldDatabase = jest.fn();
+  billingEmailReplayProducerRefusal
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce({ eligible: false, reason: 'sequence-advanced', resendable: true });
+  let boundary;
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(await options.preSendCheck({ database: heldDatabase, providerBoundary: false })).toEqual({ ok: true });
+    boundary = await options.preSendCheck({ database: heldDatabase, providerBoundary: true });
+    options.state.boundaryBlock = boundary;
+  });
+  const dispatch = jest.fn();
+
+  await expect(runBillingEmailProviderReplayHandoff(message(), dispatch)).resolves.toMatchObject({
+    handled: true, allowed: false, terminal: true, code: 'BILLING_REPLAY_RESENDABLE', reason: 'sequence-advanced',
+  });
+  expect(boundary).toMatchObject({ ok: false, code: 'BILLING_REPLAY_RESENDABLE' });
+  expect(billingEmailReplayProducerRefusal.mock.calls).toEqual([
+    [context], [context, { database: heldDatabase }], [context, { database: heldDatabase }],
+  ]);
+  expect(dispatch).not.toHaveBeenCalled();
+});
+
 test.each(['billing.notice', 'billing.receipt_notice'])('contextless %s retains the existing provider retry path', async (templateKey) => {
   const legacy = message({ template_key: templateKey, payload_snapshot: JSON.stringify({ notification_body: 'Payment received' }) });
   expect(isBillingEmailProviderReplay(legacy)).toBe(false);

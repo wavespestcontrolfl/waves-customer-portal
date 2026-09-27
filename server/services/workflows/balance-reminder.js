@@ -52,8 +52,12 @@ function smsLogMetadata(row) {
 // Account-level reminders stop if ANY invoice behind the balance is held.
 // Read failures skip this run; late-payment-checker owns verification nudges.
 // throwOnError: a caller that can retry later (a stored email's provider
-// retry) gets the read error instead of a permanent "stopped".
-async function customerDunningStopped(balance, selectedInvoiceId, { throwOnError = false } = {}) {
+// retry) gets the read error instead of a permanent "stopped". database and
+// processor: that retry's recheck under the billing email locks reads on
+// the held connection and leaves the payment processor to its unlocked pass.
+async function customerDunningStopped(balance, selectedInvoiceId, {
+  throwOnError = false, database = db, processor = true,
+} = {}) {
   try {
     const ids = [...new Set([
       ...(balance.invoiceIds || []), balance.oldestInvoiceId, selectedInvoiceId,
@@ -61,15 +65,16 @@ async function customerDunningStopped(balance, selectedInvoiceId, { throwOnError
     if (!ids.length) return false;
     const InvoiceFollowUps = require('../invoice-followups');
     for (const id of ids) {
-      if (await InvoiceFollowUps.hasActiveSequence(id)) return true;
-      if (await InvoiceFollowUps.isDunningStopped(id)) return true;
+      if (await InvoiceFollowUps.hasActiveSequence(id, database)) return true;
+      if (await InvoiceFollowUps.isDunningStopped(id, database)) return true;
     }
-    const activePlan = await db('payment_plans')
+    const activePlan = await database('payment_plans')
       .whereIn('invoice_id', ids)
       .where({ status: 'active' })
       .first('id');
     if (activePlan) return true;
-    const rows = await db('invoices')
+    if (!processor) return false;
+    const rows = await database('invoices')
       .whereIn('id', ids)
       .whereNotNull('stripe_payment_intent_id')
       .select('id', 'stripe_payment_intent_id');
@@ -249,8 +254,8 @@ class BalanceReminder {
     );
   }
 
-  async getCustomerBalance(customerId) {
-    const allOutstanding = await db("payments")
+  async getCustomerBalance(customerId, database = db) {
+    const allOutstanding = await database("payments")
       .where({ "payments.customer_id": customerId })
       .whereIn("status", ["failed", "upcoming"])
       .whereNull("superseded_by_payment_id")
@@ -261,7 +266,7 @@ class BalanceReminder {
     // homeowner's customer_id but are the payer's debt — drop them so an AP
     // ACH/card failure doesn't inflate the homeowner's balance / overdue age and
     // trigger an early or incorrect balance reminder.
-    const payerInvRows = await db("invoices")
+    const payerInvRows = await database("invoices")
       .where({ customer_id: customerId })
       // payer_id OR the withdrawal stamp (Codex #4311 r43 P1): a combined-visit
       // invoice withdrawn to a payer keeps payer_id NULL, so an id-only test
@@ -299,7 +304,7 @@ class BalanceReminder {
       0,
       Math.floor((Date.now() - new Date(oldest.payment_date)) / 86400000),
     );
-    const oldestInvoice = await db("invoices")
+    const oldestInvoice = await database("invoices")
       .where({ customer_id: customerId })
       .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
       // Third-party Bill-To: never surface a payer-billed invoice as the
@@ -628,14 +633,15 @@ class BalanceReminder {
   // sender's dunning stops (an active follow-up sequence, stopped dunning, a
   // payment plan, a pending micro-deposit verification) has started since.
   // A provider retry of the stored email asks this before it re-runs the
-  // shared billing email check (billing-email-replay-eligibility.js).
-  async latePaymentEmailStillOwed({ customerId, invoiceId, renderedTotal }) {
+  // shared billing email check (billing-email-replay-eligibility.js), and
+  // again under its locks (database, processor: false).
+  async latePaymentEmailStillOwed({ customerId, invoiceId, renderedTotal, database = db, processor = true }) {
     let scope = { invoiceIds: [] };
     if (renderedTotal != null) {
-      scope = await this.getCustomerBalance(customerId);
+      scope = await this.getCustomerBalance(customerId, database);
       if (!scope || scope.totalBalance.toFixed(2) !== renderedTotal) return { owed: false, reason: "balance-changed" };
     }
-    if (await customerDunningStopped(scope, invoiceId, { throwOnError: true })) {
+    if (await customerDunningStopped(scope, invoiceId, { throwOnError: true, database, processor })) {
       return { owed: false, reason: "dunning-stopped" };
     }
     return { owed: true };

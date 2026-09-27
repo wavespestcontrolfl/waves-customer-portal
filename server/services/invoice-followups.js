@@ -1999,8 +1999,8 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
  * Called by late-payment-checker.js to decide whether an invoice is already
  * handled by the per-invoice sequence (so we skip the account-level reminder).
  */
-async function hasActiveSequence(invoiceId) {
-  const seq = await db('invoice_followup_sequences')
+async function hasActiveSequence(invoiceId, database = db) {
+  const seq = await database('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
     .whereIn('status', ['active', 'paused', 'autopay_hold'])
     .first();
@@ -2031,14 +2031,15 @@ async function isDunningStopped(invoiceId, database = db) {
 // operator's "send now") supersedes it: the sequence sits at most one step
 // past the one it rendered (the touch advances it; a held SMS leg keeps it).
 // A provider retry of the stored email asks this before it re-runs the
-// shared billing email check (billing-email-replay-eligibility.js).
-async function followupEmailStillOwed({ sequenceId, invoiceId, stepId }) {
-  const seq = await db('invoice_followup_sequences').where({ id: sequenceId }).first('status', 'step_index');
+// shared billing email check (billing-email-replay-eligibility.js), and
+// again under its locks (database, processor: false).
+async function followupEmailStillOwed({ sequenceId, invoiceId, stepId, database = db, processor = true }) {
+  const seq = await database('invoice_followup_sequences').where({ id: sequenceId }).first('status', 'step_index');
   if (!seq || ['paused', 'autopay_hold', 'stopped'].includes(String(seq.status || ''))) return { owed: false, reason: 'sequence-not-active' };
   const rendered = config.steps.findIndex((step) => step.id === stepId);
   if (rendered < 0 || Number(seq.step_index) > rendered + 1) return { owed: false, reason: 'sequence-advanced' };
-  if (gates.divertMicrodepositDunning) {
-    const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'stripe_payment_intent_id');
+  if (processor && gates.divertMicrodepositDunning) {
+    const invoice = await database('invoices').where({ id: invoiceId }).first('id', 'stripe_payment_intent_id');
     if (invoice?.stripe_payment_intent_id
       && await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice, { throwOnError: true })) {
       return { owed: false, reason: 'microdeposit-verification-pending' };

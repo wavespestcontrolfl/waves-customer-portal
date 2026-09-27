@@ -44,6 +44,14 @@ function refusal(block) {
   };
 }
 
+function producerBlock(producer) {
+  return {
+    code: producer.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
+    reason: producer.reason,
+    retryable: producer.retryable === true,
+  };
+}
+
 async function runBillingEmailProviderReplayHandoff(message, dispatch, {
   recipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
   authorityRecipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
@@ -59,13 +67,7 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
   }
   if (typeof dispatch !== 'function') throw new TypeError('Billing replay dispatch callback is required');
   const producer = await billingEmailReplayProducerRefusal(context);
-  if (producer) {
-    return refusal({
-      code: producer.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
-      reason: producer.reason,
-      retryable: producer.retryable === true,
-    });
-  }
+  if (producer) return refusal(producerBlock(producer));
 
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   await dispatchUnderBillingEmailAuthority({
@@ -92,6 +94,10 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
           retryable: verdict?.retryable === true,
         };
       }
+      // The sender's own rules again, on the held connection, so a stop, a
+      // later step or a changed balance since the unlocked pass still refuses.
+      const lockedProducer = await billingEmailReplayProducerRefusal(context, { database });
+      if (lockedProducer) return { ok: false, ...producerBlock(lockedProducer) };
       return providerBoundary && typeof providerBoundaryCheck === 'function'
         ? providerBoundaryCheck({ database }) : { ok: true };
     },

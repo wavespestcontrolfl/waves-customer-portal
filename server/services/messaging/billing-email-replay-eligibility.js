@@ -201,26 +201,30 @@ async function billingEmailReplayEligible(meta, database = db) {
   }
 }
 
-// A moved sender's own "would I still send this?" rules, asked once before
-// the shared check takes its locks (they may call the payment processor).
+// A moved sender's own "would I still send this?" rules: asked in full
+// before the shared check takes its locks (they may call the payment
+// processor), then again on the held connection at every locked recheck,
+// including the provider boundary, with the processor left out.
 // A "no longer owed" answer is resendable: the sender's next send of the
 // same email can still deliver it. An unreadable answer retries later.
 const PRODUCER_RULES = Object.freeze({
-  late_payment_email: (meta) => require('../workflows/balance-reminder').latePaymentEmailStillOwed({
-    customerId: meta.customer_id, invoiceId: meta.invoice_id, renderedTotal: meta.rendered_balance,
+  late_payment_email: (meta, options) => require('../workflows/balance-reminder').latePaymentEmailStillOwed({
+    customerId: meta.customer_id, invoiceId: meta.invoice_id, renderedTotal: meta.rendered_balance, ...options,
   }),
   // The step it rendered is the event key's tail (invoice_followup:<invoice>:<step>).
-  invoice_followup_email: (meta) => require('../invoice-followups').followupEmailStillOwed({
+  invoice_followup_email: (meta, options) => require('../invoice-followups').followupEmailStillOwed({
     sequenceId: meta.followup_sequence_id, invoiceId: meta.invoice_id,
     stepId: String(meta.notificationEventKey || '').slice(`invoice_followup:${meta.invoice_id}:`.length),
+    ...options,
   }),
 });
 
-async function billingEmailReplayProducerRefusal(meta) {
+// locked: { database } of the held connection; omitted, the unlocked pass.
+async function billingEmailReplayProducerRefusal(meta, locked = null) {
   const rule = PRODUCER_RULES[meta?.source_entry_point];
   if (!rule) return null;
   try {
-    const verdict = await rule(meta);
+    const verdict = await rule(meta, locked ? { database: locked.database, processor: false } : {});
     return verdict?.owed === true ? null : { eligible: false, reason: verdict?.reason || 'no-longer-owed', resendable: true };
   } catch {
     return refused('billing-email-producer-check-unavailable', true);

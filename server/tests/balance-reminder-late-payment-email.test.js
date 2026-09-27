@@ -995,13 +995,27 @@ describe('latePaymentEmailStillOwed (a stored late-payment email\'s provider ret
     await expect(ask()).resolves.toEqual({ owed: true });
   });
 
+  test('the locked recheck reads on the held connection and leaves the payment processor out', async () => {
+    const held = jest.fn();
+    const readBalance = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    held.mockImplementation(() => chain({ first: null }));
+    await expect(BalanceReminder.latePaymentEmailStillOwed({
+      customerId: 'cust-1', invoiceId: 'inv-1', renderedTotal: '129.00', database: held, processor: false,
+    })).resolves.toEqual({ owed: true });
+    expect(readBalance).toHaveBeenCalledWith('cust-1', held);
+    expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith('inv-1', held);
+    expect(held).toHaveBeenCalledWith('payment_plans');
+    expect(held).not.toHaveBeenCalledWith('invoices');
+    expect(StripeService.isInvoiceAwaitingMicrodepositVerification).not.toHaveBeenCalled();
+  });
+
   test('an invoice-amount email checks only its own invoice\'s dunning stops, not the account total', async () => {
     const readBalance = jest.spyOn(BalanceReminder, 'getCustomerBalance');
     setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
     await expect(BalanceReminder.latePaymentEmailStillOwed({ customerId: 'cust-1', invoiceId: 'inv-1' }))
       .resolves.toEqual({ owed: true });
     expect(readBalance).not.toHaveBeenCalled();
-    expect(InvoiceFollowUps.hasActiveSequence.mock.calls).toEqual([['inv-1']]);
+    expect(InvoiceFollowUps.hasActiveSequence.mock.calls).toEqual([['inv-1', db]]);
     InvoiceFollowUps.isDunningStopped.mockResolvedValue(true);
     setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
     await expect(BalanceReminder.latePaymentEmailStillOwed({ customerId: 'cust-1', invoiceId: 'inv-1' }))
@@ -1109,8 +1123,8 @@ describe('account-level dunning stops', () => {
       const queries = armReminder(entry, channels, { stop, stoppedId });
       await BalanceReminder[entry]();
       expectNoContact(queries);
-      if (stop === 'sequence') expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(stoppedId);
-      if (stop === 'dunning') expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(stoppedId);
+      if (stop === 'sequence') expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(stoppedId, db);
+      if (stop === 'dunning') expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(stoppedId, db);
       if (stop === 'plan') {
         expect(queries.plan.whereIn).toHaveBeenCalledWith('invoice_id', expect.arrayContaining([stoppedId]));
         expect(queries.plan.where).toHaveBeenCalledWith({ status: 'active' });
@@ -1136,8 +1150,8 @@ describe('account-level dunning stops', () => {
       expect(queries.activity.insert).toHaveBeenCalled();
       expect(queries.microdeposits.whereIn).toHaveBeenCalledWith('id', ['inv-2', 'inv-3', 'inv-1']);
       for (const id of ['inv-1', 'inv-2', 'inv-3']) {
-        expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(id);
-        expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(id);
+        expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(id, db);
+        expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(id, db);
       }
     });
   });
@@ -1156,7 +1170,7 @@ describe('account-level dunning stops', () => {
     });
     try {
       await BalanceReminder.latePaymentCheck();
-      expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith('inv-1');
+      expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith('inv-1', db);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
       expect(ContactLedger.recordContact).not.toHaveBeenCalled();

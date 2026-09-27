@@ -218,6 +218,15 @@ describe('a moved sender\'s own rules before the shared check', () => {
     });
   });
 
+  test('under the locks it asks again on the held connection, without the payment processor', async () => {
+    const database = jest.fn();
+    BalanceReminder.latePaymentEmailStillOwed.mockResolvedValueOnce({ owed: true });
+    await expect(billingEmailReplayProducerRefusal(meta, { database })).resolves.toBeNull();
+    expect(BalanceReminder.latePaymentEmailStillOwed).toHaveBeenCalledWith({
+      customerId, invoiceId: 'inv-1', renderedTotal: '129.00', database, processor: false,
+    });
+  });
+
   test('"no longer owed" is resendable, and an unreadable answer retries later', async () => {
     BalanceReminder.latePaymentEmailStillOwed.mockResolvedValueOnce({ owed: false, reason: 'dunning-stopped' });
     await expect(billingEmailReplayProducerRefusal(meta))
