@@ -58,6 +58,8 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
   });
 
   afterEach(async () => {
+    // A withdrawal's staff bell names the customer.
+    await db('notifications').whereRaw("metadata->>'customerId' = any(?)", [created.customers]).del();
     // The send's own audit rows reference the customer.
     await db('activity_log').whereIn('customer_id', created.customers).del();
     await db('annual_prepay_terms').whereIn('customer_id', created.customers).del();
@@ -106,6 +108,17 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     }
     return { customerId, invoiceId };
   }
+
+  // Codex #4971 r11 P1: a renewal send queued for later (quiet hours / a
+  // retry) — due now, claimed by processScheduledSends hours after the
+  // pay-link clearance ran at scheduling.
+  async function queuedRenewal() {
+    const fx = await fixture();
+    await db('invoices').where({ id: fx.invoiceId }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000) });
+    const successor = await db('annual_prepay_terms').where({ prepay_invoice_id: fx.invoiceId }).first('id', 'renewed_from_term_id', 'status');
+    return { ...fx, successor };
+  }
+  const successorStatus = async (id) => (await db('annual_prepay_terms').where({ id }).first('status')).status;
 
   const readInvoice = (id) => db('invoices').where({ id }).first('status', 'send_claim_token', 'sent_at', 'sms_sent_at', 'payer_id', 'scheduled_send_error');
 
@@ -246,5 +259,55 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     await expect(Invoice.withPayLinkSendClaim(invoiceId, handoff)).resolves.toEqual({ ok: false, code: 'payer_billed' });
     expect(handoff).not.toHaveBeenCalled();
     expect(await readInvoice(invoiceId)).toMatchObject({ status: 'sent', send_claim_token: null });
+  });
+
+  // Codex #4971 r11 P1: the renewal claim is the AUTHORITATIVE clearance —
+  // the scheduled worker's claim re-judges the renewal, under the gate,
+  // right before the provider.
+  test('a queued renewal whose parent was cancelled (refund / void) after scheduling: the worker sends nothing — the renewal is withdrawn (voided, cancelled)', async () => {
+    const { invoiceId, successor } = await queuedRenewal();
+    await db('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).update({ status: 'cancelled' }); // move 9: no decision
+
+    await Invoice.processScheduledSends();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(await readInvoice(invoiceId)).toMatchObject({ status: 'void', sent_at: null, sms_sent_at: null, send_claim_token: null });
+    expect(await successorStatus(successor.id)).toBe('cancelled');
+  });
+
+  test('a queued renewal whose customer deleted their account after scheduling: nothing sent, the renewal withdrawn', async () => {
+    const { customerId, invoiceId, successor } = await queuedRenewal();
+    await db('customers').where({ id: customerId }).update({ deleted_at: new Date() });
+
+    await Invoice.processScheduledSends();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(await readInvoice(invoiceId)).toMatchObject({ status: 'void', sent_at: null, sms_sent_at: null });
+    expect(await successorStatus(successor.id)).toBe('cancelled');
+  });
+
+  test('a queued renewal whose parent payment went into dispute: nothing sent, re-queued a day out, the renewal kept', async () => {
+    const { invoiceId, successor } = await queuedRenewal();
+    await db('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).update({ status: 'payment_pending', dispute_suspended_at: new Date() });
+
+    await Invoice.processScheduledSends();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const row = await db('invoices').where({ id: invoiceId }).first('status', 'scheduled_send_at', 'scheduled_send_error', 'send_claim_token');
+    expect(row).toMatchObject({ status: 'scheduled', send_claim_token: null, scheduled_send_error: expect.stringContaining('renewal_send_withheld') });
+    expect(new Date(row.scheduled_send_at).getTime()).toBeGreaterThan(Date.now() + 23 * 3600000);
+    expect(await successorStatus(successor.id)).toBe('payment_pending');
+  });
+
+  test('a normal queued renewal still goes out on schedule', async () => {
+    const { invoiceId, successor } = await queuedRenewal();
+
+    await Invoice.processScheduledSends();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(await readInvoice(invoiceId)).toMatchObject({ status: 'sent' });
+    expect(await successorStatus(successor.id)).toBe('payment_pending');
   });
 });

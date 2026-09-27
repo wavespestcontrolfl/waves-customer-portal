@@ -631,6 +631,35 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
       expect(result).toEqual([String(termId)]);
     });
 
+    // Codex #4971 r11 P1 (chokepoint B): the dispute webhook holds the
+    // renewal gate (withTermiteGateForCharge, a session lock) from before its
+    // phase-one ledger flip through the later reopen transaction — both ways
+    // round, the dispute and a renewal charge on the same parent serialize.
+    test('the dispute webhook\'s gate (by the disputed charge / PaymentIntent) waits on a renewal charge in flight, and a charge waits on a held dispute', async () => {
+      const { withTermiteGateForCharge } = require('../services/annual-prepay-renewals');
+      const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const chargeId = await insertPayment({ metadata: { invoice_id: invoiceId } });
+      const paymentIntentId = `pi_${randomUUID().slice(0, 12)}`;
+      await db('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: paymentIntentId });
+
+      const disputeAfterCharge = await raceWriteAgainstCharge(termId,
+        () => withTermiteGateForCharge({ chargeId, paymentIntentId }, async () => 'dispute-phases-ran'));
+      expect(disputeAfterCharge.sawAdvisoryWait).toBe(true);
+      expect(disputeAfterCharge.order).toEqual(['charge-holds-lock', 'charge-releases', 'write-runs']);
+      expect(disputeAfterCharge.result).toBe('dispute-phases-ran');
+
+      const order = [];
+      const dispute = withTermiteGateForCharge({ chargeId }, async () => {
+        order.push('dispute-phase-one');
+        await sleep(250);
+        order.push('dispute-reopen-committed');
+      });
+      await sleep(40);
+      await withParentDecisionLock(termId, async () => { order.push('renewal-charge-runs'); });
+      await dispute;
+      expect(order).toEqual(['dispute-phase-one', 'dispute-reopen-committed', 'renewal-charge-runs']);
+    });
+
     test('a charge touching no termite term takes nothing and never waits', async () => {
       const plain = await insertTerm({ annualPlanVersion: null, status: 'active', withInvoice: true });
       const plainTerm = await db('annual_prepay_terms').where({ id: plain.termId }).first('customer_id');

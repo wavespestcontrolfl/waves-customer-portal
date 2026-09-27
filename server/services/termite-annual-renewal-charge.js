@@ -292,6 +292,20 @@ function graceDeadlineFor(term) {
   return require('./annual-prepay-renewals').termiteRenewalGraceDeadlineFor(term);
 }
 
+// The ONE "is this successor still inside its own grace window?" refusal
+// (the SAME GRACE_DAYS window minting itself is bounded to, P1-2): past it,
+// the renewal is the grace lapse's — never a charge, never a pay link.
+// Durable: the window never reopens. Read by the charge's pre-check and
+// fence claim (successorActionBlocker), its last check under the gate right
+// before Stripe (chargeRefusalUnderGate — Codex #4971 r11 P1: a worker that
+// claimed on the final grace day and reached the gate the next ET day), and
+// every recovery leg (successorRecoveryRefusal). null = still inside.
+function graceWindowRefusal(term) {
+  const deadline = graceDeadlineFor(term);
+  if (deadline && etDateString() > deadline) return { reason: 'past_grace_deadline', retire: true, lapseOwnsPresented: true };
+  return null;
+}
+
 // Codex round-6 P1: ONE column PER KIND (20260926050001 — 050000's shared
 // renewal_exception_belled_at/renewal_exception_kind pair is left in place,
 // unused, since 050000 is already pushed/frozen). The three exception-bell
@@ -351,10 +365,15 @@ async function stampRenewalExceptionBelled(term, kind, conn = db) {
 //
 //   paid evidence   status paid/prepaid, or paid_at set
 //   settled         paid evidence, NOT a cancelled/void/refunded status, and
-//                   NO full refund on the payments ledger against the
-//                   invoice's Stripe identity — a full refund (or a lost
-//                   dispute) lands there before, or without, any status sync
-//                   (the SAME ledger shape coveredTermsAsOf reads)
+//                   NO revoked payment on the payments ledger against the
+//                   invoice's Stripe identity — a full refund, or (Codex
+//                   #4971 r11 P1) a payment in DISPUTE, lands there before,
+//                   or without, any status sync: the dispute webhook stamps
+//                   payments.status 'disputed' in one transaction and
+//                   reopens the invoice in a later one, so a paid-looking
+//                   invoice behind a disputed payment is not settled. A
+//                   refund is durable; a dispute can still be won (the won
+//                   closure restores the row to 'paid').
 //   processing      an ACH debit still clearing — neither paid nor unpaid
 //   delivered       PERSISTED delivery evidence only: a sent_at /
 //                   sms_sent_at / email_sent_at stamp, which the send path
@@ -394,26 +413,35 @@ function classifyRenewalInvoice(invoice) {
   };
 }
 
-async function invoiceFullyRefundedOnLedger(conn, invoice) {
-  const refunded = await conn('payments')
+// The payments-ledger revocation of an invoice's payment: 'refunded' (a full
+// refund — durable), 'disputed' (a payment in dispute — transient, a won
+// dispute restores it), or null. The SQL twin is REVOKED_PAYMENT_SQL.
+async function invoiceLedgerRevocation(conn, invoice) {
+  const revoked = await conn('payments')
     .whereRaw(
-      `(status = 'refunded' or refund_status = 'full')
+      `(status in ('refunded', 'disputed') or refund_status = 'full')
        and (
          (stripe_payment_intent_id is not null and stripe_payment_intent_id = ?)
          or (stripe_charge_id is not null and stripe_charge_id = ?)
        )`,
       [invoice.stripe_payment_intent_id || null, invoice.stripe_charge_id || null],
     )
-    .first('id');
-  return Boolean(refunded);
+    .first('id', 'status', 'refund_status');
+  if (!revoked) return null;
+  return revoked.status === 'disputed' && revoked.refund_status !== 'full' ? 'disputed' : 'refunded';
 }
+
+// A payments row (aliased) that revokes its invoice's payment — the SQL twin
+// of invoiceLedgerRevocation, read by whereInvoiceSettledNotRevoked and
+// parentChangedAtSql.
+const revokedPaymentSql = (rp) => `(${rp}.status in ('refunded', 'disputed') or ${rp}.refund_status = 'full')`;
 
 // JS form of "settled" (see the table above). SQL twin:
 // whereInvoiceSettledNotRevoked, below.
 async function invoiceSettledNotRevoked(conn, invoice) {
   const evidence = classifyRenewalInvoice(invoice);
   if (!evidence.paidEvidence || evidence.cancelled) return false;
-  return !(await invoiceFullyRefundedOnLedger(conn, invoice));
+  return !(await invoiceLedgerRevocation(conn, invoice));
 }
 
 function whereInvoiceSettledNotRevoked(builder, alias) {
@@ -427,7 +455,7 @@ function whereInvoiceSettledNotRevoked(builder, alias) {
     .whereRaw(`lower(coalesce(??, '')) not in (${cancelled.map(() => '?').join(', ')})`, [col('status'), ...cancelled])
     .whereNotExists(function noFullRefund() {
       this.select(1).from('payments as rp')
-        .whereRaw("(rp.status = 'refunded' or rp.refund_status = 'full')")
+        .whereRaw(revokedPaymentSql('rp'))
         .whereRaw(
           '((rp.stripe_payment_intent_id is not null and rp.stripe_payment_intent_id = ??) or (rp.stripe_charge_id is not null and rp.stripe_charge_id = ??))',
           [col('stripe_payment_intent_id'), col('stripe_charge_id')],
@@ -533,12 +561,20 @@ async function resolveParentEligibility(trx, parent) {
   }
   if (!parent.prepay_invoice_id) return { eligible: true };
   const invoice = await trx('invoices').where({ id: parent.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
-  if (!invoice || (await invoiceSettledNotRevoked(trx, invoice))) return { eligible: true };
-  // Paid evidence that is nonetheless not settled = revoked (a cancelled/
-  // refunded status or a full ledger refund) — durable. No paid evidence at
-  // all = unpaid, which on a live parent means a reopened (disputed)
-  // invoice — not durable.
+  if (!invoice) return { eligible: true };
+  // The settled test (invoiceSettledNotRevoked), unrolled to keep WHICH
+  // ledger revocation it found. Paid evidence that is nonetheless not
+  // settled = revoked (a cancelled/refunded status or a full ledger refund) —
+  // durable. No paid evidence at all = unpaid, which on a live parent means a
+  // reopened (disputed) invoice — not durable; and (Codex #4971 r11 P1) a
+  // paid-looking invoice whose payment is in DISPUTE on the ledger (the
+  // webhook's first phase, before the invoice reopens) is not durable either
+  // — the dispute can still be won.
   const evidence = classifyRenewalInvoice(invoice);
+  const payable = evidence.paidEvidence && !evidence.cancelled;
+  const revocation = payable ? await invoiceLedgerRevocation(trx, invoice) : null;
+  if (payable && !revocation) return { eligible: true };
+  if (revocation === 'disputed') return { eligible: false, reason: 'parent_payment_disputed', durable: false };
   return { eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: evidence.cancelled || evidence.paidEvidence };
 }
 
@@ -1050,8 +1086,8 @@ async function successorActionBlocker(conn, successorId, { lock = false } = {}) 
   // window minting itself is bounded to, P1-2) — a long outage that leaves
   // the recovery leg running weeks late must never fire a months-overdue
   // charge or bill. Durable: that window never reopens.
-  const deadline = graceDeadlineFor(fresh);
-  if (deadline && etDateString() > deadline) return { reason: 'past_grace_deadline', retire: true, lapseOwnsPresented: true };
+  const graceRefusal = graceWindowRefusal(fresh);
+  if (graceRefusal) return graceRefusal;
 
   // Chokepoint A: the invoice must still be OPEN — not cancelled/void/
   // refunded, no paid evidence (paid/prepaid/paid_at: settled by card, ACH
@@ -1377,7 +1413,10 @@ async function bellLatePaidRenewalUnderGate(original, conn) {
 //   - its prepay invoice's revocation (updated_at once it reads refunded /
 //     void / cancelled);
 //   - a full refund of that invoice on the payments ledger (the refund
-//     writers stamp payments.updated_at with the refund).
+//     writers stamp payments.updated_at with the refund), or (Codex #4971
+//     r11 P1) its payment put in dispute there (the dispute webhook stamps
+//     payments.updated_at with the 'disputed' flip, before the invoice
+//     itself reopens).
 // One SQL definition, read by leg 7e's scan and by paidAfterParentChanged.
 // Columns a narrow schema may lack are read through to_jsonb (NULL when
 // absent; LEAST ignores NULLs). `p` is the parent term, `pi` its prepay
@@ -1390,7 +1429,7 @@ function parentChangedAtSql(p = 'p', pi = 'pi') {
     CASE WHEN NOT (${p}.status IN ('active', 'renewal_pending') OR (${p}.status = 'renewed' AND ${p}.renewal_decision = 'renew')) THEN ${p}.updated_at END,
     CASE WHEN lower(coalesce(${pi}.status, '')) IN ('void', 'cancelled', 'canceled', 'refunded') THEN ${ts(pi, 'updated_at')} END,
     (SELECT MIN(${ts('rp', 'updated_at')}) FROM payments rp
-      WHERE (rp.status = 'refunded' OR rp.refund_status = 'full')
+      WHERE ${revokedPaymentSql('rp')}
         AND ((rp.stripe_payment_intent_id IS NOT NULL AND rp.stripe_payment_intent_id = ${pi}.stripe_payment_intent_id)
           OR (rp.stripe_charge_id IS NOT NULL AND rp.stripe_charge_id = ${pi}.stripe_charge_id)))
   )`;
@@ -1781,7 +1820,14 @@ async function chargeRefusalUnderGate(successor, conn) {
   }
   const freshParent = await conn('annual_prepay_terms').where({ id: fresh.renewed_from_term_id }).first();
   const parentEligibility = await parentRefusalForSuccessor(conn, fresh, freshParent);
-  return parentEligibility.eligible ? null : parentEligibility;
+  if (!parentEligibility.eligible) return parentEligibility;
+  // Codex #4971 r11 P1: the fence was claimed inside the grace window, but a
+  // worker delayed past midnight ET before this gate (pool contention, a
+  // paused process) must not charge a window that has since closed — the
+  // grace lapse owns it. Durable: handleRefusalAtSubmission withdraws, and
+  // the withdrawal leaves a presented renewal to the lapse.
+  const graceRefusal = graceWindowRefusal(fresh);
+  return graceRefusal ? { eligible: false, reason: graceRefusal.reason, durable: true } : null;
 }
 
 // The parent re-check under withParentDecisionLock refused AFTER the
@@ -2143,15 +2189,73 @@ async function withPayLinkClearance(successor, conn, context, send) {
 // null when the pay link may go out; otherwise 'handled' / 'deferred' (see
 // withPayLinkClearance).
 async function payLinkRefusal(successor, conn, context) {
+  const verdict = await payLinkVerdict(successor, conn);
+  return verdict ? actOnPayLinkVerdict(successor, verdict, conn, context) : null;
+}
+
+// payLinkRefusal's question with NO side effects (the renewal send claim
+// asks it before releasing its own queue claim, then acts): null = the pay
+// link may go out; else { kind, durable, reason }:
+//   handled  the successor left payment_pending — nothing is owed
+//   dispute  paid, then disputed back to payment_pending (Codex #4971
+//            pre-push P1): the dispute owns it — never a pay link; rotated
+//            (no bell) until it resolves either way
+//   refused  successorRecoveryRefusal (a deleted account, the parent no
+//            longer authorizing it, the grace window closed) — durable
+//            withdraws, transient bells and rotates
+async function payLinkVerdict(successor, conn) {
   const stillPending = await conn('annual_prepay_terms').where({ id: successor.id, status: PAYMENT_PENDING_STATUS }).first();
-  if (!stillPending) return 'handled';
-  // Codex #4971 pre-push P1: never a pay link for a disputed renewal — the
-  // dispute owns it; rotated (no bell) until it resolves either way.
-  if (successorDisputeSuspended(stillPending)) {
+  if (!stillPending) return { kind: 'handled', durable: true, reason: 'the renewal is no longer payment_pending' };
+  if (successorDisputeSuspended(stillPending)) return { kind: 'dispute', durable: false, reason: 'the renewal payment is under dispute' };
+  const refusal = await successorRecoveryRefusal(successor, conn);
+  return refusal ? { kind: 'refused', durable: Boolean(refusal.retire), reason: refusal.reason, refusal } : null;
+}
+
+async function actOnPayLinkVerdict(successor, verdict, conn, context) {
+  if (verdict.kind === 'handled') return 'handled';
+  if (verdict.kind === 'dispute') {
     await stampSweepDeferred(successor, conn);
     return 'deferred';
   }
-  return refuseRecoveryDelivery(successor, conn, context);
+  return actOnRecoveryRefusal(successor, verdict.refusal, conn, context);
+}
+
+// Codex #4971 r11 P1 — the renewal send's AUTHORITATIVE clearance, run by
+// invoice.js claimRenewalInvoiceForSend: the claim EVERY send of a renewal
+// invoice goes through, the immediate paths AND the scheduled-send worker
+// (a send deferred by quiet hours or a retry is claimed hours later; the
+// clearance withPayLinkClearance ran when it was queued is only an early
+// exit). Under the renewal gate (first; re-entrant from inside
+// withPayLinkClearance) the successor is re-judged by payLinkVerdict — a
+// parent cancelled / refunded, an account deleted, a dispute, the grace
+// window closed. Clear: `claim()` runs (the Bill-To fence and the claim,
+// under the held gate — lock order gate, then the customer / payer rows).
+// Refused: `release(verdict)` first gives back a worker's queue claim (so
+// a durable withdrawal can void the invoice; a transient hold re-queues it),
+// then the refusal is acted on exactly as the clearance would (withdraw, or
+// bell + rotate), and the send is refused before any provider is contacted
+// (renewalSendWithheldError). A successor no longer payment_pending owes no
+// pay link, but its invoice's own claim checks (paid / void) already answer
+// that — the claim runs as before.
+async function withRenewalSendClearance(successorId, { claim, release }) {
+  const successor = await db('annual_prepay_terms').where({ id: successorId }).first();
+  if (!successor?.renewed_from_term_id) return claim();
+  return withRenewalGate(successor, async () => {
+    const verdict = await payLinkVerdict(successor, db);
+    if (!verdict || verdict.kind === 'handled') return claim();
+    await release(verdict);
+    const outcome = await actOnPayLinkVerdict(successor, verdict, db, 'the scheduled renewal invoice was due to be sent');
+    throw renewalSendWithheldError(successor, verdict, outcome);
+  });
+}
+
+// A pre-provider refusal (deliveryNeverAttempted — invoice.js's convention
+// for "definitely not sent"), so no caller reads it as an ambiguous
+// delivery.
+function renewalSendWithheldError(successor, verdict, outcome) {
+  return Object.assign(new Error(`Renewal invoice for term ${successor.id} withheld — ${verdict.reason} (${outcome})`), {
+    code: 'renewal_send_withheld', deliveryNeverAttempted: true, withheldOutcome: outcome,
+  });
 }
 
 // Delivers the renewal invoice (with its pay link) at most once — through
@@ -2970,9 +3074,7 @@ async function successorRecoveryRefusal(successor, conn) {
       return { reason: `the parent is no longer eligible (${parentEligibility.reason})`, retire: parentEligibility.durable };
     }
   }
-  const deadline = graceDeadlineFor(successor);
-  if (deadline && etDateString() > deadline) return { reason: 'past_grace_deadline', retire: true, lapseOwnsPresented: true };
-  return null;
+  return graceWindowRefusal(successor);
 }
 
 // "May this recovery leg still deliver a pay link for this successor?" —
@@ -2994,7 +3096,12 @@ async function successorRecoveryRefusal(successor, conn) {
 // once its bell persisted); 'deferred' when the row must be retried later.
 async function refuseRecoveryDelivery(successor, conn, context) {
   const refusal = await successorRecoveryRefusal(successor, conn);
-  if (!refusal) return null;
+  return refusal ? actOnRecoveryRefusal(successor, refusal, conn, context) : null;
+}
+
+// What a recovery refusal does: a DURABLE one withdraws the successor, a
+// transient one bells and rotates it. Returns 'handled' or 'deferred'.
+async function actOnRecoveryRefusal(successor, refusal, conn, context) {
   if (refusal.retire) {
     const outcome = await withdrawRenewalSuccessor(successor, refusal.reason, conn);
     return outcome === 'deferred' ? 'deferred' : 'handled';
@@ -3478,6 +3585,7 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
 
 module.exports = {
   runTermiteAnnualRenewalSweep,
+  withRenewalSendClearance,
   termiteAnnualRenewalChargeLive,
   renewalMoneyInMotionForParent,
   renewalMoneyInMotionForTerm,
@@ -3487,6 +3595,7 @@ module.exports = {
     decideAndCharge,
     resolveChargeEligibility,
     chargeRefusalUnderGate,
+    paidAfterParentChanged,
     retireAbandonedChargeClaim,
     resolvePendingChargeOutcomes,
     bellLatePaidRenewals,

@@ -211,6 +211,16 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
         { status: 'paid', refund_status: 'partial', stripe_payment_intent_id: 'pi_part' }, true],
       ['paid, a full refund of a DIFFERENT payment', { status: 'paid', stripe_payment_intent_id: 'pi_mine' },
         { status: 'refunded', stripe_payment_intent_id: 'pi_other' }, true],
+      // Codex #4971 r11 P1: the dispute webhook's first phase flips the
+      // payment to 'disputed' before the invoice reopens.
+      ['paid, its payment IN DISPUTE on the ledger (PI match)', { status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_disp' },
+        { status: 'disputed', stripe_payment_intent_id: 'pi_disp' }, false],
+      ['paid, its payment IN DISPUTE on the ledger (charge match)', { status: 'paid', stripe_charge_id: 'ch_disp' },
+        { status: 'disputed', stripe_charge_id: 'ch_disp' }, false],
+      ['paid, a dispute WON (the row restored to paid)', { status: 'paid', stripe_payment_intent_id: 'pi_won' },
+        { status: 'paid', stripe_payment_intent_id: 'pi_won' }, true],
+      ['paid, a DIFFERENT payment in dispute', { status: 'paid', stripe_payment_intent_id: 'pi_mine2' },
+        { status: 'disputed', stripe_payment_intent_id: 'pi_other2' }, true],
     ];
 
     test.each(SHAPES)('%s', async (_label, invoiceFields, payment, expected) => {
@@ -1061,6 +1071,42 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
         status: 'payment_pending', renewal_charge_failure_kind: 'outcome_pending', renewal_charge_claim_retired_at: null,
       });
       expect((await db('invoices').where({ id: invoice.id }).first()).status).toBe('overdue');
+    });
+  });
+
+  // Codex #4971 r11 P1 (chokepoint A): a parent whose payment was put in
+  // dispute on the ledger — the webhook's phase one committed, the invoice
+  // not reopened yet — no longer authorizes the renewal: the charge's
+  // in-gate re-check refuses. Transient (a dispute can be won): nothing is
+  // withdrawn. The change is dated by the dispute stamp, so a successor paid
+  // after it is a late-paid renewal.
+  describe('r11: a parent payment in dispute is revocation evidence', () => {
+    async function disputedParentRenewal() {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000), stripe_payment_intent_id: `pi_parent_${randomUUID().slice(0, 8)}` });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      const invoice = await insertInvoice({ status: 'draft' });
+      const successor = await insertSuccessor(parent, invoice, { created_at: new Date() });
+      await db('payments').insert({ status: 'disputed', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: new Date(Date.now() - 10 * 60000) });
+      return { parent, parentInvoice, successor };
+    }
+
+    test('the charge\'s in-gate re-check refuses while the invoice still reads paid — transient, never a withdrawal', async () => {
+      const { successor } = await disputedParentRenewal();
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({
+        eligible: false, reason: 'parent_payment_disputed', durable: false,
+      });
+    });
+
+    test('the dispute WON (the row restored to paid): the charge proceeds', async () => {
+      const { parentInvoice, successor } = await disputedParentRenewal();
+      await db('payments').where({ stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id }).update({ status: 'paid' });
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toBeNull();
+    });
+
+    test('a renewal paid after the dispute stamp is dated late by it', async () => {
+      const { parent, successor } = await disputedParentRenewal();
+      await db('invoices').where({ id: successor.prepay_invoice_id }).update({ status: 'paid', paid_at: new Date() });
+      await expect(Charge._private.paidAfterParentChanged(db, await db('annual_prepay_terms').where({ id: successor.id }).first(), parent)).resolves.toBe(true);
     });
   });
 

@@ -3455,7 +3455,7 @@ async function claimBillToFencedSend(invoiceId, pre, options) {
   if (!pre || pre.payer_id) return null;
   if (pre.visit_completion_packet_id) return claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, options);
   const renewal = await termiteRenewalTermForInvoice(invoiceId, pre.annual_prepay_term_id);
-  return renewal ? claimRenewalInvoiceForSend(invoiceId, renewal.customer_id, options) : null;
+  return renewal ? claimRenewalInvoiceForSend(invoiceId, renewal, options) : null;
 }
 
 // The renewal SUCCESSOR term an invoice is the prepay invoice of, or null.
@@ -3468,7 +3468,37 @@ async function termiteRenewalTermForInvoice(invoiceId, termId, database = db) {
     .whereNotNull("renewed_from_term_id").whereNotNull("annual_plan_version").first("id", "customer_id");
 }
 
-async function claimRenewalInvoiceForSend(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false } = {}) {
+// Codex #4971 r11 P1: the renewal's own clearance (a parent cancelled or
+// refunded, an account deleted, a dispute, the grace window closed) is
+// re-judged HERE, at the claim every renewal send goes through — the
+// scheduled-send worker included, hours after the send was queued — under
+// the renewal gate, before the Bill-To fence below
+// (termite-annual-renewal-charge.js withRenewalSendClearance). A refused
+// send never reaches a provider; a worker's queue claim is given back first
+// (releaseRefusedRenewalSend) so the refusal never retries to the homeowner.
+async function claimRenewalInvoiceForSend(invoiceId, renewal, options = {}) {
+  return require("./termite-annual-renewal-charge").withRenewalSendClearance(renewal.id, {
+    claim: () => claimRenewalInvoiceUnderFence(invoiceId, renewal.customer_id, options),
+    release: (verdict) => releaseRefusedRenewalSend(invoiceId, verdict, options),
+  });
+}
+
+// A worker-preclaimed renewal send the clearance refused: a DURABLE refusal
+// leaves the queue for good (a draft, so the withdrawal can void it); a
+// transient one (the parent's or the renewal's own payment in dispute) goes
+// back to the queue a day later, spending no attempt, and is re-judged then.
+// Nothing to release for a send this call has not claimed yet.
+async function releaseRefusedRenewalSend(invoiceId, verdict, { allowClaimed = false, claimToken = null } = {}) {
+  if (!allowClaimed || !claimToken) return;
+  const held = verdict.durable
+    ? { status: "draft", scheduled_send_at: null }
+    : { status: "scheduled", scheduled_send_at: new Date(Date.now() + 24 * 60 * 60 * 1000) };
+  await db("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken }).update({
+    ...held, send_claim_token: null, scheduled_send_error: `renewal_send_withheld: ${verdict.reason}`, updated_at: new Date(),
+  });
+}
+
+async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false } = {}) {
   return db.transaction(async (trx) => {
     const payerId = await customerDefaultPayerLocked(customerId, trx);
     if (!payerId) {

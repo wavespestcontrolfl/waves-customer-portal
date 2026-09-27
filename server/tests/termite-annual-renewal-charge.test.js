@@ -1778,6 +1778,31 @@ describe('termite annual renewal charge', () => {
         expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       });
 
+      // Codex #4971 r11 P1: the fence is claimed on the LAST grace day, but
+      // the worker reaches the renewal gate after midnight ET — the window
+      // closed, so the in-gate re-check refuses: never charged.
+      test('claimed on the last grace day, the gate reached the next ET day: no Stripe call — past the grace deadline', async () => {
+        mockCommon();
+        const { chargeInvoiceWithSavedCard } = mockRetireDeps();
+        let today = '2026-10-27'; // baseSuccessor: term_start 2026-09-27 + 30 grace days
+        jest.doMock('../utils/datetime-et', () => {
+          const actual = jest.requireActual('../utils/datetime-et');
+          return { ...actual, etDateString: (d) => (d === undefined ? today : actual.etDateString(d)) };
+        });
+        const { _private } = require('../services/termite-annual-renewal-charge');
+        const gate = require('../services/annual-prepay-renewals').withParentDecisionLock;
+        gate.mockImplementation(async (_termId, fn) => { today = '2026-10-28'; return fn(); });
+        const successor = baseSuccessor();
+        const { conn, claimUpdate } = makeDecideConn({ successor, eligibilityInvoice: { status: 'draft' }, freshInvoice: { status: 'draft' } });
+
+        const outcome = await _private.decideAndCharge(successor, baseParent(), conn);
+
+        expect(claimUpdate).toHaveBeenCalledTimes(1); // claimed inside the window
+        expect(gate).toHaveBeenCalled();
+        expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+        expect(outcome).toMatchObject({ status: 'ineligible', reason: 'past_grace_deadline' });
+      });
+
       // Codex #4971 pre-push P1: no exclusion without a confirmed bell. A
       // withdrawn successor leaves every scan, so the staff bell rings FIRST;
       // if it does not persist, nothing is voided and the row is rotated to

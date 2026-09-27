@@ -987,11 +987,11 @@ router.post(
         }
 
         case 'charge.dispute.created':
-          await handleDisputeCreated(event.data.object);
+          await withDisputeRenewalGate(event.data.object, () => handleDisputeCreated(event.data.object));
           break;
 
         case 'charge.dispute.closed':
-          await handleDisputeClosed(event.data.object);
+          await withDisputeRenewalGate(event.data.object, () => handleDisputeClosed(event.data.object));
           break;
 
         case 'charge.dispute.funds_withdrawn':
@@ -6769,6 +6769,23 @@ async function restoreStatementCascadeForDispute(statementId, disputedPi) {
   logger.info(`[stripe-webhook] statement S-${statementId} dispute won — cascade restored to paid`);
 }
 
+// Codex #4971 r11 P1 (chokepoint B): a dispute's ledger flip and its
+// invoice / term updates run in SEPARATE transactions (phase one stamps
+// payments 'disputed' under the per-PI lock; the reopen and the term
+// suspension commit later). A termite renewal charge that took the renewal
+// gate between them read a parent invoice still marked paid. The whole
+// created / closed handling holds the renewal gates for every termite term
+// the disputed money touches — a SESSION lock (withTermiteGateForCharge, as
+// StripeService.refund holds it across its provider call) taken before the
+// first ledger write, re-entered (skipped) by the reopen transactions' own
+// acquireTermiteGateAtEntry. No termite term involved = no lock at all.
+function withDisputeRenewalGate(dispute, fn) {
+  return require('../services/annual-prepay-renewals').withTermiteGateForCharge(
+    { chargeId: dispute?.charge || null, paymentIntentId: dispute?.payment_intent || null },
+    fn,
+  );
+}
+
 async function handleDisputeCreated(dispute) {
   const chargeId = dispute.charge;
   const reason = dispute.reason || 'unknown';
@@ -6840,6 +6857,7 @@ async function handleDisputeCreated(dispute) {
         const feeInvoice = await trx('invoices').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status');
         await trx('payments').where({ id: rowInLock.id }).update({
           status: 'disputed',
+          updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
           failure_reason: `Dispute: ${reason}`,
           metadata: JSON.stringify({
             ...meta,
@@ -6908,7 +6926,7 @@ async function handleDisputeCreated(dispute) {
         await reverseStatementCascadeForDispute(disputedStmt.id, dispute.payment_intent, `dispute.created (${reason})`, { database: trx });
         const existingRow = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
         if (existingRow) {
-          await trx('payments').where({ id: existingRow.id }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}` });
+          await trx('payments').where({ id: existingRow.id }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}`, updated_at: new Date() });
         } else {
           await trx('payments').insert({
             customer_id: null,
@@ -7055,6 +7073,7 @@ async function handleDisputeCreated(dispute) {
           if (meta.dispute_final && meta.dispute_id === dispute.id) continue;
           await lockTrx('payments').where({ id: row.id }).update({
             status: 'disputed',
+            updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
             failure_reason: `Dispute: ${reason}`,
             metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, ...(meta.invoice_id ? { dispute_invoice_id: meta.invoice_id } : {}) }),
           });
@@ -7237,6 +7256,7 @@ async function handleDisputeCreated(dispute) {
     } else {
     await db('payments').where({ id: payment.id }).update({
       status: 'disputed',
+      updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
       failure_reason: `Dispute: ${reason}`,
     });
 
@@ -7527,6 +7547,7 @@ async function handleDisputeClosed(dispute) {
           } else if (status === 'lost') {
             await lockTrx('payments').where({ id: row.id }).update({
               status: 'disputed',
+              updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
               failure_reason: `Dispute lost — $${amount} returned to customer`,
               metadata: finalRowMeta,
             });
@@ -8039,6 +8060,7 @@ async function handleDisputeClosed(dispute) {
         } else if (status === 'lost') {
           await trx('payments').where({ id: payment.id }).update({
             status: 'disputed',
+            updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
             failure_reason: `Dispute lost — $${amount} returned to customer`,
             metadata: lockedFinalMeta,
           });
@@ -8149,6 +8171,7 @@ async function handleDisputeClosed(dispute) {
       // so dunning chases it even when created/closed arrive reversed.
       await db('payments').where({ id: payment.id }).update({
         status: 'disputed',
+        updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
         failure_reason: `Dispute lost — $${amount} returned to customer`,
         metadata: finalMeta,
       });
@@ -8424,6 +8447,7 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
 module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
+module.exports._withDisputeRenewalGate = withDisputeRenewalGate;
 module.exports._handleChargeRefunded = handleChargeRefunded;
 module.exports._resolveRefundIdForCharge = resolveRefundIdForCharge;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
