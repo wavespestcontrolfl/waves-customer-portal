@@ -164,8 +164,11 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     const eligibleLeadId = await insertLead(mockPg);
     const eligibleCallId = await insertCall(mockPg, {
       metadata: { lead_id: eligibleLeadId },
-      created_at: new Date('2027-01-14T12:00:00.000Z'),
-      updated_at: new Date('2027-01-15T17:00:00.000Z'), // 1h before NOW — past the 15-min grace window
+      // Timed so the computed send_at (call end + the 2h delay) lands only
+      // ~3 minutes before NOW — within STAGING_STALE_MS's 60-minute cap,
+      // not just the activation boundary and the 3-day lookback.
+      created_at: new Date('2027-01-15T15:55:00.000Z'),
+      updated_at: new Date('2027-01-15T15:55:00.000Z'), // well past the 15-min grace window
     });
 
     const preBoundaryLeadId = await insertLead(mockPg);
@@ -307,30 +310,10 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(secondResult).toEqual({ sent: false, skipped: 'link_sent_recently' });
   });
 
-  // codex r3 P1/P2 (this round) — new raw SQL added alongside the earlier
-  // jsonb_build_object fix: refreshLiveActivationBoundary's onConflict().
-  // merge() write and recoverStaleClaims'/recoverAbandonedClaim's own
+  // codex r3 P2 (this round) — new raw SQL added alongside the earlier
+  // jsonb_build_object fix: recoverStaleClaims'/recoverAbandonedClaim's own
   // named-binding comparisons. The same class of bug (a mocked knex cannot
   // see a real Postgres parser rejection) could just as easily hide here.
-  test('refreshLiveActivationBoundary advances a stale boundary via a real onConflict().merge() write', async () => {
-    const oldBoundary = new Date('2020-01-01T00:00:00.000Z');
-    await mockPg('system_settings').insert({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY, value: oldBoundary.toISOString(), category: 'call_booking_link_text' });
-    // No heartbeat row at all — a real gap.
-    await callBookingLinkText.refreshLiveActivationBoundary(mockPg, NOW);
-
-    const boundaryRow = await mockPg('system_settings').where({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY }).first('value');
-    expect(new Date(boundaryRow.value).getTime()).toBe(callBookingLinkText.MODULE_LOAD_AT.getTime());
-    const heartbeatRow = await mockPg('system_settings').where({ key: callBookingLinkText.LAST_LIVE_SETTINGS_KEY }).first('value');
-    expect(new Date(heartbeatRow.value).getTime()).toBe(NOW.getTime());
-
-    // Calling it again immediately (heartbeat now fresh) must NOT regress
-    // the just-advanced boundary — a real round trip through the same
-    // onConflict().merge() write, not just a JS-level assertion.
-    await callBookingLinkText.refreshLiveActivationBoundary(mockPg, new Date(NOW.getTime() + 1000));
-    const boundaryAfter = await mockPg('system_settings').where({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY }).first('value');
-    expect(new Date(boundaryAfter.value).getTime()).toBe(callBookingLinkText.MODULE_LOAD_AT.getTime());
-  });
-
   test('recoverStaleClaims finds a real stale claimed row via its named-binding timestamptz comparison and requeues it through recoverAbandonedClaim', async () => {
     const leadId = await insertLead(mockPg);
     const staleClaimedAt = new Date(NOW.getTime() - callBookingLinkText.STALE_CLAIM_MS - 5 * 60 * 1000);

@@ -41,10 +41,6 @@ const {
   resolveLeadLinkage,
   activationBoundary,
   persistedActivationBoundary,
-  refreshLiveActivationBoundary,
-  ACTIVATION_SETTINGS_KEY,
-  LAST_LIVE_SETTINGS_KEY,
-  HEARTBEAT_GAP_MS,
   MODULE_LOAD_AT,
   neverSendRecheck,
   consentedDestination,
@@ -56,6 +52,7 @@ const {
   stageOne,
   sweep,
   STAGING_GRACE_MINUTES,
+  STAGING_STALE_MS,
 } = require('../services/call-booking-link-text');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
@@ -674,97 +671,21 @@ describe('stage', () => {
     const decided = await stageOne(conn, call, now, boundary);
     expect(decided).toBe('pending'); // NOT skipped as pre_activation
   });
-});
 
-// ── refreshLiveActivationBoundary — self-heals the boundary after a
-// disabled interval (codex r3 P1) ─────────────────────────────────────────
-// Two independent system_settings rows: ACTIVATION_SETTINGS_KEY (the
-// boundary itself) and LAST_LIVE_SETTINGS_KEY (a heartbeat every LIVE sweep
-// writes). A gap since the last heartbeat past HEARTBEAT_GAP_MS means the
-// gate was off (or the worker was down) since then, and the boundary
-// advances to max(stored boundary, MODULE_LOAD_AT) — never regresses it.
-describe('refreshLiveActivationBoundary', () => {
-  function systemSettingsMock(initial = {}) {
-    const store = { ...initial };
-    const conn = jest.fn((table) => {
-      if (table !== 'system_settings') throw new Error(`unexpected table ${table}`);
-      let pendingKey;
-      const chain = {
-        where: jest.fn(({ key }) => { pendingKey = key; return chain; }),
-        first: jest.fn(async () => (store[pendingKey] !== undefined ? { value: store[pendingKey] } : undefined)),
-        insert: jest.fn((row) => ({
-          onConflict: jest.fn(() => ({
-            merge: jest.fn(async () => { store[row.key] = row.value; }),
-            ignore: jest.fn(async () => { if (store[row.key] === undefined) store[row.key] = row.value; }),
-          })),
-        })),
-      };
-      return chain;
-    });
-    return { conn, store };
-  }
-
-  afterEach(() => { delete process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT; });
-
-  test('an explicit env override skips this entirely — no read, no write, at any gap', async () => {
-    process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
-    const { conn } = systemSettingsMock();
-    await refreshLiveActivationBoundary(conn, new Date());
-    expect(conn).not.toHaveBeenCalled();
-  });
-
-  test('no heartbeat at all (first live sweep after a fresh boot) advances the boundary to MODULE_LOAD_AT and writes a fresh heartbeat', async () => {
-    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: '2020-01-01T00:00:00.000Z' });
-    const now = new Date(MODULE_LOAD_AT.getTime() + 60 * 1000);
-    await refreshLiveActivationBoundary(conn, now);
-    expect(new Date(store[ACTIVATION_SETTINGS_KEY]).getTime()).toBe(MODULE_LOAD_AT.getTime());
-    expect(new Date(store[LAST_LIVE_SETTINGS_KEY]).getTime()).toBe(now.getTime());
-  });
-
-  // "on -> off (gap) -> on: off-period calls excluded" — a heartbeat older
-  // than the threshold is exactly what a gate cycled off (or a dead worker)
-  // for longer than 2 cron ticks leaves behind; a call landing during that
-  // gap must be pre_activation once the boundary catches up.
-  test('a stale heartbeat (past 2x the cron cadence) advances the boundary, so a call from the gap is pre_activation', async () => {
-    const now = new Date(MODULE_LOAD_AT.getTime() + 60 * 1000);
-    const staleHeartbeat = new Date(now.getTime() - HEARTBEAT_GAP_MS - 60 * 1000).toISOString();
-    const oldBoundary = new Date(MODULE_LOAD_AT.getTime() - 24 * 60 * 60 * 1000).toISOString(); // established a day before this boot
-    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: oldBoundary, [LAST_LIVE_SETTINGS_KEY]: staleHeartbeat });
-    await refreshLiveActivationBoundary(conn, now);
-    expect(new Date(store[ACTIVATION_SETTINGS_KEY]).getTime()).toBe(MODULE_LOAD_AT.getTime());
-
-    // A call that started during the gap (after the old boundary, before
-    // the advanced one) now reads as pre_activation via the ordinary
-    // stageOne path — this is the actual "off-period calls excluded"
-    // guarantee, not just an isolated boundary-value assertion.
-    const gapCall = {
-      id: 'call-in-gap', direction: 'inbound', created_at: new Date(MODULE_LOAD_AT.getTime() - 60 * 1000),
-      duration_seconds: 90, metadata: { lead_id: 'lead-1' },
-    };
-    const advancedBoundary = new Date(store[ACTIVATION_SETTINGS_KEY]);
-    const stageConn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
-    stageConn.raw = jest.fn((sql, bindings) => { stageConn.raw.calls = stageConn.raw.calls || []; stageConn.raw.calls.push(bindings); return 'RAW'; });
-    const decided = await stageOne(stageConn, gapCall, now, advancedBoundary);
-    expect(decided).toBe('skipped');
-    const parsed = stageConn.raw.calls.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text);
-    expect(parsed.call_booking_link_text.reason).toBe('pre_activation');
-  });
-
-  // "a routine restart within the threshold: nothing lost" — an ordinary
-  // deploy's own gap (the process restarting, picking the cron back up)
-  // lands comfortably under the threshold and must never regress the
-  // boundary a call between the ORIGINAL boundary and now still needs.
-  test('a fresh heartbeat under the gap threshold leaves the boundary untouched — a call since the original boundary still stages', async () => {
-    const now = new Date('2026-09-26T15:00:00Z');
-    const recentHeartbeat = new Date(now.getTime() - 60 * 1000).toISOString(); // 1 min ago — well under the threshold
-    const originalBoundary = '2020-01-01T00:00:00.000Z';
-    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: originalBoundary, [LAST_LIVE_SETTINGS_KEY]: recentHeartbeat });
-    await refreshLiveActivationBoundary(conn, now);
-    expect(store[ACTIVATION_SETTINGS_KEY]).toBe(originalBoundary); // untouched
-    expect(new Date(store[LAST_LIVE_SETTINGS_KEY]).getTime()).toBe(now.getTime()); // heartbeat still refreshed
-
+  // codex r6 P2: replaces the removed activation-boundary heartbeat/
+  // self-heal mechanism, which could not tell a genuine gate-off interval
+  // apart from ordinary worker/deploy downtime. A computed send_at already
+  // more than an hour in the past AT STAGING TIME — whatever caused the
+  // gap (an off->on re-enable, long downtime, or a backlog) — is skipped
+  // outright rather than queued, so re-enabling never bursts a pile of
+  // hours-stale texts.
+  test('a call whose computed send_at is already hours in the past at staging is skipped stale_at_staging, never queued', async () => {
+    const now = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    const rawBindings = [];
+    conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
-      id: 'call-since-boundary', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      id: 'call-off-period', direction: 'inbound', created_at: new Date('2026-09-26T13:00:00Z'), duration_seconds: 90, // ended ~5h before `now`
       metadata: { lead_id: 'lead-1' },
       ai_extraction_enriched: {
         meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -776,19 +697,35 @@ describe('refreshLiveActivationBoundary', () => {
       },
       ai_address_validation: { inServiceArea: true },
     };
-    const stageConn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
-    stageConn.raw = jest.fn(() => 'RAW');
-    const decided = await stageOne(stageConn, call, now, new Date(originalBoundary));
-    expect(decided).toBe('pending'); // nothing lost
+    const decided = await stageOne(conn, call, now, new Date('2020-01-01')); // long-past boundary — never blocks
+    expect(decided).toBe('skipped');
+    const parsed = rawBindings.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text);
+    expect(parsed.call_booking_link_text.reason).toBe('stale_at_staging');
   });
 
-  test('a gap detected but the stored boundary is already newer than MODULE_LOAD_AT is never regressed (no boundary write at all)', async () => {
-    const now = new Date(MODULE_LOAD_AT.getTime() + 60 * 1000);
-    const futureBoundary = new Date(now.getTime() + 60 * 60 * 1000).toISOString(); // already ahead of MODULE_LOAD_AT
-    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: futureBoundary }); // no heartbeat at all — a real gap
-    await refreshLiveActivationBoundary(conn, now);
-    expect(store[ACTIVATION_SETTINGS_KEY]).toBe(futureBoundary); // unchanged — never regressed
-    expect(new Date(store[LAST_LIVE_SETTINGS_KEY]).getTime()).toBe(now.getTime());
+  test('a call from a short (~20 min) gap, whose send_at is still within the hour, stages normally', async () => {
+    const now = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    conn.raw = jest.fn(() => 'RAW');
+    const call = {
+      id: 'call-short-gap', direction: 'inbound', created_at: new Date('2026-09-26T15:50:00Z'), duration_seconds: 90, // 2h delay elapsed only ~8.5 min ago
+      metadata: { lead_id: 'lead-1' },
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now, new Date('2020-01-01'));
+    expect(decided).toBe('pending'); // sent on schedule, nothing lost to the cap
+  });
+
+  test('STAGING_STALE_MS is exactly one hour', () => {
+    expect(STAGING_STALE_MS).toBe(60 * 60 * 1000);
   });
 });
 
@@ -956,7 +893,7 @@ describe('consentedDestination', () => {
 describe('neverSendRecheck', () => {
   const CALL_FOR_RECHECK = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), direction: 'inbound', from_phone: '+19415550100' };
   const DESTINATION = '+19415550100'; // matches CALL_FOR_RECHECK's own ANI — consent isolated from these tests' own concerns
-  const OPEN = { id: 'lead-1', status: 'new', converted_at: null, estimate_id: null, customer_id: null, deleted_at: null };
+  const OPEN = { id: 'lead-1', status: 'new', converted_at: null, estimate_id: null, customer_id: null, deleted_at: null, phone: DESTINATION };
 
   function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null } = {}) {
     return jest.fn((table) => {
@@ -993,6 +930,26 @@ describe('neverSendRecheck', () => {
   test('an estimate linked since then blocks the send', async () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     await expect(check({ dbi: dbi({ lead: { ...OPEN, estimate_id: 'est-1' } }) })).resolves.toEqual({ ok: false, code: 'estimate_linked' });
+  });
+
+  // codex r6 P1: staff correcting the phone in the gap between
+  // dispatchClaimedCall's own earlier phone_changed_before_send check and
+  // this hook (the actual last check before messages.create()) would
+  // otherwise deliver the minted bearer link to a number this lead no
+  // longer owns — worse than losing the send, since the token exposes the
+  // lead's current name/address to whoever holds that number now. Terminal
+  // (no retryable flag) — never resent to the OLD number, and a human can
+  // always text the corrected one by hand.
+  test('a phone corrected since the token was minted blocks the send with phone_changed_before_send, terminally', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const corrected = dbi({ lead: { ...OPEN, phone: '+19415559999' } });
+    await expect(check({ dbi: corrected })).resolves.toEqual({ ok: false, code: 'phone_changed_before_send' });
+  });
+
+  test('the SAME phone in a differently-formatted string (canonical identity, not a raw match) still passes', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const sameNumberDifferentFormat = dbi({ lead: { ...OPEN, phone: '(941) 555-0100' } });
+    await expect(check({ dbi: sameNumberDifferentFormat })).resolves.toEqual({ ok: true });
   });
 
   test('booked since the call started blocks the send', async () => {

@@ -18,7 +18,15 @@
  * Timing (owner rule): never before 2 hours after the call ends — staff get
  * the first shot at a callback — and never texted by the delayed job outside
  * 8 AM–8 PM ET, so a call ending at/after 6 PM ET waits for 8 AM ET the next
- * morning instead of a 2-hour offset that would land after 8 PM.
+ * morning instead of a 2-hour offset that would land after 8 PM. Also never
+ * more than an hour LATE: staging skips a call outright (`stale_at_staging`,
+ * terminal — see STAGING_STALE_MS) when its computed send_at is already
+ * more than an hour in the past at the moment staging looks at it — an
+ * off->on gate re-enable, long worker downtime, or a genuine processing
+ * backlog is never a reason to burst-text a pile of hours-stale follow-ups
+ * the instant staging catches up. This cap applies only at staging; a call
+ * already staged and deferred at dispatch time keeps its own send_at and
+ * the separate 24h original_send_at bound.
  *
  * Mechanism (no new table): the decision and its timer both live on the
  * call's own `call_log.metadata.call_booking_link_text` — set once, at most,
@@ -89,6 +97,23 @@ const DISPATCH_BATCH = 50;
 // cheaper than a retry/defer scheme, and costs nothing against the 2-hour
 // minimum delay this lane already imposes.
 const STAGING_GRACE_MINUTES = 15;
+// How far in the past the computed send_at may already be at the MOMENT OF
+// STAGING before this call is skipped outright rather than queued (codex
+// r6 P2 — this cap replaces an activation-boundary self-heal mechanism this
+// lane tried and removed: a heartbeat-based "was the gate off" inference
+// cannot tell a genuine disabled interval apart from ordinary worker/deploy
+// downtime, and drew findings two rounds running). Whatever caused the
+// gap — a gate re-enabled after being off, long worker downtime, or a
+// genuine processing backlog — staging every previously-unstaged call the
+// instant it catches up would burst-text a pile of stale follow-ups; this
+// caps the damage at the one rule that actually matters to the owner: a
+// booking-link text is never sent more than an hour after its OWN
+// scheduled time. Applies ONLY at staging (stageOne, below) — a call
+// ALREADY staged and deferred at dispatch time (outside the send window, a
+// retryable send outcome) keeps its own advancing send_at and the
+// SEPARATE, unrelated 24h original_send_at bound (NOT_READY_GIVE_UP_MS)
+// that governs a stalled DISPATCH, never this staging-time cap.
+const STAGING_STALE_MS = 60 * 60 * 1000;
 // How long past its send time a staged call may stay mid-reprocess before
 // the send gives up (see dispatchClaimedCall's readiness fence). Shared
 // with the retryable-send bound below — both measure "how stale can this
@@ -526,68 +551,6 @@ async function activationBoundary(conn) {
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
 }
 
-// A second, independent settings row: the last instant a LIVE sweep ran
-// (written only from sweep(), and only after its own gate check — nothing
-// here is ever read or written while the gate is off, so gate-off stays
-// the same true no-op it always was). Separate key from
-// ACTIVATION_SETTINGS_KEY because this is a HEARTBEAT, not the boundary
-// itself — refreshLiveActivationBoundary below reads this one to decide
-// whether the boundary needs advancing, then writes a fresh value here
-// every tick regardless of that decision.
-const LAST_LIVE_SETTINGS_KEY = 'call_booking_link_text_last_live_at';
-// The cron cadence (scheduler.js) is 5 minutes; tolerating exactly one
-// missed tick (an ordinary slow deploy step, a transient DB hiccup) before
-// treating a gap as real avoids false-triggering a boundary advance on
-// every routine restart.
-const HEARTBEAT_GAP_MS = 2 * 5 * 60 * 1000;
-
-// Self-heals the activation boundary after a disabled interval (codex r3
-// P1): the ORIGINAL fix only ever set the boundary once, the first time any
-// process found nothing stored. A gate cycled on -> off -> on within
-// STAGING_LOOKBACK_DAYS left that same, now-stale boundary in place — every
-// call that landed during the off period (never staged, since sweep()
-// returns before stage() runs while the gate is off) would be staged as one
-// burst the instant the gate came back, exactly the "days of pre-existing
-// valid-but-unstaged calls" the boundary exists to prevent in the first
-// place.
-//
-// A LIVE sweep is the ONLY caller (sweep() invokes this immediately after
-// its own gate check, before stage()) — so nothing here is ever read or
-// written while the gate is off. Each tick reads the PREVIOUS heartbeat
-// first: missing, or older than HEARTBEAT_GAP_MS, means a real gap — the
-// gate was off, or the worker itself was down — and the boundary advances
-// to whichever is LATER of the currently-stored boundary and this
-// process's own MODULE_LOAD_AT. MODULE_LOAD_AT stands in for "the gate's
-// own re-enable instant" because a gate flip requires a fresh Railway
-// deploy (GATE_CALL_BOOKING_LINK_TEXT is read once at feature-gates.js's
-// own module load) — this process could not be seeing isEnabled(GATE)
-// return true unless it booted after that flip. A routine restart whose
-// gap still lands under the threshold leaves the boundary untouched, so an
-// ordinary deploy never loses anything. The env override always wins
-// regardless (see activationBoundary) — this function only ever touches
-// the PERSISTED value, so it is skipped entirely while an operator has
-// pinned an explicit instant, rather than churn a stored value nothing
-// reads while the override is set.
-async function refreshLiveActivationBoundary(conn, now) {
-  if (process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT) return;
-  const heartbeat = await conn('system_settings').where({ key: LAST_LIVE_SETTINGS_KEY }).first('value');
-  const gapMs = heartbeat?.value ? now.getTime() - new Date(heartbeat.value).getTime() : Infinity;
-  if (!Number.isFinite(gapMs) || gapMs > HEARTBEAT_GAP_MS) {
-    const stored = await persistedActivationBoundary(conn);
-    const advanced = new Date(Math.max(stored.getTime(), MODULE_LOAD_AT.getTime()));
-    if (advanced.getTime() > stored.getTime()) {
-      await conn('system_settings').insert({
-        key: ACTIVATION_SETTINGS_KEY, value: advanced.toISOString(), category: 'call_booking_link_text',
-        description: 'First live-activation instant for GATE_CALL_BOOKING_LINK_TEXT; a call that started before it is historical, not a live never-booked lead to chase.',
-      }).onConflict('key').merge(['value']);
-    }
-  }
-  await conn('system_settings').insert({
-    key: LAST_LIVE_SETTINGS_KEY, value: now.toISOString(), category: 'call_booking_link_text',
-    description: 'Heartbeat: the last instant a LIVE sweep ran. A gap past 2x the 5-minute cron cadence means the gate was off or the worker was down, and the NEXT live sweep advances the activation boundary to cover it.',
-  }).onConflict('key').merge(['value']);
-}
-
 /**
  * Evaluates and stamps every V2-extracted call this lane has not yet looked
  * at (bounded lookback). Never re-evaluates a call twice — the metadata key
@@ -670,6 +633,15 @@ async function stageOne(conn, call, now, boundary = null) {
   // the skew," never "delayed indefinitely."
   const clampedEnd = callEnd.getTime() > now.getTime() ? now : callEnd;
   const send_at = computeSendAt(clampedEnd).toISOString();
+  // Staging staleness cap (codex r6 P2 — see STAGING_STALE_MS's own doc
+  // comment): a computed send time already more than an hour in the past
+  // AT THE MOMENT OF STAGING is never queued at all — this is what bounds
+  // an off->on re-enable, long downtime, or a backlog to "the office sees
+  // it was missed," never a burst of hours-late texts.
+  if (now.getTime() - new Date(send_at).getTime() > STAGING_STALE_MS) {
+    await claimMetadata(conn, call.id, { status: 'skipped', reason: 'stale_at_staging', staged_at });
+    return 'skipped';
+  }
   // original_send_at is set ONCE here and never overwritten by a later
   // retry deferral (codex r2 P1): a retry re-queues with a NEW send_at (the
   // next attempt time), and measuring the 24h retry give-up against that
@@ -872,6 +844,18 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').first();
       if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
       if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
+      // Re-verifies the SAME fact dispatchClaimedCall's own earlier
+      // phone_changed_before_send check made, on the freshest possible read
+      // (codex r6 P1): that earlier check compared built.phone against
+      // lead.phone at THAT moment, but staff can correct the phone in the
+      // gap between there and this hook's own call — the actual last thing
+      // that runs before messages.create(). Sending the minted bearer link
+      // (/inspection/:token) to a number staff just retired for THIS lead
+      // would hand whoever now holds it the lead's current name and address
+      // (inspection-public.js's buildLeadPayload) — worse than merely
+      // losing the send. Compared by canonical phone identity, matching
+      // consentedDestination's own comparator, never a raw string match.
+      if (phoneIdentityKey(lead.phone) !== phoneIdentityKey(destinationPhone)) return { ok: false, code: 'phone_changed_before_send' };
       // Re-verified even though nothing between the earlier send-time check
       // and here can change the destination string itself (codex r5 P1) —
       // the same last-moment-before-the-provider-request discipline every
@@ -1172,7 +1156,6 @@ async function recoverStaleClaims(conn, now) {
 
 async function sweep(conn = db, { now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
-  await refreshLiveActivationBoundary(conn, now);
   const { staged, ineligible } = await stage(conn, { now });
   const due = await conn('call_log')
     .whereRaw("metadata->:key->>'status' = 'pending'", { key: METADATA_KEY })
@@ -1221,6 +1204,7 @@ module.exports = {
   MESSAGE_TYPE,
   STAGING_LOOKBACK_DAYS,
   STAGING_GRACE_MINUTES,
+  STAGING_STALE_MS,
   MIN_CONVERSATION_SECONDS,
   computeSendAt,
   callEndFor,
@@ -1233,10 +1217,7 @@ module.exports = {
   resolveLeadLinkage,
   activationBoundary,
   persistedActivationBoundary,
-  refreshLiveActivationBoundary,
   ACTIVATION_SETTINGS_KEY,
-  LAST_LIVE_SETTINGS_KEY,
-  HEARTBEAT_GAP_MS,
   MODULE_LOAD_AT,
   neverSendRecheck,
   consentedDestination,
