@@ -1981,14 +1981,9 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
       if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
     });
   }
-  if (phone) {
-    const key = phoneDigits(phone);
-    if (!key) { builder.whereRaw('false'); return builder; }
-    builder.whereRaw(
-      `regexp_replace(COALESCE(CASE WHEN cl.direction LIKE 'outbound%' THEN cl.to_phone ELSE cl.from_phone END, ''), '[^0-9]', '', 'g') IN (?, ?)`,
-      [key, `1${key}`],
-    );
-  }
+  // The contact number of the promise's own call (dialed number outbound,
+  // caller ID inbound), matched by this file's own phoneWhere digits rule.
+  if (phone) phoneWhere(builder, "CASE WHEN cl.direction LIKE 'outbound%' THEN cl.to_phone ELSE cl.from_phone END", phone);
   return builder;
 }
 

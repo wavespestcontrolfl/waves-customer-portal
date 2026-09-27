@@ -300,18 +300,15 @@ describe('triggerNotification bell outcome', () => {
   // A second same-day callback on the SAME open promise dedupes to the
   // committed bell — the promise-chaser bell's own dedupeKey — and must not
   // re-buzz the phone either, even though it is a genuinely new call.
-  // Unlike sms_reply, a promise-chaser dedupe HIT does not skip the push:
-  // the same call can retry after its OWN earlier push failed (the bell
-  // insert having already succeeded), and suppressing that retry's push
-  // would lose the alert for good. The "don't re-buzz for a genuinely
-  // separate same-day call" decision is promise-chaser-bell's own, made
-  // BEFORE it ever reaches this dispatcher.
-  test('a promise-chaser dedupe hit still reaches push — a retried failed push must not be silently dropped', async () => {
+  // Like sms_reply, a promise-chaser dedupe HIT skips the push. The sweep is
+  // stateless and never retries a push, so a dedupe hit can only be a
+  // concurrent dispatch of the same (promise, ET day) that already pushed.
+  test('a promise-chaser dedupe hit does not push again (a concurrent dispatch already did)', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
     const stats = await triggerNotification('promise_chaser', { commitmentId: 'fixture-commitment-1', phone: '+19415550199' },
       { dedupeKey: 'waves-promise_chaser-fixture-commitment-1-2026-09-26' });
-    expect(stats.bellWritten).toBe(true);
-    expect(require('../services/push-notifications').sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(stats.deduped).toBe(true);
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 
   test('push-only SMS recovery retains its message tag and avoids renotification', async () => {
