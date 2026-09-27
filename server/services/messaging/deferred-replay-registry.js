@@ -1660,17 +1660,19 @@ async function billingEmailDurablyAccepted(notificationEventKey) {
 // above — never the queue row, never scheduler ctx.
 async function billingTextDurablyAccepted(notificationEventKey) {
   if (!notificationEventKey) return false;
-  // status-scoped to queued/sent/delivered at the query level (matches
-  // acceptedScheduledSms's own shape) — an unresolved 'sending' reservation
-  // can never be the row .first() returns, so multiple attempts sharing the
-  // same notificationEventKey (a failed try, then an accepted retry) can
-  // never have this pick the wrong one.
+  // Status-scoped to queued/sent/delivered (matches acceptedScheduledSms's
+  // own shape), AND the Twilio SID is required in SQL rather than read off
+  // whichever row .first() returns: once markScheduledSmsSent marks this
+  // replay's own queue row 'sent', it carries the same notificationEventKey
+  // with a NULL twilio_sid, as does an App push proof, and an unordered
+  // .first() could return either of those instead of the provider row.
   const row = await db('sms_log')
     .where({ direction: 'outbound' })
     .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereNotNull('twilio_sid')
     .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
-    .first('twilio_sid');
-  return Boolean(row?.twilio_sid);
+    .first('id');
+  return Boolean(row);
 }
 
 // Durable evidence for the App leg: the push proof row push-channel-

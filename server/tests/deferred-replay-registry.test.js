@@ -286,7 +286,7 @@ describe('deferred-replay registry', () => {
           const q = {};
           q.where = jest.fn(() => q);
           q.whereRaw = jest.fn(() => q);
-          q.whereIn = jest.fn(() => q);
+          q.whereIn = jest.fn(() => q); q.whereNotNull ??= jest.fn(() => q);
           q.first = jest.fn(async () => undefined);
           return q;
         }
@@ -328,7 +328,8 @@ describe('deferred-replay registry', () => {
         }
         if (table === 'sms_log') {
           smsCall += 1;
-          const q = {}; q.where = jest.fn(() => q); q.whereRaw = jest.fn(() => q); q.whereIn = jest.fn(() => q);
+          const q = {}; q.where = jest.fn(() => q); q.whereRaw = jest.fn(() => q); q.whereIn = jest.fn(() => q); q.whereNotNull ??= jest.fn(() => q);
+          q.whereNotNull = jest.fn(() => q);
           // First call is the Text check (accepted); second is the App check.
           q.first = jest.fn(async () => (smsCall === 1 ? { twilio_sid: 'SM123' } : undefined));
           return q;
@@ -428,7 +429,7 @@ describe('deferred-replay registry', () => {
           const q = {}; q.where = jest.fn(() => q); q.first = jest.fn(async () => { throw new Error('db down'); }); return q;
         }
         if (table === 'sms_log') {
-          const q = {}; q.where = jest.fn(() => q); q.whereRaw = jest.fn(() => q); q.whereIn = jest.fn(() => q); q.first = jest.fn(async () => undefined); return q;
+          const q = {}; q.where = jest.fn(() => q); q.whereRaw = jest.fn(() => q); q.whereIn = jest.fn(() => q); q.whereNotNull ??= jest.fn(() => q); q.first = jest.fn(async () => undefined); return q;
         }
         throw new Error(`Unexpected table: ${table}`);
       });
@@ -478,10 +479,14 @@ describe('deferred-replay registry', () => {
           smsCall += 1;
           const row = smsCall === 1 ? textRow : appRow;
           const q = {};
+          // Mirrors the SQL filter: the Text check requires a Twilio SID
+          // in the WHERE clause, so a NULL-sid row never comes back.
+          let requireSid = false;
           q.where = jest.fn(() => q);
           q.whereRaw = jest.fn(() => q);
-          q.whereIn = jest.fn(() => q);
-          q.first = jest.fn(async () => row);
+          q.whereIn = jest.fn(() => q); q.whereNotNull ??= jest.fn(() => q);
+          q.whereNotNull = jest.fn((column) => { if (column === 'twilio_sid') requireSid = true; return q; });
+          q.first = jest.fn(async () => (requireSid && row && !row.twilio_sid ? undefined : row));
           return q;
         }
         if (table === 'invoices') {
@@ -611,7 +616,7 @@ describe('deferred-replay registry', () => {
           const q = {}; q.where = jest.fn(() => q); q.first = jest.fn(async () => ({ status: 'sent' })); return q;
         }
         if (table === 'sms_log') {
-          const q = {}; q.where = jest.fn(() => q); q.whereRaw = jest.fn(() => q); q.whereIn = jest.fn(() => q); q.first = jest.fn(async () => undefined); return q;
+          const q = {}; q.where = jest.fn(() => q); q.whereRaw = jest.fn(() => q); q.whereIn = jest.fn(() => q); q.whereNotNull ??= jest.fn(() => q); q.first = jest.fn(async () => undefined); return q;
         }
         if (table === 'invoices') {
           const q = {};

@@ -170,6 +170,37 @@ postgres('invoice_send_deferred partial-fanout replay: leg-retry guard + durable
     expect(stampedInvoice.email_sent_at).toBeNull();
   });
 
+  test('Text evidence is the provider row: the replay\'s own sent queue row and an App push proof (same key, NULL sid) never mask it', async () => {
+    const { customerId, invoice } = await seedCustomerAndInvoice();
+    const { row, notificationEventKey } = await queuePartialFanoutRetry({ customerId, invoiceId: invoice.id });
+    // Queue row already marked sent (as markScheduledSmsSent leaves it), and
+    // a push proof, both inserted BEFORE the real Twilio row so an unordered
+    // .first() on the key alone would reach them first.
+    await fixture.knex('sms_log').where({ id: row.id }).update({ status: 'sent' });
+    await fixture.knex('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: 'push', to_phone: '',
+      message_body: 'Your invoice is ready', message_type: 'invoice', status: 'sent', twilio_sid: null,
+      created_at: new Date(), metadata: JSON.stringify({ notificationEventKey }),
+    });
+    const { _registry } = require('../services/messaging/deferred-replay-registry');
+    const meta = { ...row.metadata, invoice_id: invoice.id, partial_fanout_retry: true, notificationEventKey };
+
+    // App proof alone: sms_sent_at is stamped (Text OR App), so clear it and
+    // check Text on its own below.
+    await _registry.invoice_send_deferred.finalize(meta);
+    await fixture.knex('sms_log').where({ from_phone: 'push' }).del();
+    await fixture.knex('invoices').where({ id: invoice.id }).update({ sms_sent_at: null });
+
+    // Only the sent queue row left (NULL sid): not Text evidence.
+    await _registry.invoice_send_deferred.finalize(meta);
+    expect((await fixture.knex('invoices').where({ id: invoice.id }).first()).sms_sent_at).toBeNull();
+
+    // The real provider row after it: stamped.
+    await insertAcceptedTextEvidence({ customerId, notificationEventKey });
+    await _registry.invoice_send_deferred.finalize(meta);
+    expect((await fixture.knex('invoices').where({ id: invoice.id }).first()).sms_sent_at).not.toBeNull();
+  });
+
   test('an uncertain leg blocks auto-retry entirely: the row is NOT rescheduled for another attempt, even though Text also accepted', async () => {
     const { customerId, invoice } = await seedCustomerAndInvoice();
     const { row, notificationEventKey } = await queuePartialFanoutRetry({ customerId, invoiceId: invoice.id });
