@@ -35,7 +35,7 @@ const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request')
 const {
   classifyItem, logQueuedLine, findPossibleDuplicateMovement, lockShipment, shipmentHandedOff, SOURCES,
   TITLE_SIZE_RE, sizeUnit, parseSizeNumber, sizesAgree, round4,
-  parseMultipack, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
+  parseMultipack, MULTIPACK_PATTERNS, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
 } = require('./receipt-processor');
 
 const GATE = 'GATE_INVENTORY_AGENT';
@@ -387,20 +387,57 @@ function isIdentityWord(word) {
   return !COUNT_UNIT_WORD_RE.test(word) && !sizeUnit(word);
 }
 
-// True when `nameWords` (normalizeForMatch'd) is a CONTIGUOUS run of at
-// least 2 of `titleWords`, in that exact order, whose first word — and at
-// least one word overall (the first word already being one is enough, but
-// this is checked as its own condition rather than assumed) — is an
-// identity word: a real product phrase lifted whole from the listing
-// ("Bifen XTS"), never a subset scattered across it ("XTS Bifen" out of
-// order), a single generic word ("Insecticide"), or a phrase built entirely
-// from sizes/counts/packs/EPA boilerplate ("96 oz", "12 Count", "EPA Reg").
-function isContiguousTitlePhrase(nameWords, titleWords) {
-  if (nameWords.length < 2 || !isIdentityWord(nameWords[0]) || !nameWords.some(isIdentityWord)) return false;
+// The word-index SPAN ({ start, end }, inclusive) of the FIRST run where
+// `nameWords` (normalizeForMatch'd) is a CONTIGUOUS run of at least 2 of
+// `titleWords`, in that exact order, whose first word — and at least one
+// word overall (the first word already being one is enough, but this is
+// checked as its own condition rather than assumed) — is an identity word:
+// a real product phrase lifted whole from the listing ("Bifen XTS"), never a
+// subset scattered across it ("XTS Bifen" out of order), a single generic
+// word ("Insecticide"), or a phrase built entirely from sizes/counts/packs/
+// EPA boilerplate ("96 oz", "12 Count", "EPA Reg"). null when no such run
+// exists.
+function contiguousTitlePhraseSpan(nameWords, titleWords) {
+  if (nameWords.length < 2 || !isIdentityWord(nameWords[0]) || !nameWords.some(isIdentityWord)) return null;
   for (let start = 0; start + nameWords.length <= titleWords.length; start += 1) {
-    if (nameWords.every((word, offset) => titleWords[start + offset] === word)) return true;
+    if (nameWords.every((word, offset) => titleWords[start + offset] === word)) return { start, end: start + nameWords.length - 1 };
   }
-  return false;
+  return null;
+}
+
+// RULE (item 1, 2026-09-27 round 10 review — a manufacturer-only name):
+// "Syngenta Professional Products" passes the contiguous-phrase check above
+// for "Syngenta Professional Products Demand CS 8 oz" (every word IS a real,
+// ordered run from the title), but it names the MANUFACTURER, never the
+// product — "Demand CS" is what's actually being bought. The title's own
+// ANCHOR is the last identity word (isIdentityWord) appearing before its
+// first size claim or pack marker (the SAME parsers validateReading uses:
+// parsedSizeClaims/TITLE_SIZE_RE, parseMultipack) — the word a size reading
+// is naturally read "off of" ("CS" in "... Demand CS 8 oz"). A proposed
+// name's contiguous phrase must COVER that word's position; a title with no
+// identity word anywhere before its first size/pack marker (or, lacking
+// either, before its own end) has no anchor at all, and every proposal for
+// it is unsure. Scanning ALL of MULTIPACK_PATTERNS for the earliest match
+// (not just parseMultipack's own first-pattern-wins pick) is deliberate: any
+// pack marker, wherever it falls, closes off the identity portion of the
+// title the same way a size claim does.
+function titleAnchorWordIndex(rawTitle) {
+  const title = String(rawTitle || '');
+  let cutoff = title.length;
+  for (const match of title.matchAll(TITLE_SIZE_RE)) {
+    const [, , first, second] = match;
+    if (canonicalUnit(first, second) && match.index < cutoff) cutoff = match.index;
+  }
+  for (const pattern of MULTIPACK_PATTERNS) {
+    const packMatch = title.match(pattern);
+    if (packMatch && Number(packMatch[1]) > 0 && packMatch.index < cutoff) cutoff = packMatch.index;
+  }
+  const titleWords = normalizeForMatch(title).split(' ').filter(Boolean);
+  const wordsBeforeCutoff = normalizeForMatch(title.slice(0, cutoff)).split(' ').filter(Boolean).length;
+  for (let i = Math.min(wordsBeforeCutoff, titleWords.length) - 1; i >= 0; i -= 1) {
+    if (isIdentityWord(titleWords[i])) return i;
+  }
+  return null;
 }
 
 // The candidate's container_size normalized to ONE shape, so
@@ -475,6 +512,25 @@ function agreeAgainstBlankContainer(candidate, reading, lineQuantity, rawReading
   };
 }
 
+// Every normalized word of `words` (a candidate's NAME or ONE of its
+// aliases, already split) appears among `titleWords` — any order, whole
+// words (titleWords is itself normalizeForMatch'd, so this is a plain set
+// test, never a substring match). A candidate with no words at all (an
+// empty/blank name) never counts as evidence.
+function everyWordInTitle(titleWords, words) {
+  return words.length > 0 && words.every((word) => titleWords.includes(word));
+}
+
+// RULE (item 2, 2026-09-27 round 10 review): does `titleWords` actually NAME
+// `product` — its own catalog NAME, or one of its PRE-EXISTING aliases
+// (`aliasesByProduct`, NEVER the alias this line is about to create)? See
+// validateExisting's own header for why this only runs when the
+// deterministic matcher named nothing at all.
+function productNamedByTitle(titleWords, product, aliasesByProduct) {
+  if (everyWordInTitle(titleWords, normalizeForMatch(product.name).split(' ').filter(Boolean))) return true;
+  return (aliasesByProduct[product.id] || []).some((alias) => everyWordInTitle(titleWords, normalizeForMatch(alias).split(' ').filter(Boolean)));
+}
+
 // A validated 'existing' decision, or 'agent_unsure' with why.
 function validateExisting(raw, ctx) {
   const { candidates, rawTitle, lineQuantity, matchedProductId } = ctx;
@@ -487,6 +543,28 @@ function validateExisting(raw, ctx) {
   // confirm THAT product, never substitute a different one it prefers.
   if (matchedProductId && candidate.id !== matchedProductId) {
     return unsureResult('the agent picked a different product than the catalog match');
+  }
+
+  // RULE (item 2, 2026-09-27 round 10 review): an UNMATCHED title ("Bifen
+  // XTS Insecticide 96 oz" resolving to candidate "Bifen IT" on the shared
+  // token "Bifen") has no deterministic-matcher confirmation behind it at
+  // all — the agent's own choice is the only thing that will ever tie this
+  // title to a product, and createAgentAlias is about to make that choice
+  // self-confirming forever (the full raw title becomes the product's own
+  // alias). So it needs INDEPENDENT evidence: every word of the candidate's
+  // catalog NAME, or of one of its PRE-EXISTING aliases, must appear in the
+  // title — and no OTHER active product may satisfy the same test, or the
+  // title just doesn't clearly name one single product. Skipped entirely
+  // when the deterministic matcher already named this product
+  // (matchedProductId set) — that confirmation IS the evidence.
+  if (!matchedProductId) {
+    const titleWords = normalizeForMatch(rawTitle).split(' ').filter(Boolean);
+    if (!productNamedByTitle(titleWords, candidate, ctx.aliasesByProduct || {})) {
+      return unsureResult("the title doesn't name this product");
+    }
+    const otherMatch = (ctx.allActiveProducts || []).some((p) => p.id !== candidate.id
+      && productNamedByTitle(titleWords, p, ctx.activeProductAliases || {}));
+    if (otherMatch) return unsureResult('the title names more than one product');
   }
 
   const reading = validateReading(raw.reading, { rawTitle, lineQuantity });
@@ -530,8 +608,18 @@ function validateNewProduct(raw, ctx) {
   // exact-title alias would then make the error self-confirming.
   const titleWords = normalizeForMatch(rawTitle).split(' ').filter(Boolean);
   const nameWords = normalizeForMatch(name).split(' ').filter(Boolean);
-  if (!isContiguousTitlePhrase(nameWords, titleWords)) {
+  const span = contiguousTitlePhraseSpan(nameWords, titleWords);
+  if (!span) {
     return { kind: 'unsure', status: 'agent_unsure', reason: `the proposed name ("${name}") isn't a specific product phrase from the title` };
+  }
+  // The phrase must also COVER the title's own ANCHOR (item 1, 2026-09-27
+  // round 10 review) — see titleAnchorWordIndex's own header. A name that
+  // only lifts the manufacturer/brand words ahead of the real product name
+  // ("Syngenta Professional Products" for "... Demand CS 8 oz") is refused
+  // here even though it IS a genuine contiguous run of the title's words.
+  const anchor = titleAnchorWordIndex(rawTitle);
+  if (anchor == null || anchor < span.start || anchor > span.end) {
+    return { kind: 'unsure', status: 'agent_unsure', reason: `the proposed name ("${name}") doesn't cover the title's own product-identity word` };
   }
   if (collidesWithActiveProduct(name, rawTitle, allActiveProducts, activeProductAliases)) {
     return { kind: 'unsure', status: 'agent_unsure', reason: `looks like an existing product ("${name}")` };

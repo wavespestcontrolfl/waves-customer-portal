@@ -281,8 +281,34 @@ async function findActiveProductByExactName(trx, name) {
 // two products each claim the same alias text with a NULL vendor (NULL <>
 // NULL in Postgres, so the constraint never fires) — this lookup is what
 // actually catches that.
+//
+// Scoped to an ACTIVE owner only (item 3, 2026-09-27 round 10 review):
+// product-matcher.js's own deterministic matcher joins active products only,
+// so an alias still sitting on a RETIRED product must never read as a
+// conflict here — a NEW active product (or the agent) must be free to claim
+// the same exact text. The `(alias_name, vendor_id)` unique index doesn't
+// know about `active` at all, though, so a real DB collision against a
+// stale inactive row is still possible with a non-null vendor_id —
+// findStaleInactiveAlias below is the separate lookup that catches THAT one.
 async function findAliasByNormalizedName(trx, aliasName) {
-  return trx('product_aliases').whereRaw('lower(btrim(alias_name)) = lower(btrim(?))', [String(aliasName || '')]).first();
+  return trx('product_aliases as pa')
+    .join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true)
+    .whereRaw('lower(btrim(pa.alias_name)) = lower(btrim(?))', [String(aliasName || '')])
+    .first('pa.*');
+}
+
+// The (alias_name, vendor_id) unique index's own exact match, owner's
+// `active` flag ignored — the one case findAliasByNormalizedName's
+// active-only join can't see: a RETIRED product's alias row with the SAME
+// text and the SAME non-null vendor_id would otherwise throw a unique
+// violation on insert. Never reachable with a NULL vendor_id (NULL <> NULL
+// never collides at the index), so the agent's own createAgentAlias —
+// vendor_id always null — never needs this lookup at all.
+async function findStaleInactiveAlias(trx, aliasName, vendorId) {
+  if (!vendorId) return null;
+  return trx('product_aliases').where({ vendor_id: vendorId })
+    .whereRaw('lower(btrim(alias_name)) = lower(btrim(?))', [String(aliasName || '')]).first();
 }
 
 // The admin alias endpoint's own writer (POST /api/admin/inventory/aliases),
@@ -298,6 +324,16 @@ async function createProductAlias(fields, options = {}) {
     await lockCatalogCreate(trx);
     const existing = await findAliasByNormalizedName(trx, aliasName);
     if (existing) return existing.product_id === productId ? { success: true } : { success: false, conflict: existing };
+    // No ACTIVE owner conflicts — but a stale row still sitting on a RETIRED
+    // product, with the SAME exact alias_name and the SAME non-null
+    // vendor_id, would still throw a unique-violation on a plain insert
+    // (the index doesn't know about `active`). Transfer that row to the
+    // active product instead of colliding (item 3, 2026-09-27 round 10).
+    const stale = await findStaleInactiveAlias(trx, aliasName, vendorId || null);
+    if (stale) {
+      const [transferred] = await trx('product_aliases').where({ id: stale.id }).update({ product_id: productId }).returning('*');
+      return { success: true, transferred };
+    }
     await trx('product_aliases').insert({ product_id: productId, alias_name: aliasName, vendor_id: vendorId || null });
     return { success: true };
   };

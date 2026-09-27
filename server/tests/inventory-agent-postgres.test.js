@@ -27,12 +27,17 @@ const { undoLine } = require('../../ops/agents/inventory-agent-undo');
 
 const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments', 'service_product_usage', 'protocol_template_products', 'lawn_protocol_product_substitutions'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
-// A Taurus title the deterministic matcher can't claim ("SC" is missing, and
-// every product word must appear contiguously), so the line is genuinely the
-// agent's: a queued line the receipt rules DO resolve now posts through those
-// rules without the model (Codex round 8), which would bypass what these
-// tests exercise.
-const AGENT_ONLY_TAURUS_TITLE = 'Taurus Termiticide 78 oz';
+// A Taurus title the deterministic matcher can't claim (its own product name
+// "Taurus SC" never appears CONTIGUOUS — "Termiticide" sits between the two
+// words — and every product word must appear contiguously to match), so the
+// line is genuinely the agent's: a queued line the receipt rules DO resolve
+// now posts through those rules without the model (Codex round 8), which
+// would bypass what these tests exercise. It DOES carry every word of
+// "Taurus SC" (in any order), though — required since round 10's own
+// independent-evidence rule (item 2, validateExisting) refuses an
+// 'existing' decision on an unmatched title unless every word of the
+// candidate's name (or a pre-existing alias) appears in the title.
+const AGENT_ONLY_TAURUS_TITLE = 'Taurus Termiticide SC 78 oz';
 const HOUR = 60 * 60 * 1000;
 
 jest.setTimeout(30000);
@@ -814,6 +819,99 @@ jest.setTimeout(30000);
     expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
   });
 
+  // Item 3, 2026-09-27 round 10 review: findAliasByNormalizedName used to
+  // treat an alias still owned by a RETIRED (inactive) product as a
+  // conflict, even though product-matcher.js's own deterministic matcher
+  // joins active products only — a stale row on a duplicate/retired catalog
+  // entry silently blocked a NEW active product (or the agent) from ever
+  // claiming that exact alias text.
+  describe('an alias owned only by a RETIRED product is never a conflict (item 3, 2026-09-27 round 10)', () => {
+    test('admin create (createProductAlias) succeeds when only an INACTIVE product holds the exact alias text, no vendor', async () => {
+      const [retired] = await mockConn('products_catalog').insert({ name: 'Old Bifen', active: false, category: 'insecticide' }).returning('*');
+      await mockConn('product_aliases').insert({ product_id: retired.id, alias_name: 'Bifen XTS 96 oz' });
+      const [active] = await mockConn('products_catalog').insert({ name: 'Bifen XTS', active: true, category: 'insecticide' }).returning('*');
+
+      const result = await inventoryOperations.createProductAlias({ productId: active.id, aliasName: 'Bifen XTS 96 oz', vendorId: null });
+      expect(result).toEqual({ success: true });
+      // Both rows exist side by side — a NULL vendor_id never collides at
+      // the (alias_name, vendor_id) index — but matchTitleToProduct only
+      // ever sees the active one (its own join is `active = true`).
+      const owners = (await mockConn('product_aliases').where({ alias_name: 'Bifen XTS 96 oz' })).map((a) => a.product_id).sort();
+      expect(owners).toEqual([active.id, retired.id].sort());
+    });
+
+    test('admin create TRANSFERS a stale alias from a RETIRED product instead of colliding, when the SAME non-null vendor_id would otherwise violate the unique index', async () => {
+      const vendorId = randomUUID(); // no `vendors` FK in this LIKE-copy schema — any UUID stands in
+      const [retired] = await mockConn('products_catalog').insert({ name: 'Old Bifen', active: false, category: 'insecticide' }).returning('*');
+      const [stale] = await mockConn('product_aliases').insert({ product_id: retired.id, alias_name: 'Bifen XTS 96 oz', vendor_id: vendorId }).returning('*');
+      const [active] = await mockConn('products_catalog').insert({ name: 'Bifen XTS', active: true, category: 'insecticide' }).returning('*');
+
+      const result = await inventoryOperations.createProductAlias({ productId: active.id, aliasName: 'Bifen XTS 96 oz', vendorId });
+      expect(result).toMatchObject({ success: true, transferred: { id: stale.id, product_id: active.id } });
+      // Transferred, never duplicated: exactly one row for this (alias_name, vendor_id).
+      const rows = await mockConn('product_aliases').where({ alias_name: 'Bifen XTS 96 oz', vendor_id: vendorId });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].product_id).toBe(active.id);
+    });
+
+    test('agent create (createAgentAlias, via the real apply path) succeeds when only an INACTIVE product holds the same exact title as an alias', async () => {
+      const [retired] = await mockConn('products_catalog').insert({ name: 'Old Bifen', active: false, category: 'insecticide' }).returning('*');
+      await mockConn('product_aliases').insert({ product_id: retired.id, alias_name: 'Bifen Insecticide Concentrate 96 oz' });
+      // Named so its OWN words ("bifen", "concentrate") are both present in
+      // the title below — round 10 item 2's independent-evidence rule for an
+      // unmatched title — while staying non-contiguous in the title itself
+      // ("Insecticide" sits between them), so the deterministic matcher
+      // still can't claim it either; this line really is the agent's.
+      const [active] = await mockConn('products_catalog').insert({
+        name: 'Bifen Concentrate', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+      }).returning('*');
+      const title = 'Bifen Insecticide Concentrate 96 oz';
+      const line = await pendingLine({ raw_title: title, quantity: 1, shipment_key: 'ship-inactive-alias' });
+      const decision = {
+        kind: 'existing', reason: 'matches the candidate', product_id: active.id, new_product: null,
+        reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+      };
+      const result = await run({ ok: true, json: decision });
+      expect(result).toMatchObject({ logged: 1, held: 0 });
+      const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+      expect(saved).toMatchObject({ status: 'logged', product_id: active.id, agent_created_alias_id: expect.any(String) });
+      // The agent's own alias (vendor_id null) sits beside the retired
+      // product's — never blocked, never merged into it.
+      const owners = (await mockConn('product_aliases').where({ alias_name: title })).map((a) => a.product_id).sort();
+      expect(owners).toEqual([active.id, retired.id].sort());
+    });
+
+    test('an ACTIVE owner still conflicts, even alongside an inactive one holding the SAME text — admin create refuses (409-worthy), never silently prefers or ignores it', async () => {
+      const [retired] = await mockConn('products_catalog').insert({ name: 'Discontinued Bifen', active: false, category: 'insecticide' }).returning('*');
+      await mockConn('product_aliases').insert({ product_id: retired.id, alias_name: 'Bifen XTS 96 oz' });
+      const [otherActive] = await mockConn('products_catalog').insert({ name: 'Bifen IT', active: true, category: 'insecticide' }).returning('*');
+      await mockConn('product_aliases').insert({ product_id: otherActive.id, alias_name: 'Bifen XTS 96 oz' });
+      const [active] = await mockConn('products_catalog').insert({ name: 'Bifen XTS', active: true, category: 'insecticide' }).returning('*');
+
+      const adminResult = await inventoryOperations.createProductAlias({ productId: active.id, aliasName: 'Bifen XTS 96 oz', vendorId: null });
+      // The active owner's row is what's reported — the inactive one sitting
+      // right beside it under the SAME text is never picked instead.
+      expect(adminResult).toMatchObject({ success: false, conflict: { product_id: otherActive.id } });
+      expect(await mockConn('product_aliases').where({ alias_name: 'Bifen XTS 96 oz', product_id: active.id })).toHaveLength(0);
+    });
+
+    // createAgentAlias runs the SAME findAliasByNormalizedName lookup under
+    // the SAME lock (inventory-agent.js, item 2, 2026-09-27 round 7 review) —
+    // proven directly here rather than through the full pipeline, since a
+    // pre-existing exact-title alias on an ACTIVE product is always caught by
+    // the deterministic matcher (or applyDecision's own chokepoint) first in
+    // the ordinary flow, long before createAgentAlias's own insert runs.
+    test('the lookup createAgentAlias shares still returns the ACTIVE owner, never the inactive one holding the same text', async () => {
+      const [retired] = await mockConn('products_catalog').insert({ name: 'Discontinued Bifen', active: false, category: 'insecticide' }).returning('*');
+      await mockConn('product_aliases').insert({ product_id: retired.id, alias_name: 'Bifen XTS 96 oz' });
+      const [otherActive] = await mockConn('products_catalog').insert({ name: 'Bifen IT', active: true, category: 'insecticide' }).returning('*');
+      await mockConn('product_aliases').insert({ product_id: otherActive.id, alias_name: 'Bifen XTS 96 oz' });
+
+      const found = await mockConn.transaction((trx) => inventoryOperations.findAliasByNormalizedName(trx, 'Bifen XTS 96 oz'));
+      expect(found).toMatchObject({ product_id: otherActive.id });
+    });
+  });
+
   // 2026-09-27 pre-push audit: the agent used to lock an existing product
   // FOR UPDATE and only THEN take the catalog lock (createAgentAlias), while
   // the admin alias endpoint holds the catalog lock and its insert's
@@ -826,6 +924,13 @@ jest.setTimeout(30000);
       const [product] = await mockConn('products_catalog').insert({
         name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
       }).returning('*');
+      // A pre-existing alias (never the exact raw title) giving the model's
+      // 'existing' choice its own independent evidence (item 2, 2026-09-27
+      // round 10 review): every one of its words ("bifen", "concentrate")
+      // appears in the title below, so validateExisting's own name/alias
+      // check passes and the decision really does reach resolveExistingProduct
+      // — required for this test to exercise the lock-order path at all.
+      await mockConn('product_aliases').insert({ product_id: product.id, alias_name: 'Bifen Concentrate' });
       // On its last attempt, so the attempt's reason is saved on the line: a
       // deadlock would surface there as the thrown error's message.
       const line = await pendingLine({ raw_title: 'Bifen Insecticide Concentrate 96 oz', quantity: 1, agent_attempts: 2 });
@@ -1113,7 +1218,12 @@ jest.setTimeout(30000);
     const [product] = await mockConn('products_catalog').insert({
       name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
     }).returning('*');
-    const [alias] = await mockConn('product_aliases').insert({ product_id: product.id, alias_name: 'Bifen Pro Concentrate' }).returning('*');
+    // 'Bifen Concentrate', not 'Bifen Pro Concentrate' — every one of its
+    // words must appear in the title below to give validateExisting its own
+    // independent evidence (item 2, 2026-09-27 round 10 review); "Pro" isn't
+    // in the title, so that older alias text would refuse before ever
+    // reaching the race this test means to exercise.
+    const [alias] = await mockConn('product_aliases').insert({ product_id: product.id, alias_name: 'Bifen Concentrate' }).returning('*');
     const line = await pendingLine({ raw_title: 'Bifen Insecticide Concentrate 96 oz', quantity: 1 });
     const decision = {
       kind: 'existing', reason: 'the alias names it', product_id: product.id, new_product: null,

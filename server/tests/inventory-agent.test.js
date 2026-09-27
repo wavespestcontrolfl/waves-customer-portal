@@ -592,6 +592,101 @@ describe('classifyDecision — new_product', () => {
   });
 });
 
+// Item 1, 2026-09-27 round 10 review: a manufacturer-only name ("Syngenta
+// Professional Products" for "Syngenta Professional Products Demand CS 8
+// oz") passes the contiguous-phrase check above — it IS a real, ordered run
+// of the title's own words — but it names the MANUFACTURER, never the
+// product. The title's own ANCHOR (the last identity word before its first
+// size/pack marker) must fall inside the proposed name's own span.
+describe('classifyDecision — new_product: the name must COVER the title\'s own anchor word, not just lift manufacturer/brand words ahead of it (item 1, 2026-09-27 round 10)', () => {
+  const allowedCategories = new Set(['insecticide']);
+  const nameFor = (rawTitle, name, reading) => classifyDecision({
+    kind: 'new_product', reason: 'not in the catalog',
+    new_product: { name, category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+    reading,
+  }, ctx({ rawTitle, allowedCategories }));
+  const ozReading = (n) => ({ size_text: `${n} oz`, size_number: n, size_unit: 'oz', pack_count: 1 });
+
+  const title = 'Syngenta Professional Products Demand CS 8 oz';
+
+  test('the manufacturer\'s own name alone never reaches the anchor — held', () => {
+    const decision = nameFor(title, 'Syngenta Professional Products', ozReading(8));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision.reason).toMatch(/doesn't cover the title's own product-identity word/);
+  });
+
+  test('"Demand CS" (the anchor itself), and the full manufacturer + product phrase, both validate', () => {
+    expect(nameFor(title, 'Demand CS', ozReading(8))).toMatchObject({ kind: 'new_product', status: 'logged' });
+    expect(nameFor(title, 'Syngenta Professional Products Demand CS', ozReading(8))).toMatchObject({ kind: 'new_product', status: 'logged' });
+  });
+
+  test('a generic last word ("Insecticide") is never the anchor — it falls back to the real identity word before it', () => {
+    expect(nameFor('Bifen XTS Insecticide 96 oz', 'Bifen XTS', ozReading(96))).toMatchObject({ kind: 'new_product', status: 'logged' });
+  });
+
+  test('a count-item noun ("Trap") is not an identity word either — the anchor is the real word before it', () => {
+    const decision = nameFor('Victor Rat Trap 12 Count', 'Victor Rat Trap', { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 });
+    expect(decision).toMatchObject({ kind: 'new_product', status: 'logged' });
+  });
+
+  test('a size-first title has no identity word before its first size claim — no anchor, always unsure', () => {
+    const decision = nameFor('96 oz Bifen XTS', 'Bifen XTS', ozReading(96));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+});
+
+// Item 2, 2026-09-27 round 10 review: an UNMATCHED title has no
+// deterministic-matcher confirmation behind the agent's choice at all —
+// createAgentAlias is about to make that choice self-confirming forever (the
+// full raw title becomes the product's own alias) — so it needs independent
+// evidence the title actually names the chosen product.
+describe('classifyDecision — existing, on an UNMATCHED title, needs independent evidence the title names the product (item 2, 2026-09-27 round 10)', () => {
+  test('a shared-token candidate the title doesn\'t fully name -> unsure, never a self-confirming wrong alias', () => {
+    const bifenIt = { id: 'p-bifen-it', name: 'Bifen IT', container_size: '96 oz', inventory_unit: 'oz' };
+    const raw = { kind: 'existing', product_id: 'p-bifen-it', reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz', lineQuantity: 1, candidates: [bifenIt] }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision.reason).toMatch(/doesn't name this product/);
+  });
+
+  test('a reordered title containing every word of the candidate\'s own name validates', () => {
+    const taurusSc = { id: 'p-taurus-sc', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
+    const raw = { kind: 'existing', product_id: 'p-taurus-sc', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'Taurus Termiticide SC 78 oz', lineQuantity: 1, candidates: [taurusSc] }));
+    expect(decision).toMatchObject({ kind: 'existing', status: 'logged', amount: 78 });
+  });
+
+  test('a PRE-EXISTING alias (never the alias this line would create) can supply the evidence instead of the name', () => {
+    const product = { id: 'p-x', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
+    const raw = { kind: 'existing', product_id: 'p-x', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Control Solutions Taurus Termiticide SC 78 oz', lineQuantity: 1, candidates: [product],
+      aliasesByProduct: { 'p-x': ['Control Solutions Taurus Termiticide SC'] },
+    }));
+    expect(decision).toMatchObject({ kind: 'existing', status: 'logged' });
+  });
+
+  test('two active products BOTH fully named by the title -> unsure (which one?)', () => {
+    const a = { id: 'p-a', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
+    const b = { id: 'p-b', name: 'SC Taurus', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
+    const raw = { kind: 'existing', product_id: 'p-a', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Taurus Termiticide SC 78 oz', lineQuantity: 1, candidates: [a, b], allActiveProducts: [a, b],
+    }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision.reason).toMatch(/more than one product/);
+  });
+
+  test('the matched-product path (matchedProductId set) needs no independent evidence — the deterministic match already is one', () => {
+    const bifenIt = { id: 'p-bifen-it', name: 'Bifen IT', container_size: '96 oz', inventory_unit: 'oz' };
+    const raw = { kind: 'existing', product_id: 'p-bifen-it', reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Bifen XTS Insecticide 96 oz', lineQuantity: 1, candidates: [bifenIt], matchedProductId: 'p-bifen-it',
+    }));
+    expect(decision).toMatchObject({ kind: 'existing', status: 'logged' });
+  });
+});
+
 describe('classifyDecision — the agent may only confirm the deterministic match, never substitute', () => {
   const taurus = { id: 'p-taurus', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
   const other = { id: 'p-other', name: 'Other Product', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
