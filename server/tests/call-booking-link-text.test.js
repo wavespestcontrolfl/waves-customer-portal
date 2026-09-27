@@ -28,7 +28,14 @@ jest.mock('../services/sms-auto-send', () => ({
 // a passed-in conn — mocked at the module boundary so these unit tests
 // exercise this lane's OWN wiring (what it passes in, how it reacts to the
 // answer) without depending on outbound-call-reason.js's own DB probes.
-jest.mock('../services/outbound-call-reason', () => ({ hasPriorContact: jest.fn() }));
+// nanpStoredPhoneClause (codex #5018 r15 P2) is the real implementation —
+// it is a pure string builder (never touches the DB), and bookedSinceCall's
+// own mocked chain.whereRaw ignores whatever string it returns, so there is
+// no reason to fake it.
+jest.mock('../services/outbound-call-reason', () => ({
+  hasPriorContact: jest.fn(),
+  nanpStoredPhoneClause: jest.requireActual('../services/outbound-call-reason').nanpStoredPhoneClause,
+}));
 
 const db = require('../models/db');
 const markerDb = require('../models/marker-db');
@@ -1126,7 +1133,7 @@ describe('neverSendRecheck', () => {
   function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
@@ -1291,6 +1298,30 @@ describe('neverSendRecheck', () => {
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
   });
 
+  // codex #5018 r15 P1: stagingIneligibleReason's own table never
+  // re-derives outbound eligibility — outboundStagingReason is a SEPARATE
+  // staging-only check dispatchIneligibleReason already ran once, against
+  // the (by-then already stale) call. The evidence itself (a prior
+  // qualifying inbound call/text, or a non-call customer-originated lead)
+  // can be reassigned to a DIFFERENT lead by a concurrent merge/correction
+  // in the gap between that check and this hook's own reload — re-deriving
+  // it fresh here, against the FRESH row, closes that race.
+  test('outbound prior-contact evidence withdrawn on reprocess blocks the send, even though the earlier (stale) check passed', async () => {
+    const outboundCall = { ...CALL_FOR_RECHECK, direction: 'outbound' };
+    const check = neverSendRecheck(outboundCall, 'lead-1', DESTINATION);
+    hasPriorContact.mockResolvedValueOnce(false); // withdrawn by the time THIS hook's own probe runs
+    const conn = dbi({ freshCall: { ...FRESH_CALL_LOG, direction: 'outbound' } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'outbound_without_prior_contact' });
+  });
+
+  test('an outbound call still confirmed against the fresh row proceeds', async () => {
+    const outboundCall = { ...CALL_FOR_RECHECK, direction: 'outbound' };
+    const check = neverSendRecheck(outboundCall, 'lead-1', DESTINATION);
+    hasPriorContact.mockResolvedValueOnce(true);
+    const conn = dbi({ freshCall: { ...FRESH_CALL_LOG, direction: 'outbound' } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
+  });
+
   test('booked since the call started blocks the send', async () => {
     // metadata.created_customer_id matches the lead's customer_id — THIS
     // call's own legacy path minted it, isolating this test from the new
@@ -1302,12 +1333,23 @@ describe('neverSendRecheck', () => {
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
   });
 
+  // codex #5018 r15 P2: staff quick-adding a customer straight from the
+  // appointment modal, without ever linking this lead, books a real visit
+  // the customer_id check above can never see (lead.customer_id stays
+  // null). Matched instead by the lead's own phone against that new
+  // customer's stored phone.
+  test('booked through a customer staff quick-added, never linked to this lead, still blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi({ lead: { ...OPEN, customer_id: null }, bookedSince: { id: 'visit-unlinked' } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
+  });
+
   test('a link delivered in the last 14 days blocks the send', async () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const conn = dbi();
     conn.mockImplementation((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return OPEN;
@@ -1387,42 +1429,19 @@ describe('neverSendRecheck', () => {
     });
   });
 
-  // codex #5018 r13 P1: the handoff marker must INSERT into its own table
-  // (call_booking_link_text_handoffs) through markerDb(), NEVER touch
-  // call_log at all — dbi now holds call_log FOR UPDATE for the rest of
-  // this handoff, so a marker written to call_log's OWN row from a
-  // separate connection (markerDb()) would deadlock against that lock (see
-  // the service file's own doc comment). Proven here by making dbi's OWN
-  // update() throw if it's ever called at all: the check must still
-  // succeed, because the real write never touches dbi/call_log for this
-  // step.
-  test('the handoff marker INSERTs into its own table through markerDb(), never touching call_log', async () => {
+  // codex #5018 r15 P1: neverSendRecheck (invoked as providerPreSendCheck)
+  // no longer writes the handoff marker itself at all — that write moved to
+  // onDispatchStart, twilio.js's own REAL attempt boundary, immediately
+  // before dispatchStarted flips true and messages.create() runs, AFTER
+  // disclaimedNumberBlocksSend/preSendCheck.isStillValid have also cleared.
+  // Marking here left exactly that gap uncovered. See the
+  // 'handoff_started_at is stamped right before the provider call' describe
+  // block (under dispatchClaimedCall) for the marker's own coverage.
+  test('never writes the handoff marker itself, even though dbi/call_log is held FOR UPDATE for the rest of this handoff', async () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
-    const readOnlyDbi = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
-        .forEach((m) => { chain[m] = jest.fn(() => chain); });
-      chain.first = jest.fn(async () => {
-        if (table === 'leads') return OPEN;
-        if (table === 'call_log') return FRESH_CALL_LOG;
-        return undefined;
-      });
-      chain.pluck = jest.fn(async () => []);
-      chain.update = jest.fn(() => { throw new Error('dbi/call_log must never be written to for this marker'); });
-      return chain;
-    });
-    readOnlyDbi.raw = jest.fn(() => 'RAW');
-
-    const markerInsert = jest.fn((row) => ({ onConflict: jest.fn((col) => ({ ignore: jest.fn(async () => { markerInsert.lastRow = row; markerInsert.lastConflictCol = col; }) })) }));
-    const markerChain = { insert: markerInsert };
-    const markerConn = jest.fn(() => markerChain);
-    markerConn.raw = jest.fn(() => 'RAW');
-    markerDb.mockReturnValue(markerConn);
-
-    await expect(check({ dbi: readOnlyDbi })).resolves.toEqual({ ok: true });
-    expect(markerConn).toHaveBeenCalledWith(HANDOFF_MARKER_TABLE);
-    expect(markerInsert).toHaveBeenCalledWith(expect.objectContaining({ call_log_id: 'call-1' }));
-    expect(markerInsert.lastConflictCol).toBe('call_log_id');
+    const conn = dbi();
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
+    expect(markerDb).not.toHaveBeenCalled();
   });
 });
 
@@ -1478,7 +1497,7 @@ describe('dispatchClaimedCall', () => {
     markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.where = jest.fn((...args) => {
         if (table === 'scheduled_services' && args[0] === 'created_at') capture.bookedSinceBound = args[2];
@@ -1645,6 +1664,17 @@ describe('dispatchClaimedCall', () => {
     const visitCreatedAt = new Date('2026-09-26T15:10:00Z'); // minutes after the real call, decades before callEndedAt's reading
     const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, visitCreatedAt });
     const result = await dispatchClaimedCall(conn, recovered, NOW);
+    expect(result.skipped).toBe('booked_since_call');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex #5018 r15 P2: a booking for a customer staff quick-added from the
+  // appointment modal, without ever linking this lead — OPEN_LEAD.customer_id
+  // stays null, the ONLY signal is a phone match against the new customer's
+  // own stored phone. Skipping the send is the safe direction.
+  test('booked through a customer staff quick-added, never linked to this lead, blocks the send', async () => {
+    const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: null }, bookedSince: { id: 'visit-unlinked' } });
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
     expect(result.skipped).toBe('booked_since_call');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
@@ -2022,7 +2052,7 @@ describe('dispatchClaimedCall', () => {
   // ── handoff_started_at — the fact that decides safe-to-retry vs
   // leave-for-review after a failure (codex r3 P2) ────────────────────────
   describe('handoff_started_at is stamped right before the provider call', () => {
-    // codex #5018 r13 P1: the marker is now an INSERT into its own table
+    // codex #5018 r13 P1: the marker is an INSERT into its own table
     // (call_booking_link_text_handoffs) via markerDb() — a connection
     // OUTSIDE dbi's own transaction — never an UPDATE on call_log itself.
     // A timeout/throw from messages.create() rolls dbi's transaction back;
@@ -2031,40 +2061,69 @@ describe('dispatchClaimedCall', () => {
     // markerDb() at its own conn by default, so a custom `markerInsert`
     // spy below keeps observing the real write site.
 
-    // codex r8 P2: the stamp used to land in dispatchClaimedCall's own body,
-    // BEFORE sendCustomerMessage was ever called at all — but that function
-    // still does its OWN fallible pre-provider work first (acquiring the
-    // provider handoff reservation, a fresh suppression/consent read)
-    // before it ever reaches twilio.js's dispatch/providerPreSendCheck.
-    // Moved into neverSendRecheck itself — invoked as providerPreSendCheck,
-    // "once, on the SAME connection the provider handoff holds, right
-    // after the annual-offer guard and right before the SDK request"
-    // (twilio.js's own contract) — as the LAST thing it does before
-    // returning ok. These tests invoke providerPreSendCheck explicitly,
-    // the way twilio.js's real dispatch() does, since the mock otherwise
-    // never calls it at all.
-    test('the marker is inserted inside providerPreSendCheck, as the LAST thing before it returns ok — never before sendCustomerMessage\'s own earlier pre-provider work', async () => {
+    // codex #5018 r15 P1: the write moved OFF providerPreSendCheck (still
+    // neverSendRecheck, invoked exactly as before) and onto a NEW
+    // onDispatchStart hook — twilio.js's own REAL attempt boundary,
+    // invoked immediately before dispatchStarted flips true and
+    // messages.create() runs, AFTER disclaimedNumberBlocksSend and
+    // preSendCheck.isStillValid have ALSO cleared. Marking inside
+    // providerPreSendCheck left exactly that gap uncovered: a disclaimed-
+    // number hold or a closed send window committing between
+    // neverSendRecheck returning ok and messages.create() would have left
+    // a marker for an SMS that was never actually attempted. These tests
+    // invoke both hooks explicitly, in the SAME order twilio.js's real
+    // dispatch() does, since the mock otherwise never calls either.
+    test('onDispatchStart writes the marker, as the REAL attempt boundary — providerPreSendCheck itself writes nothing', async () => {
       const markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
       const conn = makeDb({ markerInsert });
-      let insertedBeforePreProviderWork;
-      let insertedAfterCheckReturnedOk;
+      let insertedBeforeOnDispatchStart;
+      let insertedAfterOnDispatchStart;
       sendCustomerMessage.mockImplementation(async (opts) => {
-        // Simulates sendCustomerMessage's OWN reservation/suppression/
-        // consent work running BEFORE providerPreSendCheck is ever called.
-        insertedBeforePreProviderWork = markerInsert.mock.calls.length;
         const verdict = await opts.providerPreSendCheck({ dbi: conn });
         expect(verdict).toEqual({ ok: true });
-        insertedAfterCheckReturnedOk = markerInsert.mock.calls.length;
+        insertedBeforeOnDispatchStart = markerInsert.mock.calls.length;
+        // Simulates twilio.js's own disclaimedNumberBlocksSend/
+        // preSendCheck.isStillValid gate, between providerPreSendCheck and
+        // onDispatchStart, clearing without incident.
+        await opts.onDispatchStart();
+        insertedAfterOnDispatchStart = markerInsert.mock.calls.length;
         return { sent: true, providerMessageId: 'SM_test_sid', deliveryOutcome: 'accepted' };
       });
       const result = await dispatchClaimedCall(conn, CALL, NOW);
       expect(result.sent).toBe(true);
-      expect(insertedBeforePreProviderWork).toBe(0); // not inserted before providerPreSendCheck even ran
-      expect(insertedAfterCheckReturnedOk).toBe(1);
+      expect(insertedBeforeOnDispatchStart).toBe(0); // not inserted while providerPreSendCheck ran
+      expect(insertedAfterOnDispatchStart).toBe(1);
       expect(markerInsert).toHaveBeenCalledWith(expect.objectContaining({ call_log_id: CALL.id }));
     });
 
-    test('a throw AFTER providerPreSendCheck inserts the marker leaves it in place — recoverAbandonedClaim then treats it as ambiguous, never resent', async () => {
+    // Codex #5018 r15 P1's own named scenario: a disclaimed-number hold (or
+    // any other refusal in the gap twilio.js keeps between
+    // providerPreSendCheck and the real attempt) means onDispatchStart is
+    // NEVER reached — no marker, so a later retry is never wrongly treated
+    // as ambiguous.
+    test('a disclaimed-number refusal AFTER providerPreSendCheck but BEFORE onDispatchStart leaves no marker — safe to retry', async () => {
+      const markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
+      const conn = makeDb({ markerInsert });
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        // twilio.js's own disclaimedNumberBlocksSend gate refuses here —
+        // opts.onDispatchStart is never invoked for this attempt.
+        const err = new Error('disclaimed number on hold');
+        err.retryable = true;
+        throw err;
+      });
+      await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('disclaimed number on hold');
+      expect(markerInsert).not.toHaveBeenCalled();
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW); // makeDb()'s default marker lookup finds no row
+      expect(outcome.ambiguous).toBe(false);
+    });
+
+    // Codex #5018 r15 P1's second named scenario: a crash AFTER
+    // dispatchStarted (i.e. after onDispatchStart already ran) leaves the
+    // marker in place — recoverAbandonedClaim then treats it as ambiguous,
+    // never resent, since Twilio may already have the request.
+    test('a crash AFTER onDispatchStart (dispatchStarted already true) leaves the marker in place — ambiguous, never resent', async () => {
       let markerInserted = false;
       const markerInsert = jest.fn(() => {
         markerInserted = true;
@@ -2074,6 +2133,7 @@ describe('dispatchClaimedCall', () => {
       sendCustomerMessage.mockImplementation(async (opts) => {
         const verdict = await opts.providerPreSendCheck({ dbi: conn });
         expect(verdict).toEqual({ ok: true });
+        await opts.onDispatchStart(); // the REAL attempt boundary — dispatchStarted flips true here in twilio.js
         throw new Error('provider timeout, no result'); // messages.create() itself failed AFTER the marker insert
       });
       await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('provider timeout, no result');
@@ -2083,7 +2143,7 @@ describe('dispatchClaimedCall', () => {
       // conn — reconfigure it to reflect the row the insert above created.
       conn.mockImplementation((table) => {
         const chain = {};
-        ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'where']
+        ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'where', 'join']
           .forEach((m) => { chain[m] = jest.fn(() => chain); });
         chain.first = jest.fn(async () => (table === HANDOFF_MARKER_TABLE ? { call_log_id: CALL.id } : undefined));
         chain.update = jest.fn(async () => 1);

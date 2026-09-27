@@ -591,8 +591,12 @@ module.exports = {
   nonServiceCaller,
   isSubstantiveText,
   hasPriorContact,
+  // Promoted to a real export (codex #5018 r15 P2): call-booking-link-
+  // text.js's own unlinked-customer phone match reuses this SAME SQL-side
+  // NANP matcher rather than hand-roll a second regex — a private,
+  // test-only export is the wrong way to share it across modules.
+  nanpStoredPhoneClause,
   _private: {
     last10, callNature, parseMetadata, existsQualifyingInboundCall, existsQualifyingInboundText,
-    nanpStoredPhoneClause,
   },
 };

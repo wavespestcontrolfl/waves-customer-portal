@@ -198,6 +198,39 @@ test('the trusted gratitude executor may combine its claim handoff with the fina
   expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ providerPreSendCheck, withSmsHandoff: expect.any(Function) });
 });
 
+// codex #5018 r15 P2: the manual Leads-page compose (admin-leads.js POST
+// /:id/send-sms) serializes behind the SAME phone lock call-booking-link-
+// text.js's own worker uses, so its concurrent delivered-link check and a
+// manual send can't interleave. No providerPreSendCheck requirement here —
+// manual semantics stay unconditional either way.
+test('the manual Leads-page compose may supply a locked SMS handoff alone, no providerPreSendCheck required', async () => {
+  const withSmsHandoff = jest.fn(async (dispatch) => dispatch());
+
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT, entryPoint: 'admin_leads_send_sms', withSmsHandoff,
+  })).resolves.toMatchObject({ sent: true });
+
+  expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ withSmsHandoff: expect.any(Function) });
+});
+
+test('the SAME manual-compose handoff also works for the customer audience (a linked customer owns this phone)', async () => {
+  const withSmsHandoff = jest.fn(async (dispatch) => dispatch());
+
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT, audience: 'customer', customerId: 'cust-1', entryPoint: 'admin_leads_send_sms', withSmsHandoff,
+  })).resolves.toMatchObject({ sent: true });
+
+  expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ withSmsHandoff: expect.any(Function) });
+});
+
+test('a DIFFERENT entryPoint may not reuse the manual-compose handoff allowance', async () => {
+  const withSmsHandoff = jest.fn();
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT, entryPoint: 'some_other_route', withSmsHandoff,
+  })).resolves.toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+  expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
 
 test('canonical delivery borrows only a branded caller reservation and returns its actual provider context privately', async () => {
   const coordination = require('../services/messaging/provider-handoff-reservation');

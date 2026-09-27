@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { assertAssignableTechnician } = require('../services/technician-eligibility');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, tryLockCustomerComms, lockSmsPhone } = require('../utils/customer-comms-lock');
 // Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
 // overlap probe for this route lives in the trx below (occupancy lock rung 1
 // + findConflictingVisits before insert) — one mechanism, see #3453; a hit
@@ -1464,6 +1464,20 @@ router.post('/:id/send-sms', async (req, res, next) => {
       // so it's allowlisted in validators/send-window.js like the other
       // admin compose surfaces.
       entryPoint: 'admin_leads_send_sms',
+      // codex #5018 r15 P2: without this, a staff-typed message (a manual
+      // consultation link included) can race call-booking-link-text.js's
+      // own worker — its final linkSentRecently check and this send could
+      // interleave, both landing as if the other never happened. The SAME
+      // phone-locked handoff that lane's own automated send already uses
+      // (lockSmsPhone, matching applyInboundOptout's own key) serializes
+      // the two: manual semantics are otherwise UNCHANGED — staff can
+      // always send here, with no 14-day delivered-link block on this
+      // path; only the ORDERING of a concurrent automated attempt against
+      // this one is affected.
+      withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
+        await lockSmsPhone(trx, lead.phone);
+        return dispatch(trx);
+      }),
       metadata: {
         original_message_type: 'lead_outreach',
         adminUserId: req.technicianId,

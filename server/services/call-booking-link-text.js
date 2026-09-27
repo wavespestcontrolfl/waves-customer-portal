@@ -865,10 +865,35 @@ async function recordDecision(conn, call, entry, { logActivity = true } = {}) {
 // always at least 2 hours after the call (see computeSendAt), satisfying
 // the owner's 2-hour staff-first window as a side effect of the schedule
 // itself regardless of which instant this lower bound anchors on.
-async function bookedSinceCall(conn, customerId, since) {
-  if (!customerId) return false;
-  const row = await conn('scheduled_services').where({ customer_id: customerId })
-    .where('created_at', '>=', since).whereNotIn('status', ['cancelled']).first('id');
+async function bookedSinceCall(conn, customerId, since, leadPhone) {
+  if (customerId) {
+    const row = await conn('scheduled_services').where({ customer_id: customerId })
+      .where('created_at', '>=', since).whereNotIn('status', ['cancelled']).first('id');
+    if (row) return true;
+  }
+  // Unlinked-customer booking (codex #5018 r15 P2): staff quick-adding a
+  // customer straight from the appointment modal, without ever linking
+  // this lead, books a real visit the check above can never see — it has
+  // no lead.customer_id to check at all (or, after a later correction,
+  // points at a DIFFERENT record than whoever actually got booked).
+  // Matched by the lead's own phone against the CUSTOMER's stored phone,
+  // by canonical NANP identity, through the repo's shared SQL-side
+  // matcher (nanpStoredPhoneClause, outbound-call-reason.js) — never a
+  // hand-rolled regex. Several customers can share one phone (a couple, a
+  // shared office line); any one of them booking after the call is
+  // enough to skip — an EXISTS across every matching, non-deleted
+  // customer, not a single lookup, since skipping the send is always the
+  // safe direction.
+  const phoneKey = phoneIdentityKey(leadPhone);
+  if (!phoneKey || phoneKey.length !== 10) return false;
+  const { nanpStoredPhoneClause } = require('./outbound-call-reason');
+  const row = await conn('scheduled_services')
+    .join('customers', 'customers.id', 'scheduled_services.customer_id')
+    .whereNull('customers.deleted_at')
+    .whereRaw(nanpStoredPhoneClause('customers.phone'), [phoneKey])
+    .where('scheduled_services.created_at', '>=', since)
+    .whereNotIn('scheduled_services.status', ['cancelled'])
+    .first('scheduled_services.id');
   return !!row;
 }
 
@@ -912,7 +937,7 @@ const DISPATCH_CHECKS = [
   async ({ conn, call }) => ((await outboundPriorContactMissing(conn, call)) ? 'outbound_without_prior_contact' : null),
   async ({ conn, call, lead }) => {
     const callStart = callStartedAt(call) || new Date(call.created_at);
-    return (await bookedSinceCall(conn, lead.customer_id, callStart)) ? 'booked_since_call' : null;
+    return (await bookedSinceCall(conn, lead.customer_id, callStart, lead.phone)) ? 'booked_since_call' : null;
   },
   async ({ conn, leadId, now }) => ((await linkSentRecently(conn, leadId, now)) ? 'link_sent_recently' : null),
   // Re-run the full stage-time predicate against the row as it stands now —
@@ -1111,31 +1136,24 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       // number itself consented" question. Sending on stale consent
       // evidence would violate the TCPA-consent-before-SMS invariant.
       if (!consentedDestination(freshCall, extractionOf(freshCall), destinationPhone)) return { ok: false, code: 'destination_not_consented' };
+      // Re-verified against the FRESH row (codex #5018 r15 P1):
+      // stagingIneligibleReason's own table never re-derives outbound
+      // eligibility — that lives entirely in outboundStagingReason, a
+      // SEPARATE staging-only check dispatchIneligibleReason already ran
+      // once against the (by-then already stale) call. The evidence itself
+      // (a prior qualifying inbound call/text, or a non-call customer-
+      // originated lead) can be reassigned to a DIFFERENT lead by a
+      // concurrent merge/correction in the gap between that check and this
+      // hook's own reload; re-deriving it fresh here closes that race the
+      // same way every other check on this hook already does.
+      // outboundPriorContactMissing itself already no-ops for an inbound
+      // call (its own opening line) and, on a probe error, fails toward
+      // "missing" — blocking here, terminally, the SAME posture the
+      // existing DISPATCH_CHECKS entry for this predicate already has.
+      if (await outboundPriorContactMissing(dbi, freshCall)) return { ok: false, code: 'outbound_without_prior_contact' };
       const callStart = callStartedAt(call) || new Date(call.created_at);
-      if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
+      if (await bookedSinceCall(dbi, lead.customer_id, callStart, lead.phone)) return { ok: false, code: 'booked_since_call' };
       if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
-      // Marked HERE, as the LAST thing before returning ok — the true
-      // provider-start boundary (codex r8 P2). On its OWN table (codex
-      // #5018 r13 P1), never call_log — dbi now holds call_log FOR UPDATE
-      // (above) for the rest of this handoff, through Twilio's own
-      // request; a SEPARATE-connection write to call_log's OWN row (the
-      // original r11 design, markerDb() writing call_log.metadata) would
-      // have to wait on that SAME lock, which dbi cannot release until
-      // AFTER this write returns — a hard self-deadlock, not a timing
-      // artifact. call_booking_link_text_handoffs (migration
-      // 20260927160000) never touches call_log at all, so markerDb()'s
-      // INSERT here commits immediately and independently of dbi/call_log's
-      // lock, and — unchanged from r11's own guarantee — independently of
-      // whatever dbi/Twilio do next: a timeout/thrown error from
-      // messages.create() rolls dbi back, but this row survives, so
-      // recoverStaleClaims/recoverAbandonedClaim (now reading this table
-      // instead of call_log.metadata.handoff_started_at) still correctly
-      // read a genuinely ambiguous send as ambiguous, never retried.
-      // ON CONFLICT DO NOTHING: this hook can in principle run more than
-      // once for the same call_log_id across retries of the SAME claimed
-      // row (a claim is per-dispatch-tick, not per-call) — the FIRST
-      // handoff's timestamp is the one that matters; never overwritten.
-      await markerDb()(HANDOFF_MARKER_TABLE).insert({ call_log_id: call.id, handoff_started_at: new Date() }).onConflict('call_log_id').ignore();
       return { ok: true };
     } catch (err) {
       // A DB read failing here is an infrastructure hiccup, not a
@@ -1274,13 +1292,16 @@ async function dispatchClaimedCall(conn, call, now) {
 
   // The handoff marker (call_booking_link_text_handoffs, codex #5018 r13
   // P1 — moved off call_log.metadata's own handoff_started_at field) is
-  // written inside neverSendRecheck itself (codex r8 P2), not here —
-  // sendCustomerMessage still does its OWN fallible pre-provider work
-  // (acquiring the provider handoff reservation, a fresh suppression/
-  // consent read) before it ever reaches that hook, and marking this row
-  // before any of that ran left a throw in that gap permanently ambiguous
-  // even though Twilio was never contacted. See neverSendRecheck's own doc
-  // comment for exactly where the boundary now sits.
+  // written via onDispatchStart (codex #5018 r15 P1 — moved OFF
+  // providerPreSendCheck/neverSendRecheck itself), invoked by twilio.js at
+  // the REAL attempt boundary: immediately before dispatchStarted flips
+  // true and messages.create() runs, AFTER providerPreSendCheck's own
+  // refusal path AND disclaimedNumberBlocksSend/preSendCheck.isStillValid
+  // have all cleared. Marking inside providerPreSendCheck left exactly
+  // that gap uncovered — a disclaimed-number hold or a closed send window
+  // committing between neverSendRecheck returning ok and messages.create()
+  // would have left a marker (and an 'ambiguous', never-resent status) for
+  // an SMS that was never actually attempted.
   const managedLine = managedLineForCall(call);
   const result = await sendCustomerMessage({
     to: destinationPhone,
@@ -1294,6 +1315,12 @@ async function dispatchClaimedCall(conn, call, now) {
     entryPoint: 'call_booking_link_text',
     metadata: { original_message_type: MESSAGE_TYPE, call_log_id: call.id, lead_id: lead.id, ...(managedLine ? { fromNumber: managedLine } : {}) },
     providerPreSendCheck: neverSendRecheck(call, leadId, destinationPhone),
+    // ON CONFLICT DO NOTHING: this can in principle run more than once for
+    // the same call_log_id across retries of the SAME claimed row (a claim
+    // is per-dispatch-tick, not per-call) — the FIRST attempt's timestamp
+    // is the one that matters; never overwritten.
+    onDispatchStart: () => markerDb()(HANDOFF_MARKER_TABLE)
+      .insert({ call_log_id: call.id, handoff_started_at: new Date() }).onConflict('call_log_id').ignore(),
     // codex #5018 r11 P1: without a locked handoff, a STOP committed after
     // send-customer-message.js's FIRST suppression/consent read (well before
     // this call even reaches the provider) and before this hook's own
@@ -1387,14 +1414,17 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
 // (staleClaimRecovery below, after STALE_CLAIM_MS — the previous worker
 // most likely died mid-dispatch and never got to run any catch at all).
 // Both callers share this one decision: a row in call_booking_link_text_
-// handoffs (written inside neverSendRecheck itself, as the actual
-// provider-start boundary — see its own doc comment; migration
-// 20260927160000, codex #5018 r13 P1 — moved off call_log.metadata's own
-// handoff_started_at field, which would have deadlocked against that same
-// row's now-held FOR UPDATE lock) is the ONE fact that says whether
-// resending is safe. Absent, the failure happened strictly before any
-// network attempt, so this is exactly as safe to requeue as any other
-// retryable send outcome —
+// handoffs (written via onDispatchStart — twilio.js's own REAL attempt
+// boundary, immediately before dispatchStarted flips true and
+// messages.create() runs; see dispatchClaimedCall's own doc comment;
+// migration 20260927160000, codex #5018 r13/r15 P1 — moved off call_log.
+// metadata's own handoff_started_at field, which would have deadlocked
+// against that same row's now-held FOR UPDATE lock, and OUT of
+// providerPreSendCheck/neverSendRecheck itself, which still has real
+// refusal paths — disclaimedNumberBlocksSend, the send-window recheck —
+// ahead of it) is the ONE fact that says whether resending is safe.
+// Absent, the failure happened strictly before any network attempt, so
+// this is exactly as safe to requeue as any other retryable send outcome —
 // through the SAME bounded rail (original_send_at's own 24h deadline, then
 // the ordinary backoff) recordSendOutcome already owns for that case.
 // Present, the provider may already have this exact attempt — moved to

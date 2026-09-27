@@ -1233,6 +1233,16 @@ const TwilioService = {
           err.retryable = true;
           throw err;
         }
+        // The REAL attempt boundary (codex #5018 r15 P1) — the LAST
+        // synchronous point before dispatchStarted flips true and
+        // messages.create() runs; providerPreSendCheck above and
+        // disclaimedNumberBlocksSend/preSendCheck.isStillValid still ahead
+        // of it can each block or throw, so a caller's durable "this attempt
+        // may have reached the provider" marker must not commit until here,
+        // or a block/crash in that gap would leave a marker for an unsent
+        // SMS. Optional and additive — a no-op for every caller that
+        // doesn't pass it, byte-identical to before.
+        if (typeof options.onDispatchStart === 'function') await options.onDispatchStart();
         handoffAt = new Date();
         smsAttemptAt = handoffAt;
         dispatchStarted = true;

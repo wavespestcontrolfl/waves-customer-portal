@@ -354,6 +354,7 @@ async function sendCustomerMessageCore(input) {
     preProviderCheck,
     preSendCheck,
     providerPreSendCheck,
+    onDispatchStart,
     withSmsHandoff,
     withProviderHandoff,
     providerHandoffReservation: suppliedProviderHandoffReservation,
@@ -409,7 +410,17 @@ async function sendCustomerMessageCore(input) {
     // never-send checks) re-runs on the SAME held connection right after.
     || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
       && input.entryPoint === 'call_booking_link_text'
-      && typeof providerPreSendCheck === 'function');
+      && typeof providerPreSendCheck === 'function')
+    // Manual Leads-page compose (admin-leads.js POST /:id/send-sms, codex
+    // #5018 r15 P2): staff can type any message, a manual consultation
+    // link included — the SAME phone lock the automated lane above takes
+    // serializes the two so a concurrent worker's own delivered-link check
+    // and this send can't interleave. Either audience, since the route
+    // resolves 'customer' when the lead's own linked customer owns this
+    // exact phone, 'lead' otherwise — manual semantics are unconditional
+    // either way, so no providerPreSendCheck requirement here.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'conversational'
+      && input.entryPoint === 'admin_leads_send_sms');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -967,6 +978,14 @@ async function sendCustomerMessageCore(input) {
     // preSendCheck avoids invoking existing opaque preparation callbacks a
     // second time at the provider boundary.
     providerPreSendCheck,
+    // The REAL attempt boundary (codex #5018 r15 P1) — invoked by twilio.js
+    // itself, immediately before dispatchStarted flips true and
+    // messages.create() runs, AFTER providerPreSendCheck and
+    // disclaimedNumberBlocksSend/preSendCheck.isStillValid have all
+    // cleared. A caller's durable "this attempt may have reached the
+    // provider" marker belongs here, never inside providerPreSendCheck
+    // itself, which still has real refusal paths ahead of it.
+    onDispatchStart,
     providerHandoffReservation,
   });
   };

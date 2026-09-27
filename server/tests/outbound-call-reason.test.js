@@ -34,6 +34,7 @@ const {
   nonServiceCaller,
   isSubstantiveText,
   hasPriorContact,
+  nanpStoredPhoneClause,
   _private,
 } = require('../services/outbound-call-reason');
 
@@ -590,7 +591,7 @@ describe('hasPriorContact', () => {
     const leadsQ = state.queries.find((q) => q.table === 'leads');
     for (const [q, column] of [[callQ, 'from_phone'], [smsQ, 'from_phone'], [leadsQ, 'phone']]) {
       const clause = q.raws.find((r) => String(r[0]).includes('regexp_replace'));
-      expect(clause[0]).toBe(_private.nanpStoredPhoneClause(column));
+      expect(clause[0]).toBe(nanpStoredPhoneClause(column));
       expect(clause[0]).toContain("~ '^1{0,1}\\d{10}$'");
       expect(clause[1]).toEqual(['9415550101']);
     }
@@ -603,7 +604,7 @@ describe('hasPriorContact', () => {
   // SQL at all; a REAL, connection-less knex instance does.
   test('nanpStoredPhoneClause compiles under REAL knex with exactly the bindings supplied (mocked db cannot catch a binding-count mismatch)', () => {
     for (const column of ['phone', 'from_phone', 'c.phone']) {
-      const clause = _private.nanpStoredPhoneClause(column);
+      const clause = nanpStoredPhoneClause(column);
       // No bare `?` other than the one real placeholder — a second bare
       // `?` (e.g. an unescaped regex quantifier) is exactly what broke
       // knex's binding count on push.

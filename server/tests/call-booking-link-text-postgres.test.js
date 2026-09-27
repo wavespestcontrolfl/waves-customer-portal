@@ -368,11 +368,15 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     });
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-4', line: 'Pick a time.\n\n', phone: '+15555550444' });
     // Mirrors twilio.js's own real dispatch(): providerPreSendCheck runs
-    // INSIDE the held handoff transaction, then the (simulated) SDK request
-    // fails — a genuine post-marker throw, exactly like a provider timeout.
-    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => withSmsHandoff(async (trx) => {
+    // INSIDE the held handoff transaction, THEN onDispatchStart (codex
+    // #5018 r15 P1 — the REAL attempt boundary, immediately before
+    // dispatchStarted flips true and messages.create() runs, moved OFF
+    // providerPreSendCheck itself), then the (simulated) SDK request fails
+    // — a genuine post-marker throw, exactly like a provider timeout.
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => withSmsHandoff(async (trx) => {
       const verdict = await providerPreSendCheck({ dbi: trx });
       if (!verdict.ok) return verdict;
+      await onDispatchStart();
       throw new Error('provider timeout, no result');
     }));
 
@@ -405,8 +409,15 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
     });
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-7', line: 'Pick a time.\n\n', phone: '+15555550777' });
-    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
-      const verdict = await withSmsHandoff(async (trx) => providerPreSendCheck({ dbi: trx }));
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const v = await providerPreSendCheck({ dbi: trx });
+        // codex #5018 r15 P1: onDispatchStart — never providerPreSendCheck
+        // itself — is the write site now; invoked exactly as twilio.js
+        // invokes it, immediately before the (simulated) provider request.
+        if (v.ok) await onDispatchStart();
+        return v;
+      });
       return verdict.ok
         ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000007' }
         : { sent: false, ...verdict };
@@ -574,6 +585,98 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(activity).toHaveLength(1);
     expect(activity[0].metadata).toMatchObject({ reason: 'booked_since_call' });
   });
+
+  // codex #5018 r15 P2: a booking for a customer staff quick-added straight
+  // from the appointment modal, WITHOUT ever linking this lead — the lead's
+  // own customer_id stays null throughout, so only a phone match (via the
+  // real nanpStoredPhoneClause join, a mocked knex cannot compile) catches
+  // it.
+  test('dispatchClaimedCall skips booked_since_call for a booking through a customer never linked to the lead, matched only by phone', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550666', customer_id: null });
+    const unlinkedCustomerId = randomUUID();
+    await mockPg('customers').insert({
+      id: unlinkedCustomerId, first_name: 'Quick', last_name: 'Added', phone: '+15555550666',
+      address_line1: '2 Example St', city: 'Bradenton', zip: '34205',
+    });
+    const callCreatedAt = new Date('2027-01-15T10:00:00.000Z');
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550666', created_at: callCreatedAt, updated_at: callCreatedAt,
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    await mockPg('scheduled_services').insert({
+      id: randomUUID(), customer_id: unlinkedCustomerId, scheduled_date: '2027-01-20', service_type: 'Pest Control', status: 'pending',
+      created_at: new Date(callCreatedAt.getTime() + 60 * 60 * 1000), // booked an hour after the call started
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: false, skipped: 'booked_since_call' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex #5018 r15 P2: proof a mocked knex/sendCustomerMessage cannot give
+  // — a manual send (admin-leads.js's own withSmsHandoff, the SAME
+  // lockSmsPhone key) already holding the phone lock genuinely blocks this
+  // worker's own attempt until the manual send's transaction commits, so
+  // the two can never interleave. Once released, the worker's own final
+  // linkSentRecently recheck sees the now-delivered link and skips, rather
+  // than sending a second one.
+  test('a manual send holding the phone lock makes the worker wait, then the worker sees the delivered link and skips', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550888' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550888',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    const mintedAt = new Date(NOW.getTime() - 24 * 60 * 60 * 1000);
+    await mockPg('short_codes').insert({ id: randomUUID(), code: 'zz99', target_url: 'https://portal.example.com/inspection/tok-9', kind: 'consultation', entity_type: 'leads', entity_id: leadId, created_at: mintedAt, updated_at: mintedAt });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-9', line: 'Pick a time.\n\n', phone: '+15555550888' });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const v = await providerPreSendCheck({ dbi: trx });
+        if (v.ok) await onDispatchStart();
+        return v;
+      });
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000009' }
+        : { sent: false, ...verdict };
+    });
+
+    const { lockSmsPhone } = require('../utils/customer-comms-lock');
+    let releaseManualSend;
+    const manualSendHeld = new Promise((resolve) => { releaseManualSend = resolve; });
+    const manualSendTx = mockPg.transaction(async (trx) => {
+      await lockSmsPhone(trx, '+15555550888');
+      // The manual send's own write, landing WHILE it still holds the lock
+      // — matching admin-leads.js's real ordering (lock the phone, then
+      // send and record) — is the evidence the worker's own recheck must
+      // see AFTER the lock releases.
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: '+15555550888', status: 'accepted',
+        message_body: 'Pick a time: https://portal.example.com/l/zz99', created_at: new Date(),
+      });
+      await manualSendHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the manual transaction a moment to actually acquire the lock
+    // (and commit its own INSERT within it) before the worker starts.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const workerPromise = callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    // The worker's own withSmsHandoff is now genuinely blocked on the SAME
+    // advisory key (pg_advisory_xact_lock waits, it does not error) — this
+    // is the real proof no mocked knex can give.
+    await new Promise((r) => setTimeout(r, 200));
+    releaseManualSend();
+    await manualSendTx;
+
+    const result = await workerPromise;
+    expect(result).toEqual({ sent: false, skipped: 'link_sent_recently' });
+  }, 10000);
 
   test('link_sent_recently: a same-code sending reservation does not block, but a real accepted send does', async () => {
     const leadId = await insertLead(mockPg, { phone: '+15555550333' });

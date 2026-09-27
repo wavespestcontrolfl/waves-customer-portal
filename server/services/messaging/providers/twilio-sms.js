@@ -106,7 +106,7 @@ async function sendViaTwilio(input, hooks = {}) {
 }
 
 async function sendViaTwilioOnce(input, {
-  preSendCheck, providerPreSendCheck, withSmsHandoff, providerHandoffReservation,
+  preSendCheck, providerPreSendCheck, onDispatchStart, withSmsHandoff, providerHandoffReservation,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
   const internalProviderReservation = providerCoordination.isProviderHandoffHandle(providerHandoffReservation)
@@ -197,6 +197,11 @@ async function sendViaTwilioOnce(input, {
       // template lookup, customer/location query).
       preSendCheck,
       providerPreSendCheck,
+      // The REAL attempt boundary (codex #5018 r15 P1) — awaited by
+      // twilio.js immediately before dispatchStarted flips true and
+      // messages.create() runs, AFTER providerPreSendCheck's own refusal
+      // path has already cleared.
+      onDispatchStart,
       withSmsHandoff,
       providerHandoffReservation: internalProviderReservation,
       // The opaque owner token is issued only from the complete canonical
