@@ -513,7 +513,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // BOTH the visit-summary and ordinary branches, since dispatchToProvider
     // is the SAME function either way.
     let annualWithheld = false;
-    const dispatchToProvider = async () => {
+    let authorityRefusal = null;
+    const dispatchToProvider = async (database, providerBoundaryCheck) => {
       // Bounce recovery re-sends the SAME stored html/text to a CORRECTED
       // address, straight through sendgrid.sendOne — its own content
       // derivation over that html/text covers this without composing the
@@ -530,7 +531,10 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // send a garbage value into the estimates query and loop as transient.
       const sourceEstimateId = guardEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
       try {
-        result = await sendgrid.sendOne({
+        result = Object.assign({
+          html: bouncedMessage.html_snapshot,
+          text: bouncedMessage.text_snapshot,
+        }, await sendgrid.sendOne({
           to: correctedEmail,
           fromEmail: message.from_email_snapshot,
           fromName: message.from_name_snapshot,
@@ -552,7 +556,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           // refused permanently just because this recovery path has no
           // explicit opinion of its own.
           templateKey: bouncedMessage.template_key,
-        });
+          database,
+          providerBoundaryCheck,
+        }));
       } catch (err) {
         if (err && err.annualOfferWithheld) {
           annualWithheld = true;
@@ -582,11 +588,32 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         if (!result) throw err;
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
       }
+      authorityRefusal = fence?.reason || 'visit_summary_unavailable';
+    } else if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
+      const handoff = await billingReplay.runBillingEmailProviderReplayHandoff(
+        bouncedMessage,
+        dispatchToProvider,
+        {
+          recipientEmail: correctedEmail,
+          authorityRecipientEmail: bouncedMessage.recipient_email_snapshot,
+          forwardProviderBoundary: true,
+          preSendCheck: async ({ database }) => (await correctedAddressOwnedByOther(
+            correctedEmail, ownCustomerId, database || db,
+          ) ? {
+              ok: false,
+              code: 'CORRECTED_EMAIL_OWNED_BY_OTHER',
+              reason: 'corrected_owned_by_other',
+            } : { ok: true }),
+        },
+      );
+      // The replay contract always supplies a reason for a refusal. An allowed
+      // handoff has already populated result, so an absent reason is ignored.
+      authorityRefusal = handoff.reason;
     } else {
       await dispatchToProvider();
     }
     if (!result) {
-      const reason = annualWithheld ? 'annual_offer_withheld' : (fence?.reason || 'visit_summary_unavailable');
+      const reason = annualWithheld ? 'annual_offer_withheld' : (authorityRefusal || 'provider_dispatch_unavailable');
       await db('email_messages').where({ id: message.id, status: 'queued' })
         .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
       if (visitSummary) {
@@ -607,9 +634,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // rewritten bytes onto the recovery row so it reflects what the
       // corrected address actually received, same as a fresh sendTemplate
       // send does (email-template-library.js).
-      ...(result.withheldLinksRewritten?.length
-        ? { html_snapshot: result.html, text_snapshot: result.text }
-        : {}),
+      html_snapshot: result.html,
+      text_snapshot: result.text,
     });
     // Advance to 'sent' ONLY if still 'queued' — a fast delivery/bounce webhook
     // (resolvable via custom_args.email_message_id before this commit) may have
@@ -624,8 +650,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // (via custom_args.email_message_id) already resolved the row before this
     // catch ran (lost-response case). If so, don't regress it or report failure.
     const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
-    const status = String(current?.status || '').toLowerCase();
-    if (current && !['queued', 'failed'].includes(status)) {
+    const status = String(current?.status || 'queued').toLowerCase();
+    if (!['queued', 'failed'].includes(status)) {
       return { ok: true, messageRowId: message.id, reused: true };
     }
     await db('email_messages')
@@ -705,7 +731,6 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
     const decision = decideRecoveryAction({
       candidate, suppressed, ownedByOther, hasAttachments, addressOnFile,
-      requiresSourceAuthorization: billingReplay.isBillingEmailProviderReplay(bouncedMessage),
       min: minConfidence(),
     });
 

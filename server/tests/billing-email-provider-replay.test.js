@@ -91,6 +91,37 @@ test('runs eligibility and provider dispatch on the held authority database', as
   expect(order).toEqual(['eligibility', 'dispatch']);
 });
 
+test('keeps original recipient authority while sending a corrected bounce destination at the final boundary', async () => {
+  const heldDatabase = jest.fn();
+  const correctedCheck = jest.fn(async () => ({ ok: true }));
+  const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+    expect(database).toBe(heldDatabase);
+    expect(await providerBoundaryCheck({ database })).toEqual({ ok: true });
+  });
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(options.recipientEmail).toBe('casey@example.net');
+    expect(options.authorityRecipientEmail).toBe('casey@example.com');
+    expect(await options.preSendCheck({ database: heldDatabase, providerBoundary: false })).toEqual({ ok: true });
+    const providerBoundaryCheck = async ({ database }) => {
+      const verdict = await options.preSendCheck({ database, providerBoundary: true });
+      options.state.handoffStarted = verdict.ok === true;
+      return verdict;
+    };
+    await options.dispatch(heldDatabase, providerBoundaryCheck);
+    options.state.providerAccepted = true;
+  });
+
+  await expect(runBillingEmailProviderReplayHandoff(message(), dispatch, {
+    recipientEmail: 'casey@example.net',
+    authorityRecipientEmail: 'casey@example.com',
+    preSendCheck: correctedCheck,
+    forwardProviderBoundary: true,
+  })).resolves.toEqual({ handled: true, allowed: true });
+  expect(billingEmailReplayEligible).toHaveBeenCalledTimes(2);
+  expect(correctedCheck).toHaveBeenCalledTimes(2);
+  expect(dispatch).toHaveBeenCalledWith(heldDatabase, expect.any(Function));
+});
+
 test('propagates a provider error for the retry owner to classify', async () => {
   const providerError = new Error('provider outcome unknown');
   dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {

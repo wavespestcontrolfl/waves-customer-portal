@@ -11,6 +11,10 @@ jest.mock('../services/email-template-library', () => ({
   activeSuppressionFor: jest.fn(),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/billing-email-provider-replay', () => ({
+  isBillingEmailProviderReplay: jest.fn(() => false),
+  runBillingEmailProviderReplayHandoff: jest.fn(),
+}));
 jest.mock('../services/visit-completion-summary', () => ({
   retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { const verdict = await dispatch(); return verdict && verdict.ok === false ? verdict : { ok: true }; }),
   reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
@@ -20,7 +24,13 @@ const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const emailLib = require('../services/email-template-library');
 const NotificationService = require('../services/notification-service');
+const billingReplay = require('../services/billing-email-provider-replay');
 const recovery = require('../services/email-bounce-recovery');
+
+beforeEach(() => {
+  billingReplay.isBillingEmailProviderReplay.mockReturnValue(false);
+  billingReplay.runBillingEmailProviderReplayHandoff.mockReset();
+});
 
 // Minimal chainable knex mock. Every builder method returns the chain; the
 // terminal-ish methods resolve to configurable values.
@@ -897,39 +907,64 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     expect(res).toMatchObject({ resent: true });
   });
 
-  test('stored billing replay context fails closed instead of bypassing its authority through sendOne', async () => {
-    const messageRow = { id: 'msg-billing-blocked', status: 'queued' };
+  test('a stored billing replay authorizes the original context and sends to the corrected destination', async () => {
+    const messageRow = { id: 'msg-billing-recovery', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'Billing update', send_attempt_token: 'recovery-attempt' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-billing-recovery' });
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    const heldDatabase = jest.fn();
+    const providerBoundaryCheck = jest.fn(async () => ({ ok: true }));
+    billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (original, dispatch, options) => {
+      expect(original.id).toBe('orig-billing-recovery');
+      expect(options).toMatchObject({
+        recipientEmail: 'jane@gmail.com', authorityRecipientEmail: 'jane@gmial.com',
+        preSendCheck: expect.any(Function), forwardProviderBoundary: true,
+      });
+      await dispatch(heldDatabase, providerBoundaryCheck);
+      return { handled: true, allowed: true };
+    });
 
-    const res = await recovery.attemptRecovery(
-      {
-        id: 'orig-billing-blocked', recipient_type: 'customer', recipient_id: 'c1',
-        recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
-        suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'],
-        payload_snapshot: { __billing_replay_context: { customer_id: 'c1' } },
-        html_snapshot: '<p>Billing notice</p>', text_snapshot: 'Billing notice',
-      },
-      { event: 'bounce', type: 'bounce' },
-    );
+    const bounced = {
+      id: 'orig-billing-recovery', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      trigger_event_id: 'precharge:c1:2030-06-10', idempotency_key: 'billing_channel_email:precharge:c1:2030-06-10:email',
+      payload_snapshot: { __billing_replay_context: { schema_version: 1 } },
+      html_snapshot: '<p>Billing update</p>', text_snapshot: 'Billing update',
+    };
+    await expect(recovery.attemptRecovery(bounced, { event: 'bounce', type: 'bounce' }))
+      .resolves.toMatchObject({ resent: true, corrected: 'jane@gmail.com' });
+
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck,
+      customArgs: { email_message_id: messageRow.id, send_attempt_token: messageRow.send_attempt_token },
+    }));
+  });
+
+  test('an invalid stored billing replay cannot fall back to a direct recovery send', async () => {
+    const messageRow = { id: 'msg-billing-invalid', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', subject_snapshot: 'Billing update', send_attempt_token: 'recovery-attempt' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    billingReplay.runBillingEmailProviderReplayHandoff.mockResolvedValueOnce({
+      handled: true, allowed: false, reason: 'Stored billing replay context does not match the email message',
+    });
+
+    await expect(recovery.attemptRecovery({
+      id: 'orig-billing-invalid', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      trigger_event_id: 'precharge:c1:2030-06-10', payload_snapshot: { __billing_replay_context: null },
+      html_snapshot: '<p>Billing update</p>', text_snapshot: 'Billing update',
+    }, { event: 'bounce', type: 'bounce' })).resolves.toEqual({
+      skipped: 'Stored billing replay context does not match the email message',
+    });
 
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(res).toEqual({ skipped: 'billing_replay_reauthorization_required' });
-    expect(mockDb._calls.find((c) => c.table === 'email_messages')).toBeUndefined();
-    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop())
-      .toMatchObject({ data: { status: 'billing_replay_reauthorization_required' } });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
-      'alert',
-      'Email bounced — needs a correct address',
-      expect.stringContaining('billing source must be reauthorized'),
-      expect.objectContaining({
-        link: '/admin/customers?customerId=c1',
-        metadata: expect.objectContaining({
-          status: 'billing_replay_reauthorization_required',
-          original_message_id: 'orig-billing-blocked',
-        }),
-      }),
-    );
+    expect(mockDb._calls).toContainEqual(expect.objectContaining({
+      table: 'email_messages', data: expect.objectContaining({ status: 'blocked' }),
+    }));
   });
 
   test('round 9 structural fix (P1): a bounce-recovered deposit.receipt whose stored content still carries a withheld link is rewritten by sendOne and re-sent — the recovery row snapshot is updated to match', async () => {

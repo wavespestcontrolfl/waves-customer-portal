@@ -191,7 +191,7 @@ async function suppressionBlock(trx, recipientEmail, category, customer, templat
 }
 
 async function verifyAndDispatch({
-  input, trx, invoice, phone, recipientEmail, templateKey, preSendCheck, dispatch, state,
+  input, trx, invoice, phone, recipientEmail, authorityRecipientEmail, templateKey, preSendCheck, dispatch, state,
 }) {
   const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
   if (fresh.error) state.boundaryBlock = fresh.error;
@@ -199,7 +199,7 @@ async function verifyAndDispatch({
     state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
       'Billing contact changed before delivery', { retryable: true });
   }
-  else if (fresh.recipientEmail !== recipientEmail) {
+  else if (fresh.recipientEmail !== authorityRecipientEmail) {
     state.boundaryBlock = blocked(
       'EMAIL_RECIPIENT_CHANGED',
       'Billing email recipient changed before delivery',
@@ -235,7 +235,7 @@ async function verifyAndDispatch({
 }
 
 async function dispatchUnderBillingEmailAuthority({
-  input, recipientEmail, templateKey = null, preSendCheck, dispatch, state,
+  input, recipientEmail, authorityRecipientEmail = recipientEmail, templateKey = null, preSendCheck, dispatch, state,
 }) {
   try {
     const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
@@ -245,7 +245,8 @@ async function dispatchUnderBillingEmailAuthority({
       const phone = toE164(clean(customer?.phone));
       if (phone) await lockSmsPhone(trx, phone);
       const verifiedDispatch = (database, invoice) => verifyAndDispatch({
-        input, trx: database, invoice, phone, recipientEmail, templateKey, preSendCheck, dispatch, state,
+        input, trx: database, invoice, phone, recipientEmail, authorityRecipientEmail,
+        templateKey, preSendCheck, dispatch, state,
       });
       return input.invoiceId
         ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)

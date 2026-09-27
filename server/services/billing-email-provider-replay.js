@@ -35,7 +35,12 @@ function refusal(block) {
   };
 }
 
-async function runBillingEmailProviderReplayHandoff(message, dispatch) {
+async function runBillingEmailProviderReplayHandoff(message, dispatch, {
+  recipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
+  authorityRecipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
+  preSendCheck: additionalCheck = null,
+  forwardProviderBoundary = false,
+} = {}) {
   if (!isBillingEmailProviderReplay(message)) return { handled: false };
   const context = readStoredBillingReplayContext(message);
   if (!context) {
@@ -57,18 +62,25 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
         notificationEventKey: context.notificationEventKey,
       },
     },
-    recipientEmail: clean(message.recipient_email_snapshot).toLowerCase(),
+    recipientEmail,
+    authorityRecipientEmail,
     templateKey: clean(message.template_key),
-    preSendCheck: async ({ database }) => {
+    preSendCheck: async ({ database, providerBoundary }) => {
       const verdict = await billingEmailReplayEligible(context, database);
-      return verdict?.eligible === true ? { ok: true } : {
-        ok: false,
-        code: 'BILLING_REPLAY_INELIGIBLE',
-        reason: verdict?.reason || 'Billing replay is no longer eligible',
-        retryable: verdict?.retryable === true,
-      };
+      if (verdict?.eligible !== true) {
+        return {
+          ok: false,
+          code: 'BILLING_REPLAY_INELIGIBLE',
+          reason: verdict?.reason || 'Billing replay is no longer eligible',
+          retryable: verdict?.retryable === true,
+        };
+      }
+      return typeof additionalCheck === 'function'
+        ? additionalCheck({ database, providerBoundary }) : { ok: true };
     },
-    dispatch: (database) => dispatch(database),
+    dispatch: (database, providerBoundaryCheck) => (forwardProviderBoundary
+      ? dispatch(database, providerBoundaryCheck)
+      : dispatch(database)),
     state,
   });
 
