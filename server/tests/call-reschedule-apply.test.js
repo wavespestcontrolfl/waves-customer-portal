@@ -234,6 +234,13 @@ describe('planRescheduleFromCall', () => {
     // The catalog name still carries the alias contract.
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
       candidates: [visit({ catalog_service_name: 'Quarterly Pest Control Service - 1 hour - $117' })] }).action).toBe('apply');
+    // A row that lost its catalog row (ON DELETE SET NULL clears service_id,
+    // the key snapshot survives) has no identity left to match, whatever its
+    // label says, and one that lost the placeholder names no service.
+    for (const snapshot of ['pest_general_quarterly', 'general_appointment']) {
+      expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
+        candidates: [visit({ service_id: null, catalog_service_name: null, service_key_snapshot: snapshot })] }).reason).toBe('service_needs_review');
+    }
     // A row that never named a catalog service cannot have been repointed —
     // its free-text label is the only identity it has ever had, so it keeps
     // matching on that.

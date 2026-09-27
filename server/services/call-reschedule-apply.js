@@ -179,11 +179,13 @@ function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) 
 }
 
 // The catalog name a visit is matched on: its catalog row's name when it has
-// one (a repoint can leave service_type stale), else its own label. Null when
-// its catalog row no longer resolves or is the placeholder, which names no
-// service yet.
+// one (a repoint can leave service_type stale), else, for a row that never
+// had a catalog row, its own label. Null when its catalog row no longer
+// resolves — including a row that lost it, whose key snapshot survives the
+// catalog delete's ON DELETE SET NULL — or is the placeholder, which names
+// no service yet.
 function authoritativeServiceName(row) {
-  if (!row.service_id) return row.service_type;
+  if (!row.service_id) return row.service_key_snapshot ? null : row.service_type;
   return row.catalog_service_key === PLACEHOLDER_SERVICE_KEY ? null : row.catalog_service_name;
 }
 
@@ -361,7 +363,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
     .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
       'scheduled_services.service_id', 'scheduled_services.service_type', 'scheduled_services.scheduled_date',
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes',
-      'scheduled_services.status', 'scheduled_services.source_action', 'scheduled_services.visit_id',
+      'scheduled_services.service_key_snapshot', 'scheduled_services.status', 'scheduled_services.source_action', 'scheduled_services.visit_id',
       'scheduled_services.customer_confirmed',
       'scheduled_services.internal_notes', 'scheduled_services.is_recurring', 'scheduled_services.self_booking_id',
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
