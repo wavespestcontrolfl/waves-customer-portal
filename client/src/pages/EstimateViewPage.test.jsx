@@ -504,6 +504,59 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.queryByText(/Satisfaction guaranteed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
   });
+
+  it('strips a stale guaranteed one-time hero after the service-specific overlay', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: true,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Mixed Service Way, Sarasota, FL 34236',
+          serviceCategory: 'pest_control',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'one_time',
+          isOneTimeOnly: true,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noGuaranteeClaims: true,
+        },
+        pricing: {
+          services: [],
+          frequencies: [],
+          askChips: [],
+          oneTimeBreakdown: {
+            total: 350,
+            items: [{ service: 'german_roach', label: 'German Roach Cleanout', amount: 350, kind: 'charge' }],
+          },
+          oneTimeServiceCopy: {
+            hero: {
+              eyebrow: 'Your German roach treatment',
+              h1: 'Your German roach treatment quote is ready!',
+              sub: 'Two targeted visits — 100% guaranteed with the Waves Guarantee.',
+            },
+          },
+          defaultServiceMode: 'one_time',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<EstimateViewPage />);
+
+    expect(await screen.findByRole('heading', { name: 'Your German roach treatment quote is ready!' })).toBeInTheDocument();
+    expect(screen.queryByText(/100% guaranteed/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/actual property/i)).toBeInTheDocument();
+  });
 });
 
 describe('OneTimeBreakdownCard', () => {

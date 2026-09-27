@@ -7865,7 +7865,6 @@ function EstimateViewPageInner({ websiteMode = false }) {
       noGuarantee: noGuaranteeClaims,
     })
     : glassEstimateCopyFor(serviceCategory);
-  const baseGlassPack = noGuaranteeClaims ? glassPackWithoutGuarantee(categoryGlassPack) : categoryGlassPack;
   // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
   // roach cleanout, flea, wasp, bed bug, …): its hero names the service
   // actually quoted, replacing the category hero ("your service quote is
@@ -7876,7 +7875,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
     : null;
   // Applied with or without the category glass pack — the server-rendered
   // page applies the service hero unconditionally (codex #3823 deferred P2).
-  const glassPack = glassPackWithOneTimeHero(baseGlassPack, oneTimeServiceCopy, { reviewBeforeBooking });
+  const heroGlassPack = glassPackWithOneTimeHero(categoryGlassPack, oneTimeServiceCopy, { reviewBeforeBooking });
+  // Apply the estimate-wide rule last: an authored proposal can add termite
+  // work while stale engine pricing still supplies a guaranteed one-time
+  // service hero, and that overlay must not restore the removed claim.
+  const glassPack = noGuaranteeClaims ? glassPackWithoutGuarantee(heroGlassPack) : heroGlassPack;
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.

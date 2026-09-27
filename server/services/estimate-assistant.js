@@ -25,6 +25,7 @@ Answer questions about the customer's estimate, Waves services, WaveGuard, billi
 
 Rules:
 - Use only the estimate context for prices, services selected, schedules, discounts, billing terms, and property details.
+- Honor guarantees.noGuaranteeClaims. When true, do not claim this estimate includes a callback, satisfaction, re-treatment, or money-back guarantee; refer to its written service scope and terms.
 - Use the supportContext for service procedures, products, label/safety references, and Waves admin knowledge. Do not expose internal cost notes.
 - Never give customer-facing product brand names. If product context is relevant, use active ingredients, treatment classes, and how the treatment works.
 - If neither the estimate context nor supportContext contains a specific fact, say you do not see it and suggest calling or texting Waves.
@@ -501,6 +502,7 @@ function buildEstimateAssistantContext({
   pricingBundle = {},
   selectedFrequency = '',
   serviceMode = 'recurring',
+  noGuaranteeClaims = false,
 } = {}) {
   const parsedData = parseEstimateData(estData);
   const requestedMode = serviceMode === 'one_time' ? 'one_time' : 'recurring';
@@ -620,8 +622,16 @@ function buildEstimateAssistantContext({
       items: oneTimeServices.map(rowWithSummary),
     } : null,
     guarantees: {
-      recurring: 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.',
-      oneTime: 'One-time pest service may include a 30-day callback period when shown on the estimate.',
+      noGuaranteeClaims: noGuaranteeClaims === true,
+      recurring: noGuaranteeClaims === true
+        ? null
+        : 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.',
+      oneTime: noGuaranteeClaims === true
+        ? null
+        : 'One-time pest service may include a 30-day callback period when shown on the estimate.',
+      guidance: noGuaranteeClaims === true
+        ? 'Use this estimate’s written service scope and terms. Do not describe the estimate as including a callback, satisfaction, re-treatment, or money-back guarantee.'
+        : null,
     },
     contact: COMPANY,
   };
@@ -1265,6 +1275,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
   const billingText = context.billing?.amountText;
   const services = listServices(context);
   const oneTimeText = context.oneTime?.amountText;
+  const noGuaranteeAnswer = `This estimate’s written service scope and terms are what apply. I do not see an estimate-wide callback or money-back guarantee listed; call or text Waves at ${phone} if you want the team to confirm coverage for a specific service.`;
 
   // Bora-Care questions are answered first — above the include/coverage, safety,
   // and product branches — so phrasings like "does Bora-Care cover beetles?" or
@@ -1290,6 +1301,14 @@ function answerEstimateQuestionFallback(question, context = {}) {
   if (context.billing?.quoteRequired && estimateContextHasMistingSystem(context)
     && (estimateContextIsMistingOnly(context) || isMistingSystemQuestion(q))) {
     return mistingSystemFallbackAnswer(question, phone);
+  }
+
+  // Run before the generic "included/coverage" branch: natural guarantee
+  // questions often say "Does this include a guarantee?", and must not fall
+  // through to a generic service list when this estimate's terms are neutral.
+  if (context.guarantees?.noGuaranteeClaims === true
+    && /\b(guarantee|callback|re-?treat|money[- ]?back|satisfaction|risk[- ]?free)\b/.test(q)) {
+    return noGuaranteeAnswer;
   }
 
   if (/\b(include|included|cover|coverage|what.*get|plan)\b/.test(q)) {
@@ -1389,6 +1408,9 @@ function answerEstimateQuestionFallback(question, context = {}) {
   }
 
   if (/\b(waveguard|silver|bronze|gold|platinum|member|membership|guarantee|callback|risk)\b/.test(q)) {
+    if (context.guarantees?.noGuaranteeClaims === true) {
+      return noGuaranteeAnswer;
+    }
     if (context.serviceMode === 'one_time') {
       return `This is a one-time service, not a recurring WaveGuard membership. ${context.guarantees?.oneTime || 'One-time pest service may include a 30-day callback period when shown on the estimate.'}`;
     }
@@ -1457,6 +1479,7 @@ async function answerEstimateQuestion({
   pricingBundle,
   selectedFrequency,
   serviceMode,
+  noGuaranteeClaims = false,
   database = db,
 } = {}) {
   const cleanQuestion = cleanText(question);
@@ -1466,6 +1489,7 @@ async function answerEstimateQuestion({
     pricingBundle,
     selectedFrequency,
     serviceMode,
+    noGuaranteeClaims,
   });
   try {
     context.supportContext = await loadEstimateAiSupportContext({

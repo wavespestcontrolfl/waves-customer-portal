@@ -8,7 +8,13 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { serviceMixMakesNoGuaranteeClaim, normalizeOneTimeBreakdown, guaranteeRecurringRows, guaranteeProposalRows } = require('../routes/estimate-public');
+const {
+  serviceMixMakesNoGuaranteeClaim,
+  estimateMakesNoGuaranteeClaim,
+  normalizeOneTimeBreakdown,
+  guaranteeRecurringRows,
+  guaranteeProposalRows,
+} = require('../routes/estimate-public');
 
 const PEST = [{ name: 'Pest Control', mo: 55 }];
 const charge = (service, label, amount) => ({ service, label, amount, kind: 'charge' });
@@ -59,6 +65,22 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
     expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estData), normalizeOneTimeBreakdown(estData).items)).toBe(false);
     const termiteNested = { result: { results: { recurring: { services: [{ name: 'Termite Bait Monitoring', mo: 45 }] } } } };
     expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(termiteNested), [])).toBe(true);
+  });
+
+  test('mapped result rows are unioned with raw engine recurring rows before the guarantee decision', () => {
+    const estData = {
+      result: { recurring: { services: PEST } },
+      engineResult: {
+        lineItems: [{ service: 'termite_bait', name: 'Termite Bait Monitoring', recurring: true, monthly: 45 }],
+      },
+    };
+    const rows = guaranteeRecurringRows(estData);
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'Pest Control' }),
+      expect.objectContaining({ service: 'termite_bait' }),
+    ]));
+    expect(serviceMixMakesNoGuaranteeClaim(rows, [])).toBe(true);
+    expect(estimateMakesNoGuaranteeClaim(estData)).toBe(true);
   });
 
   test('an authored proposal naming termite work is flagged even when its engine rows are pest only (Codex r4)', () => {

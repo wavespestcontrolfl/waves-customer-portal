@@ -253,6 +253,19 @@ describe('glassPackWithOneTimeHero', () => {
     expect(glassPackWithOneTimeHero(base, { hero }, { reviewBeforeBooking: true }).heroSub).toBe(base.heroSub);
     expect(glassPackWithOneTimeHero(null, { hero }, { reviewBeforeBooking: true }).heroSub).toBeNull();
   });
+  it('the no-guarantee transform runs after a stale guaranteed service hero overlay', () => {
+    setGlassDefault(true);
+    const base = glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control'));
+    const staleServiceHero = {
+      hero: { ...hero, sub: 'Two targeted visits — 100% guaranteed with the Waves Guarantee.' },
+    };
+    const overlaid = glassPackWithOneTimeHero(base, staleServiceHero);
+    expect(overlaid.heroSub).toMatch(/100% guaranteed/i);
+
+    const finalPack = glassPackWithoutGuarantee(overlaid);
+    expect(finalPack.heroSub).not.toMatch(/guarantee/i);
+    expect(finalPack.heroSub).toMatch(/actual property/);
+  });
   it('no service hero leaves the pack untouched', () => {
     expect(glassPackWithOneTimeHero(null, null)).toBeNull();
     const base = { eyebrow: 'x', heroH1: 'y' };

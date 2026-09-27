@@ -8839,14 +8839,7 @@ async function handleEstimateView(req, res, next) {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
       // React view reads (renderPage only sees this view and the data).
-      noGuaranteeClaims: serviceMixMakesNoGuaranteeClaim(
-        guaranteeRecurringRows(estData),
-        [
-          ...(normalizeOneTimeBreakdown(estData)?.items || []),
-          ...(pricingBundleForView?.oneTimeBreakdown?.items || []),
-          ...guaranteeProposalRows(estData),
-        ],
-      ),
+      noGuaranteeClaims: estimateMakesNoGuaranteeClaim(estData, pricingBundleForView),
       status: estimate.status === 'accepted'
         ? estimate.status
         : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
@@ -19930,9 +19923,13 @@ const NON_SERVICE_RECURRING_KEY_RX = /membership|setup|discount|credit/;
 // recurringServicesWithSupplements does not initialize from. Classification
 // only, so a row seen twice is harmless.
 function guaranteeRecurringRows(estData) {
-  const root = estData?.result || estData?.engineResult || estData || {};
-  const nested = Array.isArray(root?.results?.recurring?.services) ? root.results.recurring.services : [];
-  return [...recurringServicesWithSupplements(root), ...nested];
+  const roots = [estData?.result, estData?.engineResult]
+    .filter((root) => root && typeof root === 'object');
+  if (!roots.length && estData && typeof estData === 'object') roots.push(estData);
+  return roots.flatMap((root) => {
+    const nested = Array.isArray(root?.results?.recurring?.services) ? root.results.recurring.services : [];
+    return [...recurringServicesWithSupplements(root), ...nested];
+  });
 }
 
 // An authored proposal's own rows are its customer-visible scope
@@ -19985,6 +19982,15 @@ function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = 
     classified += 1;
   }
   return classified === 0;
+}
+
+function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
+  const oneTimeItems = [
+    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+    ...(pricingBundle?.oneTimeBreakdown?.items || []),
+    ...guaranteeProposalRows(estData),
+  ];
+  return serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estData), oneTimeItems);
 }
 
 // Optional service-category scope for the glass release: CSV env, e.g.
@@ -26338,9 +26344,9 @@ async function composeEstimateDataPayload(estimate, {
     );
     // Termite work (or unclassifiable work) anywhere on the page's own rows:
     // the page and its proposal document make no estimate-wide guarantee.
-    const noGuaranteeClaims = serviceMixMakesNoGuaranteeClaim(
-      guaranteeRecurringRows(estimateDataForIntelligence),
-      [...oneTimeItemsForCategory, ...guaranteeProposalRows(estimateDataForIntelligence)],
+    const noGuaranteeClaims = estimateMakesNoGuaranteeClaim(
+      estimateDataForIntelligence,
+      pricingBundle,
     );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
@@ -26379,6 +26385,7 @@ async function composeEstimateDataPayload(estimate, {
           pricingBundle,
           selectedFrequency: '',
           serviceMode: defaultServiceMode,
+          noGuaranteeClaims,
         });
         intelligence.supportSources = loadPublicEstimateSupportSources({
           question: 'What is included in this WaveGuard estimate?',
@@ -27413,6 +27420,7 @@ async function handleEstimateAsk(req, res, next) {
     } catch (err) {
       logger.warn(`[estimate-ask] pricing bundle failed: ${err.message}`);
     }
+    const noGuaranteeClaims = estimateMakesNoGuaranteeClaim(estData, pricingBundle);
 
     const result = await answerEstimateQuestion({
       question,
@@ -27421,6 +27429,7 @@ async function handleEstimateAsk(req, res, next) {
       pricingBundle,
       selectedFrequency,
       serviceMode,
+      noGuaranteeClaims,
     });
 
     await db('intelligence_bar_queries').insert(buildEstimateAskQueryLog({
@@ -27552,6 +27561,7 @@ module.exports.attachPublicPricingContract = attachPublicPricingContract;
 module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
+module.exports.estimateMakesNoGuaranteeClaim = estimateMakesNoGuaranteeClaim;
 module.exports.guaranteeRecurringRows = guaranteeRecurringRows;
 module.exports.guaranteeProposalRows = guaranteeProposalRows;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
