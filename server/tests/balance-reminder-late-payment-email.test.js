@@ -997,6 +997,22 @@ describe('latePaymentEmailStillOwed (a stored late-payment email\'s provider ret
     });
     await expect(ask()).resolves.toMatchObject({ owed: false });
   });
+
+  // The shared check turns a thrown answer into a retry later; a swallowed
+  // read error would read as "stopped" and end the retry for good.
+  test.each([
+    ['the follow-up read', () => InvoiceFollowUps.hasActiveSequence.mockRejectedValue(new Error('db down'))],
+    ['the micro-deposit lookup', () => StripeService.isInvoiceAwaitingMicrodepositVerification
+      .mockRejectedValue(new Error('stripe unavailable'))],
+  ])('an error in %s is thrown, not answered as a dunning stop', async (_label, fail) => {
+    jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    fail();
+    setDbQueues({}, {
+      plan: chain({ first: null }),
+      microdeposits: chain({ result: [{ id: 'inv-1', stripe_payment_intent_id: 'pi-inv-1' }] }),
+    });
+    await expect(ask()).rejects.toThrow();
+  });
 });
 
 describe('account-level dunning stops', () => {

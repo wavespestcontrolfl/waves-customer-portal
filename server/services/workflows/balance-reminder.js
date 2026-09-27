@@ -51,7 +51,9 @@ function smsLogMetadata(row) {
 
 // Account-level reminders stop if ANY invoice behind the balance is held.
 // Read failures skip this run; late-payment-checker owns verification nudges.
-async function customerDunningStopped(balance, selectedInvoiceId) {
+// throwOnError: a caller that can retry later (a stored email's provider
+// retry) gets the read error instead of a permanent "stopped".
+async function customerDunningStopped(balance, selectedInvoiceId, { throwOnError = false } = {}) {
   try {
     const ids = [...new Set([
       ...(balance.invoiceIds || []), balance.oldestInvoiceId, selectedInvoiceId,
@@ -77,6 +79,7 @@ async function customerDunningStopped(balance, selectedInvoiceId) {
     }
     return false;
   } catch (err) {
+    if (throwOnError) throw err;
     logger.warn(`[balance-reminder] dunning-stop check failed — skipping this customer's reminder this run (fail closed): ${err.message}`);
     return true;
   }
@@ -622,7 +625,9 @@ class BalanceReminder {
   async latePaymentEmailStillOwed({ customerId, invoiceId, renderedTotal }) {
     const balance = await this.getCustomerBalance(customerId);
     if (!balance || balance.totalBalance.toFixed(2) !== renderedTotal) return { owed: false, reason: "balance-changed" };
-    if (await customerDunningStopped(balance, invoiceId)) return { owed: false, reason: "dunning-stopped" };
+    if (await customerDunningStopped(balance, invoiceId, { throwOnError: true })) {
+      return { owed: false, reason: "dunning-stopped" };
+    }
     return { owed: true };
   }
 
