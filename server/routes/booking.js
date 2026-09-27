@@ -3068,7 +3068,16 @@ async function createSelfBooking(payload = {}) {
       const preFenceCustomer = custId
         ? await db('customers').where({ id: custId }).first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude')
         : null;
-      const preloadedBookingLocation = !callbackVisit ? await preloadBookingLocation(preFenceCustomer) : null;
+      // A genuine re-service rebuilds availability from the customer's
+      // server-owned address just before calling this commit path. Preserve
+      // that same fallback when the legacy profile has no saved pin. The
+      // assessment caller already supplies expectedLocation from its own
+      // resolved/fenced property flow, so it must not trigger a second,
+      // potentially divergent geocode here.
+      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false;
+      const preloadedBookingLocation = shouldResolveMissingBookingLocation
+        ? await preloadBookingLocation(preFenceCustomer)
+        : null;
       txResult = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
       // in services/scheduling/occupancy.js). This path's own conflict gate
@@ -3202,9 +3211,9 @@ async function createSelfBooking(payload = {}) {
         const missingPinUnchanged = ['latitude', 'longitude'].every(
           column => (freshBookingCustomer[column] ?? null) === (preFenceCustomer[column] ?? null),
         );
-        if (!callbackVisit && !freshPin && missingPinUnchanged && !storedBookingPin(preFenceCustomer)) {
-          // A customer can have a valid geocoded offer without a saved pin.
-          // Preserve that server-resolved location, but only while the same
+        if (shouldResolveMissingBookingLocation && !freshPin && missingPinUnchanged && !storedBookingPin(preFenceCustomer)) {
+          // A customer can have server-built availability without a saved
+          // pin. Preserve that resolved location, but only while the same
           // address/missing pair still holds. Never resurrect a cleared pin
           // or bypass a staff review recorded while the lookup was running.
           const reviewed = await require('../services/customer-geocode-review').reviewedServiceLocation({

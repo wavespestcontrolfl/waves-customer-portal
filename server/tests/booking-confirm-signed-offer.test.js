@@ -493,6 +493,31 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     return capturedScheduledInsert;
   }
 
+  function callbackPayload(overrides = {}) {
+    return {
+      slot_date: SLOT_DATE,
+      slot_start: '09:00',
+      technician_id: TECH_ID,
+      source: 'reservice_link',
+      authedCustomer: loadedCustomer,
+      payAtVisit: false,
+      customersOnly: false,
+      callbackVisit: {
+        serviceKey: 'pest_re_service',
+        serviceId: 'eeee4444-ff55-4666-8777-aaaa8888bbbb',
+        serviceType: 'Pest Control Re-Service',
+        durationMinutes: 30,
+      },
+      ...overrides,
+    };
+  }
+
+  async function runCallbackToScheduledInsert(overrides) {
+    await expect(createSelfBooking(callbackPayload(overrides))).rejects.toThrow(SENTINEL);
+    expect(capturedScheduledInsert).toBeDefined();
+    return capturedScheduledInsert;
+  }
+
   test("someone ELSE's estimate UUID books UNLINKED (no source_estimate_id stamp) with a warn", async () => {
     const row = await runToScheduledInsert({ source_estimate_id: OTHER_EST });
     expect(row.source_estimate_id).toBeNull();
@@ -580,6 +605,84 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
       else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
     }
+  });
+
+  test('a missing-coordinate re-service uses one canonical pin for conflict, capacity, and the visit stamp', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const exactPin = { lat: 27.339, lng: -82.531 };
+    let transactionStarted = false;
+    const runTransaction = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation((...args) => { transactionStarted = true; return runTransaction(...args); });
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async (address) => {
+      expect(address).toBe('123 Fixture Lane, Sarasota, FL, 34236');
+      expect(transactionStarted).toBe(false);
+      return exactPin;
+    });
+    const capacitySpy = jest.spyOn(require('../services/scheduling/arrival-route'), 'checkArrivalPlacement')
+      .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    const laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+    try {
+      const row = await runCallbackToScheduledInsert();
+      expect(row).toMatchObject({
+        ...exactPin,
+        is_callback: true,
+        service_address_line1: CUST.address_line1, service_address_line2: CUST.address_line2,
+        service_address_city: CUST.city, service_address_state: CUST.state, service_address_zip: CUST.zip,
+      });
+      expect(loadedCustomer.latitude).toBeNull();
+      expect(fencedCustomer.latitude).toBeNull();
+      expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ travel: expect.objectContaining(exactPin) }));
+      expect(capacitySpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      geocodeSpy.mockRestore(); capacitySpy.mockRestore(); conflictSpy.mockRestore(); laneSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('a re-service address changed while its missing pin resolves is refused under the customer fence', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async () => {
+      fencedCustomer = { ...fencedCustomer, address_line1: '456 Changed Avenue' };
+      return { lat: LAT, lng: LNG };
+    });
+    try {
+      await expect(createSelfBooking(callbackPayload())).resolves.toMatchObject({
+        ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY',
+      });
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test('an assessment callback with its own expected location is not independently re-geocoded', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+    try {
+      await expect(createSelfBooking(callbackPayload({
+        callbackVisit: {
+          serviceKey: 'lawn_inspection',
+          serviceId: 'ffff5555-aa66-4777-8888-bbbb9999cccc',
+          serviceType: 'Waves Assessment',
+          durationMinutes: 30,
+          isCallback: false,
+          expectedLocation: { lat: LAT, lng: LNG },
+        },
+      }))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(geocodeSpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
   });
 
   test('a complete customer pin cleared while confirm waits is not resurrected from the signed echo', async () => {
