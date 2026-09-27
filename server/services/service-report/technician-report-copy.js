@@ -241,7 +241,8 @@ const REPORT_PAST_ACCESS_NUMBER_RE = /\b\d{3,8}\b(?!\.\d)/g;
 const REPORT_STRUCTURED_DATE_TEXT = String.raw`(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*(?:\d{2}|\d{4}))`;
 const REPORT_STRUCTURED_DATE_RE = new RegExp(String.raw`\b${REPORT_STRUCTURED_DATE_TEXT}\b`, 'g');
 const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
-const REPORT_PAST_ACCESS_WORK_ACTION_RE = /\b(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?)\b/i;
+const REPORT_WORK_ACTION_TEXT = String.raw`(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|replac(?:e|es|ed|ing)|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?)`;
+const REPORT_PAST_ACCESS_WORK_ACTION_RE = new RegExp(String.raw`\b${REPORT_WORK_ACTION_TEXT}\b`, 'i');
 // A work verb plus a pest noun establishes a count, including bounded species
 // and state modifiers. Explicit access relationships are screened first.
 const REPORT_PEST_COUNT_RE = /\b(?:found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:[a-z][a-z’'-]{0,23}\s+){0,3}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
@@ -393,7 +394,10 @@ const REPORT_CREDENTIAL_TOKEN_RE = new RegExp(
   String.raw`(^|[^A-Za-z0-9])(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
   'g',
 );
-const REPORT_CREDENTIAL_CONTEXT_PREFIX_RE = /^(?:(?:use|using|enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|with|via|to|for|at|on|into|near|by)\s+)+/i;
+const REPORT_CREDENTIAL_CONTEXT_PREFIX_RE = new RegExp(
+  String.raw`^(?:(?:use|using|enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|and|then|with|via|to|for|at|on|into|near|by|${REPORT_WORK_ACTION_TEXT})\s+)+`,
+  'i',
+);
 
 function accessCodeDetectionText(text) {
   return text.replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
@@ -414,6 +418,8 @@ function accessCodeDetectionText(text) {
     // The token grammar accepts alphabetic prefixes for forms such as
     // "AB 2468". Preserve access verbs/connectors that happen to occupy that
     // slot so normalization cannot erase the credential/device relationship.
+    // Keep clause transitions and work verbs for the inverse reason: removing
+    // "and inspected" would collapse an ordinary count into "gate 100".
     const contextPrefix = token.match(REPORT_CREDENTIAL_CONTEXT_PREFIX_RE)?.[0] || '';
     return `${prefix}${contextPrefix}${digits}`;
   });

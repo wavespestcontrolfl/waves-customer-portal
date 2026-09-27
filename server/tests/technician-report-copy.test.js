@@ -161,6 +161,9 @@ describe('custom action credential screening', () => {
     '2468 ft will open the rear gate',
     '2468 ml can unlock the side door',
     '2468 oz should still access the garage entry',
+    'Opened gate and inspected 100 bait stations, then entered 8842 at the keypad',
+    'Opened rear gate and checked 120 traps, then used code 2468 at the keypad',
+    'Opened gate and serviced 100 bait stations, then unlocked the side door with 8842',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -231,6 +234,13 @@ describe('custom action credential screening', () => {
     'Applied 24-0-11 to open turf near the rear gate',
     '2468 ft will cover open turf near the rear gate',
     '2468 ml can treat the hinge beside the side door',
+    'Opened gate and inspected 100 bait stations',
+    'Opened rear gate and checked 120 traps',
+    'Opened gate and serviced 100 bait stations',
+    'Opened gate and replaced 120 traps',
+    'Opened gate and treated 100 stations',
+    'Opened gate and applied 100 product units',
+    'Opened gate and found 100 empty traps',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -295,6 +305,9 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     '2468 ft will open the rear gate',
     '2468 ml can unlock the side door',
     '2468 oz should still access the garage entry',
+    'Opened gate and inspected 100 bait stations, then entered 8842 at the keypad',
+    'Opened rear gate and checked 120 traps, then used code 2468 at the keypad',
+    'Opened gate and serviced 100 bait stations, then unlocked the side door with 8842',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
@@ -358,6 +371,13 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Applied 24-0-11 to open turf near the rear gate',
     '2468 ft will cover open turf near the rear gate',
     '2468 ml can treat the hinge beside the side door',
+    'Opened gate and inspected 100 bait stations',
+    'Opened rear gate and checked 120 traps',
+    'Opened gate and serviced 100 bait stations',
+    'Opened gate and replaced 120 traps',
+    'Opened gate and treated 100 stations',
+    'Opened gate and applied 100 product units',
+    'Opened gate and found 100 empty traps',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
