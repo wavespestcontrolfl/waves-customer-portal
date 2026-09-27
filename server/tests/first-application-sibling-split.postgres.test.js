@@ -576,6 +576,48 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       const canceled = await trx('invoices').where({ id: canceledId }).first();
       expect(canceled.billing_review_opened_at).toBeNull(); // untouched
     }));
+
+    // Root-fix regression (pre-push audit P0, this round): the durable-
+    // provenance lookup must apply the SAME live/refunded/canceled
+    // precedence — a REFUNDED invoice's own leftover provenance (from a
+    // review that opened on it before it was refunded) must NOT win over a
+    // LIVE replacement invoice that superseded it, or this fix reopens the
+    // exact round-3 bug (the collectible replacement stays unreviewed and
+    // fully chargeable while a dead, refunded row gets the review instead).
+    test('a REFUNDED invoice carrying stale provenance never shadows its LIVE replacement', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft' });
+      // Open a review on the original invoice — stamps its provenance.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const opened = await trx('invoices').where({ id: ids.invoiceId }).first();
+      expect(opened.billing_review_context.sourceEstimateId).toBe(ids.estimateId);
+
+      // The original invoice is refunded — the customer's card was
+      // reversed, and a NEW, live replacement invoice is minted for the
+      // SAME reserved row, with NO provenance of its own (a fresh row).
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'refunded' });
+      const replacementId = randomUUID();
+      await trx('invoices').insert({
+        id: replacementId, customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+        token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+        status: 'draft', title: 'First Service Application',
+        notes: `Auto-generated from accepted estimate #${ids.estimateId}. Customer selected pay per application — first application only.`,
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 }]),
+        subtotal: 153.60, total: 153.60,
+        created_at: new Date(Date.now() + 60000), // strictly newer
+      });
+
+      // The realigned sibling diverges again — the review must land on
+      // the LIVE replacement, not the refunded, stale-provenance original.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-05' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      expect(result.invoiceId).toBe(replacementId);
+      const refundedAfter = await trx('invoices').where({ id: ids.invoiceId }).first();
+      // The refunded row's review is untouched (except the earlier open).
+      expect(refundedAfter.billing_review_context.sourceEstimateId).toBe(ids.estimateId);
+    }));
   });
 
   describe('round-3: bell reopens on a later, separate recurrence', () => {

@@ -330,13 +330,19 @@ async function loadLockedEstimateGroup(trx, scheduledServiceId) {
 // when no candidate has any provenance yet.
 //
 // Provenance does not blindly win, though: a candidate whose provenance
-// match is itself in a shadowable state (refunded/canceled/etc. —
-// InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES minus 'refunded',
-// same vocabulary selectFirstApplicationInvoiceMatch already uses) must
-// still lose to a LIVE text-matching replacement — otherwise this fix
-// would reopen the round-3 bug it was built to close (a stale canceled
-// invoice's own leftover provenance shadowing the live replacement that
-// superseded it and text-matches normally). So the precedence is:
+// match is itself in a shadowable state — void/refunded/canceled/cancelled,
+// InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES IN FULL, deliberately
+// INCLUDING 'refunded' here even though selectFirstApplicationInvoiceMatch
+// drops 'refunded' from its own skip set for a different reason (a
+// refunded match deliberately wins over live for the COVERAGE lookup,
+// since there's no reliable refund-event clock to order them and a
+// bounced refund must not double-collect — that reasoning does not
+// transfer to identifying which invoice to REVIEW) — must still lose to a
+// LIVE text-matching replacement, or this fix would reopen the round-3 bug
+// it was built to close (a stale refunded/canceled invoice's own leftover
+// provenance shadowing the live replacement that superseded it and
+// text-matches normally; pre-push audit P0, this round). So the
+// precedence is:
 //   1. a provenance match that is itself LIVE (not in that shadowable set)
 //   2. else the ordinary text-match precedence (live > refunded > the
 //      canceled-with-setup-fee park case), unchanged from round-3
@@ -370,7 +376,18 @@ async function findLockedFirstApplicationInvoice(trx, moved, members) {
   const provenanceMatch = candidates.find(
     (row) => invoiceProvenanceEstimateId(row) === String(moved.source_estimate_id),
   ) || null;
-  const shadowableStatuses = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES.filter((s) => s !== 'refunded');
+  // The FULL resolved-status set, including 'refunded' (pre-push P0 —
+  // selectFirstApplicationInvoiceMatch's own filter drops 'refunded' from
+  // its shadowable set for a DIFFERENT reason: for the coverage lookup, a
+  // refunded match deliberately wins over a live one, since there's no
+  // reliable refund-event clock to order them and a bounced refund must
+  // not double-collect. That reasoning does not transfer here — a
+  // refunded invoice's leftover provenance must NOT win over a live
+  // replacement for identifying which invoice to REVIEW, or a refunded
+  // invoice's stale context reintroduces the exact round-3 bug this
+  // precedence exists to close (the replacement stays unreviewed and
+  // fully chargeable). So 'refunded' stays shadowable here.
+  const shadowableStatuses = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES;
   const provenanceIsLive = !!provenanceMatch && !shadowableStatuses.includes(provenanceMatch.status);
 
   const { invoice: selected, liveBeside } = selectFirstApplicationInvoiceMatch(candidates);
