@@ -843,4 +843,49 @@ const OUR_NUMBER = '+19415550100';
     const [, , opts] = triggerNotification.mock.calls[1];
     expect(opts.deliveredSubscriptionIds).toEqual(['sub-accepted-1']);
   });
+
+  test("a retry that lands on a DIFFERENT promise (the first was kept in the meantime) never inherits the first promise's delivered-device history", async () => {
+    const earlierA = callRow(300); // waited longest — selected first
+    const commitmentA = commitmentRow(earlierA.id);
+    const earlierB = callRow(200);
+    const commitmentB = commitmentRow(earlierB.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlierA, earlierB, back]);
+    await mockConn('call_commitments').insert([commitmentA, commitmentB]);
+
+    // Attempt 1: promise A (the longer-waiting one) is selected; a partial
+    // push buzzes sub-1 and leaves the claim pending.
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, retryable: true,
+      push: { sent: 1, failed: 1, deliveredSubscriptionIds: ['sub-1'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    const afterFirst = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(afterFirst.metadata.promise_chaser).toMatchObject({ commitmentId: commitmentA.id, deliveredSubscriptionIds: ['sub-1'] });
+
+    // Promise A gets kept in the meantime (staff reached the caller,
+    // between A's own call and B's) — the SLA pager's own evidence.
+    // Strictly after A's call ended but strictly before B's own call, so
+    // it keeps A without also keeping B.
+    const reached = callRow(250, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
+    await mockConn('call_log').insert(reached);
+
+    // Age the lease so a retry can reclaim it.
+    afterFirst.metadata.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(afterFirst.metadata) });
+
+    // Attempt 2 (the retry): A is now kept, so selectPromiseToRing moves on
+    // to promise B — a promise sub-1 was never actually delivered against.
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, push: { sent: 1, failed: 0, deliveredSubscriptionIds: ['sub-2'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid, { viaSweep: true })).toBe(true);
+    const [, , opts2] = triggerNotification.mock.calls[1];
+    // sub-1's history belonged to A, never to B — it must not be excluded
+    // from B's own push.
+    expect(opts2.deliveredSubscriptionIds).toEqual([]);
+
+    const settled = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitmentB.id });
+  });
 });

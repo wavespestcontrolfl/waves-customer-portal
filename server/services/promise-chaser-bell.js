@@ -534,6 +534,18 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     if (selection.outcome === 'skip') { await settle(call.id, token, 'skipped', selection.reason); return false; }
     const { promise, what, when } = selection;
 
+    // A retry (the sweep reclaiming this SAME row) can legitimately select
+    // a DIFFERENT promise than its own prior attempt did — the first
+    // promise may have been dismissed or kept in the meantime. This row's
+    // OWN deliveredSubscriptionIds belongs to whichever promise it was
+    // targeting when a PRIOR attempt persisted it (existing.commitmentId,
+    // read before stampTarget below overwrites it); reused only when this
+    // attempt is chasing that SAME promise again, never carried over onto
+    // an unrelated one it was never actually delivered against.
+    const priorTarget = existing?.commitmentId;
+    const ownDeliveredSoFar = priorTarget && String(priorTarget) === String(promise.id)
+      ? (existing?.deliveredSubscriptionIds || []) : [];
+
     // Stamp which promise this claim now targets BEFORE the cross-call
     // check below, so a concurrent call checking the SAME promise can see
     // us. Cross-call half of "once per promise per day, never re-buzz a
@@ -554,7 +566,7 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
 
     const existingWithCrossDelivered = {
       ...existing,
-      deliveredSubscriptionIds: [...new Set([...(existing?.deliveredSubscriptionIds || []), ...cross.deliveredElsewhere])],
+      deliveredSubscriptionIds: [...new Set([...ownDeliveredSoFar, ...cross.deliveredElsewhere])],
     };
     const result = await dispatchPromiseNotification(call, promise, what, when, { viaSweep, existing: existingWithCrossDelivered });
     if (result.pending) { await recordProgress(call.id, token, result.pending); return false; }
