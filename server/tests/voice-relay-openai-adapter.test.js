@@ -185,6 +185,37 @@ describe('a shared VOICE_RELAY_MODEL/MODEL_VOICE value is validated too (Codex r
     expect(result).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
   });
 
+  // Codex r8 P2: the shared chain is VOICE_RELAY_MODEL, then MODEL_VOICE —
+  // each validated — and only then the code default, matching the Models tab.
+  test('a rejected VOICE_RELAY_MODEL falls to a valid MODEL_VOICE, not straight to the code default', () => {
+    const saved = process.env.MODEL_VOICE;
+    process.env.VOICE_RELAY_MODEL = OPENAI_CANDIDATE;
+    process.env.MODEL_VOICE = 'claude-haiku-4-5-20251001';
+    try {
+      let result;
+      jest.isolateModules(() => {
+        result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false });
+      });
+      expect(result).toEqual({ model: 'claude-haiku-4-5-20251001', fallbackReason: `unknown_shared_model:VOICE_RELAY_MODEL=${OPENAI_CANDIDATE}` });
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_VOICE; else process.env.MODEL_VOICE = saved;
+    }
+  });
+
+  test('a MODEL_VOICE the relay refuses falls to the code default, stamped with its own env name', () => {
+    const saved = process.env.MODEL_VOICE;
+    process.env.MODEL_VOICE = OPENAI_CANDIDATE;
+    try {
+      let result;
+      jest.isolateModules(() => {
+        result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false });
+      });
+      expect(result).toEqual({ model: MODELS.DEFAULTS.VOICE, fallbackReason: `unknown_shared_model:MODEL_VOICE=${OPENAI_CANDIDATE}` });
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_VOICE; else process.env.MODEL_VOICE = saved;
+    }
+  });
+
   test('a garbage id fails closed even with the gate on', () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_MODEL = 'not-a-real-model-at-all';

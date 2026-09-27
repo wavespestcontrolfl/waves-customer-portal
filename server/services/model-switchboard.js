@@ -132,7 +132,11 @@ const POLICY_SELECTOR = {
 // picker consults `accepts.catalogOnly` to stop offering a search result the
 // runtime would reject after restart. Only meaningful with `opts.parse`,
 // which is what actually enforces it at read time; this just advertises it.
-const T = (tier) => ({ kind: 'tier', key: tier });
+//   T(tier, { parse, fallbackModel }) — `parse` only for a call site that
+//                      validates the tier's value itself (voice_relay: the
+//                      relay's Anthropic allowlist); a value it refuses shows
+//                      as the call site's own `fallbackModel`, as it runs.
+const T = (tier, opts = {}) => ({ kind: 'tier', key: tier, parse: opts.parse || null, fallbackModel: opts.fallbackModel || null });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
 const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null, catalogOnly: !!opts.catalogOnly, allowed: opts.allowed || null });
@@ -254,10 +258,11 @@ function inboundOverrideParse(raw) {
   const { isAllowedOverrideModel } = require('./voice-agent/relay-conversation');
   return isAllowedOverrideModel(raw) ? raw : null;
 }
-// The shared VOICE_RELAY_MODEL under the inbound pin: the relay takes it only
-// when it is an allowlisted Anthropic id (resolveSessionModel — collections
-// reads the same env and speaks only Anthropic), so an OpenAI or unknown value
-// shows as rejected here rather than as the model inbound calls run on.
+// The shared chain under the inbound pin — VOICE_RELAY_MODEL, then the VOICE
+// tier: the relay takes each only as an allowlisted Anthropic id
+// (resolveSessionModel — collections reads the same env and speaks only
+// Anthropic), falling to the next link and finally MODELS.DEFAULTS.VOICE, so
+// a refused value shows as rejected here rather than as what inbound runs on.
 function inboundSharedModelParse(raw) {
   const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
   return ALLOWED_OVERRIDE_MODEL_IDS.has(raw) ? raw : null;
@@ -388,7 +393,7 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE'), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -916,7 +921,9 @@ function resolveRef(ref) {
   switch (ref.kind) {
     case 'tier': {
       const sel = SELECTOR_BY_KEY[ref.key];
-      return { model: MODELS[ref.key], selector: ref.key, via: ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
+      const current = MODELS[ref.key];
+      const refused = !!ref.parse && !ref.parse(current);
+      return { model: refused ? ref.fallbackModel : current, selector: ref.key, via: refused ? `${ref.key} rejected → code default` : ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
     }
     case 'route':
       return resolveAttributed(MODELS.ROUTES[ref.key]?.model, ROUTE_SELECTOR[ref.key], `ROUTES.${ref.key}`);

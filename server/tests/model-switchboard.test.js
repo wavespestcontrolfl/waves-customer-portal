@@ -570,6 +570,28 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
     }
   });
 
+  // Codex r8 P2: the tab walks the same validated chain the relay does —
+  // VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default.
+  it.each([
+    ['a rejected VOICE_RELAY_MODEL over a valid MODEL_VOICE shows MODEL_VOICE', { VOICE_RELAY_MODEL: 'gpt-6-sol', MODEL_VOICE: 'claude-haiku-4-5-20251001' }, 'claude-haiku-4-5-20251001', 'gpt-6-sol'],
+    ['a MODEL_VOICE the relay refuses shows the code default', { MODEL_VOICE: 'gpt-6-sol' }, 'CODE_DEFAULT', 'gpt-6-sol'],
+  ])('%s — matching resolveSessionModel', (_label, env, inboundModel, collectionsModel) => {
+    const saved = { MODEL_VOICE: process.env.MODEL_VOICE };
+    Object.assign(process.env, env);
+    try {
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const { resolveSessionModel } = require('../services/voice-agent/relay-conversation');
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      const expected = inboundModel === 'CODE_DEFAULT' ? require('../config/models').DEFAULTS.VOICE : inboundModel;
+      expect(inbound.primary.model).toBe(expected);
+      expect(resolveSessionModel({ sandbox: false }).model).toBe(expected);
+      expect(lanes.find((l) => l.id === 'voice_relay_collections').primary.model).toBe(collectionsModel);
+    } finally {
+      if (saved.MODEL_VOICE === undefined) delete process.env.MODEL_VOICE; else process.env.MODEL_VOICE = saved.MODEL_VOICE;
+    }
+  });
+
   it('with VOICE_RELAY_INBOUND_MODEL set to a valid override, voice_relay no longer depends on VOICE_RELAY_MODEL — only collections is affected', () => {
     process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
     process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';

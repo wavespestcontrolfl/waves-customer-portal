@@ -17,8 +17,9 @@
  * (this.sandbox === true) and takes precedence over the inbound override, so
  * the owner can A/B a candidate model on the sandbox line without touching
  * production inbound calls. Precedence, highest first:
- *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
- *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
+ *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE → MODELS.DEFAULTS.VOICE
+ *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE → MODELS.DEFAULTS.VOICE
+ * (every link before the code default is validated; a refused one falls to the next)
  * Every override is checked against an allowlist derived from
  * MODELS.MODEL_CATALOG (Anthropic, text-capable, not `requires: 'deep'` —
  * this lane always runs `thinking: 'disabled'`, which Fable/Mythos ids
@@ -155,6 +156,14 @@ function deriveRelayEventsSubscribed(relayProfileId) {
 }
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+// The shared chain under the inbound overrides, read at the same moment as
+// MODEL: VOICE_RELAY_MODEL, then the VOICE tier (MODEL_VOICE) — each link
+// taken only as an allowlisted Anthropic id (resolveSessionModel), the same
+// links the Models tab's inbound row walks (model-switchboard.js voice_relay).
+const SHARED_MODEL_CHAIN = [
+  { source: 'VOICE_RELAY_MODEL', value: process.env.VOICE_RELAY_MODEL || null },
+  { source: 'MODEL_VOICE', value: MODELS.VOICE },
+];
 
 // Env names for the two inbound-only override levers (see the file header),
 // used in log/stamp text. The reads below name process.env.VOICE_RELAY_* directly
@@ -163,11 +172,6 @@ const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 // directly, so these two vars have no effect on that flow.
 const INBOUND_MODEL_ENV = 'VOICE_RELAY_INBOUND_MODEL';
 const SANDBOX_MODEL_ENV = 'VOICE_RELAY_SANDBOX_MODEL';
-// Named for the fallback-reason/warning text only when the shared MODEL
-// default itself fails validation (see resolveSessionModel) — VOICE_RELAY_MODEL
-// is the operator-facing lever for it (MODEL_VOICE moves MODELS.VOICE, the
-// value VOICE_RELAY_MODEL falls back to when unset).
-const SHARED_MODEL_ENV = 'VOICE_RELAY_MODEL';
 
 // Allowlist for the override envs above — derived from the shared catalog
 // (config/models.js MODEL_CATALOG) rather than a locally hand-typed list, so
@@ -266,18 +270,17 @@ function warnRejectedOverrideOnce(source, value, opts) {
  * ends up running instead — the version stamp must show a rejection happened
  * even when the call still ran on a legitimate (if less-preferred) model.
  *
- * The shared MODEL fallback (VOICE_RELAY_MODEL / MODELS.VOICE, computed at
- * module load, never allowlist-checked before this lane picked a client by
- * provider) is validated here too — the resolved model no longer only
- * shapes request params, it now SELECTS THE PROVIDER CLIENT (providerFor,
- * used by the constructor right after this returns). A misconfigured
- * VOICE_RELAY_MODEL or MODEL_VOICE pointing at a non-Anthropic id
- * (GATE_VOICE_RELAY_OPENAI off, or an OpenAI id this registry never marked
- * voice-eligible, or any id the registry does not recognize at all) must
- * fail closed to the registry's own code default (MODELS.DEFAULTS.VOICE —
- * always a valid, allowlisted Anthropic id) rather than silently reach the
- * OpenAI client, or an unrecognized provider entirely, with no override
- * ever having been rejected.
+ * The shared chain (VOICE_RELAY_MODEL, then MODELS.VOICE / MODEL_VOICE, both
+ * read at module load) is validated here too — the resolved model no longer
+ * only shapes request params, it SELECTS THE PROVIDER CLIENT (providerFor,
+ * used by the constructor right after this returns). Each link is taken only
+ * as an allowlisted Anthropic id; a refused one (an OpenAI id, one this
+ * registry never marked voice-eligible, or any id it does not recognize) is
+ * logged once, recorded as `fallbackReason` if it is the first rejection,
+ * and falls to the next link, finally the registry's own code default
+ * (MODELS.DEFAULTS.VOICE — always a valid, allowlisted Anthropic id). The
+ * Models tab's inbound row walks the same validated chain
+ * (model-switchboard.js voice_relay), so it shows what actually runs.
  *
  * OpenAI ids are eligible only for a sandbox session or an eval-harness
  * session (`evalHarness`, set by services/eval/voice-relay-replay.js alone —
@@ -304,14 +307,18 @@ function resolveSessionModel({ sandbox, evalHarness } = {}) {
       warnRejectedOverrideOnce(source, value, allowOpts);
     }
   }
-  // VOICE_RELAY_MODEL is shared with collections-conversation.js, which only
-  // speaks Anthropic — so the shared fallback takes the Anthropic allowlist
-  // alone, gate or no gate. OpenAI is reachable only via the inbound/sandbox
-  // overrides above.
-  if (typeof MODEL === 'string' && ALLOWED_OVERRIDE_MODEL_IDS.has(MODEL)) return { model: MODEL, fallbackReason };
-  if (!fallbackReason) {
-    fallbackReason = `unknown_shared_model:${SHARED_MODEL_ENV}=${MODEL}`;
-    warnRejectedOverrideOnce(SHARED_MODEL_ENV, MODEL);
+  // The shared chain — VOICE_RELAY_MODEL, then MODEL_VOICE — takes the
+  // Anthropic allowlist alone, gate or no gate: VOICE_RELAY_MODEL is shared
+  // with collections-conversation.js, which only speaks Anthropic, and
+  // OpenAI is reachable only via the inbound/sandbox overrides above. A
+  // rejected link falls to the next one, then to the registry's code default.
+  for (const { source, value } of SHARED_MODEL_CHAIN) {
+    if (!value) continue;
+    if (ALLOWED_OVERRIDE_MODEL_IDS.has(value)) return { model: value, fallbackReason };
+    if (!fallbackReason) {
+      fallbackReason = `unknown_shared_model:${source}=${value}`;
+      warnRejectedOverrideOnce(source, value);
+    }
   }
   return { model: MODELS.DEFAULTS.VOICE, fallbackReason };
 }
