@@ -361,6 +361,36 @@ postgres('InvoiceService.update — unbacked document-level discount fence', () 
     expect(Number(afterSecondEdit.total)).toBe(30);
   });
 
+  // Codex round-5 P1: reconcileInvoiceDiscountProvenance must record the
+  // discount_dollars that actually APPLIED (calculateUpdateFinancials caps
+  // discount_amount at subtotal via Math.min, without rescaling the line
+  // item's own stored dollars), never the inflated raw per-line amount.
+  test('a capped line-only discount (a literal credit larger than the subtotal) reconciles invoice_discounts to the CAPPED amount, not the raw line dollars', async () => {
+    const customerId = await insertCustomer('Synthetic capped-line-only fixture');
+    const invoiceId = randomUUID();
+    await trx('invoices').insert({
+      id: invoiceId, customer_id: customerId,
+      token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+      status: 'draft', title: 'First Service Application',
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 100, amount: 100 }]),
+      subtotal: 100, total: 100,
+    });
+    // A $50 service with a literal -$100 credit — the credit exceeds the
+    // subtotal, so only $50 actually applies (discount can never exceed
+    // the subtotal; the total never goes negative).
+    const updated = await InvoiceService.update(invoiceId, {
+      line_items: [
+        { description: 'First service application', quantity: 1, unit_price: 50, amount: 50 },
+        { description: 'Oversized credit', quantity: 1, unit_price: -100, amount: -100 },
+      ],
+    });
+    expect(Number(updated.discount_amount)).toBe(50);
+    expect(Number(updated.total)).toBe(0);
+    const provenance = await trx('invoice_discounts').where({ invoice_id: invoiceId });
+    expect(provenance).toHaveLength(1);
+    expect(Number(provenance[0].discount_dollars)).toBe(50);
+  });
+
   test('a legit literal (no discount_id) line-item credit that happens to equal 100% of the subtotal still retotals normally', async () => {
     const { invoiceId } = await fixtureWithLegitLiteralFullLineDiscount();
     const updated = await InvoiceService.update(invoiceId, {

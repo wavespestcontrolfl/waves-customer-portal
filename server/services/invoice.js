@@ -358,10 +358,10 @@ async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
 // a separate, still-accepted limitation — reversing them would need a
 // dedicated primitive this fix doesn't add). Best-effort: a failure here
 // must not roll back or fail an otherwise-successful edit.
-async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, conn) {
+async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discountAmount, conn) {
   try {
     const items = Array.isArray(lineItems) ? lineItems : parseInvoiceLineItems(lineItems);
-    const rows = items
+    const rawRows = items
       .filter((li) => {
         if (li?.category === "deposit_credit") return false;
         const qty = li?.quantity != null ? Number(li.quantity) : 1;
@@ -369,11 +369,40 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, conn) {
         return Number.isFinite(rawAmt) && rawAmt < 0;
       })
       .map((li) => ({
-        invoice_id: invoiceId,
         discount_id: li?.discount_id || null,
         discount_name: li?.description || null,
-        discount_dollars: Math.round(Math.abs(Number(li?.amount ?? li?.unit_price) || 0) * 100) / 100,
+        rawDollars: Math.abs(Number(li?.amount ?? li?.unit_price) || 0),
       }));
+    const rawSum = Math.round(rawRows.reduce((s, r) => s + r.rawDollars, 0) * 100) / 100;
+    const targetDollars = Math.round(parseFloat(discountAmount || 0) * 100) / 100;
+    // calculateUpdateFinancials caps discountAmount at subtotal (Math.min)
+    // WITHOUT rescaling each line's own stored dollars — same shape as
+    // create()'s own cap (~3786-3850). Scale each row proportionally so the
+    // audit rows sum to the ACTUALLY-applied discountAmount, never the
+    // inflated raw per-line dollars (Codex round-5 P1): a $50 service with a
+    // literal -$100 credit applies only $50, not $100. Remainder absorbed by
+    // the row with the most headroom, mirroring create()'s own rounding rule.
+    const factor = rawSum > 0 ? Math.min(1, targetDollars / rawSum) : 0;
+    const rows = rawRows.map((r) => ({
+      invoice_id: invoiceId,
+      discount_id: r.discount_id,
+      discount_name: r.discount_name,
+      discount_dollars: Math.round(r.rawDollars * factor * 100) / 100,
+    }));
+    if (rows.length > 0 && factor < 1) {
+      const scaledSum = Math.round(rows.reduce((s, r) => s + r.discount_dollars, 0) * 100) / 100;
+      const remainder = Math.round((targetDollars - scaledSum) * 100) / 100;
+      if (remainder !== 0) {
+        const targetIdx = rows.reduce(
+          (bestIdx, r, i) => (r.discount_dollars > rows[bestIdx].discount_dollars ? i : bestIdx),
+          0,
+        );
+        rows[targetIdx] = {
+          ...rows[targetIdx],
+          discount_dollars: Math.round((rows[targetIdx].discount_dollars + remainder) * 100) / 100,
+        };
+      }
+    }
     // SAVEPOINT (nested transaction) so a failure here rolls back only
     // itself — never the caller's edit transaction, which a raw failed
     // statement inside a Postgres txn would otherwise abort even though
@@ -7899,7 +7928,7 @@ const InvoiceService = {
       // above) — in the SAME transaction as the edit itself, best-effort
       // (never aborts an otherwise-successful edit).
       if (updates.line_items && data.line_items !== undefined) {
-        await reconcileInvoiceDiscountProvenance(id, data.line_items, client);
+        await reconcileInvoiceDiscountProvenance(id, data.line_items, data.discount_amount, client);
       }
       // Phase 2: an edited accrued invoice changes the statement total — reroll in
       // the SAME transaction so a reroll failure ABORTS the edit; we never commit
