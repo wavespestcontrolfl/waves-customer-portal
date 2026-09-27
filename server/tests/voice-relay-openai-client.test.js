@@ -476,12 +476,23 @@ describe('readSSEEvents — line endings', () => {
   });
 });
 
-// Codex r5 P1: with store:false, a reasoning model's tool loop needs its
-// reasoning items back — encrypted, immediately before the call they
-// preceded, within the same caller turn.
+// Codex r5/r6 P1: with store:false, a reasoning model's tool loop needs its
+// reasoning items back — encrypted, each immediately before the item that
+// followed it (the round's original order, preamble message included),
+// within the same caller turn.
 describe('reasoning items across tool-call rounds', () => {
   const RS = (id, enc = `enc-${id}`) => ({ type: 'reasoning', id, summary: [], encrypted_content: enc, status: 'completed' });
   const FC = (id, callId, name = 'lookup_customer') => ({ type: 'function_call', id, call_id: callId, name, arguments: '{}', status: 'completed' });
+  const MSG = (id, text) => ({ type: 'message', id, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text }] });
+  const rsIn = (id, enc = `enc-${id}`) => ({ type: 'reasoning', id, summary: [], encrypted_content: enc });
+  const msgIn = (id, text) => ({ type: 'message', id, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] });
+  const fcIn = (id, callId, name = 'lookup_customer') => ({ type: 'function_call', ...(id ? { id } : {}), call_id: callId, name, arguments: '{}' });
+  const tr = (callId, text = 'Found.') => ({ type: 'function_call_output', call_id: callId, output: text });
+
+  /** One tool round through the real mapper, then the history the relay would keep. */
+  function round(output) {
+    return mapResponseToMessage({ status: 'completed', output }, 'gpt-6-sol');
+  }
 
   test('a reasoning model asks for encrypted reasoning; effort none and no-effort models do not', () => {
     expect(buildOpenAIRequest({ model: 'gpt-6-sol', messages: [] }).include).toEqual(['reasoning.encrypted_content']);
@@ -489,67 +500,95 @@ describe('reasoning items across tool-call rounds', () => {
     expect(buildOpenAIRequest({ model: 'gpt-5.6-sol', messages: [] })).not.toHaveProperty('include');
   });
 
-  test('the reasoning run immediately before a function_call rides on its tool_use block, trimmed to the replay fields', () => {
-    const msg = mapResponseToMessage({ status: 'completed', output: [RS('rs_1'), RS('rs_2'), FC('fc_1', 'call_1'), FC('fc_2', 'call_2')] }, 'gpt-6-sol');
-    expect(msg.content[0]._openai).toEqual({
-      itemId: 'fc_1',
-      reasoning: [
-        { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-rs_1' },
-        { type: 'reasoning', id: 'rs_2', summary: [], encrypted_content: 'enc-rs_2' },
-      ],
-    });
-    expect(msg.content[1]).not.toHaveProperty('_openai'); // nothing reasoned right before the second call
+  test('a tool round records its original item order on its first tool_use block, trimmed to replay fields', () => {
+    const msg = round([RS('rs_1'), MSG('msg_1', 'Let me check.'), RS('rs_2'), FC('fc_1', 'call_1'), FC('fc_2', 'call_2'), RS('rs_trailing')]);
+    expect(msg.content.map((b) => b.type)).toEqual(['text', 'tool_use', 'tool_use']);
+    expect(msg.content[1]._openai.order).toEqual([
+      { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-rs_1' },
+      { type: 'message', id: 'msg_1' },
+      { type: 'reasoning', id: 'rs_2', summary: [], encrypted_content: 'enc-rs_2' },
+      { type: 'function_call', id: 'fc_1', call_id: 'call_1' },
+      { type: 'function_call', id: 'fc_2', call_id: 'call_2' },
+    ]); // trailing reasoning has no following item to pair with — dropped
+    expect(msg.content[2]).not.toHaveProperty('_openai');
   });
 
-  test('reasoning followed by a message is not kept (the relay may rewrite or withhold that text)', () => {
-    const msg = mapResponseToMessage({
-      status: 'completed',
-      output: [RS('rs_1'), { type: 'message', content: [{ type: 'output_text', text: 'Let me check.' }] }, FC('fc_1', 'call_1')],
-    }, 'gpt-6-sol');
-    expect(msg.content[0]).toEqual({ type: 'text', text: 'Let me check.' });
-    expect(msg.content[1]).not.toHaveProperty('_openai');
+  test.each([
+    ['no reasoning at all', [MSG('msg_1', 'One sec.'), FC('fc_1', 'call_1')]],
+    ['a reasoning item without encrypted content', [{ type: 'reasoning', id: 'rs_1', summary: [] }, FC('fc_1', 'call_1')]],
+    ['a message without an id', [RS('rs_1'), { type: 'message', content: [{ type: 'output_text', text: 'Hi.' }] }, FC('fc_1', 'call_1')]],
+    ['a call without an item id', [RS('rs_1'), { type: 'function_call', call_id: 'call_1', name: 'lookup_customer', arguments: '{}', status: 'completed' }]],
+  ])('a round with %s records nothing to replay', (_label, output) => {
+    expect(round(output).content.find((b) => b.type === 'tool_use')).not.toHaveProperty('_openai');
   });
 
-  test('replay: the reasoning run goes back immediately before its call, which carries its item id', () => {
-    const toolUse = { type: 'tool_use', id: 'call_1', name: 'lookup_customer', input: {}, _openai: { itemId: 'fc_1', reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' }] } };
+  test('replay: [reasoning, function_call] goes back paired, the call carrying its item id', () => {
+    const msg = round([RS('rs_1'), FC('fc_1', 'call_1')]);
     const items = toResponsesInput([
       { role: 'user', content: 'hi' },
-      { role: 'assistant', content: [{ type: 'text', text: 'One moment.' }, toolUse] },
+      { role: 'assistant', content: msg.content },
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'Found.' }] },
     ]);
     expect(items).toEqual([
       { role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
-      { role: 'assistant', content: 'One moment.' },
-      { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' },
-      { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup_customer', arguments: '{}' },
-      { type: 'function_call_output', call_id: 'call_1', output: 'Found.' },
+      rsIn('rs_1'),
+      fcIn('fc_1', 'call_1'),
+      tr('call_1'),
     ]);
   });
 
-  test('replay: reasoning from an earlier caller turn is not sent again, and its call goes back id-less', () => {
-    const toolUse = { type: 'tool_use', id: 'call_1', name: 'lookup_customer', input: {}, _openai: { itemId: 'fc_1', reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' }] } };
+  test('replay: [reasoning, message, function_call] keeps its original order — the reasoning stays paired with the message', () => {
+    const msg = round([RS('rs_1'), MSG('msg_1', 'Let me check.'), FC('fc_1', 'call_1')]);
     const items = toResponsesInput([
       { role: 'user', content: 'hi' },
-      { role: 'assistant', content: [toolUse] },
+      { role: 'assistant', content: msg.content },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'Found.' }] },
+    ]);
+    expect(items.slice(1)).toEqual([rsIn('rs_1'), msgIn('msg_1', 'Let me check.'), fcIn('fc_1', 'call_1'), tr('call_1')]);
+  });
+
+  test('replay: a message the relay withheld (write-tool turn) goes back empty, still paired', () => {
+    const msg = round([RS('rs_1'), MSG('msg_1', "That's booked!"), FC('fc_1', 'call_1', 'request_booking')]);
+    const kept = msg.content.filter((b) => b.type !== 'text'); // relay-conversation.js _finalizeBlockRound, write turn
+    const items = toResponsesInput([{ role: 'user', content: 'book it' }, { role: 'assistant', content: kept }]);
+    expect(items.slice(1)).toEqual([rsIn('rs_1'), msgIn('msg_1', ''), fcIn('fc_1', 'call_1', 'request_booking')]);
+  });
+
+  test('replay: a message cut to its sent prefix, or rewritten after a barge-in, carries the text the relay kept', () => {
+    const msg = round([RS('rs_1'), MSG('msg_1', 'Let me check on that for you.'), FC('fc_1', 'call_1')]);
+    const toolUse = msg.content.find((b) => b.type === 'tool_use');
+    const items = toResponsesInput([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Let me check… [interrupted]' }, toolUse] },
+    ]);
+    expect(items.slice(1)).toEqual([rsIn('rs_1'), msgIn('msg_1', 'Let me check… [interrupted]'), fcIn('fc_1', 'call_1')]);
+  });
+
+  test('replay: several message items put the kept text on the first and leave the rest empty', () => {
+    const msg = round([MSG('msg_1', 'One sec.'), RS('rs_1'), MSG('msg_2', 'Checking.'), FC('fc_1', 'call_1')]);
+    const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: msg.content }]);
+    expect(items.slice(1)).toEqual([msgIn('msg_1', 'One sec.\nChecking.'), rsIn('rs_1'), msgIn('msg_2', ''), fcIn('fc_1', 'call_1')]);
+  });
+
+  test('replay: a round from an earlier caller turn goes back plain — no reasoning, no item ids', () => {
+    const msg = round([RS('rs_1'), MSG('msg_1', 'One moment.'), FC('fc_1', 'call_1')]);
+    const items = toResponsesInput([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: msg.content },
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'Found.' }] },
       { role: 'assistant', content: 'Hi Pat.' },
       { role: 'user', content: [{ type: 'text', text: '[clock]' }, { type: 'text', text: 'next question' }] },
     ]);
-    expect(items.some((i) => i.type === 'reasoning')).toBe(false);
-    expect(items.find((i) => i.type === 'function_call')).toEqual({ type: 'function_call', call_id: 'call_1', name: 'lookup_customer', arguments: '{}' });
+    expect(items.some((i) => i.type === 'reasoning' || i.type === 'message')).toBe(false);
+    expect(items).toContainEqual({ role: 'assistant', content: 'One moment.' });
+    expect(items).toContainEqual(fcIn(null, 'call_1'));
   });
 
-  test.each([
-    ['no encrypted content', { itemId: 'fc_1', reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [] }] }],
-    ['no reasoning id', { itemId: 'fc_1', reasoning: [{ type: 'reasoning', summary: [], encrypted_content: 'enc' }] }],
-    ['no call item id', { reasoning: [{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' }] }],
-  ])('replay: a reasoning run with %s is not sent (it could not be paired or read back)', (_label, meta) => {
-    const items = toResponsesInput([
-      { role: 'user', content: 'hi' },
-      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'lookup_customer', input: {}, _openai: meta }] },
-    ]);
-    expect(items.some((i) => i.type === 'reasoning')).toBe(false);
-    expect(items.find((i) => i.type === 'function_call')).not.toHaveProperty('id');
+  test('replay: a round whose call is missing from history falls back to the plain rebuild', () => {
+    const msg = round([RS('rs_1'), FC('fc_1', 'call_1'), FC('fc_2', 'call_2')]);
+    const onlySecond = msg.content.filter((b) => b.id === 'call_2').map((b) => ({ ...b, _openai: msg.content[0]._openai }));
+    const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: onlySecond }]);
+    expect(items.slice(1)).toEqual([fcIn(null, 'call_2')]);
   });
 
   test('stream: encrypted content from response.output_item.done fills a terminal body that lacks it', async () => {
@@ -560,6 +599,6 @@ describe('reasoning items across tool-call rounds', () => {
     ]);
     const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
     const msg = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage();
-    expect(msg.content[0]._openai.reasoning).toEqual([{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-from-done' }]);
+    expect(msg.content[0]._openai.order[0]).toEqual({ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-from-done' });
   });
 });
