@@ -1039,14 +1039,16 @@ function escapeRegExpLiteral(value) {
 // mirroring containsWholeWords' tolerance. Returns [{ start, end }, ...].
 // Between a digit and a letter (either order, inside a word or between two
 // words) a separator is optional, so a catalog "Barricade 65WG" matches a
-// spoken "65 WG" and an "Armada 50 WDG" matches "50WDG". Elsewhere words
-// still need a separator between them.
+// spoken "65 WG" and an "Armada 50 WDG" matches "50WDG". So is it between
+// two single letters ("Bifen I/T" matches "Bifen IT"). Elsewhere words still
+// need a separator between them.
 const DIGIT_LETTER_BOUNDARY = /(?<=\d)(?=[a-z])|(?<=[a-z])(?=\d)/i;
 function phrasePattern(words) {
   return words.map((word, i) => {
     const inner = word.split(DIGIT_LETTER_BOUNDARY).map(escapeRegExpLiteral).join('[^a-zA-Z0-9]*');
     if (i === 0) return inner;
-    const boundary = /\d$/.test(words[i - 1]) !== /^\d/.test(word);
+    // Two single letters in a row ("I/T") also match spoken compact ("IT").
+    const boundary = /\d$/.test(words[i - 1]) !== /^\d/.test(word) || (words[i - 1].length === 1 && word.length === 1);
     return `${boundary ? '[^a-zA-Z0-9]*' : '[^a-zA-Z0-9]+'}${inner}`;
   }).join('');
 }
@@ -1250,7 +1252,9 @@ function isBareFollowUp(text) {
 // one check every match type routes through.
 const NOUN_POSITION_UNITS = 'fl\\s*oz|oz|ounces?|gal(?:lons?)?|gals|qts?|quarts?|pts?|pints?|lbs?|pounds?|g|grams?|kg|ml|l|liters?'
   + '|each|items?|bottles?|jugs?|bags?|cases?|box(?:es)?|pails?|cans?|containers?|tubes?|packs?|things?|units?|buckets?';
-const NOUN_POSITION_NUMBER_WORDS = ['a', 'an', ...NUMBER_WORD_ONES, ...NUMBER_WORD_TENS, 'hundred', 'dozen'].join('|');
+// A spoken quantity: a/an, hundred, dozen, or a number word including tens+ones
+// compounds ("twenty one"), the same forms the percent parser reads.
+const NOUN_POSITION_NUMBER_WORDS = `a|an|hundred|dozen|${PERCENT_NUMBER_WORD_ALT}`;
 const NOUN_POSITION_BEFORE_RE = new RegExp('(?:\\bof'
   + `|(?:\\b\\d+(?:\\.\\d+)?|\\b(?:${NOUN_POSITION_NUMBER_WORDS}))\\s*(?:${NOUN_POSITION_UNITS})(?:\\s+of)?`
   + ')[^a-zA-Z0-9]*$', 'i');
@@ -1334,35 +1338,37 @@ async function productsNamedIn(rawText) {
 // target_relationship_mismatch), or null (no grounding found; the caller
 // keeps its original clarification refusal, which also covers "named 2+
 // products"). Called only where the grammar found no target at all.
-// The fallback's words must ask for the tool's own operation. adjust_stock
-// adds stock that is on hand, so it needs a receipt word and no ordering
-// word: "We ordered Taurus SC" never adds stock before it arrives.
-// create_restock_request orders more, so it needs an ordering word and no
-// receipt word: "We received Taurus SC" never opens a request.
-// Only completed-purchase or receipt words count for adjust_stock: "please
-// buy Taurus SC" asks for an order, so "buy" is an ordering word.
-const RECEIPT_WORDS = new Set(['bought', 'purchased', 'picked', 'received', 'receive', 'restocked',
-  'delivered', 'arrived', 'came', 'add', 'added', 'adding', 'put', 'got', 'log', 'logged', 'record', 'recorded']);
+// The fallback's words must ask for the tool's own operation. Each text
+// reads as ONE operation, in this order of precedence:
+// - arrival or completed-purchase words (bought, received, arrived...) mean
+//   a receipt, even beside the noun "order" ("The Taurus SC order arrived;
+//   add two bottles");
+// - otherwise ordering words (order, reorder, restock, buy) mean an order
+//   ("please buy Taurus SC", "add Taurus to the reorder list");
+// - otherwise recording words (add, log, record, put) mean a receipt.
+// adjust_stock needs a receipt and grounds only a restock preview (never a
+// count or a write-off); create_restock_request needs an order.
+const ARRIVAL_WORDS = new Set(['bought', 'purchased', 'picked', 'received', 'restocked', 'delivered', 'arrived', 'came', 'got']);
 const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock', 'buy']);
-// A receipt phrase grounds only a restock: a count correction or a write-off
-// from the same words is never inferred.
-// `texts` run newest first: the current prompt, any bare turns the look-back
-// skipped, then the turn that named the product. The newest text with any
-// operation word decides, so "It arrived, one bottle" after "Order Taurus
-// SC" is a receipt, and so is "1 bottle" after "We ordered Taurus SC" then
-// "It arrived".
-function operationMatches(toolName, texts, preview) {
+const RECORDING_WORDS = new Set(['receive', 'add', 'added', 'adding', 'put', 'log', 'logged', 'record', 'recorded']);
+function textOperation(text) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const cues = (text) => {
-    const words = normalizeForMatch(text).split(' ');
-    return { receipt: words.some((word) => RECEIPT_WORDS.has(word)), order: words.some((word) => ORDER_WORDS.has(word)) };
-  };
-  const { receipt, order } = texts.map(cues).find((c) => c.receipt || c.order) || { receipt: false, order: false };
+  const words = normalizeForMatch(text).split(' ');
+  if (words.some((word) => ARRIVAL_WORDS.has(word))) return 'receipt';
+  if (words.some((word) => ORDER_WORDS.has(word))) return 'order';
+  return words.some((word) => RECORDING_WORDS.has(word)) ? 'receipt' : null;
+}
+// `texts` run newest first: the current prompt, any bare turns the look-back
+// skipped, then the turn that named the product. The newest text with an
+// operation decides, so "It arrived, one bottle" after "Order Taurus SC" is
+// a receipt, and so is "1 bottle" after "We ordered Taurus SC" then "It
+// arrived".
+function operationMatches(toolName, texts, preview) {
+  const operation = texts.map(textOperation).find(Boolean) || null;
   if (toolName === 'adjust_stock') {
-    return receipt && !order && (preview.movement_type == null || preview.movement_type === 'restock');
+    return operation === 'receipt' && (preview.movement_type == null || preview.movement_type === 'restock');
   }
-  if (toolName === 'create_restock_request') return order && !receipt;
-  return false;
+  return toolName === 'create_restock_request' && operation === 'order';
 }
 
 const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });

@@ -671,6 +671,19 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toMatchObject(expected);
   });
 
+  test.each([
+    ['We bought Bifen IT, two bottles', { id: 'p-bifen-it', name: 'Bifen I/T', active: true }, {}],
+    ['We bought Taurus, twenty one ounces', null, {}],
+    ['The Taurus SC order arrived; add two bottles.', null, { movement_type: 'restock' }],
+  ])('round-8 phrasing grounds adjust_stock: "%s"', async (prompt, extraProduct, extra) => {
+    const target = extraProduct || TAURUS;
+    setGroundingDb({ products: [TAURUS, ALPINE, ...(extraProduct ? [extraProduct] : [])] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt, preview: { product: { id: target.id, name: target.name }, ...extra },
+    });
+    expect(result).toEqual({ productId: target.id });
+  });
+
   describe('the words must ask for the tool\'s own operation', () => {
     test.each([
       ['adjust_stock', 'We ordered Taurus SC', {}],

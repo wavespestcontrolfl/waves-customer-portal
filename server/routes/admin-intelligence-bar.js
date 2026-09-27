@@ -273,14 +273,20 @@ const { CONTINUATION_TURN } = IbThreads;
 // new card to replace the previous card") is still a claim, and the
 // notice's wording is true either way.
 const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bclick confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
-// How many cards a reply claims: an explicit count ("two confirmation
-// cards"), else 2 for a plural claim and 1 for a singular one.
+// How many cards a reply claims, summed over every claim phrase: each
+// "confirmation card(s)" or "card(s) below" counts its explicit number ("two
+// confirmation cards"), else 2 for a plural and 1 for a singular. A claim
+// with no such noun phrase ("click Confirm") counts 1.
 const CARD_COUNT_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
+const CARD_PHRASE_RE = /\b(?:(\d+|one|two|three|four|five|six|both)\s+(?:(?:new|separate)\s+)?)?(?:confirm(?:ation)?\s+(cards?)(?:\s+below)?|(cards?)\s+below)\b/gi;
 function claimedCardCount(text) {
   if (!CARD_CLAIM_RE.test(text)) return 0;
-  const explicit = String(text).match(/\b(\d+|one|two|three|four|five|six|both)\s+(?:(?:new|separate)\s+)?(?:confirmation\s+)?cards?\b/i);
-  if (explicit) return Number(explicit[1]) || CARD_COUNT_WORDS[explicit[1].toLowerCase()];
-  return /\bcards\b/i.test(text) ? 2 : 1;
+  const phrases = [...String(text).matchAll(CARD_PHRASE_RE)];
+  if (!phrases.length) return 1;
+  return phrases.reduce((sum, [, count, noun, nounBelow]) => {
+    const explicit = count && (Number(count) || CARD_COUNT_WORDS[count.toLowerCase()]);
+    return sum + (explicit || (/s$/i.test(noun || nounBelow) ? 2 : 1));
+  }, 0);
 }
 function phantomCardNotice(created) {
   if (created === 0) return "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
