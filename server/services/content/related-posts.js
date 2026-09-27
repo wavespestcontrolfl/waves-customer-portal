@@ -251,6 +251,21 @@ function parseJsonObject(value) {
   }
 }
 
+function registryRowLivePath(row) {
+  const safeRow = row || {};
+  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean) || null;
+  const requiredStates = [
+    [safeRow.content_type, 'blog'],
+    [safeRow.workflow_status, 'published'],
+    [safeRow.astro_status, 'present'],
+    [safeRow.live_status, 'live'],
+  ];
+  if (!rawPath || !requiredStates.every(([actual, expected]) => actual === expected) || safeRow.noindex_detected === true) return null;
+  const pathSites = normalizeSpokeSites([rawPath]);
+  if (/^https?:\/\//i.test(rawPath) && pathSites.length === 0) return null;
+  return normalizePathForCompare(rawPath);
+}
+
 // The registry is the only durable inventory for Astro-authored posts that
 // have neither a blog_posts row nor an autonomous run. Accept only its
 // strongest state: an Astro source is present, the workflow is published,
@@ -259,22 +274,15 @@ function candidateFromRegistryRow(row) {
   const safeRow = row || {};
   const metadata = parseJsonObject(safeRow.metadata);
   const frontmatter = parseJsonObject(metadata.frontmatter);
-  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean) || null;
-  const requiredStates = [
-    [safeRow.content_type, 'blog'],
-    [safeRow.reconciliation_status, 'astro_only'],
-    [safeRow.workflow_status, 'published'],
-    [safeRow.astro_status, 'present'],
-    [safeRow.live_status, 'live'],
-  ];
-  if (!rawPath || !requiredStates.every(([actual, expected]) => actual === expected) || safeRow.noindex_detected === true) return null;
+  const path = registryRowLivePath(safeRow);
+  if (!path || safeRow.reconciliation_status !== 'astro_only') return null;
+  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean);
   const pathSites = normalizeSpokeSites([rawPath]);
-  if (/^https?:\/\//i.test(rawPath) && pathSites.length === 0) return null;
   const configuredSites = normalizeSpokeSites(frontmatter.domains);
   return {
     id: safeRow.id,
     title: safeRow.title || frontmatter.title || null,
-    path: normalizePathForCompare(rawPath),
+    path,
     keyword: safeRow.target_keyword || frontmatter.primary_keyword || null,
     city: safeRow.target_city || null,
     service: safeRow.target_service || null,
@@ -315,6 +323,7 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       'category',
       'metadata'
     );
+  const liveRegistryPaths = new Set((registryRows || []).map(registryRowLivePath).filter(Boolean));
   const candidates = (rows || [])
     .map((row) => {
       try { return candidateFromRow(row); }
@@ -323,7 +332,8 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
     // A merge stamps status + astro_live_url before the production build is
     // verified. Only astro_status=live proves the URL is actually deployed;
     // never offer a build_failed or still-pending target to a hard link gate.
-    .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live' && c.workflowStatus === 'published');
+    .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live'
+      && c.workflowStatus === 'published' && liveRegistryPaths.has(c.path));
   for (const row of registryRows || []) {
     try {
       const candidate = candidateFromRegistryRow(row);
@@ -339,6 +349,7 @@ module.exports = {
   rankRelatedPosts,
   candidateFromRow,
   candidateFromRegistryRow,
+  registryRowLivePath,
   getRelatedPostsForBrief,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };

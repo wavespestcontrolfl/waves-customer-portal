@@ -363,6 +363,15 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
       { id: 'e', title: 'Merged But Build Failed', keyword: 'termite failed build', tag: 'Termites', category: 'termite', slug: 'failed-build', city: null, target_sites: null, status: 'published', astro_status: 'build_failed', astro_live_url: '/termite/failed-build/' },
     ];
     const registryRows = [{
+      id: 'registry-db-a',
+      canonical_url_normalized: '/termite/bait-stations/',
+      content_type: 'blog',
+      reconciliation_status: 'matched',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+    }, {
       id: 'registry-1',
       canonical_url_normalized: '/termite/direct-astro-post/',
       content_type: 'blog',
@@ -386,6 +395,24 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     ]);
     expect(out.some((r) => r.path.includes('termite-legacy-slug'))).toBe(false);
     expect(out.some((r) => r.path.includes('failed-build'))).toBe(false);
+  });
+
+  test('excludes a historically live DB post when current registry health is missing', async () => {
+    const blogRows = [{
+      id: 'stale-db', title: 'Stale Termite Post', keyword: 'termite damage inspection',
+      category: 'termite', slug: 'stale', status: 'published', astro_status: 'live',
+      astro_live_url: '/termite/stale/',
+    }];
+    const registryRows = [{
+      id: 'registry-stale', canonical_url_normalized: '/termite/stale/', content_type: 'blog',
+      reconciliation_status: 'matched', workflow_status: 'published', astro_status: 'present',
+      live_status: 'missing', noindex_detected: false,
+    }];
+
+    await expect(getRelatedPostsForBrief(
+      { service: 'termite', keyword: 'termite damage inspection' },
+      { database: fakeDb({ blogRows, registryRows }) }
+    )).resolves.toEqual([]);
   });
 
   test('a DB read failure propagates (the caller is responsible for the fallback-to-empty catch)', async () => {
