@@ -265,13 +265,15 @@ function rowKey(row) {
 //     email): always, even when a later Delivered email rebuilds the same
 //     line — the recorded hold owns that line (see dedupe);
 //   - a row whose email was deleted (email_id is ON DELETE SET NULL): the
-//     live agent can't check it for duplicates, so it holds it for a person;
+//     live agent can't check it for duplicates, so it holds it for a person —
+//     also always, since a surviving duplicate email rebuilding the same line
+//     was never recorded live (the row owns that line; see dedupe);
 //   - any other row outside the window (before --since): silent, there only
 //     so a hand-off recorded before the window still stops a later email.
 // Rows recorded inside the window are reported (holds and deleted-email
 // rows); the rest only feed the rules.
 function tableOnlyLines(rows, collectedKeys, since) {
-  return rows.filter((row) => row.status === 'no_delivery_email' || !collectedKeys.has(rowKey(row))).map((row) => {
+  return rows.filter((row) => row.status === 'no_delivery_email' || !row.email_id || !collectedKeys.has(rowKey(row))).map((row) => {
     const inWindow = new Date(row.created_at) >= since;
     const report = !inWindow ? null : (!row.email_id && 'email_deleted') || (row.status === 'no_delivery_email' && row.status) || null;
     return {
@@ -290,8 +292,8 @@ function lineKey(line) {
   return [line.vendor, line.orderNumber || 'unknown', line.shipmentKey, line.lineNo].join('|');
 }
 
-// A line the live lane actually recorded as a hold (an undelivered-shipment
-// line) owns its identity outright: the table holds exactly one row per
+// A line the live lane recorded that no email rebuilds (an undelivered
+// hold, a deleted-email row, see tableOnlyLines) owns its identity outright: the table holds exactly one row per
 // line, so a later Delivered email for that same line was never recorded
 // live, whichever email sorts first.
 function dedupe(lines) {

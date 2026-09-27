@@ -204,6 +204,15 @@ describe('tableOnlyLines', () => {
     expect(out.map((l) => [l.lineNo, l.report])).toEqual([[2, 'no_delivery_email']]);
   });
 
+  // 2026-09-27 pre-push P1: a surviving duplicate email rebuilding the same
+  // line never displaces the recorded deleted-email row.
+  test('a deleted-email row owns its line even when another email rebuilds it', () => {
+    const orphan = row({ email_id: null, status: 'agent_pending' });
+    const [recorded] = tableOnlyLines([orphan], new Set([keyOf(orphan)]), since);
+    const duplicate = { vendor: 'amazon', orderNumber: 'o', shipmentKey: 'S', lineNo: 1, email: { id: 'dup', received_at: orphan.created_at } };
+    expect(dedupe([duplicate, recorded])).toEqual([recorded]);
+  });
+
   test('a deleted-email row in the window is reported; a pre-window row only feeds the rules', () => {
     const orphan = row({ email_id: null, status: 'agent_pending' });
     const old = row({ line_no: 2, status: 'no_items', created_at: '2026-08-01T00:00:00Z' });
