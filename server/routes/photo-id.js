@@ -48,6 +48,7 @@ const {
 // return value from `v2` and never rides in report_contract or any
 // customer-facing response.
 const { identifyPestV2 } = require('../services/photo-id-v2/pest-engine');
+const speciesCatalog = require('../services/species-catalog');
 const lawnAssessment = require('../services/lawn-assessment');
 const { loadCustomerGrassContext, grassTypeLabel } = require('../services/lawn-grass-context');
 const {
@@ -403,20 +404,41 @@ function pestReserviceLane(contract) {
   return line === 'pest' || line === 'lawn' ? line : null;
 }
 
+// Catalog nodes whose EVERY entry is inspection-first — each such entry,
+// plus the termite, rodent and bed bug groups and the carpenter-ant
+// subgroup. Node ids are disjoint across levels (species-catalog.js
+// getNode), so one set covers an answer at any level. Built once from the
+// static catalog.
+const INSPECTION_FIRST_NODES = (() => {
+  const flagsByNode = new Map();
+  for (const entry of speciesCatalog.listEntries()) {
+    const category = speciesCatalog.getGroup(entry.group)?.category;
+    for (const id of [entry.slug, entry.subgroup, entry.group, category]) {
+      if (!id) continue;
+      if (!flagsByNode.has(id)) flagsByNode.set(id, []);
+      flagsByNode.get(id).push(!!entry.service?.inspection_first);
+    }
+  }
+  return new Set([...flagsByNode].filter(([, flags]) => flags.every(Boolean)).map(([id]) => id));
+})();
+
 // GATE_PHOTO_ID_V2's own next_step kind resolution (V2-CONTRACT.md
 // "next_step (existing field) kinds for v2"), used in place of
 // pestNextStepKind whenever a v2 object is present (POST and every later
-// GET reconstruction) — `contract` here is always the v1-mapped
-// report_contract (mapToV1's output), whose `service.inspection_required`
-// equals the catalog entry's own `service.inspection_first` for every v2
-// entry. Order matters:
+// GET reconstruction). `contract` is the v1-mapped report_contract
+// (mapToV1's output), read here only for the re-service lane. Order matters:
 // - a referral wins first. The engine attaches one only to a named entry,
 //   the card always shows its text (V2Result), and it says who handles this
 //   instead of us (bee relocation, bat exclusion, a wildlife trapper, an
 //   FWC/FDACS report). Honey bee swarms/wall colonies and bats are ALSO
 //   inspection-first, and an in-person-inspection offer under "we refer you
 //   to a licensed specialist" would contradict the card.
-// - then inspection-first, at any confidence (v1's rule).
+// - then inspection-first, at any confidence (v1's rule), judged on the node
+//   the answer stops at: a named entry's own flag, or a node whose every
+//   entry is inspection-first ("Looks like a termite"). Never the v1
+//   mapping's `inspection_required`, which mapToV1 sets on EVERY answer
+//   that names no entry (v1's unmatched fallback) — that would offer an
+//   in-person inspection for a photo nobody could read.
 // - needs_more_evidence never reads as a settled answer.
 // - an ally/harmless entry reads as the reassuring 'none' only when the
 //   answer is 'pretty_sure'; a 'likely' benign call stays 'unclear' — the
@@ -425,7 +447,7 @@ function pestReserviceLane(contract) {
 //   request.
 function pestNextStepKindV2(v2, contract, access, isSecondary) {
   if (v2.referral) return 'referral';
-  if (contract?.service?.inspection_required) return 'inspection';
+  if (INSPECTION_FIRST_NODES.has(v2.answer?.node_id)) return 'inspection';
   if (v2.tier === 'needs_more_evidence') return 'unclear';
   if (v2.entry && (v2.entry.verdict === 'ally' || v2.entry.verdict === 'harmless')) {
     return v2.answer?.wording === 'pretty_sure' ? 'none' : 'unclear';

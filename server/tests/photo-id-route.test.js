@@ -362,6 +362,34 @@ function v2ResultFor({
   };
 }
 
+// An answer that names no entry — "Looks like {generic}" at a catalog node,
+// or unknown — with the engine's REAL v1 mapping, which marks every such
+// answer inspection_required (v1's unmatched fallback).
+function unnamedV2ResultFor({ level = 'unknown', nodeId = null, headline = "We couldn't tell from these photos" } = {}) {
+  const { mapToV1 } = jest.requireActual('../services/photo-id-v2/pest-engine');
+  const wording = nodeId ? 'group_only' : 'unknown';
+  const base = v2ResultFor({ tier: 'needs_more_evidence' });
+  return {
+    ...base,
+    v2: {
+      ...base.v2,
+      answer: {
+        level, node_id: nodeId, wording, headline, subhead: null,
+      },
+      entry: null,
+      candidates: [],
+      next_photo: { ask: 'Get closer', why: 'Narrows it down', photo_can_confirm: true },
+    },
+    v1: mapToV1({
+      topEntrySlug: null,
+      tier: 'needs_more_evidence',
+      answer: { level, node_id: nodeId, wording },
+      evidence: { matches: [], still_need: [] },
+      candidatesBlock: [],
+    }),
+  };
+}
+
 async function post(base, path, body, headers = {}) {
   return fetch(`${base}${path}`, {
     method: 'POST',
@@ -1382,12 +1410,12 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     });
   });
 
-  test('gate on: a referral beats inspection-first (honey bees are both) — no in-person inspection offer under "we refer you"', async () => {
+  test('gate on: a referral beats inspection-first (honey bees and bats are both) — no in-person inspection offer under "we refer you"', async () => {
     mockGateState.photoIdV2 = true;
-    expect(libraryEntry('honey-bee').inspection_required).toBe(true);
+    // subterranean-termite is inspection-first (the test above); the
+    // referral on the same answer still decides.
     mockIdentifyPestV2.mockResolvedValue(v2ResultFor({
-      slug: 'honey-bee',
-      entryOverrides: { verdict: 'ally', verdict_label: 'Helpful — leave it' },
+      slug: 'subterranean-termite',
       referral: { kind: 'bee_relocation', text: 'Refer text.' },
     }));
     await withServer(async (base) => {
@@ -1397,6 +1425,37 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
 
       const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((r) => r.json());
       expect(detail.next_step.kind).toBe('referral');
+    });
+  });
+
+  test('gate on: an unknown answer -> "unclear", though the engine\'s real v1 mapping marks it inspection_required', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = unnamedV2ResultFor();
+    expect(engineResult.v1.report_contract.service.inspection_required).toBe(true);
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((r) => r.json());
+      expect(body.next_step.kind).toBe('unclear');
+      const list = await fetch(`${base}/api/photo-id`).then((r) => r.json());
+      expect(list.items.find((i) => i.id === body.id).next_step_kind).toBe('unclear');
+    });
+  });
+
+  test('gate on: an answer that stops at an all-inspection-first group ("Looks like a termite") -> "inspection"', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(unnamedV2ResultFor({ level: 'group', nodeId: 'termites', headline: 'Looks like a termite' }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((r) => r.json());
+      expect(body.next_step.kind).toBe('inspection');
+    });
+  });
+
+  test('gate on: an answer that stops at a mixed group ("Looks like an ant") -> "unclear"', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(unnamedV2ResultFor({ level: 'group', nodeId: 'ants', headline: 'Looks like an ant' }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((r) => r.json());
+      expect(body.next_step.kind).toBe('unclear');
     });
   });
 
