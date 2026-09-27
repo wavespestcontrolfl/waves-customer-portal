@@ -22,7 +22,7 @@ describe('assertReadOnly', () => {
     });
     await expect(assertReadOnly(db)).resolves.toBeUndefined();
     expect(db.raw).toHaveBeenCalledTimes(1);
-    expect(db.raw.mock.calls[0][0]).toMatch(/^UPDATE purchase_receipt_lines/);
+    expect(db.raw.mock.calls[0][0]).toMatch(/^UPDATE products_catalog/);
   });
 
   test('the write matches zero rows by construction, so it is a no-op even in the failure branch below', () => {

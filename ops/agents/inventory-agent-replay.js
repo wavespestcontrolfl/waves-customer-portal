@@ -37,6 +37,10 @@
 // write attempt through the shared db module — the script refuses to run
 // at all unless Postgres itself rejects it.
 process.env.PGOPTIONS = '-c default_transaction_read_only=on';
+// The shared server/models/db pool reads DATABASE_URL. Under a local
+// `railway run` that is Railway's internal address, unreachable from here,
+// so point it at the public URL before any server module is loaded.
+if (process.env.DATABASE_PUBLIC_URL) process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 delete process.env.GATE_LLM_CALL_LEDGER;
 delete process.env.GATE_LLM_CALL_TRACES;
 delete process.env.GATE_LLM_DISPATCH_METRICS;
@@ -60,7 +64,9 @@ function arg(name, fallback = null) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : fallback;
 }
-const LIMIT = Number(arg('limit', '50')) || 50;
+// --limit=0 is valid: list every title with its classifier status, no LLM calls.
+const LIMIT_ARG = Number(arg('limit', '50'));
+const LIMIT = Number.isInteger(LIMIT_ARG) && LIMIT_ARG >= 0 ? LIMIT_ARG : 50;
 const SINCE = new Date(arg('since', '2000-01-01T00:00:00Z'));
 
 const server = (relative) => path.join(__dirname, '..', '..', 'server', relative);
@@ -81,7 +87,9 @@ const sharedDb = require(server('models/db'));
 async function assertReadOnly(db) {
   let rejected = false;
   try {
-    await db.raw("UPDATE purchase_receipt_lines SET agent_attempts = agent_attempts WHERE id = '00000000-0000-0000-0000-000000000000'::uuid");
+    // products_catalog.name exists in every environment, before or after
+    // this lane's migration, so the check never fails for a missing column.
+    await db.raw("UPDATE products_catalog SET name = name WHERE id = '00000000-0000-0000-0000-000000000000'::uuid");
   } catch (err) {
     if (!/read-only transaction/i.test(err.message)) {
       throw new Error(`read-only self-check errored, but not with the expected read-only rejection — refusing to run: ${err.message}`);
@@ -109,7 +117,8 @@ function readOnlyConn() {
 
 async function amazonTitles(conn, since) {
   const items = [];
-  const columns = ['id', 'gmail_id', 'subject', 'body_text', 'body_html', 'received_at'];
+  // from_address is required: both Amazon parsers check the sender first.
+  const columns = ['id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at'];
   const delivered = await conn('emails').select(columns)
     .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%']).where('received_at', '>=', since);
   for (const email of delivered) {
