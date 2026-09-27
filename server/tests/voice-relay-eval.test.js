@@ -5229,6 +5229,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'CARLOS le enviará el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito Carlos.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito Carlos de la Cruz.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito Carlos de la Cruz para revisión.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito Carlos de la Cruz a Carmen Ortiz.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito la coordinadora de Waves Ana de la Cruz para revisión.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito la coordinadora de Waves Ana de la Cruz a Carmen Ortiz.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito Juan Carlos Antonio de la Rosa Martínez.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito la oficina de Waves.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito para revisión a Carlos.', 'fail'],
@@ -6022,6 +6026,7 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. Carlos le llamará para confirmar.',
       'Pedí el domingo 4 de octubre a la una de la tarde. Juan Carlos Antonio de la Rosa Martínez le llamará para confirmar.',
       'Pedí el domingo 4 de octubre a la una de la tarde. Le llamará Carlos para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. Le llamará Carlos de la Cruz a Rosa Delgado para confirmar.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a rosa martínez para confirmar.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Delgado de Martínez para confirmar.',
     ]) {
