@@ -19372,8 +19372,8 @@ const CallRecordingProcessor = {
             .update({ review_status: null });
         }
       }
-      // Owner ruling 2026-09-26 (codex #4890 r1 P1): a lender/realtor
-      // arranging a confirmed WDO inspection is an authorized caller. A
+      // Owner ruling 2026-09-26 (codex #4890 r1 P1): a lender/realtor/home
+      // buyer ordering a confirmed WDO inspection is an authorized caller. A
       // force-reprocess of a call an earlier pass carded caller_not_authorized
       // must retire that card here — the finalizer only ever OPENS review
       // state — or the visit books while the office still sees a "confirm the
@@ -19386,7 +19386,7 @@ const CallRecordingProcessor = {
             status: 'resolved',
             resolved_at: new Date(),
             resolution_source: 'system',
-            resolution_note: 'Superseded — a lender or realtor arranging a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).',
+            resolution_note: 'Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).',
           });
         if (retired > 0) {
           await trx('call_log')
