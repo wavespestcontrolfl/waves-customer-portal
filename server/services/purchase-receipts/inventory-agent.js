@@ -55,6 +55,9 @@ const NEW_PRODUCT_LOCK_KEY = 'inventory-agent:new-product';
 // (it only reads measured sizes): a title reading like "12 Count" or "1
 // Station" normalizes to inventory unit 'each' (inventory-units.js already
 // supports it as the count dimension).
+// Plural count nouns this lane counts as items (see COUNT_UNIT_WORD_RE):
+// left beside a weight or volume reading, they mean several items.
+const PLURAL_COUNT_NOUN_RE = /\b(?:dunks|tablets|traps|stations|cartridges|briquets|briquettes|pieces|pcs)\b/i;
 const COUNT_UNIT_WORD_RE = /^(?:count|ct|each|ea|pcs|pieces|traps?|stations?|cartridges?|tablets?|dunks?|briquets?|briquettes?)$/i;
 
 const EPA_REG_RE = /\bEPA\s*(?:Reg(?:istration)?\.?)?\s*(?:No\.?|#)?\s*[:#-]?\s*(\d{1,6}-\d{1,6}(?:-\d{1,6})?)\b/i;
@@ -193,8 +196,14 @@ function validateReading(reading, { rawTitle, lineQuantity }) {
   // containers in a form this lane doesn't count, as amountPerItem holds
   // them. A count size is exempt: in "25 cartridges" the plural IS the
   // counted item, not a second quantity.
-  if (!multipack && matchedClaim.unit !== 'each' && PLURAL_CONTAINER_RE.test(leftover)) {
+  if (!multipack && matchedClaim.unit !== 'each' && (PLURAL_CONTAINER_RE.test(leftover) || PLURAL_COUNT_NOUN_RE.test(leftover))) {
     return { ok: false, reason: 'plural_containers_without_pack_marker' };
+  }
+  // A weight or volume reading may not skip an item count the title states:
+  // "Mosquito Dunks 6 Dunks 1.3 oz each" is six items, and reading 1.3 oz
+  // would undercount it sixfold. Only a count reading ("6 each") can use it.
+  if (matchedClaim.unit !== 'each' && claims.some((c) => c.unit === 'each' && c.value > 1)) {
+    return { ok: false, reason: 'item_count_not_consumed' };
   }
 
   const lineQty = Number(lineQuantity);

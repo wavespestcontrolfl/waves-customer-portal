@@ -49,6 +49,16 @@ describe('validateReading — grounded vs invented numbers (complete title token
       .toMatchObject({ ok: true, sizeNumber: 25, unit: 'each' });
   });
 
+  test('a weight reading may not skip an item count the title states', () => {
+    const title = 'Mosquito Dunks 6 Dunks 1.3 oz each';
+    expect(validateReading({ size_number: 1.3, size_unit: 'oz', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false });
+    expect(validateReading({ size_number: 6, size_unit: 'each', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 6, unit: 'each' });
+    expect(validateReading({ size_number: 1.3, size_unit: 'oz', pack_count: 1 }, { rawTitle: 'Larvicide Tablets 1.3 oz', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'plural_containers_without_pack_marker' });
+  });
+
   test('a title stating two different sizes of one kind is ambiguous and never validates', () => {
     expect(validateReading({ size_number: 1, size_unit: 'gal', pack_count: 1 }, { rawTitle: 'Bifen XTS Insecticide 1 gal / 2.5 gal', lineQuantity: 1 }))
       .toMatchObject({ ok: false, reason: 'conflicting_size_claims' });
