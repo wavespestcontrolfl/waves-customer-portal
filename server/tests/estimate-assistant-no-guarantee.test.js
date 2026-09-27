@@ -551,6 +551,25 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answer).not.toContain('Pre-Slab Termiticide Treatment: No guarantee.');
   });
 
+  test('a Bora-Care warranty question gets the per-service answer, not the product shortcut', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 2250 }, serviceMode: 'one_time', noGuaranteeClaims: true, estData: {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false, anchorOneTimePrice: 2250,
+        oneTimeBreakdown: { total: 2250, items: [
+          { service: 'bora_care', label: 'Bora-Care Wood Treatment', amount: 1050 },
+          { service: 'trenching', label: 'Termite Trenching', amount: 1200,
+            warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+        ] } },
+    });
+    const answer = answerEstimateQuestionFallback('Does Bora-Care include a warranty?', context);
+    expect(answer).toContain('Bora-Care Wood Treatment: No guarantee.');
+    expect(answer).toContain('Termite Trenching: Annual inspection during the warranty period.');
+    expect(answer).not.toMatch(/borate treatment applied to bare wood/i);
+    // A product question without guarantee wording keeps the Bora-Care answer.
+    expect(answerEstimateQuestionFallback('Does Bora-Care cover beetles?', context))
+      .toMatch(/borate treatment applied to bare wood/i);
+  });
+
   test('a hand-built context lists each row under its own name', () => {
     const bond = 'Purchased termite bond: 5-year term with re-treatment coverage.';
     const rows = [

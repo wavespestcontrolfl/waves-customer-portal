@@ -1662,6 +1662,18 @@ function answerEstimateQuestionFallback(question, context = {}) {
   const oneTimeText = context.oneTime?.amountText;
   const noGuaranteeAnswer = `This estimate’s written service scope and terms are what apply. I do not see an estimate-wide callback or money-back guarantee listed; call or text Waves at ${phone} if you want the team to confirm coverage for a specific service.`;
 
+  // Runs first, ahead of the service-specific shortcuts (Bora-Care, the
+  // misting system) and the generic "included/coverage" branch. On an estimate
+  // without estimate-wide terms every guarantee question, "Does Bora-Care
+  // include a warranty?" too, gets each service's own terms (AGENTS.md, owner
+  // 2026-09-27). This answer states no price and offers no booking, so the
+  // shortcuts' own guards still hold.
+  const neutralRecurringTerms = context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true;
+  if ((context.guarantees?.noGuaranteeClaims === true || neutralRecurringTerms)
+    && /\b(guarantees?|callbacks?|re-?treat\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\w*|annual inspection)\b/.test(q)) {
+    return serviceTermsAnswer(context, phone, noGuaranteeAnswer);
+  }
+
   // Bora-Care questions are answered first — above the include/coverage, safety,
   // and product branches — so phrasings like "does Bora-Care cover beetles?" or
   // "is Bora-Care safe?" reach the borate-specific answer instead of the generic
@@ -1686,15 +1698,6 @@ function answerEstimateQuestionFallback(question, context = {}) {
   if (context.billing?.quoteRequired && estimateContextHasMistingSystem(context)
     && (estimateContextIsMistingOnly(context) || isMistingSystemQuestion(q))) {
     return mistingSystemFallbackAnswer(question, phone);
-  }
-
-  // Run before the generic "included/coverage" branch: natural guarantee
-  // questions often say "Does this include a guarantee?", and must not fall
-  // through to a generic service list when this estimate's terms are neutral.
-  const neutralRecurringTerms = context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true;
-  if ((context.guarantees?.noGuaranteeClaims === true || neutralRecurringTerms)
-    && /\b(guarantees?|callbacks?|re-?treat\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\w*|annual inspection)\b/.test(q)) {
-    return serviceTermsAnswer(context, phone, noGuaranteeAnswer);
   }
 
   if (/\b(include|included|cover|coverage|what.*get|plan)\b/.test(q)) {
