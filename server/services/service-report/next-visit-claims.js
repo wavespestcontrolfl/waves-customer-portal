@@ -8,12 +8,17 @@ const WINDOW_TEXT_RE = new RegExp(String.raw`(?<!\d)\d{1,2}(?::\d{2})?\s*(?:${ME
 const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
 const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
 const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4}|[’']?\\d{2})(?![\\d:]|\\s*(?:${MERIDIEM_TEXT}|[–—-]))\\)?)?`, 'gi');
+// A separately dated future return/arrival is an appointment claim regardless
+// of who the sentence names. Start at the future action rather than maintaining
+// a technician/crew/specialist subject list. Window-only restatements remain
+// part of the grounded appointment copy and do not create a duplicate claim.
+const FUTURE_DATED_APPOINTMENT_ACTION = String.raw`(?:will|[’']ll)\s+(?:(?:not|never)\s+)?(?:return|arrive|be\s+back|come\s+back|check\s+back|follow[-\s]+up)\b(?=[^\n.!?]{0,80}\b(?:(?:on|for|by)\s+)?(?:${WEEKDAY_NAMES}|${MONTH_NAMES}|today|tomorrow|next\s+(?:day|week|month)|\d{1,2}\s*[/-]\s*\d{1,2})\b)`;
 const APPOINTMENT_CLAIM_RE = new RegExp(
-  `\\b(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service|follow[-\\s]?up)(?:\\s*:\\s*|\\s+(?:is|has\\s+been|will\\s+be|scheduled|booked|set|on|for)\\b)|(?:we(?:\\s+will|[’']ll)?\\s+)?see\\s+you\\b|we(?:\\s+will|[’']ll)\\s+(?:return|arrive|be\\s+back|come\\s+back|check\\s+back|follow[-\\s]+up)\\b|(?:(?:your|the|our|estimated)\\s+)?arrival(?:\\s+(?:time|window))?(?:\\s*:\\s*|\\s+(?:is|will\\s+be|at|on)\\b)|(?:appointment|visit|follow[-\\s]?up)\\s+(?:is\\s+)?(?:scheduled|booked|set)\\b)`,
+  `\\b(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service|follow[-\\s]?up)(?:\\s*:\\s*|\\s+(?:is|has\\s+been|will\\s+be|scheduled|booked|set|on|for)\\b)|(?:we(?:\\s+will|[’']ll)?\\s+)?see\\s+you\\b|we(?:\\s+will|[’']ll)\\s+(?:return|arrive|be\\s+back|come\\s+back|check\\s+back|follow[-\\s]+up)\\b|${FUTURE_DATED_APPOINTMENT_ACTION}|(?:(?:your|the|our|estimated)\\s+)?arrival(?:\\s+(?:time|window))?(?:\\s*:\\s*|\\s+(?:is|will\\s+be|at|on)\\b)|(?:appointment|visit|follow[-\\s]?up)\\s+(?:is\\s+)?(?:scheduled|booked|set)\\b)`,
   'i',
 );
 const CLOCK_TIME_RE = new RegExp(String.raw`(?<!\d)\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
-const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b|\bno\s+longer\s+(?:scheduled|booked|set)\b|\bcancell?ed\b/i;
+const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b|\bno\s+longer\s+(?:scheduled|booked|set)\b|\b(?:will|[’']ll)\s+(?:not|never)\s+(?:return|arrive|be\s+back|come\s+back|check\s+back|follow[-\s]+up)\b|\bcancell?ed\b/i;
 const AFTERCARE_TIME_RE = new RegExp(String.raw`\b(?:keep|leave|avoid|do not)\b[^.!?]*?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
 
 function normalizeWindowText(value) {

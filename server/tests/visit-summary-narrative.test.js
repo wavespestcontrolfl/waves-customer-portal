@@ -240,6 +240,49 @@ test('each appointment promise must independently match the authoritative slot',
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
 });
 
+test('a subject-qualified future return cannot append a second appointment date', async () => {
+  const args = input();
+  const summary = 'Your next visit is Friday, October 2, arriving 8–10 AM. The technician will return on Monday, October 5.';
+  expect(appointmentClaimProblems(summary, groundingFacts(args))).toEqual(expect.arrayContaining([
+    'duplicate_appointment_claim',
+    'ungrounded_weekday:Monday',
+    'unsupported_appointment_date',
+    'unsupported_appointment_window',
+  ]));
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each([
+  'A specialist will arrive on Monday, October 5.',
+  'Your service team will be back Monday, October 5.',
+  'They’ll come back on Monday, October 5.',
+])('future return and arrival actions are claims without a subject allowlist: %s', (promise) => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  const problems = appointmentClaimProblems(
+    `Your next visit is Friday, October 2, arriving 8–10 AM. ${promise}`,
+    facts,
+  );
+  expect(problems).toEqual(expect.arrayContaining([
+    'duplicate_appointment_claim',
+    'ungrounded_weekday:Monday',
+  ]));
+});
+
+test('a negated subject-qualified return remains a rejected appointment claim', () => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  expect(appointmentClaimProblems(
+    'Your next visit is Friday, October 2, arriving 8–10 AM. The technician will not return on Monday, October 5.',
+    facts,
+  )).toEqual(expect.arrayContaining([
+    'duplicate_appointment_claim',
+    'negated_appointment_claim',
+    'ungrounded_weekday:Monday',
+  ]));
+});
+
 test.each([
   'Your next visit is not scheduled for Friday, October 2, arriving 8–10 AM.',
   'Your next visit is cancelled for Friday, October 2, arriving 8–10 AM.',
@@ -307,6 +350,7 @@ test.each([
   'We will check back next week to inspect again.',
   "We'll follow up next week to inspect again.",
   'We’ll follow-up next week to inspect again.',
+  'The technician will return next week to inspect again.',
   'Your next follow-up is next week.',
   'The upcoming follow up is tomorrow.',
   'Arrival is at 8 PM.',
@@ -329,6 +373,10 @@ test('appointment guard ignores grounded work numbers, aftercare times, and unre
   expect(appointmentClaimProblems(
     'We will recheck the garage next visit.',
     { nextVisit: null },
+  )).toEqual([]);
+  expect(appointmentClaimProblems(
+    'The technician returned on Monday, September 28 after documenting the garage. Your next visit is Friday, October 2, arriving 8–10 AM.',
+    { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } },
   )).toEqual([]);
 
   const summary = 'We treated 3 entry points after reviewing the September 18 note. Keep the threshold clear until the sealant dries.';
