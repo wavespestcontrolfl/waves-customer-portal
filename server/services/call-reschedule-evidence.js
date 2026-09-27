@@ -54,7 +54,7 @@
 const { etDateString } = require('../utils/datetime-et');
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
 const {
-  normalize, parseTurns, parseDayMentions, splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour, talksTime,
+  normalize, parseTurns, parseDayMentions, splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour, talksOtherTime,
 } = require('./call-time-mentions');
 
 // Fail-closed hedge/unsettled markers, matched as padded substrings.
@@ -218,6 +218,57 @@ function answersClosingQuestion(turns, idx) {
   return agentIdx >= 0 && sentenceSpans(turns[agentIdx].raw).some((sentence) => sentence.question && isClosingQuestion(sentence.ns));
 }
 
+// Does a day or hour mention name the slot?
+function namesSlot(m, slot) {
+  return m.candidates ? m.candidates.has(slot.date) : m.hour24 === slot.hour24 && !m.offHour;
+}
+
+// Where the call's final slot was first put on the table: for days and for
+// hours, the earliest mention naming it since the agent last spoke of
+// another (a caller's counter-proposal in between is an objection to weigh,
+// not the agent moving on); the later of the two.
+function slotRunStart(turns, dayRefs, hourRefs, slot) {
+  const runStart = (refs) => {
+    let start = refs.length - 1;
+    for (let k = refs.length - 2; k >= 0; k -= 1) {
+      if (namesSlot(refs[k], slot)) start = k;
+      else if (turns[refs[k].turnIdx].agent) break;
+    }
+    return refs[start].turnIdx;
+  };
+  return Math.max(runStart(dayRefs), runStart(hourRefs));
+}
+
+// A turn's text outside the day and hour mentions parsed from it.
+function textBesideMentions(turn, idx, refs) {
+  const covered = new Set(refs.filter((m) => m.turnIdx === idx).flatMap((m) => Array.from({ length: m.end - m.pos }, (_, k) => m.pos + k)));
+  return turn.ns.split(' ').filter((_, k) => !covered.has(k)).join(' ');
+}
+
+// The caller's replies to the slot between it first being put to them and
+// its final mention: each caller turn whose latest time talk before it named
+// the slot and nothing else ("Would Thursday at two work?" — "No, I cannot
+// make it"). A reply naming the slot is read beside those mentions ("Thursday
+// at two, yes; I have an appointment at four"); one naming only other times
+// is read whole, and that time is a counter-proposal ("How about three?").
+// A reply to talk of another time ("You don't want to do 8?" — "No") is not
+// a reply to the slot.
+function callerRepliesToSlot(turns, refs, slot, runStart, anchorIdx) {
+  const mentionsIn = (idx) => refs.filter((m) => m.turnIdx === idx);
+  const talksAboutTime = (idx) => mentionsIn(idx).length > 0 || talksOtherTime(turns[idx].ns, slot.hour24);
+  const onlySlot = (idx) => mentionsIn(idx).length > 0 && mentionsIn(idx).every((m) => namesSlot(m, slot))
+    && !talksOtherTime(textBesideMentions(turns[idx], idx, refs), slot.hour24);
+  const replies = [];
+  for (let idx = runStart + 1; idx < anchorIdx; idx += 1) {
+    let prev = idx - 1;
+    while (prev >= 0 && !talksAboutTime(prev)) prev -= 1;
+    if (turns[idx].agent || prev < 0 || !onlySlot(prev)) continue;
+    const counters = mentionsIn(idx).length > 0 && !mentionsIn(idx).some((m) => namesSlot(m, slot));
+    replies.push(counters ? turns[idx].ns : textBesideMentions(turns[idx], idx, refs));
+  }
+  return replies;
+}
+
 // After the agent's commitment the caller only closes the call: a caller
 // question other than a closing one ("can we do three?") is still on the
 // slot.
@@ -316,19 +367,23 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
     && other.pos < clause.start + clause.toks.length ? Math.max(word.end, other.end) : word.end);
   const cut = Math.max(...[dayWord, hourWord].filter((w) => w.turnIdx === anchorIdx).map((w) => w.end));
   const slotClauses = [dayClause.toks.join(' '), hourClause.toks.join(' '), turns[anchorIdx].ns.split(' ').slice(cut).join(' ')];
+  // An objection in the caller's reply to the slot ("No, I cannot make it",
+  // "I need to ask my husband", "How about three?") stands, however the agent
+  // then repeats the slot.
+  const callerMeanwhile = callerRepliesToSlot(turns, [...dayRefs, ...hourRefs], slot, slotRunStart(turns, dayRefs, hourRefs, slot), anchorIdx);
 
   // A hedge or unsettled condition in the clauses stating the slot ("if we
   // have space, Thursday at two"), or anywhere from the turn completing it
   // onward, however politely acknowledged, means the slot was not agreed. The
   // same marker earlier in the call, before the slot was settled, is fine.
-  if ([...slotClauses.slice(0, 2), ...turns.slice(anchorIdx).map((t) => t.ns)].some(hasHedgeMarker)) return failAt('hedge_on_slot');
+  if ([...slotClauses.slice(0, 2), ...callerMeanwhile, ...turns.slice(anchorIdx).map((t) => t.ns)].some(hasHedgeMarker)) return failAt('hedge_on_slot');
 
   // A refusal in the clause that states the slot ("I cannot make it Thursday
   // at two", "Thursday at two won't work") or anywhere after its final
   // mention, however politely acknowledged ("okay"), means the slot was not
   // agreed. A refusal in an earlier clause turns down another option
   // ("Friday doesn't work, but we'll see you Thursday at two").
-  if ([...slotClauses, ...turns.slice(anchorIdx + 1).map((t) => t.ns)].some(hasRefusalMarker)) return failAt('slot_refused');
+  if ([...slotClauses, ...callerMeanwhile, ...turns.slice(anchorIdx + 1).map((t) => t.ns)].some(hasRefusalMarker)) return failAt('slot_refused');
 
   // Does an agent turn put a question to the caller: the slot stated as one
   // ("would Thursday at two work? Please let me know"), or any question but
@@ -361,7 +416,7 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
     ? t.ns.replace(/^(?:no|nope|nah)\b/, '') : t.ns));
   if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord))
     || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord))
-    || [slotClauses[2], ...laterTurns].some((ns) => hasNegation(ns) || talksTime(ns)) || callerReopensSlot(turns, affirmIdx)) {
+    || [slotClauses[2], ...callerMeanwhile, ...laterTurns].some((ns) => hasNegation(ns) || talksOtherTime(ns, slot.hour24)) || callerReopensSlot(turns, affirmIdx)) {
     return failAt('slot_refused', affirmIdx);
   }
 

@@ -313,15 +313,28 @@ function offeredWithAnotherHour(toks, pos, end) {
     || (HOUR_ALTERNATIVES.has(toks[prev]) && hourNumber(toks[skip(prev - 1, -1)]) != null);
 }
 
-// Does this text talk about when, beyond the mentions parsed from it — an
-// hour no marker makes a clock time ("make that three"), a part of the day,
-// a weekday or month? A number running into a unit of time is a length.
-function talksTime(ns) {
+// The hours of the day a part-of-day word covers.
+const DAY_PARTS = { morning: [7, 11], afternoon: [12, 17], evening: [17, 21] };
+
+// Does this text, read beside the mentions parsed from it, talk about a
+// time other than `hour24` — an hour no marker makes a clock time ("make that
+// three", read as business hours), a part of the day that does not hold it,
+// a month or other time word? The same hour said again unmarked ("we'll
+// switch it to two") is not another time, and a number running into a unit
+// of time is a length.
+function talksOtherTime(ns, hour24) {
   const toks = ns.split(' ');
-  return toks.some((tok, i) => (TIME_WORDS.has(tok) || /^(?:[1-9]|1[0-2])$/.test(tok)) && !runsIntoDuration(toks, i + 1));
+  return toks.some((tok, i) => {
+    if (!TIME_WORDS.has(tok) && !/^(?:[1-9]|1[0-2])$/.test(tok)) return false;
+    if (runsIntoDuration(toks, i + 1)) return false;
+    const n = hourNumber(tok);
+    if (n != null) return rangeStartHour(toks, n, -1) !== hour24;
+    const part = DAY_PARTS[tok];
+    return !part || hour24 < part[0] || hour24 > part[1];
+  });
 }
 
 module.exports = {
   normalize, parseTurns, parseDayMentions,
-  splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour, talksTime,
+  splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour, talksOtherTime,
 };

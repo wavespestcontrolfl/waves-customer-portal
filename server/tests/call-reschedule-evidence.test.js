@@ -294,6 +294,31 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence(evening, '2026-09-24T20:00:00-04:00').ok).toBe(true);
   });
 
+  // The agent repeating the slot does not clear what the caller said after
+  // it was first put to them; the agent's own "let me check" meanwhile is
+  // part of settling it.
+  test('a caller objection stands however the agent then repeats the slot', () => {
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: No, I cannot make it.\nAgent: Okay, I will put you down for Thursday at two.'))
+      .toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: I need to ask my husband.\nAgent: Okay, I will put you down for Thursday at two.'))
+      .toMatchObject({ ok: false, reason: 'hedge_on_slot' });
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: How about three?\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(false);
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: Yes, Thursday works.\nAgent: Great, I will put you down for Thursday at two.').ok).toBe(true);
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Let me check.\nAgent: Okay, we will see you Thursday at two.').ok).toBe(true);
+    // A counter-proposal the caller then takes, or the caller offering two
+    // hours the agent picks between, is agreement.
+    expect(evidence('Caller: Can we do Friday at two?\nAgent: How about Thursday at two?\nCaller: Sure.\nAgent: Great, I will put you down.').ok).toBe(true);
+    expect(evidence('Caller: Can we do Thursday? At 11 o clock, 2 o clock?\nAgent: Yep, we will switch it to two.').ok).toBe(true);
+    // Replay shapes: a "no" answering talk of another time chooses the slot,
+    // and chatter after the caller's own "yes" to the slot is not a reply to it.
+    expect(evidence(['Agent: Is 8 AM on Monday too early, or we could do 11 AM?', 'Caller: That sounds good.',
+      'Agent: Okay. Well, you do not want to do 8?', 'Caller: No.', 'Agent: All right, let us do 11 then.', 'Caller: Okay.',
+      'Agent: Yep, we will see you Monday at 11.'].join('\n'), '2026-09-28T11:00:00-04:00').ok).toBe(true);
+    expect(evidence(['Agent: You want to do Thursday at two?', 'Caller: Thursday at two, yes. I have an appointment at four, but Thursday at two.',
+      'Agent: Yep, and we will be better about texting.', 'Caller: I understand, with the rain you might cancel.', 'Agent: That is on us.',
+      'Caller: Yeah, okay.', 'Agent: All right, I will see you Thursday at two.'].join('\n')).ok).toBe(true);
+  });
+
   test('an unlabeled transcript line fails closed rather than trusting turn order', () => {
     const r = evidence('Hello, this is a call with no speaker labels.');
     expect(r).toMatchObject({ ok: false, reason: 'unparseable_transcript' });

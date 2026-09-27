@@ -1,5 +1,5 @@
 // Day references in labelled call transcripts. Fixtures are fictitious.
-const { parseDayMentions, extractHourMentions, talksTime } = require('../services/call-time-mentions');
+const { parseDayMentions, extractHourMentions, talksOtherTime } = require('../services/call-time-mentions');
 
 // Sat Sep 26, 2026, 11:51 AM ET.
 const STARTED = new Date('2026-09-26T15:51:18Z');
@@ -77,9 +77,11 @@ describe('extractHourMentions', () => {
   });
 });
 
-describe('talksTime', () => {
-  test('an unmarked hour, a part of the day, a weekday or a month talks about when; a length or "one more thing" does not', () => {
-    for (const said of ['make that three', 'the morning is better', 'or friday', 'sometime in october', 'at 4']) expect(talksTime(said)).toBe(true);
-    for (const said of ['it takes about two hours', 'one more thing', 'may i ask', 'thank you so much']) expect(talksTime(said)).toBe(false);
+describe('talksOtherTime', () => {
+  test('an unmarked other hour, a part of the day not holding the hour, or a month is another time', () => {
+    for (const said of ['make that three', 'the morning is better', 'or friday', 'sometime in october', 'at 4']) expect(talksOtherTime(said, 14)).toBe(true);
+    for (const said of ['we will switch it to two', 'see you in the afternoon', 'it takes about two hours', 'one more thing', 'may i ask', 'thank you so much']) {
+      expect(talksOtherTime(said, 14)).toBe(false);
+    }
   });
 });
