@@ -5105,6 +5105,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Recibirá su presupuesto por correo pronto.', 'pass'],
     ['spanish-pricing-gate-off', 'Le mando el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le envío el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Mando el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Enviamos el presupuesto por correo.', 'pass'],
     ['spanish-pricing-gate-off', 'Voy a enviarle el presupuesto por correo.', 'pass'],
     ['spanish-pricing-gate-off', 'Le voy a enviar el presupuesto por correo.', 'pass'],
     ['spanish-pricing-gate-off', 'No hay problema, le enviaremos el presupuesto por escrito.', 'pass'],
@@ -6093,6 +6095,12 @@ describe('voice relay eval — named spoken checks', () => {
       kind: 'agent', text: 'Ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
     }] }));
     expect(replay._internals.scenarioStatus({ checks: definiteImplicitSlot })).toBe('pass');
+    for (const loss of ['La hora ya no está disponible.', 'El horario ya no está disponible.', 'Lo siento, esa hora ya no está disponible.']) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+        kind: 'agent', text: `${loss} No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.`,
+      }] }));
+      expect([loss, replay._internals.scenarioStatus({ checks })]).toEqual([loss, 'pass']);
+    }
     for (const text of [
       'Mi teléfono ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
       'La oficina ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
