@@ -128,6 +128,20 @@ describe('groundRescheduleAgreement', () => {
     ] }), `Caller: Can we make it later?\nAgent: We will see you at two instead.\nCaller: ${ACCEPT}`)).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
   });
 
+  // The fixtures above inject the fields; this pins them to the stored V2
+  // contract (schema 1.16.0), where a rename on either side would silently
+  // skip every automatic move.
+  test('it reads the scheduling fields and evidence speakers the stored V2 extraction defines', () => {
+    const schema = require('../schemas/call-extraction.persisted.schema.json');
+    expect(schema.properties.scheduling.properties).toMatchObject({
+      agent_committed_booking: { type: ['boolean', 'null'] },
+      caller_accepted_slot: { type: ['boolean', 'null'] },
+      confirmed_start_at: { format: 'date-time' },
+      moved_appointment_date: { format: 'date' },
+    });
+    expect(schema.properties.evidence.items.properties.speaker.enum).toEqual(['caller', 'agent']);
+  });
+
   test('an unlabeled or one-sided transcript, or an unreadable slot, fails closed', () => {
     expect(ground(v2(), 'We will see you Thursday at two.')).toMatchObject({ ok: false, reason: 'unparseable_transcript' });
     expect(ground(v2(), `Agent: ${COMMIT}`)).toMatchObject({ ok: false, reason: 'unparseable_transcript' });
