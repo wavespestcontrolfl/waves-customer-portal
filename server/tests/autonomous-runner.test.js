@@ -26,6 +26,7 @@ const {
   dailyBatchLimit,
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
+  citabilityAdvisoryMessages,
 } = _internals;
 
 const ORIGINAL_ENV = { ...process.env };
@@ -37,6 +38,22 @@ afterEach(() => {
   for (const k of Object.keys(ORIGINAL_ENV)) {
     if (k.startsWith('SHADOW_MODE_') || k.startsWith('AUTO_PUBLISH_')) process.env[k] = ORIGINAL_ENV[k];
   }
+});
+
+test('every citability soft failure is preserved as a separate advisory message', () => {
+  const soft_failures = [
+    { name: 'voice_match', reason: 'generic' },
+    { name: 'citability_named_sources', reason: 'no source' },
+    { name: 'citability_concrete_specifics', reason: 'no measurement' },
+    { name: 'citability_comparison', reason: 'no table' },
+    { name: 'citability_how_to_choose', reason: 'no criteria' },
+  ];
+  expect(citabilityAdvisoryMessages({ soft_failures })).toEqual([
+    { code: 'CITABILITY_NAMED_SOURCES', message: 'no source' },
+    { code: 'CITABILITY_CONCRETE_SPECIFICS', message: 'no measurement' },
+    { code: 'CITABILITY_COMPARISON', message: 'no table' },
+    { code: 'CITABILITY_HOW_TO_CHOOSE', message: 'no criteria' },
+  ]);
 });
 
 describe('internal-link dry-run queue helpers', () => {

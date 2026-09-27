@@ -12,6 +12,7 @@
 jest.mock('../models/db', () => jest.fn());
 
 const { WRITER_AGENT_CONFIG } = require('../services/content/agents/writer-agent-config');
+const { REFRESH_AGENT_CONFIG } = require('../services/content/agents/refresh-agent-config');
 const { PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
 
 describe('writer-agent-config CITABILITY section', () => {
@@ -24,6 +25,7 @@ describe('writer-agent-config CITABILITY section', () => {
       .map((c) => `[${c.name.toUpperCase()}]`);
     expect(codes).toHaveLength(4);
     for (const code of codes) expect(system).toContain(code);
+    for (const code of codes) expect(REFRESH_AGENT_CONFIG.system).toContain(code);
   });
 
   test('keeps the no-quota and no-invented-source guardrails explicit', () => {

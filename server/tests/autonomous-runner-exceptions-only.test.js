@@ -202,7 +202,18 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
       uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
       // A real quality MISS: ok:false with hard failures and NO `.error`
       // (an `.error` shape is a gate infra fault and must still park).
-      qualityGate: { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['word_count'], soft_failures: [], total_score: 40, min_total_score: 80 }) },
+      qualityGate: { evaluate: jest.fn().mockReturnValue({
+        ok: false,
+        hard_failures: ['word_count'],
+        soft_failures: [
+          { name: 'citability_named_sources', reason: 'no source' },
+          { name: 'citability_concrete_specifics', reason: 'no measurement' },
+          { name: 'citability_comparison', reason: 'no table' },
+          { name: 'citability_how_to_choose', reason: 'no criteria' },
+        ],
+        total_score: 40,
+        min_total_score: 80,
+      }) },
     });
 
     const result = await runner.runNext();
@@ -212,7 +223,15 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.defer).toHaveBeenCalledWith('opp_agg', expect.any(Date), { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
-    expect(String(retryWrite.patch.signal_metadata)).toContain('QUALITY_GATE');
+    const gateRetry = JSON.parse(retryWrite.patch.signal_metadata).gate_retry;
+    expect(gateRetry.findings)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'QUALITY_GATE' })]));
+    expect(gateRetry.advisory_messages.map((message) => message.code)).toEqual([
+      'CITABILITY_NAMED_SOURCES',
+      'CITABILITY_CONCRETE_SPECIFICS',
+      'CITABILITY_COMPARISON',
+      'CITABILITY_HOW_TO_CHOOSE',
+    ]);
   });
 
   test('second failure (gate_retry already recorded) skips silently — never pending_review', async () => {

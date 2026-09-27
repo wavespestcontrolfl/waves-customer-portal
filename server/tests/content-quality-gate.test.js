@@ -1422,6 +1422,10 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'According to Leading Experts, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Industry Research, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Research, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the National Pest Management Association, ants are common.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Florida Pest Management Association reports ant activity changes after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Per NPMA, ant activity changes after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Association, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Professionals, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Experts, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to the Local Department, ants are common.' }).ok).toBe(false);

@@ -1108,7 +1108,7 @@ function draftPostType(draft) {
 // ComparisonTable, so neither may count toward this nudge.
 // The county prefix is REQUIRED: a bare "Mosquito Control" is our own
 // service name and must not count as an external authority (fallback P2).
-const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
+const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|NPMA|FPMA|National Pest Management Association|Florida Pest Management Association|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
 // Bare mentions are NOT attribution (Codex P2, 2026-09-26): "an
 // EPA-registered product" names EPA without citing it for any claim. A named
 // authority counts only in a citation frame — led by an attribution phrase,

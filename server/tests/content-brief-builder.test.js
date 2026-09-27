@@ -609,6 +609,21 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives[1]).toContain('novel failure');
   });
 
+  test('citability advisory messages reach the redraft without joining the binding failure list', () => {
+    const directives = buildRetryDirectives({
+      findings: [{ severity: 'P1', code: 'QUALITY_GATE', message: 'hard quality miss' }],
+      advisory_messages: [
+        { code: 'CITABILITY_NAMED_SOURCES', message: 'no_named_source_attribution' },
+        { code: 'CITABILITY_HOW_TO_CHOOSE', message: 'no_how_to_choose_section' },
+      ],
+    });
+    expect(directives[0]).toContain('PREVIOUS ATTEMPT REJECTED');
+    expect(directives.join('\n')).toContain('OPTIONAL CITABILITY SIGNALS');
+    expect(directives.join('\n')).toContain('Citability (non-blocking)');
+    expect(directives.join('\n')).toContain('no_named_source_attribution');
+    expect(directives.join('\n')).toContain('no_how_to_choose_section');
+  });
+
   test('canonical directives carry the gate finding text so the redraft knows the OFFENDING entity (Codex r4)', () => {
     const directives = buildRetryDirectives({
       findings: [{

@@ -1227,6 +1227,7 @@ class AutonomousRunner {
           skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
           notes,
           blocking: [...aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }), ...guardAdvisory],
+          advisoryMessages: citabilityAdvisoryMessages(qualityResult),
         });
       }
       // Remaining combinations are genuine human decisions (gate infra
@@ -1914,12 +1915,14 @@ class AutonomousRunner {
    * Second failure: skip silently. The gates themselves never loosen —
    * a repeat offender is discarded, not published and not parked.
    */
-  async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes, blocking }) {
+  async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+    claimToken, skipReason, notes, blocking, advisoryMessages = [],
+  }) {
     const alreadyRetried = !!opp.signal_metadata?.gate_retry;
     if (!alreadyRetried) {
       let recorded = false;
       try {
-        recorded = await this._recordGateRetry(opp, skipReason, blocking, claimToken);
+        recorded = await this._recordGateRetry(opp, skipReason, blocking, claimToken, advisoryMessages);
       } catch (err) {
         logger.warn(`[autonomous-runner] gate-retry record failed for ${opp.id}: ${err.message}`);
       }
@@ -1952,7 +1955,7 @@ class AutonomousRunner {
    * was actually written. Guarded to the active claim so a stale worker
    * can't stamp feedback over another attempt.
    */
-  async _recordGateRetry(opp, skipReason, blocking, claimToken) {
+  async _recordGateRetry(opp, skipReason, blocking, claimToken, advisoryMessages = []) {
     const findings = (blocking || []).map((f) => ({
       severity: f.severity,
       code: f.code,
@@ -1960,7 +1963,14 @@ class AutonomousRunner {
     }));
     const meta = {
       ...(opp.signal_metadata || {}),
-      gate_retry: { at: new Date().toISOString(), skip_reason: skipReason, findings },
+      gate_retry: {
+        at: new Date().toISOString(),
+        skip_reason: skipReason,
+        findings,
+        // Optional quality signals must reach the redraft without becoming
+        // hard retry directives. The brief renderer labels these separately.
+        advisory_messages: advisoryMessages,
+      },
     };
     const updated = await db('opportunity_queue')
       .where('id', opp.id)
@@ -4265,6 +4275,15 @@ function aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionR
   return blocking;
 }
 
+function citabilityAdvisoryMessages(qualityResult) {
+  return (qualityResult?.soft_failures || [])
+    .filter((failure) => String(failure?.name || '').startsWith('citability_'))
+    .map((failure) => ({
+      code: String(failure.name).toUpperCase(),
+      message: String(failure.reason || 'optional citability signal').slice(0, 300),
+    }));
+}
+
 function protectedPagePatch(prot = {}) {
   return {
     outcome: 'skipped_gate_fail',
@@ -4458,4 +4477,5 @@ module.exports._internals = {
   nextEtWeekStart,
   gbpLocationIdForCity,
   operatorBriefTextForComparisonGate,
+  citabilityAdvisoryMessages,
 };
