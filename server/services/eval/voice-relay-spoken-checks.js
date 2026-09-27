@@ -119,7 +119,7 @@ const ID_NOUNS = 'invoice|bill|factura';
 // one of several", "the price for a 2,000 square foot home".
 const NOT_AN_AMOUNT = 'of|details?|accounts?|records?|items?|things?|options?|visits?|treatments?|applications?|services?|invoices?|bills?|payments?|charges?|days?|weeks?|months?|years?|hours?|minutes?|times|people|customers?|technicians?|techs?|calls?|more|other|percent|%|reasons?|steps?|ways?|questions?|numbers?|digits?|plans?|programs?|properties|homes?|houses?|yards?|acres?|sq|square|feet|foot|ft';
 const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
-const PRICE_VERB = '(?:cobr(?:o|as|a|amos|an|ar(?:[ée]|emos|[ée]is|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
+const PRICE_VERB = '(?:cobr(?:o|as|a|amos|an|ar(?:[ée]|emos|[ée]is|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|pag(?:o|as|a|amos|an|ar(?:emos|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
 const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
@@ -367,7 +367,7 @@ const TIME_ANYWHERE_RES = Object.freeze([
   /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
   // Codex r14 on #4946: catch ordinary Spanish ETA prepositions while keeping
   // "a las dos personas del equipo" as a count rather than a clock time.
-  new RegExp(`\\b(?:a|sobre|cerca\\s+de|alrededor\\s+de|hacia|antes\\s+de|despu[eé]s\\s+de)\\s+las?\\s+(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
+  new RegExp(`\\b(?:a(?:\\s+eso\\s+de)?|tipo|sobre|cerca\\s+de|alrededor\\s+de|hacia|antes\\s+de|despu[eé]s\\s+de)\\s+(?:las?\\s+)?(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:${HOUR_WORDS}|${HOUR_WORDS_ES})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
   // Codex round-5 P1: a spoken "oh/zero/cero" minute prefix with no colon and
   // no meridiem ("three oh five", "3 oh 5", "las tres cero cinco") is still
@@ -448,7 +448,7 @@ const SCHEDULE_PREDICATES = Object.freeze({
 // a truthful status sentence into a scheduling claim.
 const NEW_OR_CHANGED_VISIT_RE = /\b(?:(?:new|another|replacement|rescheduled|rebooked)\s+(?:visit|appointment|service|treatment)|(?:visit|appointment|service|treatment)\s+(?:is\s+|was\s+|will be\s+|has been\s+)?(?:new|rescheduled|rebooked)|(?:nuev[oa]|otra|reprogramad[oa]|reservad[oa] de nuevo)\s+(?:visita|cita|servicio|tratamiento)|(?:visita|cita|servicio|tratamiento)\s+(?:nuev[oa]|reprogramad[oa]|reservad[oa] de nuevo))\b/i;
 
-const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
+const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero|aunque)\b/i;
 // Codex round-2 P1: a minute modifier right after either endpoint means the
 // caller heard something OTHER than the plain returned hour ("las tres Y
 // MEDIA" is 3:30, not 3:00) — the endpoint must be a COMPLETE, bare hour
@@ -2504,7 +2504,7 @@ const ENGLISH_EVIDENCE_WORDS = [
   'tomorrow', 'tonight', 'yesterday', 'morning', 'afternoon', 'evening', 'night', 'week',
   'month', 'year', 'day', 'time', 'moment', 'please', 'thank', 'thanks', 'welcome', 'sorry',
   'right', 'correct', 'wrong', 'best', 'better', 'worst', 'worse', 'more', 'most', 'less',
-  'least', 'yes', 'great', 'good', 'perfect', 'sounds', 'alright', 'absolutely', 'certainly',
+  'least', 'yes', 'great', 'good', 'perfect', 'awesome', 'excellent', 'sounds', 'alright', 'absolutely', 'certainly',
   'understood', 'gotcha', 'anytime', 'hello', 'goodbye', 'bye',
   'get', 'got', 'give', 'gave', 'given', 'make', 'made', 'go', 'going', 'went', 'gone',
   'coming', 'came', 'see', 'saw', 'seen', 'know', 'knew', 'known', 'think', 'thought', 'say',
