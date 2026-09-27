@@ -13,6 +13,7 @@ const products = [
 let measurements;
 beforeEach(async () => {
   localStorage.clear();
+  vi.stubGlobal('scrollTo', vi.fn());
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
   measurements = { enabled: true, propertyId: 'property-1', version: 'a'.repeat(64), areas: {
     beds: { sqft: 1200, source: 'field', reviewedAt: '2026-09-27' }, lawn: null,
@@ -29,11 +30,12 @@ beforeEach(async () => {
   await refetchFlags();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-function mount(type = 'Tree & Shrub Care', fields = []) {
-  return render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: type, scheduledDate: '2026-09-27',
+function panel(type = 'Tree & Shrub Care', fields = [], id = 'visit-1') {
+  return <CompletionPanel service={{ id, customerId: 'customer-1', serviceType: type, scheduledDate: '2026-09-27',
     completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields, nextStepChips: [] } }}
-    products={products} onClose={() => {}} onSubmit={vi.fn()} />);
+    products={products} onClose={() => {}} onSubmit={vi.fn()} />;
 }
+function mount(type, fields) { return render(panel(type, fields)); }
 async function add(name) {
   await screen.findByRole('button', { name: 'Review areas' });
   fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: name } });
@@ -87,6 +89,37 @@ it('does not reinterpret palm fertilizer as bed area', async () => {
   mount(); await add('LESCO 8-0-12 Palm');
   expect(screen.queryByPlaceholderText('Sq ft')).not.toBeInTheDocument();
   expect(screen.getByPlaceholderText('Total')).toHaveValue(null);
+});
+it('a bed coverage override is withdrawn when the same visit becomes mosquito service', async () => {
+  const view = mount();
+  await screen.findByRole('button', { name: 'Review areas' });
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '600' } });
+  view.rerender(panel('Mosquito Control'));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(3600));
+});
+it('a restored bed override cannot become mosquito coverage', async () => {
+  localStorage.setItem('waves_completion_draft_visit-1', JSON.stringify({
+    serviceId: 'visit-1', savedAt: Date.now(), notes: 'Fixture notes', selectedProducts: [],
+    propertyVisitArea: { serviceId: 'visit-1', propertyId: 'property-1', kind: 'beds', area: '600' },
+  }));
+  mount('Mosquito Control');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(3600));
+});
+it('changing visits removes products awaiting the former property area', async () => {
+  const original = fetch.getMockImplementation();
+  let release;
+  fetch.mockImplementation((url, ...rest) => url.includes('/visit-1/property-areas')
+    ? new Promise(resolve => { release = resolve; }) : original(url, ...rest));
+  const view = mount();
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Snapshot 2.5TG' } });
+  fireEvent.click(screen.getByText('Snapshot 2.5TG'));
+  expect(screen.getByPlaceholderText('Total')).toBeInTheDocument();
+  view.rerender(panel('Tree & Shrub Care', [], 'visit-2'));
+  await waitFor(() => expect(screen.queryByPlaceholderText('Total')).not.toBeInTheDocument());
+  await act(async () => release(new Response(JSON.stringify(measurements), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  await add('Snapshot 2.5TG');
+  expect(screen.getByPlaceholderText('Total')).toHaveValue(2.76);
 });
 it('an individually entered product area stops following the visit area', async () => {
   mount(); await add('Snapshot 2.5TG');

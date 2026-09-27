@@ -368,6 +368,7 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     };
     trx.raw = (sql, bindings) => ({ __raw: sql, bindings });
     trx.fn = { now: () => new Date() };
+    trx.transaction = async callback => callback(trx);
     trx.schema = { hasColumn: async () => true };
     trx._updates = updates;
     return trx;
@@ -431,12 +432,14 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     ['unreviewed', 4200, false, null],
     ['missing', undefined, false, null],
     ['stale address', 4200, true, null],
+    ['dark with saved measurement', 4200, true, 4200],
   ])('primary promotion replaces the former lawn mirror: %s', async (scenario, sqft, reviewed, expected) => {
     const previousGate = process.env.GATE_PROPERTY_SERVICE_AREAS;
-    process.env.GATE_PROPERTY_SERVICE_AREAS = 'true';
+    process.env.GATE_PROPERTY_SERVICE_AREAS = scenario === 'dark with saved measurement' ? 'false' : 'true';
     try {
       const old = { ...OLD_HOME, active: true, customer_id: 'cust-1' };
       const neu = { ...NEW_HOME, active: true, customer_id: 'cust-1' };
+      neu.property_sqft = sqft;
       neu.service_area_measurements = {
         addressKey: scenario === 'stale address' ? 'former-address' : require('../services/customer-properties').addressKey(neu),
         areas: { lawn: { sqft, source: 'field', reviewedAt: reviewed ? '2026-09-27T12:00:00Z' : null, reviewedBy: reviewed ? 'tech-1' : null } },

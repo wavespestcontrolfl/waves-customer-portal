@@ -12276,7 +12276,7 @@ export function CompletionPanel({
   useEffect(() => {
     setPropertyAreas(null); setPropertyVisitArea(null);
     if (propertyAreasVisitRef.current !== service.id) {
-      setSelectedProducts(current => current.filter(product => !product.propertyServiceAreaField));
+      setSelectedProducts(current => current.filter(product => !product.propertyServiceAreaField && !product.propertyAreaDefault));
       propertyAreasVisitRef.current = service.id;
     }
   }, [service.id]);
@@ -13408,7 +13408,8 @@ export function CompletionPanel({
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[serviceLineForCloseout];
   const reviewedPropertyArea = currentPropertyAreas?.areas[propertyAreaKey];
   const propertyVisitOverride = propertyVisitArea?.serviceId === service.id
-    && propertyVisitArea?.propertyId === currentPropertyAreas?.propertyId ? propertyVisitArea.area : undefined;
+    && propertyVisitArea?.propertyId === currentPropertyAreas?.propertyId
+    && propertyVisitArea?.kind === propertyAreaKey ? propertyVisitArea.area : undefined;
   const propertyTreatedArea = serviceLineForCloseout === "lawn" ? lawnVisitArea
     : propertyVisitOverride ?? (reviewedPropertyArea?.reviewedAt ? reviewedPropertyArea.sqft : "");
   useEffect(() => {
@@ -15014,7 +15015,8 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
-    setPropertyVisitArea(savedDraft.propertyVisitArea?.serviceId === service.id ? savedDraft.propertyVisitArea : null);
+    setPropertyVisitArea(savedDraft.propertyVisitArea?.serviceId === service.id
+      && savedDraft.propertyVisitArea?.kind === propertyAreaKey ? savedDraft.propertyVisitArea : null);
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
     lawnRemovedDefaultNamesRef.current = savedDraft.lawnRemovedDefaultNames && typeof savedDraft.lawnRemovedDefaultNames === 'object' && !Array.isArray(savedDraft.lawnRemovedDefaultNames)
       ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
@@ -18279,7 +18281,7 @@ export function CompletionPanel({
     onVisitAreaChange={area => {
       invalidateGeneratedReportOnTypedEdit();
       if (serviceLineForCloseout === "lawn") setLawnAreaOverride(area === null ? undefined : area);
-      else setPropertyVisitArea(area === null ? null : { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId, area });
+      else setPropertyVisitArea(area === null ? null : { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId, kind: propertyAreaKey, area });
     }} />;
   const lawnProgressPanel = completionImprovements && isLawn && (
     !currentLawnPlanReady ? <p role="status" style={{ fontSize: 14 }}>Loading lawn plan…</p>

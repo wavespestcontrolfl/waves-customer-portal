@@ -23,14 +23,24 @@ function reviewedAreas(property) {
   if (saved.addressKey !== addressKey(property)) return {};
   return Object.fromEntries(AREA_KEYS.filter(key => areaNumber(saved.areas?.[key]?.sqft) !== null
     && AREA_SOURCES.includes(saved.areas[key].source) && saved.areas[key].reviewedAt && saved.areas[key].reviewedBy
-    && (key !== 'beds' || saved.areas[key].sqft === property.bed_sqft))
+    && (key !== 'beds' || saved.areas[key].sqft === property.bed_sqft)
+    && (key !== 'lawn' || saved.areas[key].sqft === property.property_sqft))
     .map(key => [key, saved.areas[key]]));
 }
 
-function areaVersion(property) {
+function areaVersion(property, primaryLawnSqft = null) {
   return createHash('sha256').update(JSON.stringify([
-    property.id, addressKey(property), property.bed_sqft, property.service_area_measurements || {},
+    property.id, addressKey(property), property.is_primary, property.bed_sqft,
+    property.property_sqft, primaryLawnSqft, property.service_area_measurements || {},
   ])).digest('hex');
+}
+
+async function primaryLawnArea(property, knex) {
+  if (!property.is_primary) return null;
+  const customer = await knex('customers').where({ id: property.customer_id }).first();
+  if (addressKey(customer) !== addressKey(property)) return null;
+  const profile = await knex('customer_turf_profiles').where({ customer_id: property.customer_id }).first();
+  return areaNumber(profile?.lawn_sqft);
 }
 
 function validateAreaChanges(input) {
@@ -96,9 +106,8 @@ function lookupSuggestions(enriched = {}) {
 async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lookup } = {}) {
   const property = await loadAreaProperty(scope, req, knex);
   const saved = reviewedAreas(property);
-  const customer = await knex('customers').where({ id: property.customer_id }).first();
-  const primaryMatches = property.is_primary && addressKey(customer) === addressKey(property);
-  const profile = primaryMatches ? await knex('customer_turf_profiles').where({ customer_id: property.customer_id }).first() : null;
+  const lawnSqft = await primaryLawnArea(property, knex);
+  const version = areaVersion(property, lawnSqft);
   let estimates = {};
   if (refresh || AREA_KEYS.some(key => !saved[key])) {
     const address = [property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(', ');
@@ -111,13 +120,13 @@ async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lo
     // A slow lookup cannot return the former property's values after an
     // address change or reassignment. The lookup owns its own address cache.
     const fresh = await loadAreaProperty({ ...scope, propertyId: property.id }, req, knex);
-    if (areaVersion(fresh) !== areaVersion(property)) throw fail('Property areas changed. Reload and review the current values.', 409);
+    if (areaVersion(fresh, await primaryLawnArea(fresh, knex)) !== version) throw fail('Property areas changed. Reload and review the current values.', 409);
   }
   const legacy = {};
   if (areaNumber(property.bed_sqft) !== null) legacy.beds = { sqft: property.bed_sqft, source: 'recorded', reviewedAt: null };
-  if (areaNumber(profile?.lawn_sqft) !== null) legacy.lawn = { sqft: profile.lawn_sqft, source: 'recorded', reviewedAt: null };
+  if (lawnSqft !== null) legacy.lawn = { sqft: lawnSqft, source: 'recorded', reviewedAt: null };
   const areas = Object.fromEntries(AREA_KEYS.map(key => [key, saved[key] || legacy[key] || estimates[key] || null]));
-  return { enabled: true, propertyId: property.id, customerId: property.customer_id, version: areaVersion(property), areas };
+  return { enabled: true, propertyId: property.id, customerId: property.customer_id, version, areas };
 }
 
 async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
@@ -127,22 +136,26 @@ async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
   const { withTurfProfileFence } = require('./customer-pricing-ai');
   await withTurfProfileFence(knex, initial.customer_id, async trx => {
     const property = await loadAreaProperty({ ...scope, customerId: initial.customer_id, propertyId: initial.id }, req, trx, { lock: true });
-    if (areaVersion(property) !== input.version) throw fail('Property areas changed. Reload before saving your correction.', 409);
+    if (areaVersion(property, await primaryLawnArea(property, trx)) !== input.version) throw fail('Property areas changed. Reload before saving your correction.', 409);
     const before = reviewedAreas(property);
     const next = { ...before };
     const reviewedAt = new Date().toISOString();
     for (const [key, value] of Object.entries(changes)) next[key] = { ...value, reviewedAt, reviewedBy: req.technicianId };
     await trx('customer_properties').where({ id: property.id }).update({
       service_area_measurements: { addressKey: addressKey(property), areas: next },
-      ...(changes.beds ? { bed_sqft: changes.beds.sqft } : {}), updated_at: trx.fn.now(),
+      ...(changes.beds ? { bed_sqft: changes.beds.sqft } : {}),
+      ...(changes.lawn ? { property_sqft: changes.lawn.sqft } : {}), updated_at: trx.fn.now(),
     });
     const customer = await trx('customers').where({ id: property.customer_id }).first();
     // Existing primary-property readers keep using their existing columns.
     // A secondary property's measurement can never overwrite those mirrors.
     if (property.is_primary && addressKey(customer) === addressKey(property)) {
       if (changes.beds) await trx('customers').where({ id: property.customer_id }).update({ bed_sqft: changes.beds.sqft, updated_at: trx.fn.now() });
-      if (changes.lawn) await trx('customer_turf_profiles').insert({ customer_id: property.customer_id, lawn_sqft: changes.lawn.sqft })
-        .onConflict('customer_id').merge({ lawn_sqft: changes.lawn.sqft, updated_at: trx.fn.now() });
+      if (changes.lawn) {
+        await trx('customers').where({ id: property.customer_id }).update({ property_sqft: changes.lawn.sqft, updated_at: trx.fn.now() });
+        await trx('customer_turf_profiles').insert({ customer_id: property.customer_id, lawn_sqft: changes.lawn.sqft })
+          .onConflict('customer_id').merge({ lawn_sqft: changes.lawn.sqft, updated_at: trx.fn.now() });
+      }
     }
     await require('./audit-log').recordAuditEvent({
       actor_type: req.techRole === 'admin' ? 'admin' : 'technician', actor_id: req.technicianId,
@@ -164,7 +177,7 @@ async function snapshotVisitArea(input, service, req, knex = db) {
     throw fail('Review the area treated for this service.', 400);
   }
   const property = await loadAreaProperty({ serviceId: service.id, propertyId: input.propertyId }, req, knex);
-  if (input.version !== areaVersion(property)) throw fail('Property areas changed. Reload and review the job coverage.', 409);
+  if (input.version !== areaVersion(property, await primaryLawnArea(property, knex))) throw fail('Property areas changed. Reload and review the job coverage.', 409);
   const measured = reviewedAreas(property)[kind];
   return { propertyId: property.id, kind, treatedSqft: input.treatedSqft,
     propertyAreaSqft: measured?.sqft ?? null, measurementSource: measured?.source ?? null,

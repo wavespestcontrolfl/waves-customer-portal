@@ -18,13 +18,13 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     await knex.raw('CREATE SCHEMA ??', [schema]);
     await knex.schema.createTable('customers', t => {
       t.uuid('id').primary(); t.string('address_line1'); t.string('address_line2'); t.string('city'); t.string('zip');
-      t.integer('bed_sqft'); t.timestamp('updated_at');
+      t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at');
     });
     await knex.schema.createTable('customer_properties', t => {
       t.uuid('id').primary(); t.uuid('customer_id').references('id').inTable('customers');
       t.boolean('active').defaultTo(true); t.boolean('is_primary').defaultTo(false);
       for (const key of ['address_line1','address_line2','city','state','zip']) t.string(key);
-      t.integer('bed_sqft'); t.timestamp('updated_at');
+      t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at');
     });
     await knex.schema.createTable('scheduled_services', t => {
       t.uuid('id').primary(); t.uuid('customer_id').references('id').inTable('customers'); t.uuid('property_id').references('id').inTable('customer_properties');
@@ -78,6 +78,24 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     expect(result.areas.mosquito.sqft).toBe(700);
     expect((await knex('customer_turf_profiles').where({ customer_id: customerId }).first()).lawn_sqft).toBe(4200);
     expect((await knex('customers').where({ id: customerId }).first()).bed_sqft).toBe(900);
+    expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBeNull();
+    expect((await knex('customer_properties').where({ id: second.id }).first()).property_sqft).toBe(1200);
+  });
+  test.each([0, 4800])('reviewed primary lawn mirrors the same area everywhere (%s)', async sqft => {
+    const result = await save(scope(), (await read(scope())).version, { lawn: { sqft, source: 'field' } });
+    expect(result.areas.lawn.sqft).toBe(sqft);
+    expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(sqft);
+    expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(sqft);
+    expect((await knex('customer_turf_profiles').where({ customer_id: customerId }).first()).lawn_sqft).toBe(sqft);
+  });
+  test('a legacy turf edit invalidates an unreviewed value loaded in the shared editor', async () => {
+    await knex('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: 4000 });
+    const first = await read(scope());
+    expect(first.areas.lawn).toMatchObject({ sqft: 4000, reviewedAt: null });
+    await knex('customer_turf_profiles').where({ customer_id: customerId }).update({ lawn_sqft: 4500 });
+    await expect(save(scope(), first.version, { lawn: { sqft: 4000, source: 'recorded' } })).rejects.toMatchObject({ status: 409 });
+    expect((await read(scope())).areas.lawn.sqft).toBe(4500);
+    await expect(areas.snapshotVisitArea({ propertyId: primary.id, version: first.version, kind: 'beds', treatedSqft: 400 }, visit, tech, knex)).rejects.toMatchObject({ status: 409 });
   });
   test('concurrent saves reject stale versions instead of losing a correction', async () => {
     const first = await read(scope());

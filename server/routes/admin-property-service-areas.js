@@ -15,15 +15,18 @@ function handler(operation) {
   };
 }
 
-function areaRouter(adminOnly = false) {
-  const router = express.Router({ mergeParams: true });
-  router.use(adminAuthenticate, requireTechOrAdmin);
-  if (adminOnly) router.use(requireAdmin);
-  router.use((req, res, next) => areas.propertyServiceAreasEnabled() ? next() : res.status(404).json({ enabled: false }));
-  router.get('/', handler('read'));
-  router.put('/', handler('save'));
-  router.post('/lookup', handler('lookup'));
-  return router;
-}
+const serviceRouter = express.Router({ mergeParams: true });
+serviceRouter.use(adminAuthenticate, requireTechOrAdmin);
+serviceRouter.use((req, res, next) => areas.propertyServiceAreasEnabled() ? next() : res.status(404).json({ enabled: false }));
+serviceRouter.get('/', handler('read'));
+serviceRouter.put('/', handler('save'));
+serviceRouter.post('/lookup', handler('lookup'));
 
-module.exports = { serviceRouter: areaRouter(), propertyRouter: areaRouter(true) };
+const propertyRouter = express.Router({ mergeParams: true });
+propertyRouter.use(adminAuthenticate, requireAdmin);
+propertyRouter.use((req, res, next) => areas.propertyServiceAreasEnabled() ? next() : res.status(404).json({ enabled: false }));
+propertyRouter.get('/', handler('read'));
+propertyRouter.put('/', handler('save'));
+propertyRouter.post('/lookup', handler('lookup'));
+
+module.exports = { serviceRouter, propertyRouter };
