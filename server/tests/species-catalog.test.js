@@ -748,7 +748,9 @@ describe('resolveName regressions', () => {
     ['armyworm', 'subgroup', 'garden-caterpillars'],
     ['army worms', 'subgroup', 'garden-caterpillars'],
     ['hornworm', 'subgroup', 'garden-caterpillars'],
-    ['banana spider', 'subgroup', 'orb-weavers'],
+    // UF/IFAS IN317 and IN1207 also apply this name to huntsman/wandering spiders.
+    ['banana spider', 'group', 'spiders'],
+    ['banana spiders', 'group', 'spiders'],
   ])('the broad-alias audit keeps %s at the neutral %s node', (name, level, id) => {
     expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level, id } });
   });

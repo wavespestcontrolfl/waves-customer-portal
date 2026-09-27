@@ -219,6 +219,10 @@
       "id": "spiders",
       "label": "Spiders",
       "generic": "a spider",
+      "aliases": [
+        "banana spider",
+        "banana spiders"
+      ],
       "category": "arachnid",
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the body markings and web. Photograph only surfaces already visible; do not approach, disturb, turn over, or handle the spider.",
@@ -856,10 +860,6 @@
       "group": "spiders",
       "label": "Orb-weavers",
       "generic": "an orb-weaver spider",
-      "aliases": [
-        "banana spider",
-        "banana spiders"
-      ],
       "scientific": "Araneidae",
       "rank": "family",
       "next_photo": {
