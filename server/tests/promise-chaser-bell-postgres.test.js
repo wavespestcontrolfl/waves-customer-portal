@@ -18,7 +18,10 @@ const { triggerNotification } = require('../services/notification-triggers');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
-const { sweepPromiseChasers, sweepSince, MODULE_LOAD_AT } = require('../services/promise-chaser-bell');
+const {
+  sweepPromiseChasers, sweepSince, windowFloor, activationBoundary,
+} = require('../services/promise-chaser-bell');
+const ACTIVATION_KEY = 'promise_chaser_activated_at';
 
 jest.setTimeout(30000);
 // Synthetic caller — never a real customer's number.
@@ -28,7 +31,7 @@ const OUR_NUMBER = '+19415550100';
 (SKIP ? describe.skip : describe)('promise-chaser bell — stateless sweep, on PostgreSQL', () => {
   let database;
   const schema = `promise_chaser_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
+  const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'audit_log'];
   let now;
   const gateNames = ['promiseChaserBell', 'callCommitments'];
   const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));
@@ -43,6 +46,12 @@ const OUR_NUMBER = '+19415550100';
   beforeEach(() => {
     now = Date.now();
     jest.clearAllMocks();
+    // The activation boundary is a real, shared system_settings row (its
+    // own onConflict('key') needs the table's REAL primary key, which a
+    // fresh clone WITH NO DATA would not carry — so, unlike every other
+    // table here, this suite deliberately never clones it and always falls
+    // through to public.system_settings, cleaned up per-test below).
+    delete process.env.PROMISE_CHASER_ACTIVATED_AT;
     // triggerNotification is mocked wholesale (this suite never exercises
     // the real notification-triggers.js pipeline — that lives in its own
     // test file), so a bell it "writes" leaves no real row unless this
@@ -62,7 +71,9 @@ const OUR_NUMBER = '+19415550100';
   });
   afterEach(async () => {
     jest.restoreAllMocks();
+    delete process.env.PROMISE_CHASER_ACTIVATED_AT;
     for (const table of tables) await database.raw('TRUNCATE TABLE ??.?? CASCADE', [schema, table]);
+    await database.raw('DELETE FROM public.system_settings WHERE key = ?', [ACTIVATION_KEY]);
     expect(logger.warn.mock.calls).toEqual([]);
   });
   afterAll(async () => {
@@ -103,7 +114,7 @@ const OUR_NUMBER = '+19415550100';
     expect(await sweepPromiseChasers()).toBe(1);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     const [, , opts] = triggerNotification.mock.calls[0];
-    expect(opts.dedupeKey).toBe(`promise_chaser:${commitment.id}:${etDateString(new Date(now))}`);
+    expect(opts.dedupeKey).toBe(`promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`);
 
     // A second tick, with the SAME call still inside the sweep window,
     // must not re-ring — the notifications row this tick just wrote is
@@ -220,17 +231,18 @@ const OUR_NUMBER = '+19415550100';
   });
 
   describe('sweep window boundary', () => {
-    test('sweepSince never looks earlier than 30 minutes ago, or earlier than MODULE_LOAD_AT, whichever is later', () => {
-      const longAfterBoot = new Date(MODULE_LOAD_AT.getTime() + 60 * 60 * 1000);
-      expect(sweepSince(longAfterBoot)).toEqual(new Date(longAfterBoot.getTime() - 30 * 60 * 1000));
-      const justAfterBoot = new Date(MODULE_LOAD_AT.getTime() + 5000);
-      expect(sweepSince(justAfterBoot)).toEqual(MODULE_LOAD_AT);
+    test('windowFloor never looks earlier than 30 minutes ago, or earlier than the activation boundary, whichever is later', () => {
+      const boundary = new Date(now - 5 * 60 * 60 * 1000); // activated 5h ago
+      const longAfterActivation = new Date(boundary.getTime() + 60 * 60 * 1000); // 1h after activation
+      expect(windowFloor(boundary, longAfterActivation)).toEqual(new Date(longAfterActivation.getTime() - 30 * 60 * 1000));
+      const justAfterActivation = new Date(boundary.getTime() + 5000); // 5s after activation, well within 30 min
+      expect(windowFloor(boundary, justAfterActivation)).toEqual(boundary);
     });
 
-    test('a call created before the sweep window (30 minutes, or MODULE_LOAD_AT if more recent) is ignored; one just inside it rings', async () => {
+    test('a call created before the sweep window (30 minutes, or the activation boundary if more recent) is ignored; one just inside it rings', async () => {
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id);
-      const cutoff = sweepSince(new Date(now));
+      const cutoff = await sweepSince(mockConn, new Date(now));
       const tooOld = callRow(0, { created_at: new Date(cutoff.getTime() - 60000), updated_at: new Date(cutoff.getTime() - 60000) });
       await mockConn('call_log').insert([earlier, tooOld]);
       await mockConn('call_commitments').insert(commitment);
@@ -240,6 +252,42 @@ const OUR_NUMBER = '+19415550100';
       const justInside = callRow(0, { created_at: new Date(cutoff.getTime() + 60000), updated_at: new Date(cutoff.getTime() + 60000) });
       await mockConn('call_log').insert(justInside);
       expect(await sweepPromiseChasers()).toBe(1);
+    });
+
+    test('PROMISE_CHASER_ACTIVATED_AT, when set, always wins over the persisted boundary', async () => {
+      // A persisted boundary from a genuine earlier activation...
+      await mockConn('system_settings').insert({
+        key: ACTIVATION_KEY, value: new Date(now - 20 * 60000).toISOString(), category: 'promise_chaser',
+      });
+      // ...is overridden by an explicit env value, read fresh every call.
+      const overrideAt = new Date(now - 10 * 60000);
+      process.env.PROMISE_CHASER_ACTIVATED_AT = overrideAt.toISOString();
+      expect(await activationBoundary(mockConn)).toEqual(overrideAt);
+    });
+
+    test("a restart doesn't drop a pre-restart callback whose extraction or delivery hadn't finished, as long as it's still inside the 30-minute window", async () => {
+      // The feature genuinely went live 20 minutes ago (well inside the
+      // 30-minute window) — simulated directly as the persisted row, since
+      // this test's own MODULE_LOAD_AT (this process's real boot instant)
+      // cannot itself be wound back to represent "20 minutes ago": that is
+      // exactly the gap the old MODULE_LOAD_AT-only design fell into on
+      // every ordinary restart, not just a gate flip.
+      const priorActivation = new Date(now - 20 * 60000);
+      await mockConn('system_settings').insert({
+        key: ACTIVATION_KEY, value: priorActivation.toISOString(), category: 'promise_chaser',
+      });
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      // Taken 15 minutes ago — after the real activation, comfortably
+      // inside the 30-minute window, but well BEFORE this test process's
+      // own (real, "just now") module-load instant, which is exactly what
+      // the old design would have measured against and wrongly excluded.
+      const preRestartCallback = callRow(15);
+      await mockConn('call_log').insert([earlier, preRestartCallback]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -340,7 +388,7 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).toHaveBeenCalledTimes(2);
     const [[, , opts1], [, , opts2]] = triggerNotification.mock.calls;
     expect(opts1.dedupeKey).toBe(opts2.dedupeKey);
-    expect(opts1.dedupeKey).toBe(`promise_chaser:${commitment.id}:${etDateString(new Date(now))}`);
+    expect(opts1.dedupeKey).toBe(`promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`);
   });
 
   test('gate off is a hard no-op — no dispatch', async () => {
@@ -356,5 +404,121 @@ const OUR_NUMBER = '+19415550100';
       gates.promiseChaserBell = true;
     }
     expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  describe('the live recheck re-runs direct fulfillment, not just kept-evidence', () => {
+    const commitments = require('../services/call-commitments');
+
+    test('a fulfillment refresh that closes the commitment as a side effect (an estimate genuinely sent in the race window) blocks the ring', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+        // Real refreshFulfillment would notice the estimate sent in the
+        // race window and stamp the row closed AS A SIDE EFFECT of running
+        // — simulated directly here (resolveFulfillment's own per-kind
+        // detection is refreshFulfillment's own tested territory); this
+        // proves the ORDER: stillEligible's re-run must happen, and its
+        // effect must be visible to stillOpenIds called right after it,
+        // for THIS bell to ever see it.
+        const spy = jest.spyOn(commitments, 'refreshFulfillment').mockImplementationOnce(async (conn, callLogId) => {
+          await conn('call_commitments').where({ call_log_id: callLogId, status: 'open' }).update({ status: 'fulfilled' });
+          return { checked: 1, fulfilled: 1, hinted: 0, cleared: 0, failed: 0 };
+        });
+        const stillWanted = await opts.shouldContinue();
+        spy.mockRestore();
+        expect(stillWanted).toBe(false);
+        return { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' } };
+      });
+      expect(await sweepPromiseChasers()).toBe(0);
+    });
+
+    test('a failed fulfillment refresh inside the live recheck blocks the ring — never rings on unverifiable state', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+        const spy = jest.spyOn(commitments, 'refreshFulfillment').mockRejectedValueOnce(new Error('synthetic fulfillment outage'));
+        const stillWanted = await opts.shouldContinue();
+        spy.mockRestore();
+        expect(stillWanted).toBe(false);
+        return { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' } };
+      });
+      expect(await sweepPromiseChasers()).toBe(0);
+    });
+  });
+
+  test('paging with a forced-small page size still reaches a genuinely actionable call several pages deep in the sweep window', async () => {
+    // A boundary well inside the 30-minute window, so calls up to 20
+    // minutes old are genuinely IN the sweep window — the point of this
+    // test is pagination continuing across multiple small pages, not the
+    // window floor.
+    await mockConn('system_settings').insert({
+      key: ACTIVATION_KEY, value: new Date(now - 25 * 60000).toISOString(), category: 'promise_chaser',
+    });
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // Older, on a DIFFERENT number with no open promise of its own — each
+    // one occupies a full page slot (with pageSize:1) but rings nothing; a
+    // single-LIMIT sweep would never reach anything past its own batch size.
+    const irrelevantCalls = Array.from({ length: 4 }, (_, i) => callRow(20 - i, { from_phone: '+19415550166' }));
+    // Newest, genuinely actionable, several pages deeper in the window.
+    const actionable = callRow(1);
+    await mockConn('call_log').insert([earlier, ...irrelevantCalls, actionable]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers({ pageSize: 1 })).toBe(1);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const [, payload] = triggerNotification.mock.calls[0];
+    expect(payload.callLogId).toBe(actionable.id);
+  });
+
+  describe('dedupeKey renewal versioning', () => {
+    test('a promise reopened after it already rang today can ring again for the new obligation', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { human_state: 'confirmed' });
+      const backA = callRow(0);
+      await mockConn('call_log').insert([earlier, backA]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      const [, , opts1] = triggerNotification.mock.calls[0];
+      expect(opts1.dedupeKey).toBe(`promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`);
+
+      // Staff reopen it — obligationRenewedAt now returns a real instant.
+      const renewedAt = new Date(now - 5 * 60000);
+      await mockConn('audit_log').insert({
+        id: randomUUID(), actor_type: 'admin', action: 'callback_reopen',
+        resource_type: 'call_commitment', resource_id: commitment.id,
+        metadata: JSON.stringify({ renewed_at: renewedAt.toISOString() }), created_at: renewedAt,
+      });
+      const backB = callRow(0);
+      await mockConn('call_log').insert(backB);
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(2);
+      const [, , opts2] = triggerNotification.mock.calls[1];
+      expect(opts2.dedupeKey).toBe(`promise_chaser:${commitment.id}:${renewedAt.getTime()}:${etDateString(new Date(now))}`);
+      expect(opts2.dedupeKey).not.toBe(opts1.dedupeKey);
+    });
+
+    test('repeated calls for the SAME unrenewed obligation still collapse onto one dedupeKey', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const backA = callRow(0);
+      const backB = callRow(0);
+      await mockConn('call_log').insert([earlier, backA, backB]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      const [, , opts] = triggerNotification.mock.calls[0];
+      expect(opts.dedupeKey).toBe(`promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`);
+    });
   });
 });

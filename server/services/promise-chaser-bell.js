@@ -32,7 +32,8 @@
  * the existing 2-minute call-alert recovery cron (scheduler.js — the same
  * one missed-call-bell / repeat-caller-bell use) calls sweepPromiseChasers,
  * which re-evaluates every eligible inbound call from the last 30 minutes
- * (never earlier than MODULE_LOAD_AT — see below) from scratch, every tick.
+ * (never earlier than the persisted activation boundary — see below) from
+ * scratch, every tick.
  * "Nothing qualifies this tick" is never a terminal fact; a promise whose
  * own extraction lands on a LATER tick is simply found then, by a fresh
  * read of call_commitments — this is what replaced the old design's own
@@ -51,15 +52,20 @@
  * NOT retried: once the bell row exists, that promise+day is done, exactly
  * like those two bells' own "a persisted bell proves delivery" rule.
  *
- * MODULE_LOAD_AT is captured the moment this file loads; scheduler.js
- * requires it eagerly at the top level (mirroring #5018's own boot-time
- * activation boundary) so that instant is effectively process-boot time.
- * Railway restarts the whole process on any env var change, including a
- * gate flip, so MODULE_LOAD_AT is always reset to "now" the instant the
- * gate goes live — no PERSISTED activation boundary (the way #5018's own,
- * system_settings-backed one works) is needed here: a flip never replays
- * whatever happened while the gate was dark, and the 30-minute lookback
- * bounds everything else regardless of how long the process has been up.
+ * The sweep window's floor is a PERSISTED first-activation boundary
+ * (activationBoundary / persistedActivationBoundary below), exactly
+ * #5018's own (call-booking-link-text.js) pattern: env override
+ * PROMISE_CHASER_ACTIVATED_AT, else the instant in system_settings key
+ * promise_chaser_activated_at — written ONCE, ever, by the first process
+ * that ever finds nothing stored there, and read back unchanged by every
+ * process and every restart after. An in-memory MODULE_LOAD_AT (Codex
+ * #5019 r16 P1) moves on every ordinary restart or deploy, not just a gate
+ * flip, so a callback taken moments before a routine restart — its own
+ * extraction or delivery still in flight — was excluded forever the
+ * instant the new process booted. The persisted boundary never does that:
+ * it fixes ONE origin instant for the feature's whole life, and the
+ * 30-minute lookback is what actually bounds every tick after that,
+ * regardless of how many restarts have happened since.
  *
  * Gated by GATE_PROMISE_CHASER_BELL (needs GATE_CALL_COMMITMENTS too — no
  * commitment rows exist without it). Gate off: no query at all, and so no
@@ -74,6 +80,12 @@ const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { SLA_KINDS, followedUpIds, WHAT } = require('./followup-sla-watcher');
 
+// This module's OWN load time — captured once, at require, which happens at
+// process boot (scheduler.js requires this lane eagerly, unconditionally).
+// Used ONLY as the very first persisted boundary's fallback value, instead
+// of a DB-time read taken at whatever moment the first sweep tick happens
+// to run (the same reasoning call-booking-link-text.js's own MODULE_LOAD_AT
+// documents) — never as the boundary itself; see persistedActivationBoundary.
 const MODULE_LOAD_AT = new Date();
 
 // The rule's own scope: "an earlier call ... ended UNBOOKED". Same live
@@ -92,14 +104,53 @@ const BOOKED_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_
 // simply ages out unrung rather than surprise-ringing an hour later.
 const LOOKBACK_MS = 30 * 60 * 1000;
 
-// The sweep's own lookback boundary: never earlier than LOOKBACK_MS ago,
-// and never earlier than MODULE_LOAD_AT (see the file docstring for why
-// that alone is enough — a gate flip restarts the whole process). Exported
-// so tests can probe the boundary itself without racing real wall-clock
-// time against a module-load instant they cannot control.
-function sweepSince(now = new Date()) {
-  return new Date(Math.max(now.getTime() - LOOKBACK_MS, MODULE_LOAD_AT.getTime()));
+// Own key/env, since this is a different gate/lane from every other
+// activation-boundary user (reschedule-link-promises.js,
+// call-booking-link-text.js) — mirrors call-booking-link-text.js's own
+// persistedActivationBoundary exactly (see that file, #5018,
+// feat/call-booking-link-text, for the pattern this is copied from): the
+// first live sweep anywhere to find nothing stored writes MODULE_LOAD_AT
+// there; every sweep after, on this process or any future one, reads the
+// same instant back. onConflict('key').ignore() means only the very FIRST
+// process (of a rolling deploy) to find nothing stored ever writes; every
+// other process, and every later restart, just reads the persisted value.
+const ACTIVATION_SETTINGS_KEY = 'promise_chaser_activated_at';
+async function persistedActivationBoundary(conn) {
+  const existing = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
+  if (existing?.value) return new Date(existing.value);
+  await conn('system_settings').insert({
+    key: ACTIVATION_SETTINGS_KEY, value: MODULE_LOAD_AT.toISOString(), category: 'promise_chaser',
+    description: 'First live-activation instant for GATE_PROMISE_CHASER_BELL; a call that started before it is historical, not a live callback to chase.',
+  }).onConflict('key').ignore();
+  const settled = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
+  return settled?.value ? new Date(settled.value) : MODULE_LOAD_AT;
 }
+
+// PROMISE_CHASER_ACTIVATED_AT (an ISO instant), when set, always wins —
+// read fresh each call, exactly like reschedule-link-promises' own env
+// override. Unset, falls back to the persisted boundary.
+async function activationBoundary(conn) {
+  const configured = process.env.PROMISE_CHASER_ACTIVATED_AT;
+  const parsed = configured ? new Date(configured) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
+}
+
+// The sweep's own lookback boundary: never earlier than LOOKBACK_MS ago,
+// and never earlier than the activation boundary. Exported (and the pure
+// half factored out as windowFloor) so tests can probe the boundary logic
+// directly rather than racing real wall-clock time against an activation
+// instant a test cannot itself control.
+function windowFloor(boundary, now) {
+  return new Date(Math.max(now.getTime() - LOOKBACK_MS, boundary.getTime()));
+}
+async function sweepSince(conn, now = new Date()) {
+  return windowFloor(await activationBoundary(conn), now);
+}
+
+// A `.catch()` sentinel distinguishable from every genuine obligationRenewedAt
+// result (null = never renewed, or a real Date) — never a value that value
+// could itself equal.
+const RENEWAL_LOOKUP_FAILED = Symbol('renewal_lookup_failed');
 
 // What we promised, and when — the two facts the alert body must carry.
 function describePromise(row) {
@@ -213,7 +264,18 @@ async function ringForCall(call, now = new Date()) {
   if (!found) return false;
   const { promise, what, when } = found;
 
-  const dedupeKey = `promise_chaser:${promise.id}:${etDateString(now)}`;
+  // A callback staff RE-OPENED or edited after it last rang is a NEW
+  // obligation, not the one the old bell already covered — versioning the
+  // key on the renewal instant (0 when never renewed) lets it ring again
+  // for THAT obligation while repeated calls chasing the SAME unrenewed one
+  // still collapse onto the one bell. A lookup failure never rings — the
+  // next tick, still inside the sweep's own window, tries again.
+  const renewedAt = await commitments.obligationRenewedAt(db, promise).catch((err) => {
+    logger.warn(`[promise-chaser-bell] renewal lookup failed for commitment ${promise.id}: ${err.message}`);
+    return RENEWAL_LOOKUP_FAILED;
+  });
+  if (renewedAt === RENEWAL_LOOKUP_FAILED) return false;
+  const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(now)}`;
 
   // The canonical "already delivered" check missed-call-bell.js and
   // repeat-caller-bell.js both use before an atomic-claim reclaim — a
@@ -243,6 +305,16 @@ async function ringForCall(call, now = new Date()) {
   // from scratch.
   const stillEligible = async () => {
     try {
+      // Re-run the SAME fulfillment refresh findPromiseToRing's own
+      // snapshot did — direct fulfillment (an estimate actually sent, a
+      // visit actually booked) can land in the gap between that snapshot
+      // and here just as easily as the kept-evidence checks below can
+      // change; without this, an estimate sent in the race window still
+      // rang "still owe them a quote" (Codex #5019 r16 P2). An unverified
+      // refresh (thrown, or its own per-commitment `failed` count) blocks
+      // the send the same way findPromiseToRing already treats it.
+      const refreshed = await commitments.refreshFulfillment(db, promise.call_log_id);
+      if (refreshed.failed > 0) return false;
       const stillLive = await commitments.stillOpenIds(db, [promise.id], { now: new Date() });
       if (!stillLive.has(promise.id)) return false;
       const followedNow = await followedUpIds(db, [promise]);
@@ -282,30 +354,49 @@ async function ringForCall(call, now = new Date()) {
  * who never passes never rings, and one who passes rings on a later tick,
  * once the webhook's own 'passed' stamp lands — no special handling needed
  * for that resolution here, since every tick just re-reads the stamp fresh.
+ *
+ * Pages the WHOLE sweep window with a created_at/id cursor, the same shape
+ * missed-call-bell.js's own sweepMissedCalls uses — a single `.limit()`
+ * batch (Codex #5019 r16 P2) let ineligible rows anywhere in the window
+ * (a batch of blocked numbers, say) crowd out a genuinely actionable one
+ * further along; paging to a SHORT page (fewer rows than pageSize) instead
+ * of a fixed cap means the whole window is always covered in one tick.
  */
-async function sweepPromiseChasers({ limit = 200 } = {}) {
+async function sweepPromiseChasers({ pageSize = 200 } = {}) {
   if (!isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return 0;
   const now = new Date();
-  const since = sweepSince(now);
-  const calls = await db('call_log')
-    .where({ direction: 'inbound' })
-    .modify(whereNotBlockedCall)
-    .modify((q) => whereNotSandboxCall(q))
-    .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`)
-    .where('created_at', '>', since)
-    .whereRaw("COALESCE(metadata->>'preconnect_screen', '') NOT IN ('gated', 'failed')")
-    .orderBy('created_at', 'asc')
-    .limit(limit)
-    .select('*');
+  const since = await sweepSince(db, now);
   let rang = 0;
-  for (const call of calls) {
-    const delivered = await ringForCall(call, now).catch((err) => {
-      logger.warn(`[promise-chaser-bell] failed for call ${String(call.twilio_call_sid).slice(-6)}: ${err.message}`);
-      return false;
-    });
-    if (delivered) rang += 1;
+  let cursor = null;
+  for (;;) {
+    const calls = await db('call_log')
+      .where({ direction: 'inbound' })
+      .modify(whereNotBlockedCall)
+      .modify((q) => whereNotSandboxCall(q))
+      .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`)
+      .where('created_at', '>', since)
+      .whereRaw("COALESCE(metadata->>'preconnect_screen', '') NOT IN ('gated', 'failed')")
+      .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?, ?)', [cursor.sweep_created_at, cursor.id]); })
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')
+      .limit(pageSize)
+      // A text cursor preserves PostgreSQL microseconds across tied dates
+      // (missed-call-bell.js's own sweepMissedCalls does the same).
+      .select('*', db.raw('created_at::text AS sweep_created_at'));
+    for (const call of calls) {
+      const delivered = await ringForCall(call, now).catch((err) => {
+        logger.warn(`[promise-chaser-bell] failed for call ${String(call.twilio_call_sid).slice(-6)}: ${err.message}`);
+        return false;
+      });
+      if (delivered) rang += 1;
+    }
+    if (calls.length < pageSize) break;
+    cursor = calls[calls.length - 1];
   }
   return rang;
 }
 
-module.exports = { sweepPromiseChasers, sweepSince, describePromise, MODULE_LOAD_AT };
+module.exports = {
+  sweepPromiseChasers, sweepSince, windowFloor, activationBoundary, persistedActivationBoundary,
+  describePromise, MODULE_LOAD_AT,
+};

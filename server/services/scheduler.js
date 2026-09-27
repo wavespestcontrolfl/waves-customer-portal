@@ -4801,8 +4801,15 @@ function initScheduledJobs() {
       // The promise-chaser bell's ONE path: a stateless, idempotent sweep
       // (see that file's docstring). promiseChaserBell is required eagerly at
       // the top of this file so its MODULE_LOAD_AT is process boot, not this
-      // tick's first fire (mirrors #5018's boot-time pattern).
-      Promise.resolve().then(() => promiseChaserBell.sweepPromiseChasers()),
+      // tick's first fire (mirrors #5018's boot-time pattern). Wrapped in the
+      // cross-instance cron lock ON ITS OWN — a Railway deploy overlap or a
+      // slow prior tick could otherwise have two instances paging the same
+      // window at once (Codex #5019 r16 P2); the other three sweeps here are
+      // already fleet-safe through their own atomic claims and stay
+      // unwrapped and uncoupled from this one — a held lease elsewhere is a
+      // quiet skip (runExclusive resolves, never rejects, on a skip), so it
+      // needs no special handling in the results.forEach below.
+      runExclusive('promise-chaser-bell', () => promiseChaserBell.sweepPromiseChasers()),
     ]);
     results.forEach((result, index) => {
       if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
