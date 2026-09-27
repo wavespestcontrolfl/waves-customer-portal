@@ -158,6 +158,9 @@ describe('custom action credential screening', () => {
     'Use 2468 ft as the gate code',
     'Enter AB24-68 ml as the side door PIN',
     'Applied 24-0-11 to open turf near the rear gate, then used 24-0-11 to unlock the side door',
+    '2468 ft will open the rear gate',
+    '2468 ml can unlock the side door',
+    '2468 oz should still access the garage entry',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -226,6 +229,8 @@ describe('custom action credential screening', () => {
     'The rear gate is 100 feet from the lanai',
     'Use 2468 ft as the treated perimeter length',
     'Applied 24-0-11 to open turf near the rear gate',
+    '2468 ft will cover open turf near the rear gate',
+    '2468 ml can treat the hinge beside the side door',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -287,6 +292,9 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Use 2468 ft as the gate code',
     'Enter AB24-68 ml as the side door PIN',
     'Applied 24-0-11 to open turf near the rear gate, then used 24-0-11 to unlock the side door',
+    '2468 ft will open the rear gate',
+    '2468 ml can unlock the side door',
+    '2468 oz should still access the garage entry',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
@@ -348,6 +356,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'The rear gate is 100 feet from the lanai',
     'Use 2468 ft as the treated perimeter length',
     'Applied 24-0-11 to open turf near the rear gate',
+    '2468 ft will cover open turf near the rear gate',
+    '2468 ml can treat the hinge beside the side door',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
