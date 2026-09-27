@@ -2435,8 +2435,8 @@ async function resolveTechnicianByName(name) {
 // not send the operator there). Both paths run the Schedule POST's own
 // buildAppointmentPricing: an operator-stated price is the primary line
 // price; with none, the price the Schedule screen pre-fills for the named
-// catalog service (the one-time mosquito lot ladder, else the catalog base
-// price). The catalog row resolves by exact name only — the call pipeline's
+// catalog service (the one-time mosquito lot ladder, else the catalog price
+// range minimum, else its base price). The catalog row resolves by exact name only — the call pipeline's
 // findServiceByName (name / short name / service key, plus rename
 // bridging), never a partial match: a price must come from the service the
 // operator named. A free visit type (appointment / estimate / re-service /
@@ -2444,7 +2444,7 @@ async function resolveTechnicianByName(name) {
 // Returns { price, source, catalogRow, pricing } or { error }.
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
   const services = await conn('services').where({ is_active: true })
-    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'category');
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category');
   const { findServiceByName } = require('../call-booking-catalog');
   const catalogRow = findServiceByName(Array.isArray(services) ? services : [], serviceType);
   const stated = statedPrice !== undefined && statedPrice !== null;
@@ -2461,14 +2461,23 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     return { error: `"${serviceType}" is not a catalog service, so the price has nothing to attach to. Use the service's exact catalog name and propose again. Nothing was booked.` };
   }
   if (!catalogRow) return { price: null, source: null, catalogRow: null, pricing: null };
+  // The Schedule modal's own pre-fill for a picked catalog line
+  // (CreateAppointmentModal addServiceFromCatalog), sent as the line price:
+  // blank for the one-time mosquito line, so the server's lot ladder prices
+  // it; otherwise the price range minimum, else the base price. A $0
+  // default is no price here (unpriced is NULL, never $0), and the
+  // billable-amount gate below decides.
+  const catalogDefault = catalogRow.service_key === 'mosquito_one_time'
+    ? undefined
+    : (catalogRow.price_range_min ?? catalogRow.base_price ?? undefined);
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
   const { buildAppointmentPricing } = require('../../routes/admin-schedule');
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,
     serviceType,
-    serviceId: catalogRow?.id || null,
-    primaryLinePrice: stated ? statedPrice : undefined,
+    serviceId: catalogRow.id,
+    primaryLinePrice: stated ? statedPrice : catalogDefault,
     customer,
   });
   if (!(Number(pricing.finalPrice) > 0)) return { price: null, source: null, catalogRow, pricing: null };

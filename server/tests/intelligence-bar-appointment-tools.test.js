@@ -565,6 +565,17 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     });
   });
 
+  test('the catalog default is the Schedule modal\'s pre-fill: the price range minimum, not the base price', async () => {
+    // CreateAppointmentModal addServiceFromCatalog pre-fills
+    // price_range_min ?? base_price — a $125-minimum / $175-base service
+    // books at $125 on the Schedule screen, so it must here too.
+    const ranged = { ...ONE_TIME_PEST, id: 'svc-ranged', price_range_min: '125.00', base_price: '175.00' };
+    const insertChain = wirePriced({ rows: [ranged] });
+    const result = await book({ _booking_price: 125, _booking_service_id: 'svc-ranged' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 125, primary_line_price: 125, service_id: 'svc-ranged' });
+  });
+
   test('a stated price wins over the catalog price', async () => {
     const insertChain = wirePriced({ rows: [ONE_TIME_PEST] });
     const result = await book({ price: 180, _booking_price: 180, _booking_service_id: 'svc-otp' });
