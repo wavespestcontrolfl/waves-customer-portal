@@ -592,7 +592,10 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
 // never stamped and never rings — fails closed, and rare.
 function promiseChaserEligibilityStamp() {
   const { isEnabled } = require('../config/feature-gates');
-  return isEnabled('promiseChaserBell') ? { promise_chaser_eligible: true } : {};
+  // The same conjunction the sweep checks (codex r6 P1): with either gate off,
+  // including GATE_CALL_COMMITMENTS used as a kill switch, no call is stamped,
+  // so re-enabling can never alert on calls taken while it was off.
+  return isEnabled('promiseChaserBell') && isEnabled('callCommitments') ? { promise_chaser_eligible: true } : {};
 }
 
 function foldVoiceMetadata(existingMetadata, freshMetadata) {

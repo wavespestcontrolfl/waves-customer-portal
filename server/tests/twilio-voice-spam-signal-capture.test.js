@@ -59,11 +59,19 @@ describe('parseAddOnsForAudit', () => {
 
 describe('promiseChaserEligibilityStamp (Codex #5019 r20/r21: per-call fact, not a time boundary)', () => {
   const saved = gates.promiseChaserBell;
-  afterEach(() => { gates.promiseChaserBell = saved; });
+  const savedCommitments = gates.callCommitments;
+  afterEach(() => { gates.promiseChaserBell = saved; gates.callCommitments = savedCommitments; });
 
-  test('gate on — the stamp is written into the fresh metadata', () => {
+  test('both gates on — the stamp is written into the fresh metadata', () => {
     gates.promiseChaserBell = true;
+    gates.callCommitments = true;
     expect(promiseChaserEligibilityStamp()).toEqual({ promise_chaser_eligible: true });
+  });
+
+  test('call commitments off (the kill switch) — no stamp, even with the bell gate on (codex r6 P1)', () => {
+    gates.promiseChaserBell = true;
+    gates.callCommitments = false;
+    expect(promiseChaserEligibilityStamp()).toEqual({});
   });
 
   test('gate off — the insert payload is byte-identical to before this stamp existed (no key at all, not a false value)', () => {
