@@ -214,6 +214,12 @@ describe('stagingIneligibleReason', () => {
     expect(stagingIneligibleReason({ ...baseCall, duration_seconds: 5 }, baseExtraction(), leadId)).toBe('call_too_short');
   });
 
+  test('a recovered row with only recording_duration_seconds is judged on that duration', () => {
+    const recovered = { ...baseCall, duration_seconds: null, recording_duration_seconds: 300 };
+    expect(stagingIneligibleReason(recovered, baseExtraction(), leadId)).not.toBe('call_too_short');
+    expect(stagingIneligibleReason({ ...recovered, recording_duration_seconds: 5 }, baseExtraction(), leadId)).toBe('call_too_short');
+  });
+
   test('an address that never validated in-area is skipped', () => {
     expect(stagingIneligibleReason({ ...baseCall, ai_address_validation: { inServiceArea: false } }, baseExtraction(), leadId)).toBe('not_in_service_area');
     expect(stagingIneligibleReason({ ...baseCall, ai_address_validation: null }, baseExtraction(), leadId)).toBe('not_in_service_area');

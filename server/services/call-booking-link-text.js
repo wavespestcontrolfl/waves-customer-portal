@@ -289,7 +289,10 @@ const STAGING_CHECKS = [
   (call, extraction) => (!extraction ? 'no_extraction' : null),
   (call, extraction) => (extraction.meta?.is_voicemail || extraction.meta?.is_spam ? 'voicemail_or_spam' : null),
   (call, extraction) => (extraction.call_nature !== 'new_lead' ? 'not_new_lead_call' : null),
-  (call) => ((Number(call.duration_seconds) || 0) < MIN_CONVERSATION_SECONDS ? 'call_too_short' : null),
+  // callDurationSeconds, same as callEndFor: a recovered row can carry only
+  // recording_duration_seconds, and reading duration_seconds alone would
+  // stamp a real conversation call_too_short forever (codex pre-push P1).
+  (call) => (callDurationSeconds(call) < MIN_CONVERSATION_SECONDS ? 'call_too_short' : null),
   (call, extraction) => (NON_CONVERSATION_DISPOSITIONS.has(extraction.recommended_disposition) ? 'not_a_conversation' : null),
   (call, extraction) => {
     const flags = new Set(Array.isArray(extraction.triage_flags) ? extraction.triage_flags : []);
