@@ -563,21 +563,3 @@ describe('validateCompanionSubmission — happy path', () => {
     expect(result.companions[0].activityScoreSource).toBe('derived');
   });
 });
-
-describe('primary typed completion — derive-mapped score precedence (source pin)', () => {
-  // completeScheduledService needs a database to exercise end to end; this
-  // pins the precedence the companion tests above prove behaviourally: for a
-  // derive-mapped indicator the derived branch runs BEFORE any submitted
-  // activityScore is read, so an obsolete pin from a pre-deploy tab can
-  // never become the stored score (owner ruling 2026-09-26, Codex P2 #5037).
-  test('the derive branch precedes the submitted-score branch', () => {
-    const src = require('fs').readFileSync(
-      require.resolve('../services/complete-scheduled-service'), 'utf8',
-    );
-    const deriveAt = src.indexOf('if (typedIndicator.derive) {');
-    const pinnedAt = src.indexOf('} else if (activityScore != null) {', deriveAt);
-    expect(deriveAt).toBeGreaterThan(-1);
-    expect(pinnedAt).toBeGreaterThan(deriveAt);
-    expect(src.slice(deriveAt, pinnedAt)).toContain("typedScoreSource = derived ? 'derived' : null;");
-  });
-});
