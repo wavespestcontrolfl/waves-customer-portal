@@ -102,6 +102,19 @@ test('runs eligibility and provider dispatch on the held authority database', as
   expect(order).toEqual(['eligibility', 'provider-preparation', 'eligibility', 'provider-request']);
 });
 
+test('a resendable eligibility refusal carries BILLING_REPLAY_RESENDABLE as its code', async () => {
+  const { BILLING_REPLAY_RESENDABLE } = require('../services/billing-email-provider-replay');
+  billingEmailReplayEligible.mockResolvedValueOnce({
+    eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true,
+  });
+  let verdict;
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    verdict = await options.preSendCheck({ database: jest.fn() });
+  });
+  await runBillingEmailProviderReplayHandoff(message(), jest.fn());
+  expect(verdict).toEqual({ ok: false, code: BILLING_REPLAY_RESENDABLE, reason: 'invoice-send-not-finalized', retryable: false });
+});
+
 test('propagates a provider error for the retry owner to classify', async () => {
   const providerError = new Error('provider outcome unknown');
   dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {

@@ -489,7 +489,7 @@ async function retryOne(message) {
       reason: unavailable ? 'Template is unavailable; retry stopped.' : `Suppressed before retry: ${suppression.suppression_type}` });
   }
 
-  const group = String(message.suppression_group_key_snapshot || '').trim().toLowerCase();
+  const group = String(message.suppression_group_key_snapshot).trim().toLowerCase();
   const asmGroupId = group === 'transactional_required' ? 0 : sendgrid.serviceGroupId();
   // dispatchStarted is set immediately before the Mail Send request: a
   // failure clearing the provider block is provably pre-send and keeps the
@@ -631,8 +631,11 @@ async function retryOne(message) {
           await markRetryFailure(message, err, new Date(), { rejectedAfterStart: state.rejected });
           return { sent: false, error: err };
         }
+        // Preserve main's resendable refusal while settling the actual phase
+        // reached by this attempt (a final veto follows the started marker).
+        const status = handoff.code === billingReplay.BILLING_REPLAY_RESENDABLE ? 'failed' : 'blocked';
         return await stopRetry(message, {
-          status: 'blocked', reason: handoff.reason, rejectedAfterStart: state.rejected,
+          status, reason: handoff.reason, rejectedAfterStart: state.rejected,
         });
       }
       if (state.acceptedMessage) {
