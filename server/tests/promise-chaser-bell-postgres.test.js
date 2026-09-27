@@ -617,6 +617,59 @@ const OUR_NUMBER = '+19415550100';
     expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung' });
   });
 
+  test("a partial push's delivered subscription IDs survive a later attempt that fails BEFORE it can persist anything itself", async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // Attempt 1: one subscription accepted, one failed.
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, retryable: true,
+      push: { sent: 1, failed: 1, deliveredSubscriptionIds: ['sub-accepted-1'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    const pending = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(pending.metadata.promise_chaser.deliveredSubscriptionIds).toEqual(['sub-accepted-1']);
+
+    // Age the lease so attempt 2 can reclaim it.
+    pending.metadata.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(pending.metadata) });
+
+    // Attempt 2: the evidence lookup itself fails inside selectPromiseToRing
+    // — this attempt exits via the 'retry' outcome BEFORE ever reaching
+    // recordProgress. claimAttempt's own reclaim write (the ONLY write this
+    // attempt makes) must not wipe the deliveredSubscriptionIds it never
+    // got the chance to recompute — it merges into the existing claim
+    // rather than replacing it wholesale.
+    followedUpIdsMock.mockRejectedValueOnce(new Error('synthetic evidence lookup failure'));
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid, { viaSweep: true })).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1); // never reached dispatch this time
+    // selectPromiseToRing logs this expected warning on the way to its
+    // 'retry' outcome — consumed here so the afterEach's blanket "no
+    // unexpected warnings" check stays meaningful for every other test.
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('synthetic evidence lookup failure'));
+    logger.warn.mockClear();
+
+    const stillPending = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(stillPending.metadata.promise_chaser.status).toBe('pending');
+    expect(stillPending.metadata.promise_chaser.deliveredSubscriptionIds).toEqual(['sub-accepted-1']);
+
+    // Attempt 3 (a successful retry): the already-accepted device is still
+    // never re-buzzed.
+    stillPending.metadata.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(stillPending.metadata) });
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, push: { sent: 1, failed: 0, deliveredSubscriptionIds: ['sub-accepted-1', 'sub-accepted-2'] },
+    });
+    expect(await sweepPromiseChasers()).toBe(1);
+    const [, , opts3] = triggerNotification.mock.calls[1];
+    expect(opts3.deliveredSubscriptionIds).toEqual(['sub-accepted-1']);
+    const settledFinal = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(settledFinal.metadata.promise_chaser.status).toBe('rung');
+  });
+
   test("an earlier call's commitment extraction still in flight leaves the claim pending — a quick callback never settles no_open_promise prematurely", async () => {
     // The earlier call — still mid-pipeline (a live processing_token), so
     // recordCommitmentsStep has not run yet and genuinely has no rows to find.

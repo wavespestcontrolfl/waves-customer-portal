@@ -105,8 +105,19 @@ async function claimAttempt(callId) {
     // (repeat-caller-bell's own CLAIM_FREE_SQL wraps its OR the same way).
     .whereRaw("((metadata->'promise_chaser'->>'status' IS DISTINCT FROM 'pending') OR (metadata->'promise_chaser'->>'claimed_at') IS NULL OR (metadata->'promise_chaser'->>'claimed_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
     .update({
-      metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('promise_chaser', ?::jsonb)",
-        [JSON.stringify({ status: 'pending', claimed_at: token })]),
+      // Merged INTO the existing promise_chaser sub-object (jsonb_set on
+      // its own path), never replacing it wholesale: a full replace here
+      // would silently wipe deliveredSubscriptionIds a PRIOR attempt's
+      // recordProgress persisted (a partial push already reached some
+      // devices) the moment this attempt reclaims the lease — before it
+      // has any chance to recompute and re-merge that list itself. Every
+      // other write in this file already merges the same way (settle keeps
+      // this shape too, but only ever for a terminal outcome nothing reads
+      // back after).
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata,'{}'::jsonb), '{promise_chaser}', COALESCE(metadata->'promise_chaser', '{}'::jsonb) || ?::jsonb, true)",
+        [JSON.stringify({ status: 'pending', claimed_at: token })],
+      ),
     });
   return claimed ? token : null;
 }
