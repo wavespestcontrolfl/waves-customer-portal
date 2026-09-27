@@ -157,6 +157,7 @@
             "employee",
             "real_estate_agent",
             "lender",
+            "home_buyer",
             "other",
             "unknown"
           ]
