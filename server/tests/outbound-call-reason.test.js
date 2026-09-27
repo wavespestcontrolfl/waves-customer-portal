@@ -67,24 +67,48 @@ function installDb(byTable = {}) {
       // in this file are untouched.
       if (table === 'leads' && !q.wheres.some((w) => typeof w[0] === 'function')) {
         const allowlistEntry = q.wheres.find((w) => w[0] === 'IN' && w[1] === 'first_contact_channel');
-        const rows = state.byTable.leads || [];
-        return allowlistEntry ? rows.filter((r) => allowlistEntry[2].includes(r.first_contact_channel)) : rows;
+        // anyLeadRecord's status exclusion (codex pre-push r7 P1): applied
+        // for real, same as the channel allowlist — a NULL status fails
+        // closed too (SQL's three-valued logic), matching whereIn's own
+        // NULL handling just above.
+        const statusExclude = q.wheres.find((w) => w[0] === 'NOT IN' && w[1] === 'status');
+        let rows = state.byTable.leads || [];
+        if (allowlistEntry) rows = rows.filter((r) => allowlistEntry[2].includes(r.first_contact_channel));
+        if (statusExclude) rows = rows.filter((r) => r.status != null && !statusExclude[2].includes(r.status));
+        return rows;
       }
       // existsQualifyingInboundCall's call_log query (identified by its own
       // whereRaw nature clause — latestInboundCall's JS-side filtering
-      // elsewhere in this file never adds one): apply the recorded nature
-      // AND disposition exclusions for real (codex pre-push r5 P1 + r6
-      // P1), reusing _private.callNature so the mock's extraction matches
-      // the module's own.
+      // elsewhere in this file never adds one): apply the recorded
+      // v2_extraction_status gate plus the nature AND disposition
+      // exclusions for real (codex pre-push r5 P1 + r6 P1 + r7 P1), reusing
+      // _private.callNature so the mock's extraction matches the module's
+      // own.
       if (table === 'call_log') {
         const natureClause = q.raws.find((r) => String(r[0]).includes('call_nature'));
         const dispositionClause = q.raws.find((r) => String(r[0]).includes('disposition'));
         if (natureClause || dispositionClause) {
+          const v2Clause = q.wheres.find((w) => w[0] === 'v2_extraction_status');
           const rows = state.byTable.call_log || [];
           return rows.filter((r) => {
+            if (v2Clause && r.v2_extraction_status !== v2Clause[1]) return false;
             if (natureClause && natureClause[1].includes(_private.callNature(r))) return false;
             if (dispositionClause && dispositionClause[1].includes(String(r.disposition || ''))) return false;
             return true;
+          });
+        }
+      }
+      // existsQualifyingInboundText's sms_log query (identified by its own
+      // whereRaw spam_verdict clause — latestInboundText's JS-side
+      // filtering elsewhere in this file never adds one): apply the
+      // enforced-solicitation exclusion for real (codex pre-push r7 P1).
+      if (table === 'sms_log') {
+        const spamClause = q.raws.find((r) => String(r[0]).includes('spam_verdict'));
+        if (spamClause) {
+          const rows = state.byTable.sms_log || [];
+          return rows.filter((r) => {
+            const meta = r.metadata && typeof r.metadata === 'object' ? r.metadata : {};
+            return meta?.spam_verdict?.enforced !== true;
           });
         }
       }
@@ -427,8 +451,27 @@ describe('hasPriorContact', () => {
   });
 
   test('a prior inbound call from that number, even a year ago, counts', async () => {
-    installDb({ call_log: [{ id: 'in-old', created_at: new Date('2025-01-01'), ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    installDb({ call_log: [{ id: 'in-old', created_at: new Date('2025-01-01'), v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  // Codex pre-push r7 P1: NANP-only phone identity. hasPriorContact uses
+  // phoneIdentityKey (server/utils/phone.js), the same NANP-vs-
+  // international rule as smsThreadKey and the blocked-numbers query — a
+  // non-NANP destination never collapses to a bare last-10, so it can never
+  // collide with an unrelated NANP number sharing the same suffix (codex
+  // #4213). Waves is SWFL-only, so this fails closed rather than probe.
+  test('a non-NANP (international) phone number → no prior contact, no DB query', async () => {
+    installDb({ call_log: [{ id: 'in-old', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: '+442079460958', before: T0 })).resolves.toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('every common NANP format (bare 10, 1+10, formatted, +1) still resolves to the same last-10 identity and counts', async () => {
+    installDb({ call_log: [{ id: 'in-old', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    for (const phone of ['9415550101', '19415550101', '(941) 555-0101', '+19415550101']) {
+      await expect(hasPriorContact({ customerId: null, phone, before: T0 })).resolves.toBe(true);
+    }
   });
 
   // The mock query builder can't evaluate SQL predicates itself — it always
@@ -447,38 +490,73 @@ describe('hasPriorContact', () => {
     // exactly as non-qualifying as spam/robocall/wrong-number/vendor.
     expect(natureClause[1]).toEqual([...NON_SERVICE_NATURES]);
     expect(natureClause[1]).toEqual(expect.arrayContaining(['job_applicant', 'other']));
+    // Codex pre-push r7 P1: v2_extraction_status = 'valid' is a plain
+    // equality where, applied ALONGSIDE the nature/disposition exclusions,
+    // not a replacement for the legacy call_outcome / processing_status /
+    // ai_extraction.call_type fields — those are never read at all.
+    expect(callQuery.wheres).toContainEqual(['v2_extraction_status', 'valid']);
+    for (const legacyField of ['call_outcome', 'processing_status']) {
+      expect(callQuery.wheres.flat().join(' ')).not.toContain(legacyField);
+      expect(callQuery.raws.flat().map(String).join(' ')).not.toContain(legacyField);
+    }
   });
 
   test('a job_applicant-only call history does NOT count as prior contact (codex pre-push r5 P1)', async () => {
-    installDb({ call_log: [{ id: 'in-applicant', ai_extraction_enriched: { call_nature: 'job_applicant' } }] });
+    installDb({ call_log: [{ id: 'in-applicant', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'job_applicant' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
   test('an "other"-natured call history does NOT count as prior contact either (codex pre-push r5 P1)', async () => {
-    installDb({ call_log: [{ id: 'in-other', ai_extraction_enriched: { call_nature: 'other' } }] });
+    installDb({ call_log: [{ id: 'in-other', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'other' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
   test('a genuine new_lead-natured call still counts as prior contact', async () => {
-    installDb({ call_log: [{ id: 'in-lead', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    installDb({ call_log: [{ id: 'in-lead', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
-  // Codex pre-push r6 P1: an OLDER inbound row from before V2 call_nature
-  // extraction shipped has no nature at all (COALESCE reads '', which
-  // passes the nature filter) but can still carry a DEFINITIVE
-  // call_log.disposition (server/services/call-disposition.js) ruling it
-  // a non-service contact.
+  // Codex pre-push r7 P1: v2_extraction_status = 'valid' is now REQUIRED,
+  // not just a nature/disposition check — a row the V2 pipeline never
+  // classified is not positively known to be a service contact, no matter
+  // what nature it happens to carry.
+  test('a new_lead-natured call with NO v2_extraction_status (never reached the V2 pipeline) does NOT count', async () => {
+    installDb({ call_log: [{ id: 'in-unclassified', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('a call whose V2 extraction failed to parse (v2_extraction_status: parse_failed) does NOT count', async () => {
+    installDb({ call_log: [{ id: 'in-failed', v2_extraction_status: 'parse_failed', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  // Codex pre-push r6 P1 (superseded by r7 P1 below): a disposition-only,
+  // no-V2-nature row already failed the disposition exclusion on its own
+  // for these four values; it now ALSO fails the v2_extraction_status gate
+  // — either reason alone would fail it closed, and both apply together.
   test.each(['vendor_logged', 'wrong_number_closed', 'spam_discarded', 'no_action_needed'])(
-    'a disposition-only (no V2 nature) %s history does NOT count as prior contact',
+    'a disposition-only (no V2 nature, no V2 extraction) %s history does NOT count as prior contact',
     async (disposition) => {
       installDb({ call_log: [{ id: 'in-old-disposition', disposition }] });
       await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
     },
   );
 
-  test('a null-nature row with a SERVICE disposition still counts as prior contact', async () => {
+  // Codex pre-push r7 P1 (required "legacy-only history" case): a
+  // pre-V2 legacy row — no v2_extraction_status, no ai_extraction_enriched
+  // nature — carrying only a SERVICE disposition (e.g. 'booked') from
+  // call-disposition.js's decideDisposition is NOT positively classified by
+  // the current pipeline and must NOT count, even though the r6 rule alone
+  // would have let it through on disposition. This is the exact case r6's
+  // now-removed test asserted the opposite of; the whole point of the r7
+  // fix is that a legacy shape like this must fail closed.
+  test('a legacy-only history (no v2_extraction_status, only a SERVICE disposition) does NOT count as prior contact', async () => {
     installDb({ call_log: [{ id: 'in-old-booked', disposition: 'booked' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('the SAME booked disposition on a row the V2 pipeline DID positively classify (v2_extraction_status: valid, no nature extracted) still counts', async () => {
+    installDb({ call_log: [{ id: 'in-modern-booked', v2_extraction_status: 'valid', disposition: 'booked' }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
@@ -510,6 +588,31 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
+  // Codex pre-push r7 P1: exclude any inbound text the SMS spam screen
+  // flagged (sms_log.metadata.spam_verdict.enforced) — the exact fragment
+  // twilio-webhook.js's own unanswered-digest exclusion uses. An enforced
+  // verdict means the text was silently screened out, not a real
+  // conversation the sender had with Waves.
+  test('an inbound text the spam screen enforced (metadata.spam_verdict.enforced) does NOT count, even with real words', async () => {
+    installDb({
+      sms_log: [{
+        id: 'sms-spam', created_at: hoursAgo(2), message_body: 'Check out our amazing deal today',
+        metadata: { spam_verdict: { solicitation: true, confidence: 0.91, mode: 'enforce', enforced: true } },
+      }],
+    });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('an inbound text the spam classifier scored but did NOT enforce still counts', async () => {
+    installDb({
+      sms_log: [{
+        id: 'sms-scored-not-enforced', created_at: hoursAgo(2), message_body: 'Can you come look at the ants?',
+        metadata: { spam_verdict: { solicitation: false, confidence: 0.2, mode: 'shadow', enforced: false } },
+      }],
+    });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
   test('a text thread of only reschedule replies / bare acknowledgements does not count — isSubstantiveText still applies over the unbounded set', async () => {
     installDb({
       sms_log: [
@@ -536,13 +639,46 @@ describe('hasPriorContact', () => {
   });
 
   test('a customer-originated web-form lead counts as prior contact', async () => {
-    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web' }] });
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status: 'new' }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
   test('a lead with a NULL first_contact_channel does NOT count (unknown fails closed)', async () => {
-    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: null }] });
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: null, status: 'new' }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  // Codex pre-push r7 P1: exclude leads marked spam/duplicate/cancelled —
+  // NON_ENGAGED_LEAD_STATUSES (server/services/lead-statuses.js), the same
+  // canonical set the dashboard KPIs and conversion-rate scoping already
+  // use, reused verbatim rather than a second list that could drift.
+  test.each(['spam', 'duplicate', 'cancelled'])(
+    'a customer-originated lead marked %s does NOT count as prior contact',
+    async (status) => {
+      installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status }] });
+      await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    },
+  );
+
+  test('a lead with a NULL status does NOT count (unknown fails closed, same as a NULL first_contact_channel)', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status: null }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('a lead in an ENGAGED status (contacted, won, lost) still counts as prior contact', async () => {
+    for (const status of ['contacted', 'won', 'lost']) {
+      installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status }] });
+      await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+    }
+  });
+
+  test('the lead probe reuses lead-statuses.js\'s own NON_ENGAGED_LEAD_STATUSES verbatim (never a drifted copy)', async () => {
+    const { NON_ENGAGED_LEAD_STATUSES } = require('../services/lead-statuses');
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status: 'new' }] });
+    await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
+    const leadsQuery = state.queries.find((q) => q.table === 'leads');
+    const statusExclude = leadsQuery.wheres.find((w) => w[0] === 'NOT IN' && w[1] === 'status');
+    expect(statusExclude[2]).toEqual(NON_ENGAGED_LEAD_STATUSES);
   });
 
   test('the lead probe reuses the consent-provenance allowlist, minus every call-derived channel', async () => {
@@ -574,12 +710,12 @@ describe('hasPriorContact', () => {
   });
 
   test('an actual prior INBOUND call still counts as prior contact (the direction-aware call probe, not the lead probe)', async () => {
-    installDb({ call_log: [{ id: 'in-1', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    installDb({ call_log: [{ id: 'in-1', v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
   test('a web-form lead still counts (customer-originated, never call-derived)', async () => {
-    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web' }] });
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status: 'new' }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
@@ -587,7 +723,7 @@ describe('hasPriorContact', () => {
   // call probe, an independent code path from the lead probe above; a year-
   // old prior inbound call already proves it counts unconditionally.
   test('an actual prior inbound call still counts as prior contact regardless of the lead-channel scoping', async () => {
-    installDb({ call_log: [{ id: 'in-old', created_at: new Date('2025-01-01'), ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    installDb({ call_log: [{ id: 'in-old', created_at: new Date('2025-01-01'), v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 

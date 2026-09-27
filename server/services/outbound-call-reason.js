@@ -54,6 +54,21 @@ const { etDateString } = require('../utils/datetime-et');
 // never that its owner contacted Waves — reused verbatim, never a second
 // allowlist that could drift from it.
 const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('./collections/consent-provenance');
+// Canonical "not a real lead engagement" set (codex pre-push r7 P1): the
+// same array the dashboard KPIs and lead-attribution's conversion-rate
+// scoping already use to keep spam/duplicate/cancelled rows out of the
+// prospect population — reused verbatim here so a lead marked spam or a
+// duplicate-wizard repeat can never stand in as prior-contact evidence.
+const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
+// NANP-vs-international identity (codex pre-push r7 P1): the SAME rule the
+// repo already uses everywhere else two phone strings are compared for
+// "same contact" (smsThreadKey, the blocked-numbers query) — a non-NANP
+// number never collapses to a bare last-10 (codex #4213: a shared-suffix
+// international number wrongly matched an unrelated NANP customer). Used
+// ONLY inside hasPriorContact below; the file's other probes keep last10()
+// unchanged — they were reviewed and approved in earlier rounds and are out
+// of scope for this fix.
+const { phoneIdentityKey } = require('../utils/phone');
 
 const REASONS = Object.freeze({
   QUOTE_REQUEST: 'quote_request',
@@ -238,6 +253,15 @@ async function anyLeadRecord({ phoneLast10, before }) {
     // owner ever contacted Waves. whereIn also fails closed on a NULL or
     // unrecognized channel (it matches no IN list, never a wildcard).
     .whereIn('first_contact_channel', LEAD_EVIDENCE_CHANNELS)
+    // Exclude spam/duplicate/cancelled leads (codex pre-push r7 P1): the
+    // same NON_ENGAGED_LEAD_STATUSES the dashboard KPIs and conversion-rate
+    // scoping already use — a lead our own pipeline flagged as spam or an
+    // auto-filed duplicate repeat is not evidence this number's owner ever
+    // reached out. whereNotIn also fails closed on a NULL status (SQL's
+    // three-valued logic excludes it, same as whereIn elsewhere in this
+    // file), consistent with "fail closed on anything not positively
+    // classified".
+    .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
     .orderBy('created_at', 'desc')
     .first('id', 'created_at');
 }
@@ -276,6 +300,14 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
     .where('direction', 'inbound')
     .where('created_at', '<', before))
     .whereRaw("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    // v2_extraction_status = 'valid' (codex pre-push r7 P1): a row the V2
+    // pipeline never classified — no run yet, a parse failure, or a
+    // pre-V2 legacy row with only call_outcome / processing_status /
+    // ai_extraction.call_type set — is NOT positively known to be a
+    // service contact and must fail closed here rather than pass on an
+    // empty COALESCE. This also drops any need to read those legacy
+    // fields: a row that never reached 'valid' never qualifies, full stop.
+    .where('v2_extraction_status', 'valid')
     .whereRaw(
       `COALESCE(lower(trim(ai_extraction_enriched->>'call_nature')), '') NOT IN (${natures.map(() => '?').join(',')})`,
       natures,
@@ -304,6 +336,12 @@ async function existsQualifyingInboundText({ phoneLast10, before }) {
       this.whereNull('message_type').orWhereNotIn('message_type', [...IGNORED_TEXT_TYPES]);
     })
     .whereRaw("message_body ~* '[a-z]'")
+    // Exclude an enforced solicitation verdict (codex pre-push r7 P1) — the
+    // exact fragment twilio-webhook.js's own unanswered-digest exclusion
+    // uses (metadata->'spam_verdict'->>'enforced'): that row was silently
+    // screened as spam, not a real inbound conversation, and must not
+    // stand in as evidence the sender contacted Waves first.
+    .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
     .modify((qb) => excludeRecruitingSmsLog(qb, 'message_type'))
     .select('id', 'message_body', 'message_type');
   return rows.some(isSubstantiveText);
@@ -326,8 +364,19 @@ async function existsQualifyingInboundText({ phoneLast10, before }) {
  */
 async function hasPriorContact({ customerId = null, phone = null, before = new Date() } = {}) {
   if (customerId) return true;
-  const phoneLast10 = last10(phone);
-  if (!phoneLast10) return false;
+  // NANP-only evidence matching (codex pre-push r7 P1): phoneIdentityKey
+  // returns the bare 10-digit form ONLY for a NANP (+1) number; anything
+  // else comes back `+<fullDigits>` (or null for no digits at all). The
+  // probes below all match on last-10 suffix, which is exactly the
+  // collision phoneIdentityKey exists to prevent for a non-NANP number
+  // (codex #4213 — a shared-suffix international caller wrongly matched an
+  // unrelated NANP customer). Waves is SWFL-only, so a non-NANP destination
+  // is rare; it fails closed here rather than risk that collision. This
+  // keeps the last10() expression — and the frozen migration
+  // 20260927000006 indexes built for it — unchanged for every NANP number.
+  const identityKey = phoneIdentityKey(phone);
+  if (!identityKey || !/^\d{10}$/.test(identityKey)) return false;
+  const phoneLast10 = identityKey;
   const at = new Date(before);
   try {
     const [inboundCall, inboundText, leadRow] = await Promise.all([
