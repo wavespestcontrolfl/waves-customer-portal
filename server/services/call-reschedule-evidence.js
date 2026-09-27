@@ -85,6 +85,7 @@ const HEDGE_MARKERS = [
   ' see if i have ', ' see if we have ', ' check the schedule ', ' look at the schedule ',
   // The caller deferring to someone or to later ("I need to ask my husband").
   ' need to ask ', ' have to ask ', ' let me ask ', ' check with my ', ' talk to my ', ' think about it ', ' let me think ', ' i ll think ',
+  ' need to confirm ', ' have to confirm ', ' confirm with ',
   // A place in line, or a callback, is not an appointment ("I'll put you
   // down on the waiting list", "for a callback about Thursday").
   ' waiting list ', ' wait list ', ' waitlist ', ' standby ', ' cancellation list ', ' callback ', ' call back ', ' a call about ',
@@ -106,6 +107,8 @@ const REFUSAL_MARKERS = [
   ' leave it where it is ', ' keep it where it is ', ' instead ',
   ' cancel it ', ' cancel the appointment ', ' cancel my appointment ', ' cancel the visit ', ' cancel my visit ',
   ' hold off ', ' leave it unchanged ', ' leave it the same ', ' keep it the same ', ' leave it alone ', ' leave it be ',
+  // A conflict with the slot ("I have another appointment then").
+  ' another appointment ', ' other appointment ', ' conflict ', ' unavailable ', ' busy then ', ' busy that ',
 ];
 
 // The agent's affirming close: a commitment, the agent taking the slot on
@@ -117,7 +120,7 @@ const REFUSAL_MARKERS = [
 // "That would be so much better").
 const ACCEPT_MARKERS = [
   'yes', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'alright', 'all right', 'perfect', 'great', 'fine', 'good', 'works',
-  'better', 'absolutely', 'definitely', 'of course', 'please', 'awesome', 'excellent', 'wonderful', 'love',
+  'better', 'absolutely', 'definitely', 'of course', 'awesome', 'excellent', 'wonderful', 'love',
 ];
 function accepts(ns) {
   return ACCEPT_MARKERS.some((m) => padded(ns).includes(padded(m)));

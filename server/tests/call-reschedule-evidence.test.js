@@ -391,6 +391,8 @@ describe('rescheduleAgreementEvidence', () => {
   test('a reply to the agent\'s proposal must accept it', () => {
     expect(evidence('Agent: Would Thursday at two work?\nCaller: I have another appointment then.\nAgent: We will see you Thursday at two.').ok).toBe(false);
     expect(evidence('Agent: Would Thursday at two work?\nCaller: That would be so much better.\nAgent: We will see you Thursday at two.').ok).toBe(true);
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: I have another appointment then, please.\nAgent: We will see you Thursday at two.').ok).toBe(false);
+    expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: I need to confirm with my husband.').ok).toBe(false);
   });
 
   test('a relative day after the agreed slot is a correction', () => {
