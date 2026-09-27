@@ -174,24 +174,25 @@ const CHOKING_RE = new RegExp(`\\b(?:chok(?:e|ed|es|ing)|gag(?:s|ged|ging)?)\\s+
 // A person pronoun right before the verb is the patient whatever came
 // earlier ("He didn't swallow it but he choked on the bait").
 const PERSON_SUBJECT_END_RE = /\b(?:i|he|she|we|you|yo|[ée]l|ella|nosotros)\s*$/i;
-// A verb joined by "and" / "then" / a comma shares its clause's subject, so
-// the subject decides, not the words just before the verb: "My child saw
-// ants and choked on the bait" reads "My child"; "The rats found it and ate
-// the bait" and "It ran off and ate the bait" read the rats / it. A leading
-// clause or an earlier conjunct can hide the subject ("After the ants
-// swarmed, my son got scared and ate the bait", "The ants scattered and my
-// son panicked and choked on the bait"), so the subject after the last comma
-// or conjunction counts too.
+// "My child saw ants and choked on the bait": when the words just before a
+// joined verb name a pest, the exposure still counts if the nearest conjunct
+// is a person or pet whose own verb took that pest as its object ("My child
+// saw ants", "My dog chased a roach"). Nothing else changes — "The rats found
+// it and ate the bait" and "My son says the rats ran and ate the bait" keep
+// the pest as the subject.
 const COORDINATED_VERB_RE = /(?:\b(?:and|then|but|so|y|luego|pero)|,)\s*$/i;
-const LEADING_CONNECTIVE_RE = /^(?:(?:and|but|so|then|also|y|pero|luego)\b[\s,]*)+/i;
-const subjectOf = (text) => text.trim().replace(LEADING_CONNECTIVE_RE, '').split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+const CONJUNCT_SPLIT_RE = /,|\b(?:and|then|but|so|y|luego|pero)\b/i;
+const PATIENT_VERB_PEST_OBJECT_RE = new RegExp(`^\\W*(?:(?:the|a|an|el|la)\\s+)?${EXPOSURE_SUBJECT}(?:\\s+${EXPOSURE_SUBJECT})?\\s+\\S+\\s+(?:(?:the|a|an|some|two|three|a\\s+few|few|those|these|all\\s+the|una?|unos|unas|las?|los?)\\s+)?(?:${PEST_POSSESSOR}|hormigas?|cucarachas?|ratas?|ratones?|ara[ñn]as?|avispas?)\\W*$`, 'i');
 function anyPatientExposure(turn) {
   const before = (clause, m) => clause.slice(0, m.index).trim().split(/\s+/).slice(-3).join(' ');
   const patient = (words) => PERSON_SUBJECT_END_RE.test(words) || !NON_PATIENT_WORD_RE.test(words);
-  const clauseSubjects = (prefix) => [subjectOf(prefix), prefix.split(/,|\b(?:and|then|but|so|y|luego|pero)\b/i).map(subjectOf).filter(Boolean).pop()].filter(Boolean);
-  const patientAt = (clause, m) => (COORDINATED_VERB_RE.test(clause.slice(0, m.index))
-    ? clauseSubjects(clause.slice(0, m.index)).some(patient)
-    : patient(before(clause, m)));
+  const patientAt = (clause, m) => {
+    if (patient(before(clause, m))) return true;
+    const prefix = clause.slice(0, m.index);
+    if (!COORDINATED_VERB_RE.test(prefix)) return false;
+    const conjuncts = prefix.split(CONJUNCT_SPLIT_RE).map((c) => c.trim()).filter(Boolean);
+    return PATIENT_VERB_PEST_OBJECT_RE.test(conjuncts[conjuncts.length - 1] || '');
+  };
   return String(turn || '').split(/(?<=[.!?;])\s+|\n+/).some((clause) => [...clause.matchAll(ANY_PATIENT_EXPOSURE_RE)]
     .some((m) => patientAt(clause, m) && !PASSIVE_END_RE.test(before(clause, m)))
     || [...clause.matchAll(CHOKING_RE)].some((m) => patientAt(clause, m)));
