@@ -825,10 +825,12 @@ async function sendCustomerMessageCore(input) {
     providerBoundaryBlock = { ...verdict, validator };
     return verdict;
   };
-  const runCallerPreSendCheck = async () => {
+  // Email authority and App bell persistence pass their held transaction
+  // so the caller's boundary reads do not acquire another pooled connection.
+  const runCallerPreSendCheck = async (database) => {
     if (typeof preSendCheck !== 'function') return { ok: true };
     try {
-      const verdict = await preSendCheck({ channel: sendInput.channel });
+      const verdict = await preSendCheck({ channel: sendInput.channel, ...(database ? { database } : {}) });
       if (verdict?.ok === true) {
         if (Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
           if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) {
@@ -874,23 +876,19 @@ async function sendCustomerMessageCore(input) {
       };
     }
   };
-  const providerPreparationCheck = async ({ database: billingEmailTrx } = {}) => {
+  const providerPreparationCheck = async ({ database: handoffDb } = {}) => {
     if (sendInput.metadata?.billingDeliveryLeg) {
       // Settings can change while a provider prepares its request. Never
       // send a leg the customer removed after the initial preference read.
-      // Codex r2 P1: an explicit Email leg's caller
-      // (billing-channel-email-authority.js) already holds
-      // withCustomerCommsLock's transaction for this exact recheck and
-      // threads it through as `database` — reuse it for these reads instead of
-      // opening a second root-pool connection (DB_POOL_MAX=2 deadlock risk
-      // under two concurrent billing emails). Push/SMS callers never supply
-      // a trx here, so they keep reading through the plain pool unchanged.
-      let latest = await loadContactState(sendInput, billingEmailTrx);
+      // Both the Email authority and App bell callback hold a transaction.
+      // Reuse it here; a scheduler may already occupy the other pool slot.
+      // Other callers continue to read through the root pool.
+      let latest = await loadContactState(sendInput, handoffDb);
       const latestSuppressionInput = !sendInput.to
         && String(latest.customer?.id) === String(sendInput.customerId)
         ? { ...sendInput, to: latest.customer.phone || null }
         : sendInput;
-      latest = await loadSuppressionState(latestSuppressionInput, latest, billingEmailTrx);
+      latest = await loadSuppressionState(latestSuppressionInput, latest, handoffDb);
       if (!latestSuppressionInput.to) latest.suppressionLoaded = true;
       const suppressionVerdict = await checkSuppression(sendInput, policy, latest);
       if (!suppressionVerdict.ok) return rememberBoundaryBlock(suppressionVerdict, 'check_suppression_boundary');
@@ -899,13 +897,13 @@ async function sendCustomerMessageCore(input) {
       // billingEmailLeg's own invoice guard (claim/visit/ownership/balance —
       // the same checks withProviderHandoff runs for SMS/App), composed here
       // instead of via that handoff: this runs under the Email authority's
-      // OWN lock on the invoice row (billingEmailTrx IS that lock's
+      // OWN lock on the invoice row (handoffDb IS that lock's
       // transaction — see the comment above), never a second lock on the
       // same row. billingEmailPreSendCheck is stripped from sendInput above
       // and reaches here only when this leg is billingEmailLeg (the
       // allowlist above refuses any other Email leg that supplies one).
       if (sendInput.metadata?.billingDeliveryLeg === 'email' && typeof billingEmailPreSendCheck === 'function') {
-        const invoiceVerdict = await billingEmailPreSendCheck({ channel: 'email', database: billingEmailTrx });
+        const invoiceVerdict = await billingEmailPreSendCheck({ channel: 'email', database: handoffDb });
         if (!invoiceVerdict || invoiceVerdict.ok !== true) {
           return rememberBoundaryBlock(invoiceVerdict, 'billing_email_pre_send_check_boundary');
         }
@@ -933,11 +931,11 @@ async function sendCustomerMessageCore(input) {
     if (await callbackNumberHoldBlocksSend(sendInput)) {
       return rememberBoundaryBlock({ ...CALLBACK_NUMBER_HOLD_BLOCK }, 'callback_number_hold_boundary');
     }
-    const callerVerdict = await runCallerPreSendCheck();
+    const callerVerdict = await runCallerPreSendCheck(handoffDb);
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
-    const annualVerdict = await annualOfferGuardVerdict(sendInput, billingEmailTrx);
+    const annualVerdict = await annualOfferGuardVerdict(sendInput, handoffDb);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
@@ -1085,6 +1083,7 @@ async function sendCustomerMessageCore(input) {
       sent: false,
       blocked: true,
       deliveryOutcome: providerOutcome.deliveryOutcome,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
       code: providerOutcome.code,
       reason: providerOutcome.error,
       ...(providerOutcome.retryable ? { retryable: true } : {}),
@@ -1140,7 +1139,7 @@ async function sendCustomerMessageCore(input) {
       return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
     }
     if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
-      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
@@ -1178,6 +1177,7 @@ async function sendCustomerMessageCore(input) {
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
     };
   }
 
