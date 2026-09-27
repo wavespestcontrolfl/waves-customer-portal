@@ -140,7 +140,11 @@ async function main() {
   console.log('Done.');
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+// Always release the pool, or the command hangs after it prints; a failure
+// keeps its nonzero exit code.
+main()
+  .catch((err) => {
+    console.error(err.message);
+    process.exitCode = 1;
+  })
+  .finally(() => db.destroy());
