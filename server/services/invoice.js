@@ -3465,7 +3465,37 @@ async function claimBillToFencedSend(invoiceId, pre, options) {
 async function termiteRenewalTermForInvoice(invoiceId, termId, database = db) {
   if (!termId) return null;
   return database("annual_prepay_terms").where({ id: termId, prepay_invoice_id: invoiceId })
-    .whereNotNull("renewed_from_term_id").whereNotNull("annual_plan_version").first("id", "customer_id");
+    .whereNotNull("renewed_from_term_id").whereNotNull("annual_plan_version").first("id", "customer_id", "renewed_from_term_id");
+}
+
+// Codex #4971 r14 P1: the WHOLE queued send of a termite renewal invoice —
+// the claim-time renewal clearance, the Bill-To fence and claim, the account
+// credit application and the provider handoff — runs under the renewal gate
+// (parent + successor keys, the off-pool session lock), exactly as an
+// immediate renewal send does (termite-annual-renewal-charge.js
+// withPayLinkClearance holds the gate across deliverRenewalInvoice →
+// sendViaSMSAndEmail). The gate used to cover only the claim, so a parent
+// cancel or refund committing between the claim and the provider saw the
+// invoice 'sending', deferred its withdrawal, and the worker still spent
+// credit and delivered a live pay link. Now a parent decision / refund
+// either waits for the send, or commits first and the claim-time clearance
+// (run inside, re-entrant) refuses it. An invoice with no renewal link takes
+// no lookup and no lock. A gate that cannot be taken (lock_timeout, the
+// session cap) is a pre-provider refusal (deliveryNeverAttempted), so the
+// scheduled worker retries it instead of stranding its claim.
+async function withRenewalSendGate(invoice, send) {
+  const renewal = await termiteRenewalTermForInvoice(invoice.id, invoice.annual_prepay_term_id);
+  if (!renewal) return send();
+  let entered = false;
+  try {
+    return await require("./termite-annual-renewal-charge").withRenewalGate(renewal, () => {
+      entered = true;
+      return send();
+    });
+  } catch (err) {
+    if (!entered && err && typeof err === "object") err.deliveryNeverAttempted = true;
+    throw err;
+  }
 }
 
 // Codex #4971 r11 P1: the renewal's own clearance (a parent cancelled or
@@ -7349,12 +7379,12 @@ const InvoiceService = {
 
       let result;
       try {
-        result = await this.sendViaSMSAndEmail(claimed.id, {
+        result = await withRenewalSendGate(claimed, () => this.sendViaSMSAndEmail(claimed.id, {
           requestReview: Boolean(claimed.scheduled_request_review),
           reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
           allowClaimed: true,
           claimToken: claimed.send_claim_token,
-        });
+        }));
       } catch (err) {
         if (err?.code === "queued_pay_link") {
           // A live deferred text already owns this pay link's delivery, so

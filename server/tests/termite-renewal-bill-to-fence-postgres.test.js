@@ -310,4 +310,73 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     expect(await readInvoice(invoiceId)).toMatchObject({ status: 'sent' });
     expect(await successorStatus(successor.id)).toBe('payment_pending');
   });
+
+  // Codex #4971 r14 P1: the WHOLE queued send runs under the renewal gate —
+  // the clearance, the claim, the credit and the provider handoff — so a
+  // parent decision (or refund) that arrives mid-send waits for it.
+  test('a parent cancel arriving while a queued renewal send is at the provider waits for the send (pg_locks), then commits — never a pay link after it', async () => {
+    const { successor } = await queuedRenewal();
+    const { recordDecision } = require('../services/annual-prepay-renewals');
+    // Hold the send at the provider; when it is let go, record what the
+    // parent reads (from another session) at the moment the provider runs.
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    let entered;
+    const inHandoff = new Promise((resolve) => { entered = resolve; });
+    let parentAtProvider = null;
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => {
+      entered();
+      await released;
+      parentAtProvider = await database('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first('status', 'renewal_decision');
+      return withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }));
+    });
+
+    const worker = Invoice.processScheduledSends();
+    await inHandoff;
+    let cancelDone = false;
+    const cancel = recordDecision({ termId: successor.renewed_from_term_id, action: 'cancel' }).then((row) => { cancelDone = true; return row; });
+
+    // The cancel queues on the parent's gate key the send is holding.
+    let waiting = 0;
+    for (let i = 0; i < 40 && !waiting; i += 1) {
+      await sleep(25);
+      const { rows } = await database.raw(
+        "SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = hashtext(?) AND objid = hashtext(?::text)",
+        ['annual-prepay-parent-decision', String(successor.renewed_from_term_id)],
+      );
+      waiting = rows[0].n;
+    }
+    expect(waiting).toBe(1);
+    expect(cancelDone).toBe(false);
+
+    release();
+    await worker;
+    const decided = await cancel;
+    expect(decided).toMatchObject({ renewal_decision: 'cancel' });
+    const sentInvoice = await db('invoices').where({ annual_prepay_term_id: successor.id }).first('status');
+    expect(sentInvoice.status).toBe('sent');
+    // The provider ran while the parent was still undecided — the cancel
+    // could not commit until the whole send had finished.
+    expect(parentAtProvider).toEqual({ status: 'active', renewal_decision: null });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a queued send of an invoice that is not a renewal takes no renewal lock; a renewal\'s send does', async () => {
+    const Charge = require('../services/termite-annual-renewal-charge');
+    const gate = jest.spyOn(Charge, 'withRenewalGate');
+    try {
+      const plain = await fixture({ renewal: false });
+      await db('invoices').where({ id: plain.invoiceId }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000) });
+      await Invoice.processScheduledSends();
+      expect(await readInvoice(plain.invoiceId)).toMatchObject({ status: 'sent' });
+      expect(gate).not.toHaveBeenCalled();
+
+      const { invoiceId, successor } = await queuedRenewal();
+      await Invoice.processScheduledSends();
+      expect(await readInvoice(invoiceId)).toMatchObject({ status: 'sent' });
+      expect(gate).toHaveBeenCalledWith(expect.objectContaining({ id: successor.id, renewed_from_term_id: successor.renewed_from_term_id }), expect.any(Function));
+    } finally {
+      gate.mockRestore();
+    }
+  });
 });

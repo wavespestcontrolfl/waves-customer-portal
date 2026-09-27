@@ -3716,6 +3716,7 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
 module.exports = {
   runTermiteAnnualRenewalSweep,
   withRenewalSendClearance,
+  withRenewalGate,
   termiteAnnualRenewalChargeLive,
   renewalMoneyInMotionForParent,
   renewalMoneyInMotionForTerm,
