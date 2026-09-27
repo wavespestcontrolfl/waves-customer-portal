@@ -828,6 +828,44 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       expect(state.invoice.billing_review_context.divergingSiblingIds).toEqual([thirdId]);
     }));
 
+    // Round-4 Codex P1 (second pre-push round): findLockedFirstApplication-
+    // Invoice identifies the invoice by pattern-matching auto-generated
+    // title/notes TEXT — staff rewriting that text while splitting the
+    // invoice by hand (an ordinary edit through the SAME PUT route) must
+    // not permanently blind the DATE-CHANGE chokepoint too, not just the
+    // money-edit one. The durable-provenance fallback lives in the SHARED
+    // findLockedFirstApplicationInvoice, so both paths get it.
+    test('manual clear, then the notes are rewritten (breaking the text-match), then a NEW sibling diverges by DATE — still reopens', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      const thirdId = randomUUID();
+      await trx('scheduled_services').insert({
+        id: thirdId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
+      });
+
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const seen = await trx('invoices').where({ id: ids.invoiceId }).first();
+      const version = billingReviewVersion(seen);
+      const cleared = await clearBillingReview(ids.invoiceId, version, trx);
+      expect(cleared.code).toBe('cleared');
+
+      // The office rewrites the auto-generated notes while splitting the
+      // invoice by hand — the text-match's own required substrings are
+      // gone for good.
+      await trx('invoices').where({ id: ids.invoiceId })
+        .update({ notes: 'Split by hand 2026-10-02 — see office notes', title: 'Pest control invoice' });
+
+      // A DIFFERENT, never-reviewed member of the same group diverges — via
+      // a DATE change this time, not a money edit.
+      await trx('scheduled_services').where({ id: thirdId }).update({ scheduled_date: '2026-10-03' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, thirdId);
+      expect(result.action).toBe('review_opened');
+      expect(result.opened).toBe(true);
+      const state = await readState(trx, ids);
+      expect(state.invoice.billing_review_opened_at).toBeTruthy();
+    }));
+
     test('auto-clear (realignment, nobody reviewed anything), then a re-divergence reopens', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
