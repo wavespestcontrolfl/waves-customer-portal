@@ -119,6 +119,9 @@ describe('groundRescheduleAgreement', () => {
     expect(cut('We will see you Thursday at two, actually three.', 'see you Thursday at two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(cut('We will move your October 8th visit, or the October 9th one, to Thursday at two.', 'Thursday at two', 'your October 8th visit', '2026-10-08'))
       .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    // Codex #5092 r2: a loose number beside the moved date ("October 8, actually 9").
+    expect(cut('We will move your October 8, actually 9, visit to Thursday at two.', 'Thursday at two', 'your October 8', '2026-10-08'))
+      .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
     // A whole time grounds, and the sentence may name the moved date beside the slot.
     expect(cut('Okay so we will see you Thursday at 2 PM then.', 'see you Thursday at 2 PM').ok).toBe(true);
     expect(cut('We will move it from October 8th to Thursday at two.', 'to Thursday at two', 'it from October', '2026-10-08'))
@@ -136,7 +139,9 @@ describe('groundRescheduleAgreement', () => {
   test('a date\'s own number never stands in for the agreed hour', () => {
     const at = (text) => agreedAt('2026-10-02T14:00:00-04:00', text);
     expect(at('We will see you October 2 in the afternoon.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
-    expect(at('We will see you October 2, 2 to 4.').ok).toBe(true);
+    expect(at('We will see you October 2, 2 to 4 pm.').ok).toBe(true);
+    // Codex #5092 r2: no am/pm said for the window, so its half of the day is open.
+    expect(at('We will see you October 2, 2 to 4.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(at('We will see you October 2 at two in the afternoon.').ok).toBe(true);
   });
 

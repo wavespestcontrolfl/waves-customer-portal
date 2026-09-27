@@ -101,10 +101,11 @@ function namesSlot(placed, slot, started, movedDate) {
 }
 
 // Does this placed quote's sentence name exactly this date: at least one day,
-// every day it (or the agreed slot's)?
+// every day it (or the agreed slot's), and no number it can't place ("October
+// 8, actually 9")?
 function namesDate(placed, date, started, slotDate) {
   const said = readPlaced(placed, started);
-  return Boolean(said) && everyDayIs(said.days, date, slotDate);
+  return Boolean(said) && !said.unexplained.length && everyDayIs(said.days, date, slotDate);
 }
 
 /**

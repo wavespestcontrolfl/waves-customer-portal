@@ -264,7 +264,7 @@ function rangeEndAfter(toks, i, after) {
   // "Ten to two" is a time a few minutes before two, not a range from ten.
   if (toks[j] === 'to' && MINUTES_TO.has(toks[i])) return -1;
   const joined = toks[j] === 'to' || toks[j] === 'through' || (toks[j] === 'and' && toks[i - 1] === 'between');
-  return joined && hourNumber(toks[j + 1]) != null ? j + 1 : -1;
+  return joined && (hourNumber(toks[j + 1]) != null || Object.hasOwn(NAMED_HOURS, toks[j + 1])) ? j + 1 : -1;
 }
 
 // "Two hours", "two and a half hours", "two or three hours", "two to three
@@ -311,13 +311,21 @@ function clockHour(n, period) {
 
 // An hour with no am/pm of its own. A range's start takes its time from the
 // end's stated am/pm and the range's length ("eight to ten pm" is 8 PM, "11
-// to 1 pm" is 11 AM); otherwise it reads as business hours: 7-11 in the
-// morning, 12 and 1-6 in the afternoon.
+// to 1 pm" is 11 AM, "10 to noon" is 10 AM); otherwise it reads as business
+// hours: 7-11 in the morning, 12 and 1-6 in the afternoon.
 function rangeStartHour(toks, n, rangeEnd) {
-  const endPeriod = rangeEnd > 0 ? periodAfter(toks, rangeEnd + 1) : null;
+  const endPeriod = rangeEndPeriod(toks, rangeEnd);
   if (!endPeriod) return clockHour(n, n >= 7 && n <= 11 ? 'am' : 'pm');
-  const end = hourNumber(toks[rangeEnd]);
+  const end = hourNumber(toks[rangeEnd]) ?? 12;
   return (clockHour(end, endPeriod) - ((end - n + 12) % 12) + 24) % 24;
+}
+
+// The am/pm a range's end states: its own ("to 4 pm"), or noon's or
+// midnight's ("between 10 and noon"); null when it states none.
+function rangeEndPeriod(toks, rangeEnd) {
+  if (rangeEnd <= 0) return null;
+  if (Object.hasOwn(NAMED_HOURS, toks[rangeEnd])) return NAMED_HOURS[toks[rangeEnd]] === 12 ? 'pm' : 'am';
+  return periodAfter(toks, rangeEnd + 1);
 }
 
 // Words before "one" that make it a pronoun ("that one"), not a number.
@@ -364,7 +372,10 @@ function hourAt(toks, i, n, said) {
   while (CLOCK_TAIL.has(toks[end])) end += 1;
   end += dayPartAt(toks, end).len;
   const ownPeriod = periodAfter(toks, after);
-  const offHour = after > i + 1 || inexactAt(toks, i, end) || said.disagrees(ownPeriod);
+  // A range with no am/pm said anywhere ("2 to 4") leaves its half of the
+  // day open, and "two-ish" is approximate: neither is an agreed hour.
+  const openRange = rangeEnd > 0 && !ownPeriod && !said.period && !rangeEndPeriod(toks, rangeEnd);
+  const offHour = after > i + 1 || inexactAt(toks, i, end) || said.disagrees(ownPeriod) || openRange || toks[end] === 'ish';
   const marked = offHour || rangeEnd > 0 || ownPeriod || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
   if (!marked) return null;
   const period = ownPeriod || said.period;
@@ -395,7 +406,8 @@ function scanHours(turnText, started) {
       if (dateTokens.has(offset + i)) continue;
       if (Object.hasOwn(NAMED_HOURS, toks[i])) {
         const hour24 = NAMED_HOURS[toks[i]];
-        mentions.push({ hour24, offHour: inexactAt(toks, i, i + 1) || said.disagrees(hour24 === 12 ? 'pm' : 'am'), pos: offset + i, end: offset + i + 1 });
+        const offHour = inexactAt(toks, i, i + 1) || said.disagrees(hour24 === 12 ? 'pm' : 'am') || toks[i + 1] === 'ish';
+        mentions.push({ hour24, offHour, pos: offset + i, end: offset + i + 1 });
         continue;
       }
       const n = hourNumber(toks[i]);
@@ -425,7 +437,9 @@ function scanHours(turnText, started) {
  * range); or minutes ("two ten", "2:30", "2.30", "two oh five") or a
  * half/quarter lead-in ("half past two"), both of which put it off the hour
  * — a slot is always on the hour, so such a mention can only disagree with
- * one. A number running into a unit of time is a length ("about two
+ * one. So is an approximate time ("two-ish", "noon-ish"), and a range
+ * with no am/pm said anywhere in its sentence ("2 to 4"), whose half of the
+ * day is open. A number running into a unit of time is a length ("about two
  * hours"). With no am/pm said with it, an hour takes the period its sentence
  * states — a part of the day ("Thursday evening at eight") or an am/pm that
  * follows no hour ("Thursday PM at 10") — else a range's start its end's

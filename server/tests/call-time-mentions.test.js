@@ -86,11 +86,20 @@ describe('extractHourMentions', () => {
     expect(hours('Two in the afternoon. Nine this morning. Eight tonight.')).toEqual([[14, false], [9, false], [20, false]]);
     expect(hours('Two of us will be home in the afternoon. October 2 in the afternoon. Oct. 2 in the morning. 10/2 in the evening.')).toEqual([]);
     // The date's 2 is neither the hour nor the window's minutes.
-    expect(hours('October 2, 2 to 4.')).toEqual([[14, false]]);
+    expect(hours('October 2, 2 pm to 4.')).toEqual([[14, false]]);
   });
 
   test('a range counts its start, reading the end\'s am/pm across noon', () => {
-    expect(hours('Two to four. Between eight and ten pm. 11 to 1 pm. 2 pm to 4 pm.')).toEqual([[14, false], [20, false], [11, false], [14, false]]);
+    expect(hours('Between eight and ten pm. 11 to 1 pm. 2 pm to 4 pm. Between 10 and noon. Two to four this afternoon.'))
+      .toEqual([[20, false], [11, false], [14, false], [10, false], [14, false]]);
+  });
+
+  test('a range with no am/pm said anywhere leaves its half of the day open', () => {
+    expect(hours('Tuesday, 2 to 4. Between eight and ten.')).toEqual([[14, true], [8, true]]);
+  });
+
+  test('an approximate time is not an agreed hour', () => {
+    expect(hours('Tomorrow at two-ish. Noon-ish. 2 pm ish.')).toEqual([[14, true], [12, true], [14, true]]);
   });
 
   test('minutes or a half/quarter lead-in put a time off the hour', () => {
