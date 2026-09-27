@@ -228,6 +228,15 @@ function lockShipment(trx, vendor, shipmentKey) {
   return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`purchase-receipt-shipment:${vendor}:${shipmentKey}`]);
 }
 
+// Has this shipment been handed to a person (see the header)? Call it under
+// lockShipment. A placeholder hand-off stops every line of the shipment;
+// the others stop only lines that came from a different email.
+async function shipmentHandedOff(trx, vendor, shipmentKey, emailId) {
+  const handOffs = await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey })
+    .whereIn('status', HANDED_OFF_STATUSES).select('status', 'email_id');
+  return handOffs.some((row) => PLACEHOLDER_HAND_OFFS.includes(row.status) || row.email_id !== emailId);
+}
+
 // Classify, and for a line that would move stock, lock its product row and
 // classify again under the lock: a container_size edit or a deactivation
 // that committed after the first read is what counts.
@@ -271,9 +280,7 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
 
   return conn.transaction(async (trx) => {
     await lockShipment(trx, vendor, shipmentKey);
-    const handOffs = await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey })
-      .whereIn('status', HANDED_OFF_STATUSES).select('status', 'email_id');
-    if (handOffs.some((row) => PLACEHOLDER_HAND_OFFS.includes(row.status) || row.email_id !== email.id)) return { ...HANDED_TO_PERSON };
+    if (await shipmentHandedOff(trx, vendor, shipmentKey, email.id)) return { ...HANDED_TO_PERSON };
     let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
     if (holdAs && classified.productId) {
       classified = { status: holdAs, productId: classified.productId, product: classified.product };
@@ -347,7 +354,7 @@ async function performLoggedMovement(trx, { vendor, claim, classified, orderNumb
 }
 
 module.exports = {
-  classifyItem, processReceiptLine, lockShipment, SOURCES, UNKNOWN_ORDER,
+  classifyItem, processReceiptLine, lockShipment, shipmentHandedOff, SOURCES, UNKNOWN_ORDER,
   findPossibleDuplicateMovement,
   // Title-size-claim and pack-marker parsing primitives, reused (not
   // duplicated) by inventory-agent.js's deterministic reading validation —

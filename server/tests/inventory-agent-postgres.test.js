@@ -166,6 +166,29 @@ jest.setTimeout(30000);
     expect(await bellsFor(line.id)).toHaveLength(1);
   });
 
+  test('a shipment handed to a person by a later email closes the pending line without stock', async () => {
+    const line = await pendingLine();
+    const [other] = await mockConn('emails').insert({
+      gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com',
+      subject: 'Delivered: 1 item', received_at: RECEIVED_AT,
+    }).returning('*');
+    await mockConn('purchase_receipt_lines').insert({
+      vendor: 'amazon', order_number: 'unknown', shipment_key: 'ship-2', line_no: 1,
+      raw_title: 'Bifen XTS Insecticide 96 oz', quantity: 2, status: 'no_order_number', email_id: other.id,
+    });
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'skipped', movement_id: null });
+    expect(saved.agent_decision).toMatchObject({ reason: 'shipment_handed_to_person' });
+    expect(await mockConn('products_catalog').where({ name: 'Bifen XTS' })).toHaveLength(0);
+    expect(await bellsFor(line.id)).toHaveLength(0);
+  });
+
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
     const [bare] = await mockConn('products_catalog').insert({
       name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,

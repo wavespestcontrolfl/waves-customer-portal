@@ -32,7 +32,7 @@ const { parsePackSize, parsePackCount, countUnitsCompatible } = require('../prod
 const { convertInventoryQuantity, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const inventoryOperations = require('../inventory-operations');
 const {
-  classifyItem, findPossibleDuplicateMovement, lockShipment, SOURCES,
+  classifyItem, findPossibleDuplicateMovement, lockShipment, shipmentHandedOff, SOURCES,
   TITLE_SIZE_RE, sizeUnit, parseSizeNumber, sizesAgree, round4,
   parseMultipack, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
 } = require('./receipt-processor');
@@ -549,6 +549,16 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
     const line = await trx('purchase_receipt_lines').where({ id: lineId }).forUpdate().first();
     if (!line || line.status !== 'agent_pending') return { applied: false, reason: 'no_longer_pending' };
     await lockShipment(trx, vendor, shipmentKey);
+    // A later email for this shipment may have handed it to a person (no
+    // items, no order number, never delivered, unreadable) while this line
+    // waited. Never add stock on top of that instruction; the person already
+    // has that bell, so this line closes quietly.
+    if (await shipmentHandedOff(trx, vendor, shipmentKey, email.id)) {
+      await trx('purchase_receipt_lines').where({ id: lineId }).update({
+        status: 'skipped', agent_decision: { ...decisionRecord(decision), reason: 'shipment_handed_to_person' }, agent_decided_at: new Date(),
+      });
+      return { applied: true, status: 'skipped' };
+    }
 
     if (decision.kind === 'not_stock' || decision.kind === 'equipment' || decision.kind === 'unsure') {
       await trx('purchase_receipt_lines').where({ id: lineId }).update({
