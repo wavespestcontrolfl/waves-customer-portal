@@ -415,6 +415,13 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['It usually takes two hours.', 'How long does the spray take to dry?'],
     ['Your technician recommends waiting 30 minutes.', 'How long after treatment can I re-enter?'],
     ['About 30 minutes after the visit.', 'How long after treatment can I re-enter?'],
+    ['At 4 PM.', 'How soon can we come back?'],
+    ['In 30 minutes.', 'When can we come back?'],
+    ['In 30 minutes.', 'How long until we can return?'],
+    ['In 30 minutes.', 'When is it safe to return?'],
+    ['After 4 PM.', 'Is it ok for the dog to come back in?'],
+    ['En 2 horas.', '¿Cuándo podemos volver?'],
+    ['Usually 45 minutes, then let it dry for an hour.', 'How long does lawn service take?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -431,6 +438,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['The visit takes about 45 minutes.', 'Do I need to stay home during the treatment?'],
     ['We will come back in two weeks for a follow-up treatment.', ''],
     ['The treatment takes about 45 minutes.', 'How long does the treatment take?'],
+    ['Usually 45 minutes.', 'How long does lawn service take?'],
+    ['About 45 minutes.', 'How long will the technician be here for the treatment?'],
+    ['About 90 days.', 'How long does the treatment last?'],
+    ['We can come back Tuesday at 10 AM.', 'When can you come back?'],
+    ['Tuesday works.', 'Can we get back to you tomorrow?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
@@ -1286,6 +1298,19 @@ describe('normalizeIntakeResult', () => {
     expect(out.reply).toContain('1-800-222-1222');
   });
 
+  test.each([
+    'How much is her pest service?',
+    'How much is flea service for my dog?',
+  ])('a business question that only names someone ends an earlier emergency: %s', (active) => {
+    const out = normalizeIntakeResult(
+      { reply: 'Service is $50 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
+      'openai',
+      `My dog ate the bait\n${active}`,
+      active,
+    );
+    expect(out.reply).toMatch(/Get my price/);
+  });
+
   test('a question after a business turn is judged on its own', () => {
     const reply = 'No big deal, they are just American roaches.';
     const out = normalizeIntakeResult(
@@ -2083,6 +2108,12 @@ describe('looksLikeEmergency', () => {
     'Ants got into the bait and it got in the eyes',
     'Roach killer got in its eyes',
     'My son threw up after the spray',
+    'My child inhaled fumes from the treatment',
+    'My child breathed in fumes after your treatment',
+    'My son was exposed to fumes from the treatment',
+    'Mi hijo inhaló los vapores del tratamiento',
+    'The fumes made my child dizzy',
+    'My son can not breathe in',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2177,6 +2208,8 @@ describe('looksLikeEmergency', () => {
     "My son didn't throw up after the spray",
     'The rat got into the poison and put it in its mouth',
     'Put bait in the mouth of the burrow',
+    "My child didn't breathe in the fumes",
+    'The fumes killed the roaches',
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
     'The ants got poisoned by chemicals',

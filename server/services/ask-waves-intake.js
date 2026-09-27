@@ -138,6 +138,8 @@ const NEGATED_REACTION_RE = /\b(?:didn'?t\s+have|did\s+not\s+have|hasn'?t\s+had|
 // Eating or drinking is an exposure only with a product in the same clause —
 // "my dog ate the bait" is, "I ate lunch and saw roaches" is not.
 const PRODUCT_NOUN = '(?:weed\\s*killers?|bug\\s*(?:spray|killer)s?|(?:roach|ant|ants|wasp|hornet|flea|tick|mosquito|insect|rat|mouse|mice|rodent)\\s+(?:killer|spray|bait|poison|powder|gel|traps?)s?|lawn\\s+(?:treatment|chemicals?|spray|fertilizer)s?|round\\s*up|raid|termiticid\\w*|matamalezas|mata\\s*(?:hierbas?|malezas?|cucarachas?|hormigas?|ratas?)|herbicida\\w*|baits?|granul\\w*|pellets?|gel|pesticid\\w*|poison\\w*|spray|insecticid\\w*|chemicals?|products?(?!\\s+(?:page|pages|link|links|list|catalog|site|listing|details|description|info|review|reviews|number|code|name|line|options?))|rodenticid\\w*|repellent\\w*|fertiliz\\w*|herbicid\\w*|traps?|stations?(?!\\s+(?:page|pages|link|list|details|info|number))|cebos?|veneno\\w*|gr[aá]nulos?|productos?|qu[ií]mic\\w*|pesticida\\w*|insecticida\\w*|raticida\\w*|fertilizante\\w*)';
+// Fumes, vapor or mist from a treatment — what a visitor breathes in.
+const FUME_WORD = '(?:fumes?|vapou?rs?|mist|overspray|gas(?:es)?|(?:spray|chemical|pesticide|treatment)\\s+(?:drift|cloud|smell|odou?r)|vapores?|vaho|humos?|neblina|gases|olor\\s+(?:a\\s+|del?\\s+)?(?:qu[ií]mic\\w*|pesticida\\w*|insecticida\\w*|veneno|tratamiento|producto))';
 const EXPOSURE_SUBJECT = '(?:birds?|parrots?|rabbits?|hamsters?|ferrets?|horses?|p[aá]jar\\w*|loros?|conejos?|i|we|he|she|someone|somebody|my|our|his|her|their|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|husband|wife|mi|su|nuestr[oa]|hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|perr[oa]s?|gat[oa]s?|mascotas?)';
 const NON_PEST_GAP = '(?:(?!(?:ants?|roach\\w*|cockroach\\w*|bugs?|mice|rats?|rodents?|pests?|termites?|spiders?|insects?|flies|fleas?|squirrels?|wasps?|bees?|hormigas?|cucarachas?|ratas?|ratones?|plagas?|insectos?)\\b)\\S+\\s+){0,4}?';
 const EAT_EXPOSURE_RE = new RegExp(`\\b${EXPOSURE_SUBJECT}\\s+${NON_PEST_GAP}(?:ate|eaten|eating|drank|drunk|drinking|chewed|chewing|licked|licking|(?:se\\s+)?comi[oó]|(?:se\\s+)?bebi[oó]|mastic[oó]|lami[oó]|consum(?:ed|ing|es)|tast(?:ed|ing)|took(?=\\s+(?:some\\s+|a\\s+bit\\s+of\\s+)?(?:rat\\s+|the\\s+)?(?:poison|pesticid|insecticid|herbicid|rodenticid|weed\\s*killer|bait))|tom[oó](?=\\s+(?:\\S+\\s+)?(?:veneno|pesticida|insecticida|raticida|herbicida))|(?:got|gets|getting|get)\\s+into|(?:sprayed|splashed|misted|dusted)\\s+(?:myself|himself|herself|themselves|ourselves|yourself)(?:\\s+with)?|(?:se\\s+)?meti[oó]\\s+en|consumi[oó]|prob[oó]|inhal\\w*|breathed(?:\\s+in)?|breathing(?:\\s+in)?|sniffed|(?:was|were|got|been|is)\\s+exposed\\s+to|exposed\\s+to|touched|splashed|(?:was|were|got|been|gets)\\s+sprayed(?:\\s+with)?|expuest[oa]s?\\s+a|inhal[oó]|respir[oó]|suck(?:ed|ing)\\s+on|chew(?:ed|ing)\\s+on|mouthed|chup[oó]|lamió)(?![a-zñáéíóú])(?:\\s+(?:some|the|a|an|his|her|their|my|our|your|of|that|this|these|those|any|bit|little|piece|pieces|part|few|pellets?|granules?|el|la|los|las|un|una|unos|unas|del|de|algo|poco|from|out\\s+of|bottles?|containers?|cans?|jugs?|bags?|boxes?|fumes|residue|vapou?rs?|mist|dust|powder|drops?|puddles?|botella|envase|restos|vapores|water|food|milk|juice|drink|meal|treats?|kibble|soda|(?:contaminated|laced|mixed|mixed\\s+up|sprinkled|covered)\\s+with|with|containing|agua|comida|bebida|(?:contaminad[oa]|mezclad[oa])\\s+con|con)){0,5}\\s+${PRODUCT_NOUN}(?![a-zñáéíóú])|\\b${PRODUCT_NOUN}\\b[^.?!]{0,30}?\\b(?:eaten|drunk|chewed|licked|consumed|tasted|inhaled|breathed\\s+in|sniffed|comid[oa]s?|bebid[oa]s?|inhalad[oa]s?)\\s+(?:by|por)\\s+(?:(?:my|our|the|his|her|their|mi|su|el|la)\\s+)?${EXPOSURE_SUBJECT}\\b`, 'i');
@@ -149,6 +151,12 @@ const EAT_EXPOSURE_RE = new RegExp(`\\b${EXPOSURE_SUBJECT}\\s+${NON_PEST_GAP}(?:
 const BODY_PART = '(?:eyes?|eyelids?|nose|nostrils?|ears?|mouth|lips?|tongue|throat|skin|face|arms?|hands?|fingers?|legs?|feet|foot|toes?|paws?|body|head|hair|fur|ojos?|nariz|o[ií]dos?|orejas?|boca|labios?|lengua|garganta|piel|cara|brazos?|manos?|dedos?|piernas?|pies?|patas?|cuerpo|cabeza|pelo)';
 const PEST_POSSESSOR = '(?:ants?|roach\\w*|cockroach\\w*|bugs?|mice|mouse|rats?|rodents?|pests?|termites?|spiders?|insects?|flies|fleas?|ticks?|squirrels?|wasps?|bees?|hornets?|mosquito\\w*|snakes?)';
 const BODY_DETERMINER = `(?:the|a|an|his|her|their|my|our|your|its|both|one|each|either|left|right|little|tiny|bare|open|whole|los|las|la|el|sus|su|mis|mi|tus|tu|nuestr[oa]s?|ambos|ambas|izquierd[oa]|derech[oa]|(?!${PEST_POSSESSOR}['’])[a-z]+(?:['’]s|s['’]))`;
+
+// Breathing fumes is an exposure whatever produced them — "My child inhaled
+// fumes from the treatment", "breathed in the vapors", "was exposed to the
+// fumes", "inhaló los vapores". The fumes stand in for the product, since a
+// treatment is not a product noun.
+const FUME_EXPOSURE_RE = new RegExp(`\\b${EXPOSURE_SUBJECT}\\s+${NON_PEST_GAP}(?:inhal(?:e|ed|es|ing)|breath(?:e|ed|es|ing)(?:\\s+in)?|sniff(?:ed|ing|s)?|(?:was|were|got|been|is|are|gets?)\\s+exposed\\s+to|exposed\\s+to|inhal[oó]|respir[oó]|aspir[oó]|expuest[oa]s?\\s+a)\\s+(?:(?:some|the|a|an|those|these|that|this|of|all|lots\\s+of|a\\s+lot\\s+of|too\\s+much|so\\s+much|los|las|el|la|unos|unas|algo\\s+de|mucho|muchos|del?)\\s+){0,3}${FUME_WORD}(?![a-zñáéíóú])`, 'i');
 
 // A product in someone's eyes, mouth or on their skin is an exposure
 // ("My child got rat poison in his eyes", "le cayó pesticida en los ojos").
@@ -164,16 +172,17 @@ const NEGATED_NEED_RE = /\b(?:don'?t|do\s+not|doesn'?t|does\s+not|no|not|never|w
 // A symptom tied to a treatment or product is a reaction ("My child is
 // vomiting after the pesticide treatment", "rash after the lawn chemicals").
 const SYMPTOM_WORDS = '(?:convuls\\w*|shak\\w*|trembl\\w*|shiver\\w*|letharg\\w*|limp\\w*|collaps\\w*|unconscious|foam\\w*|temblando|colaps\\w*|vomit\\w*|throw\\w*\\s+up|threw\\s+up|puk(?:e|ed|es|ing)|dizz\\w*|rash\\w*|hives|swell\\w*|swoll\\w*|nause\\w*|headaches?|cough\\w*|wheez\\w*|burn(?:ing|s)?|itch\\w*|fever|faint\\w*|seiz\\w*|drool\\w*|sick(?!\\s+(?:of|and\\s+tired))|ill|v[oó]mit\\w*|mare[oa]\\w*|sarpullido|ronchas|hinchad\\w*|n[aá]usea\\w*|tos|ardor|fiebre|enferm[oó]\\w*)';
-const TREATMENT_WORDS = `(?:treat\\w*|spray\\w*|appli\\w*|chemicals?|fumig\\w*|tratamiento\\w*|fumigaci\\w*|roci\\w*|aplicaci\\w*|qu[ií]mic\\w*|${PRODUCT_NOUN})`;
+const TREATMENT_WORDS = `(?:treat\\w*|spray\\w*|appli\\w*|chemicals?|fumig\\w*|tratamiento\\w*|fumigaci\\w*|roci\\w*|aplicaci\\w*|qu[ií]mic\\w*|${FUME_WORD}|${PRODUCT_NOUN})`;
 const TREATMENT_FIRST_SYMPTOM_RE = new RegExp(`\\b(?:after|since|following|ever\\s+since|desde|despu[eé]s\\s+de[l]?|tras)\\b[^.?!\\n]{0,40}?\\b${TREATMENT_WORDS}(?![a-zñáéíóú])[^.?!\\n]{0,50}?\\b${SYMPTOM_WORDS}(?![a-zñáéíóú])`, 'i');
 const CAUSED_SYMPTOM_RE = new RegExp(`\\b${TREATMENT_WORDS}(?![a-zñáéíóú])[^.?!\\n]{0,25}?\\b(?:made|makes|making|caused|causes|causing|gave|gives|left|triggered|hizo|hace|caus[oó]|provoc[oó]|dej[oó])\\b[^.?!\\n]{0,40}?\\b${SYMPTOM_WORDS}(?![a-zñáéíóú])`, 'i');
-const TREATMENT_SYMPTOM_RE = new RegExp(`\\b${SYMPTOM_WORDS}(?![a-zñáéíóú])[^.?!\\n]{0,40}?\\b(?:after|since|from|following|when|desde|despu[eé]s|tras|por)\\b[^.?!\\n]{0,40}?\\b(?:treat\\w*|spray\\w*|appli\\w*|chemicals?|fumig\\w*|tratamiento\\w*|fumigaci\\w*|roci\\w*|aplicaci\\w*|qu[ií]mic\\w*|${PRODUCT_NOUN})(?![a-zñáéíóú])`, 'i');
+const TREATMENT_SYMPTOM_RE = new RegExp(`\\b${SYMPTOM_WORDS}(?![a-zñáéíóú])[^.?!\\n]{0,40}?\\b(?:after|since|from|following|when|desde|despu[eé]s|tras|por)\\b[^.?!\\n]{0,40}?\\b${TREATMENT_WORDS}(?![a-zñáéíóú])`, 'i');
 
 // A denied exposure ("did not swallow", "never ate the bait", "no se tragó",
 // "the spray didn't get in the kids' eyes", "no le cayó en los ojos") is a
 // correction, not an emergency. Never breathing: "is not breathing" is
-// the emergency itself.
-const NEGATED_EXPOSURE_RE = new RegExp(`\\b(?:didn'?t|did\\s+not|never|hasn'?t|has\\s+not|haven'?t)\\s+(?:get|got|splash\\w*|spill\\w*|spray\\w*)\\s+(?:\\S+\\s+){0,3}?(?:in|on|into|onto|inside|up|all\\s+over|over)\\s+(?:${BODY_DETERMINER}\\s+){0,3}${BODY_PART}(?![a-zñáéíóú])|\\b(?:did\\s+not|didn'?t|never|has\\s+not|hasn'?t|have\\s+not|haven'?t|wasn'?t|was\\s+not|weren'?t|not)\\s+(?:\\w+\\s+)?(?:swallow\\w*|ingest\\w*|eat|ate|eaten|drink|drank|drunk|lick\\w*|chew\\w*|touch\\w*|inhal\\w*|consum\\w*|tast\\w*|get\\s+into|got\\s+into|get\\s+in|got\\s+in|go\\s+in|went\\s+in|splash\\w*|spill\\w*|exposed)\\b|\\bno\\s+(?:se\\s+|le\\s+|les\\s+|me\\s+|nos\\s+|te\\s+|lo\\s+)?(?:cay[oó]|salpic[oó]|entr[oó]|roci[oó]|toc[oó]|moj[oó])\\s+(?:\\S+\\s+){0,2}?(?:en|sobre)\\s+(?:${BODY_DETERMINER}\\s+){0,3}${BODY_PART}(?![a-zñáéíóú])|\\bno\\s+(?:se\\s+|le\\s+|lo\\s+)?(?:trag[a-zñáéíóú]*|comi[oó]|ingiri[oó]|bebi[oó]|toc[oó]|lami[oó]|inhal[oó]|prob[oó])(?![a-zñáéíóú])`, 'gi');
+// the emergency itself, so only a past-tense "didn't breathe in" is denied
+// ("can not breathe in" stays an emergency).
+const NEGATED_EXPOSURE_RE = new RegExp(`\\b(?:didn'?t|did\\s+not|never|hasn'?t|has\\s+not|haven'?t)\\s+(?:get|got|splash\\w*|spill\\w*|spray\\w*)\\s+(?:\\S+\\s+){0,3}?(?:in|on|into|onto|inside|up|all\\s+over|over)\\s+(?:${BODY_DETERMINER}\\s+){0,3}${BODY_PART}(?![a-zñáéíóú])|\\b(?:did\\s+not|didn'?t|never|has\\s+not|hasn'?t|have\\s+not|haven'?t|wasn'?t|was\\s+not|weren'?t|not)\\s+(?:\\w+\\s+)?(?:swallow\\w*|ingest\\w*|eat|ate|eaten|drink|drank|drunk|lick\\w*|chew\\w*|touch\\w*|inhal\\w*|consum\\w*|tast\\w*|get\\s+into|got\\s+into|get\\s+in|got\\s+in|go\\s+in|went\\s+in|splash\\w*|spill\\w*|exposed)\\b|\\bno\\s+(?:se\\s+|le\\s+|les\\s+|me\\s+|nos\\s+|te\\s+|lo\\s+)?(?:cay[oó]|salpic[oó]|entr[oó]|roci[oó]|toc[oó]|moj[oó])\\s+(?:\\S+\\s+){0,2}?(?:en|sobre)\\s+(?:${BODY_DETERMINER}\\s+){0,3}${BODY_PART}(?![a-zñáéíóú])|\\b(?:didn'?t|did\\s+not|never|hasn'?t|has\\s+not|haven'?t|have\\s+not)\\s+(?:\\w+\\s+)?(?:breathe\\s+in|breathed\\s+in|sniff(?:ed)?)\\b|\\bno\\s+(?:se\\s+|le\\s+|lo\\s+)?(?:trag[a-zñáéíóú]*|comi[oó]|ingiri[oó]|bebi[oó]|toc[oó]|lami[oó]|inhal[oó]|prob[oó])(?![a-zñáéíóú])`, 'gi');
 
 // Denied symptoms ("is not vomiting", "has no rash") are removed first.
 // "My dog didn't eat the bait, but he licked it" — after the denial is
@@ -244,7 +253,7 @@ function looksLikeEmergency(text) {
   const t = stripDenials(text);
   // Exposure shapes are judged one turn (line) at a time — "I ate lunch" in
   // history must not pair with "Which bug spray do you use?" now.
-  const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn) || BODY_CONTACT_RE.test(turn) || treatmentSymptom(turn) || affirmedAfterDenial(turn) || SPRAY_ON_PATIENT_RE.test(turn));
+  const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || FUME_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn) || BODY_CONTACT_RE.test(turn) || treatmentSymptom(turn) || affirmedAfterDenial(turn) || SPRAY_ON_PATIENT_RE.test(turn));
   const elliptical = String(text || '').split(/\n+/).some((turn) => ELLIPTICAL_EXPOSURE_RE.test(turn));
   return EMERGENCY_RE.test(t) || SPANISH_POISONING_RE.test(t) || POISONED_FRAGMENT_RE.test(t) || elliptical || exposure
     || t.split(/\n+/).some((turn) => BITE_STING_RE.test(turn) && REACTION_RE.test(turn.replace(NEGATED_REACTION_RE, ' ')))
@@ -394,7 +403,7 @@ const UNSAFE_CLAIM_REPLY = `I can't make a blanket safety claim or give a fixed 
 //      re-enter?") instead of chasing it.
 // A flagged reply is replaced wholesale with reviewed copy; one that carries
 // emergency direction keeps the emergency script (see scrubUnsafeClaims).
-const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w*|insecticid\w*|herbicid\w*|fungicid\w*|chemicals?|applications?|applied|apply|bait\w*|fertiliz\w*|granul\w*|repellent\w*|pest\s+control|lawn\s+care|extermin\w*|mosquito\s+(?:service|control|barrier)|tratamiento\w*|productos?|qu[íi]mic\w*|pesticida\w*|insecticida\w*|fumig\w*|rociad\w*|aplicaci[óo]n\w*|cebos?|control\s+de\s+plagas|servicios?|programas?|services?|programs?|plans?)\b/i;
+const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|fumes?|vapou?rs?|pesticid\w*|insecticid\w*|herbicid\w*|fungicid\w*|chemicals?|applications?|applied|apply|bait\w*|fertiliz\w*|granul\w*|repellent\w*|pest\s+control|lawn\s+care|extermin\w*|mosquito\s+(?:service|control|barrier)|tratamiento\w*|productos?|qu[íi]mic\w*|pesticida\w*|insecticida\w*|fumig\w*|rociad\w*|aplicaci[óo]n\w*|cebos?|control\s+de\s+plagas|servicios?|programas?|services?|programs?|plans?)\b/i;
 
 const EPA_MENTION_RE = /\b(?:epa|e\.\s?p\.\s?a\.?|environmental\s+protection\s+agency|agencia\s+de\s+protecci[oó]n\s+ambiental)(?![a-z])/i;
 const APPROVAL_WORD_RE = /\b(?:go[-\s]?ahead|nod|allow\w*|permit\w*|permite\w*|permitid\w*|accept\w*|acept\w*|okay(?:ed|s)?|ok'?d|green[-\s]?light\w*|signed\s+off|sign[-\s]?off|blessed|blessing|seal\s+of\s+approval|stamp\s+of\s+approval|thumbs[-\s]up|visto\s+bueno|luz\s+verde|approv\w*|endors\w*|certif\w*|sanction\w*|authoriz\w*|clear(?:ed|ance)|aprob\w*|avalad\w*|respaldad\w*|autoriz\w*)\b/i;
@@ -519,6 +528,31 @@ const DIGITAL_ACCESS_RE = /\b(?:go(?:ing)?\s+back\s+(?:in(?:to|side)?|to)|return
 // modal in front of going in/out ("You'll be able to go inside", "When can
 // we go inside?", "Can the kids play outside?").
 const ACCESS_TOPIC_RE = /\b(?:(?:baby|babies|toddlers?|kids?|children|child|dogs?|cats?|pets?|pupp(?:y|ies))\s+(?:\w+\s+)?(?:crawl|play|roam|lie|sit)\s+(?:again|around|on|in|outside|inside|there)\b|let\s+(?:my|our|the|your)\s+(?:toddler|baby|babies|kids?|children|child|dogs?|cats?|pets?|pupp(?:y|ies))\s+(?:crawl|play|walk|run|go|out|in|back|sit|lie|roam|near)\b|no[-\s]+(?:re-?)?entry|exclusion\s+(?:period|window|time|zone|interval)|re-?entry\s+(?:interval|period|window|time)|(?:do\s+not|don'?t|no)\s+(?:re-?)?enter|(?:until|till|before|when)\s+(?:it'?s|it\s+is|it\s+will\s+be|its|it\s+becomes|they'?re|everything\s+is|the\s+(?:lawn|yard|house|room|area)\s+is)\s+(?:safe|ok|okay|dry|fine|clear)|cu[aá]ndo\s+(?:es|ser[aá]|est[aá])\s+(?:seguro|bien|seco)|hasta\s+que\s+(?:sea|est[eé])\s+(?:seguro|seco)|(?:walk|take|let|bring|put)\s+(?:my|our|the|your)\s+(?:dogs?|cats?|pets?|pupp(?:y|ies)|kittens?|baby|kids?|children|toddler)\s+(?:\S+\s+){0,2}?(?:outside|outdoors|out|in|inside|back|on)|(?:crawl|play|sit|walk|lie|lay)\s+on\s+(?:the\s+|our\s+|my\s+)?(?:floors?|carpets?|rugs?|lawn|grass|couch|furniture)|touch\s+(?:the\s+|our\s+|my\s+)?(?:countertops?|counters?|surfaces?|floors?|walls?|furniture|baseboards?|cabinets?|tables?)|vacat\w*|leave\s+(?:the\s+|your\s+)?(?:house|home|premises|property|area|room|building|apartment)|(?:re-?)?occupy|remain\s+(?:away|out|outside|off)|stay\s+away|desaloj\w*|(?:salir|abandonar)\s+de\s+la\s+casa|(?<!\b(?:we|we'll|i|i'll|they|they'll|technician|tech|he|she|will|he'll|she'll)\s)(?:return|head\s+back|go\s+back|get\s+back)\b(?=[^.?!]{0,20}\b(?:after|in|within|once|until)\s+(?:\d|an?\b|one|two|three|four|five|half|a\s+few))|dentro\s+de\s+(?:la\s+)?casa|adentro|afuera|fuera\s+de\s+(?:la\s+|el\s+)?(?:casa|zona|[aá]rea|jard[ií]n|c[eé]sped|patio)|avoid(?:ing)?\s+(?:\S+\s+){0,2}?(?:outside|outdoors|going|walking|playing|yard|lawn|grass|area|areas|room|rooms|house|home|garden|patio|deck|pool|kitchen|treated|inside|indoors)|(?:do\s+not|don'?t|never)\s+(?:access|enter|use|touch|walk\s+on)|evit(?:e|en|ar)\s+(?:\S+\s+){0,2}?(?:salir|entrar|tocar|pisar|caminar|jugar|el\s+jard[ií]n|el\s+c[eé]sped|el\s+patio|la\s+zona|el\s+[aá]rea|la\s+casa|las?\s+[aá]reas?\s+tratadas?|las?\s+zonas?\s+tratadas?)|no\s+(?:entre|entren|use|usen|acceda|pise|pisen|toque)\b|(?:return|come\s+back|go\s+back|get\s+back|be\s+back)\b(?=[^.?!]{0,30}\b(?:after|once|following|until)\b[^.?!]{0,25}\b(?:treat\w*|spray\w*|servic\w*|appli\w*|pest\s+control|fumig\w*|exterminat\w*))|(?:volver|regresar)\s+(?:a\s+\w+\s+)?(?:despu[eé]s|tras)\b|(?:return|go|get|come|head|move)\s+(?:back\s+)?(?:home|to\s+(?:the|my|our)\s+(?:house|home|apartment|condo))|back\s+(?:home|in\s+the\s+house)|(?:volver|regresar)\s+a\s+(?:casa|la\s+casa)|(?:go|going|went|get|getting|come|coming|head|heading|walk|walking|be|being|play|playing|stay|staying)\s+(?:back\s+)?(?:inside|outside|indoors|outdoors)|(?:go|get)\s+(?:back\s+)?(?:out|in)\b|back\s+(?:inside|outside|indoors|outdoors)|re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|(?:(?:to|until|once|when|after|before|is|are|it'?s|gets?|got|becomes?|completely|fully|totally)\s+(?:completely\s+|fully\s+|totally\s+)?dry\b|dr(?:ies|ied|ying)\b(?!\s+(?:bait|granul\w*|pellets?|products?|leaves|grass|patches|weather|season|spell|soil|ground|spots?|areas?)))|stay\s+(?:off|out|away|inside|indoors)|(?<!\b(?:t[eé]cnicos?|equipo|nosotros|podemos|vamos\s+a|va\s+a|van\s+a|pueden\s+sus\s+t[eé]cnicos)\s(?:\S+\s)?)(?:salir|entrar)|(?:volver|regresar)\s+(?:a\s+(?:entrar|salir|casa|la\s+casa|adentro|afuera|la\s+zona|el\s+jard[ií]n|el\s+patio|el\s+c[eé]sped)|adentro|afuera)|sec(?:o|a|os|as|ar|arse))\b/i;
+// Occupants coming back ("How soon can we come back?", "When can the kids
+// return?", "How long until we can go back?", "Is it safe to return?",
+// "¿Cuándo podemos volver?") is re-entry: the only place a visitor comes back
+// to in this chat is the treated home or yard. Read on the visitor's side
+// only — in a reply, "we can come back Tuesday" is the technician's next
+// visit — and never "get back to you", "come back to this chat" or "return
+// the form". A statement ("we come back from work at 6") is not a question
+// about coming back.
+const OCCUPANT = '(?:we|i|us|me|everyone|everybody|people|(?:the|my|our)\\s+(?:kids?|children|child|family|dogs?|cats?|pets?|pupp(?:y|ies)|kittens?|bab(?:y|ies)|toddlers?|husband|wife|son|daughter|guests?|tenants?|residents?|animals?))';
+const OCCUPANT_ES = '(?:nosotros|(?:los|las|mis|nuestr[oa]s)\\s+(?:ni[ñn][oa]s|hij[oa]s|mascotas|perr[oa]s|gat[oa]s|beb[eé]s|invitad[oa]s|inquilin[oa]s)|(?:el|la|mi|nuestr[oa])\\s+(?:ni[ñn][oa]|hij[oa]|mascota|perr[oa]|gat[oa]|beb[eé]|familia|esposo|esposa))';
+const COME_BACK = `(?:(?:be\\s+able\\s+to|get\\s+to)\\s+)?(?:(?:come|go|get|move|head|be)\\s+back|return)(?![a-zñáéíóú])(?!\\s+(?:to|with)\\s+(?:you|y'?all|your|this|the\\s+(?:chat|page|site|website|form|quote|estimate|office|call|email|text)))(?!\\s+in\\s+touch)(?!\\s+(?:the|a|an|it|this|that|these|those|my|our|your|his|her|their|some|any)\\s+(?!(?:house|home|yard|lawn|room|rooms|area|kitchen|property|apartment|condo|garden|patio|pool)\\b))`;
+const VOLVER = '(?:volver|regresar|vuelv\\w*|regres\\w*)(?![a-zñáéíóú])(?!\\s+a\\s+(?:llamar|programar|agendar|escribir|contactar|hablar|intentar|pedir|preguntar|cotizar|reservar))';
+const OCCUPANT_RETURN_RE = new RegExp(`\\b(?:can|could|may|might|should|will|would|shall|do|does)\\s+${OCCUPANT}\\s+(?:(?:safely|finally|all|both|ever)\\s+)?${COME_BACK}|\\b${OCCUPANT}\\s+(?:can|could|may|might|should|are\\s+(?:able|allowed|ok|okay|free|safe)\\s+to|is\\s+(?:able|allowed|ok|okay|free|safe)\\s+to|to)\\s+${COME_BACK}|\\b(?:safe|ok|okay|fine|alright|all\\s+right)\\s+(?:for\\s+${OCCUPANT}\\s+)?to\\s+${COME_BACK}|\\b(?:podemos|puedo|podr[eé]mos|podr[eé])\\s+${VOLVER}|\\b${OCCUPANT_ES}\\s+(?:(?:pueden|puede|podr[aá]n?|ya)\\s+)?${VOLVER}|\\b(?:pueden|puede|podr[aá]n?)\\s+${VOLVER}\\s+${OCCUPANT_ES}|\\b(?:seguro|bien)\\s+(?:para\\s+${OCCUPANT_ES}\\s+)?${VOLVER}`, 'i');
+// Access talk on the visitor's side: the reply-side matchers plus occupants
+// coming back.
+const visitorAccess = (text) => {
+  const physical = String(text || '').replace(DIGITAL_ACCESS_RE, ' ');
+  return ACCESS_SIGNAL_RE.test(physical) || ACCESS_TOPIC_RE.test(physical) || OCCUPANT_RETURN_RE.test(physical);
+};
+// The length of the visit itself ("How long does lawn service take?", "How
+// long will the technician be here for the treatment?", "How long does the
+// treatment last?") is answered with a visit or product length, not a
+// re-entry window — unless the words around the figure talk about drying.
+const VISIT_LENGTH_QUESTION_RE = /\bhow\s+long\s+(?:does|do|will|would|should|did|is|are|was)\s+(?:(?:the|a|an|your|my|our|each|every|this|that|one|typical|usual|first|initial)\s+){0,2}(?:(?:\w+\s+){0,2}?(?:services?|treatments?|visits?|appointments?|inspections?|applications?|spraying|jobs?)\s+(?:usually\s+|normally\s+|typically\s+|generally\s+)?(?:take|run|last)\b|(?:(?:\w+\s+){0,2}?(?:services?|treatments?|visits?|appointments?|inspections?|applications?|jobs?))\s*(?:[?.!,]|$)|(?:tech(?:nician)?s?|guys?|crew|team|exterminators?|you|y'?all)\s+(?:usually\s+|normally\s+|typically\s+)?(?:be\s+(?:here|there|on[-\s]?site|out\s+here|at\s+(?:the|my|our)\s+(?:house|home|property|place))|take|stay|spend)\b)|\bcu[aá]nto\s+(?:tiempo\s+)?(?:tarda|demora|toma|dura)n?\s+(?:el|la|su)\s+(?:servicio|tratamiento|visita|cita|inspecci[oó]n|aplicaci[oó]n)(?![a-zñáéíóú])|\bcu[aá]nto\s+tiempo\s+(?:va\s+a\s+estar|estar[aá]|se\s+queda)\s+(?:el|su)\s+t[eé]cnico/i;
+const DRYING_WORD_RE = /\b(?:dry|dries|dried|drying|wet|damp|sec[oa]s?|secar\w*|moj\w*|h[uú]med\w*)(?![a-zñáéíóú])/i;
 function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = contextText) {
   const text = String(reply || '');
   // Topic, not proximity: when the reply or the visitor's question is about
@@ -531,7 +565,8 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
   // The visitor side is the ACTIVE message only — an old re-entry question in
   // history must not turn "The inspection takes about 45 minutes" into a claim.
   const isAccess = (t) => ACCESS_SIGNAL_RE.test(physical(t)) || ACCESS_TOPIC_RE.test(physical(t));
-  const accessTopic = isAccess(text) || isAccess(activeMessage);
+  const accessTopic = isAccess(text) || visitorAccess(activeMessage);
+  const visitLength = VISIT_LENGTH_QUESTION_RE.test(activeMessage);
   if (accessTopic && (CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text))) return true;
   // No access topic: a clock time is booking ("we can treat tomorrow"); a
   // duration is judged by the words right around it.
@@ -544,6 +579,7 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
       if (/\bwait(?:ing|s)?\b|\besper\w*/i.test(tight) && treatmentContext
         && !SCHEDULING_DURATION_RE.test(tight) && !/\b(?:call\w*|dispatch\w*|refund\w*|repl(?:y|ies)|respon\w*|email\w*|texts?|payments?|invoices?|charges?|confirm\w*)\b/i.test(tight)) return true;
       if (SCHEDULING_DURATION_RE.test(tight) || GENERIC_LENGTH_RE.test(tight)) continue;
+      if (visitLength && !DRYING_WORD_RE.test(tight)) continue;
       if (treatmentContext) return true;
     }
   }
@@ -567,10 +603,7 @@ function aboutTreatment(question) {
 
 // A terse reply takes its claim from the visitor's active question.
 const hasTimeFigure = (text) => CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text);
-const isPhysicalAccess = (text) => {
-  const physical = text.replace(DIGITAL_ACCESS_RE, ' ');
-  return ACCESS_SIGNAL_RE.test(physical) || ACCESS_TOPIC_RE.test(physical);
-};
+const isPhysicalAccess = (text) => visitorAccess(text);
 
 // A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
 // the visitor asked — an EPA-approval, treatment-safety or timed re-entry
@@ -622,7 +655,7 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawC
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${activeMessage}`);
   const physicalReply = t.replace(DIGITAL_ACCESS_RE, ' ');
   if (!treatmentContext && !INTAKE_TREATMENT_CONTEXT_RE.test(t) && SCHEDULING_DURATION_RE.test(activeMessage)
-    && !ACCESS_SIGNAL_RE.test(physicalActive) && !ACCESS_TOPIC_RE.test(physicalActive)
+    && !visitorAccess(physicalActive)
     && !ACCESS_SIGNAL_RE.test(physicalReply) && !ACCESS_TOPIC_RE.test(physicalReply)) return false;
   return fixedTimingClaim(t, contextText, treatmentContext, activeMessage);
 }
@@ -672,18 +705,24 @@ const REVIEWED_REPLIES = new Set([
 // which is judged on its own. The ways to follow up can't be listed — "What
 // should we do?", "She threw up", "Is it safe for him now?" — the ways to
 // change the subject to business can. A turn that asks for help ("what should
-// I do now?") or talks about the patient ("he's getting worse", "my son")
-// picks the emergency back up even after a business turn. The
+// I do now?"), names a symptom or care, or talks about the patient ("is he
+// safe now?", "my son") picks the emergency back up even after a business
+// turn. The
 // provider-failure fallback still reads the whole history (no answer to
 // protect, so caution wins).
 const FOLLOW_UP_RE = /\b(?:what\s+(?:should|do|can)\s+(?:i|we)\s+do\s+(?:now|next|about\s+(?:him|her|them|it|this|that))|what\s+(?:should|do|can|must)\s+(?:i|we)\s+do\s*(?:[?.!,]|$)|qu[eé]\s+(?:debemos|podemos|puedo)\s+hacer\s*(?:[?.!,]|$)|what\s+should\s+(?:he|she|they)\s+do|is\s+(?:this|that|it)\s+(?:serious|dangerous|bad|normal|an\s+emergency)|could\s+(?:this|that|it)\s+(?:get|be)\s+(?:worse|serious|dangerous)|will\s+(?:he|she|it)\s+be\s+(?!(?:ok|okay|fine|alright)\s+to\s+(?:come|schedule|book|visit))(?:ok|okay|fine|alright)|should\s+(?:i|we|he|she)\s+(?:be\s+worried|worry)|how\s+(?:serious|bad)\s+is|(?:es|ser[aá])\s+(?:grave|serio|peligroso)|se\s+pondr[aá]\s+peor|qu[eé]\s+(?:debe|deber[ií]a)\s+hacer|what\s+now|now\s+what|still\s+(?:swell\w*|itch\w*|hurt\w*|red|sick|vomit\w*|not)|(?:getting|got)\s+worse|(?:is|are)\s+(?:he|she|they|it)\s+(?:ok|okay|going\s+to\s+be)|(?:he|she|they)(?:'s|'re|\s+is|\s+are)\s+(?:still|getting|now)|help\s+(?:him|her|them)|should\s+(?:i|we)\s+(?:go\s+to\s+(?:the\s+)?(?:hospital|er|doctor|emergency)|call\s+(?:911|poison|an?\s+ambulance|(?:a|the|his|her|our)\s+(?:doctor|vet|pediatrician))|take\s+(?:him|her|them|it)\s+(?:in|to\s+(?:the\s+)?(?:hospital|er|doctor|vet)))|qu[eé]\s+(?:hago|hacemos|debo\s+hacer)|todav[ií]a\s+(?:tiene|est[aá])|(?:est[aá]|se\s+puso)\s+peor|sigue\s+(?:hinchad\w*|mal|con))(?![a-zñáéíóú])/i;
 // Price, scheduling or account talk — never the bare word "service", which
 // follow-ups use too ("Is your service safe for kids?").
 const BUSINESS_TURN_RE = /\b(?:how\s+much|pric(?:e|es|ed|ing|ey)|cost(?:s|ing)?|charg(?:e|es|ed|ing)|quot(?:e|es|ed|ing)|estimates?|schedul\w*|book(?:s|ed|ing)?|appointments?|sign\s+up|(?:pest|lawn|mosquito|termite|quarterly|monthly|annual|yearly)\s+(?:plan|program|service|visits?)|quarterly|monthly|inspections?|coupons?|discounts?|come\s+(?:out\s+|by\s+|over\s+|back\s+)?(?:tomorrow|today|tonight|this\s+week|next\s+week|on\s+\w+day)|(?:do|can|could|would|will)\s+you\s+(?:guys\s+|all\s+)?(?:also\s+)?(?:treat|handle|remove|spray|service|offer|cover|get\s+rid|take\s+care|come)|precio\w*|cu[aá]nto\s+(?:cuesta|cobran|vale)|cotizaci[oó]n|citas?|agendar)(?![a-zñáéíóú])/i;
-// Talk about a person or pet — a symptom, care, "he", "my son" — keeps the
-// emergency the subject even in a turn that also names price, scheduling or
-// the account ("Should I cancel? She threw up").
-const PATIENT_TALK_RE = new RegExp(`\\b(?:${SYMPTOM_WORDS}|he|she|him|his|her|hers|ella|(?:my|our|his|her|their|the|mi|mis|su|sus|nuestr[oa]s?)\\s+(?:son|daughter|child|children|kids?|baby|toddler|infant|husband|wife|hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|${PET_WORD})|doctor|vet|veterinarian|hospital|er|poison\\s+control|911|ambulance|pediatrician|m[eé]dico|veterinari[oa]|urgencias)(?![a-zñáéíóú])`, 'i');
+// A symptom on a person or pet ("She threw up", "the dog is shaking") or
+// medical care ("we're at the vet") keeps the emergency the subject even in
+// a turn that also names price, scheduling or the account ("Should I
+// cancel? She threw up"). A bare pronoun does not — "How much is her pest
+// service?" is a business question.
+const CARE_TALK_RE = /\b(?:doctor|vet|veterinarian|hospital|poison\s+control|911|ambulance|paramedics?|pediatrician|urgent\s+care|m[eé]dico|veterinari[oa]|urgencias)(?![a-zñáéíóú])/i;
+// Talk about a person or pet — "Is he safe now?", "Will my son be okay?" —
+// picks an earlier emergency back up across a business turn.
+const PATIENT_TALK_RE = new RegExp(`\\b(?:he|she|him|his|her|hers|ella|(?:my|our|his|her|their|the|mi|mis|su|sus|nuestr[oa]s?)\\s+(?:son|daughter|child|children|kids?|baby|toddler|infant|husband|wife|hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|${PET_WORD}))(?![a-zñáéíóú])`, 'i');
 function emergencyContextOf(contextText, activeMessage) {
   if (activeMessage === contextText) return contextText;
   // An emergency in the active message fires the script either way; reading
@@ -695,8 +734,9 @@ function emergencyContextOf(contextText, activeMessage) {
   if (history[history.length - 1] === activeMessage) history.pop();
   for (const raw of [activeMessage, ...history.reverse()]) {
     const turn = foldTypography(raw);
-    if (looksLikeEmergency(turn) || FOLLOW_UP_RE.test(turn) || PATIENT_TALK_RE.test(turn)) return contextText;
+    if (looksLikeEmergency(turn) || FOLLOW_UP_RE.test(turn) || CARE_TALK_RE.test(turn) || SYMPTOM_SUBJECT_RE.test(turn)) return contextText;
     if (BUSINESS_TURN_RE.test(turn) || SUPPORT_RE.test(turn)) return activeMessage;
+    if (PATIENT_TALK_RE.test(turn)) return contextText;
   }
   return activeMessage;
 }
@@ -748,7 +788,7 @@ const PET_OBJECT_EXPOSURE_RE = new RegExp(`\\b(?:sprayed|splashed|misted|dusted|
 const PET_ANTECEDENT_RE = new RegExp(`\\b(?:my|our|the)\\s+${PET_WORD}\\b`, 'i');
 
 function productExposureIn(context) {
-  return stripDenials(context).split(/\n+/).some((c) => INGESTION_RE.test(c) || EAT_EXPOSURE_RE.test(c)
+  return stripDenials(context).split(/\n+/).some((c) => INGESTION_RE.test(c) || EAT_EXPOSURE_RE.test(c) || FUME_EXPOSURE_RE.test(c)
     || CONTACT_EXPOSURE_RE.test(c) || BODY_CONTACT_RE.test(c) || affirmedAfterDenial(c) || SPRAY_ON_PATIENT_RE.test(c))
     || String(context || '').split(/\n+/).some((turn) => ELLIPTICAL_EXPOSURE_RE.test(turn));
 }
