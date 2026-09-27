@@ -63,7 +63,10 @@ beforeEach(() => {
   db.raw = jest.fn((sql) => sql);
   db.transaction = jest.fn(async (callback) => callback(db));
   heldDatabase = jest.fn();
-  heldDatabase.mockReturnValue(query);
+  // The autopay notice's receipt switch is read on the held transaction
+  // (left on); every other read keeps the shared query double.
+  heldDatabase.mockImplementation((table) => (table === 'notification_prefs'
+    ? { where: () => ({ first: async () => ({ payment_receipt: null }) }) } : query));
   heldDatabase.raw = db.raw;
   templates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'billing.notice' } });
   templates.activeSuppressionFor.mockResolvedValue(null);

@@ -71,7 +71,8 @@ test('only the billing templates take the billing retry handoff', () => {
 });
 
 test('a row with no stored contract re-authorizes its own customer notice through the Email authority', async () => {
-  const heldDatabase = jest.fn();
+  // The receipt's own kill switch is read on the held transaction (left on).
+  const heldDatabase = jest.fn(() => ({ where: () => ({ first: async () => ({ payment_receipt: true }) }) }));
   const dispatch = jest.fn(async () => {});
   dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
     expect(options.input).toEqual({ customerId: 'cust-1', invoiceId: null, channel: 'email', metadata: {
@@ -108,7 +109,7 @@ test.each([
   ['no notice key', { trigger_event_id: null }],
   ['two notice categories', { categories: JSON.stringify(['billing', 'invoice', 'payment_receipt']) }],
   ['no billing category', { categories: JSON.stringify(['email_template']) }],
-  ['a template that does not match its category', { template_key: 'billing.notice' }],
+  ['a receipt template on a non-receipt category', { categories: JSON.stringify(['email_template', 'billing', 'invoice']) }],
 ])('an unregistered row with %s is refused before the authority', async (_label, overrides) => {
   const dispatch = jest.fn();
   await expect(runBillingEmailProviderReplayHandoff(unregistered(overrides), dispatch)).resolves.toMatchObject({
@@ -116,6 +117,87 @@ test.each([
   });
   expect(dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
   expect(dispatch).not.toHaveBeenCalled();
+});
+
+// Payment receipts sent before billing.receipt_notice existed (migration
+// 20260926000100) used billing.notice. Their retries keep working.
+test('a pre-migration receipt on billing.notice keeps its retry', async () => {
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(options.input.metadata.billingDeliveryCategory).toBe('payment_receipt');
+    expect(options.templateKey).toBe('billing.notice');
+    options.state.providerAccepted = true;
+  });
+  await expect(runBillingEmailProviderReplayHandoff(unregistered({ template_key: 'billing.notice' }), jest.fn()))
+    .resolves.toEqual({ handled: true, allowed: true });
+});
+
+// A receipt still honors notification_prefs.payment_receipt, read on the
+// authority's held transaction, like the first send.
+describe('payment receipt kill switch on a retry', () => {
+  function prefsDatabase(row, { fails = false } = {}) {
+    const first = jest.fn(async () => { if (fails) throw new Error('prefs read failed'); return row; });
+    const where = jest.fn(() => ({ first }));
+    return Object.assign(jest.fn(() => ({ where })), { where, first });
+  }
+  async function preSendVerdict(database) {
+    let verdict;
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+      verdict = await options.preSendCheck({ database, providerBoundary: false });
+      if (verdict.ok !== true) options.state.boundaryBlock = verdict;
+      else options.state.providerAccepted = true;
+    });
+    const outcome = await runBillingEmailProviderReplayHandoff(unregistered(), jest.fn());
+    return { verdict, outcome };
+  }
+
+  test('a customer who turned receipts off gets no retried receipt', async () => {
+    const database = prefsDatabase({ payment_receipt: false });
+    const { verdict, outcome } = await preSendVerdict(database);
+    expect(database).toHaveBeenCalledWith('notification_prefs');
+    expect(database.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(verdict).toEqual({ ok: false, code: 'BILLING_REPLAY_INELIGIBLE', reason: 'receipt_opted_out', retryable: false });
+    expect(outcome).toMatchObject({ handled: true, allowed: false, terminal: true, reason: 'receipt_opted_out' });
+  });
+
+  test.each([[{ payment_receipt: true }], [{ payment_receipt: null }], [undefined]])('receipts left on (%j) still retry', async (row) => {
+    const { verdict, outcome } = await preSendVerdict(prefsDatabase(row));
+    expect(verdict).toEqual({ ok: true });
+    expect(outcome).toEqual({ handled: true, allowed: true });
+  });
+
+  test('an unreadable receipt setting holds the retry', async () => {
+    const { verdict } = await preSendVerdict(prefsDatabase(null, { fails: true }));
+    expect(verdict).toEqual({ ok: false, code: 'BILLING_REPLAY_INELIGIBLE', reason: 'receipt-prefs-unavailable', retryable: true });
+  });
+
+  test('an autopay notice honors the same switch, like its first send', async () => {
+    EmailTemplateLibrary.readStoredBillingReplayContext.mockReturnValue({
+      schema_version: 1, customer_id: 'cust-1', category: 'billing', source_entry_point: 'autopay_pre_charge_reminder',
+      notificationEventKey: 'precharge:cust-1:2030-06-10', charge_date: '2030-06-10',
+    });
+    const database = prefsDatabase({ payment_receipt: false });
+    let verdict;
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+      verdict = await options.preSendCheck({ database, providerBoundary: false });
+      options.state.boundaryBlock = verdict;
+    });
+    await runBillingEmailProviderReplayHandoff(message(), jest.fn());
+    expect(verdict).toEqual({ ok: false, code: 'BILLING_REPLAY_INELIGIBLE', reason: 'receipt_opted_out', retryable: false });
+    // Refused before the producer's own eligibility runs.
+    expect(billingEmailReplayEligible).not.toHaveBeenCalled();
+  });
+
+  test('other categories never read the receipt setting', async () => {
+    const database = prefsDatabase({ payment_receipt: false });
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+      expect(await options.preSendCheck({ database, providerBoundary: false })).toEqual({ ok: true });
+      options.state.providerAccepted = true;
+    });
+    await runBillingEmailProviderReplayHandoff(unregistered({
+      template_key: 'billing.notice', categories: JSON.stringify(['email_template', 'billing']),
+    }), jest.fn());
+    expect(database).not.toHaveBeenCalled();
+  });
 });
 
 test('a generic billing notice keeps its category', async () => {

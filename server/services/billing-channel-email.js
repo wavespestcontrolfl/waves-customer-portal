@@ -134,8 +134,11 @@ function preparationHold(result) {
   // A held outcome belongs to the attempt or retry rail that owns its key.
   if (result.held || !result.retryable || result.deliveryOutcome !== 'not_sent') return result;
   if (!result.blocked && result.providerRejected !== true) return result;
+  // Blocked, like every hold: sendCustomerMessage keeps a blocked outcome's
+  // code, but reports any other unsent outcome as PROVIDER_FAILURE, which no
+  // producer replays.
   return {
-    ...result, code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: result.code, deferred: true,
+    ...result, blocked: true, code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: result.code, deferred: true,
     nextAllowedAt: new Date(Date.now() + PREPARATION_RETRY_MS).toISOString(),
   };
 }

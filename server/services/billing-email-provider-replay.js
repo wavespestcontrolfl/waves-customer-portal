@@ -60,9 +60,37 @@ function unregisteredRetryContext(message) {
   const named = [...new Set(NOTICE_CATEGORIES.filter((category) => categories.includes(category)))];
   if (named.length > 1 || (!named.length && !categories.includes('billing'))) return null;
   const category = named[0] || 'billing';
-  const template = category === 'payment_receipt' ? 'billing.receipt_notice' : 'billing.notice';
-  if (clean(message.template_key) !== template) return null;
+  // billing.receipt_notice carries payment receipts only. billing.notice
+  // carries every category, including payment receipts sent before the
+  // receipt template existed (migration 20260926000100).
+  const templateKey = clean(message.template_key);
+  if (templateKey === 'billing.receipt_notice' ? category !== 'payment_receipt' : templateKey !== 'billing.notice') {
+    return null;
+  }
   return { customer_id: customerId, invoice_id: null, category, notificationEventKey };
+}
+
+// Producers that send under the autopay purpose (autopay-notifications.js,
+// workflows/payment-expiry.js). That purpose honors the payment_receipt
+// switch at the first send, like a receipt (messaging/policy.js).
+const AUTOPAY_PURPOSE_SOURCES = new Set([
+  'autopay_pre_charge_reminder', 'autopay_card_expiry_warning', 'payment_expiry_workflow',
+]);
+
+// The portal-wide email switch never stops a billing email (owner ruling
+// 2026-09-26), but a payment receipt and an autopay notice still honor their
+// kill switch, notification_prefs.payment_receipt, as the consent pipeline
+// (and receipt-delivery-queue.js for receipts) does at the first send. Read
+// on the authority's held transaction; a failed read fails closed and
+// retries.
+async function receiptOptOut(context, database) {
+  if (context.category !== 'payment_receipt' && !AUTOPAY_PURPOSE_SOURCES.has(context.source_entry_point)) return null;
+  try {
+    const prefs = await database('notification_prefs').where({ customer_id: context.customer_id }).first('payment_receipt');
+    return prefs?.payment_receipt === false ? { eligible: false, reason: 'receipt_opted_out', retryable: false } : null;
+  } catch {
+    return { eligible: false, reason: 'receipt-prefs-unavailable', retryable: true };
+  }
 }
 
 // A terminal refusal that must not block the notice for good: the retry owner
@@ -116,7 +144,8 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
     authorityRecipientEmail: clean(authorityRecipientEmail).toLowerCase(),
     templateKey: clean(message.template_key),
     preSendCheck: async ({ database, providerBoundary }) => {
-      const verdict = contracted ? await billingEmailReplayEligible(context, database) : { eligible: true };
+      const verdict = await receiptOptOut(context, database)
+        || (contracted ? await billingEmailReplayEligible(context, database) : { eligible: true });
       if (verdict?.eligible !== true) {
         return {
           ok: false,

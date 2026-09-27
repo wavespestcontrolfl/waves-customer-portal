@@ -429,7 +429,7 @@ describe('billing channel email adapter', () => {
       throw Object.assign(new Error('SENDGRID_API_KEY not configured'), { code: 'SENDGRID_NOT_CONFIGURED' });
     }));
     await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
       code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'SENDGRID_NOT_CONFIGURED',
     });
   });
@@ -442,7 +442,7 @@ describe('billing channel email adapter', () => {
       }));
       const result = await sendBillingChannelEmail(input());
       expect(result).toMatchObject({
-        sent: false, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
         code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PROVIDER_ERROR',
       });
       expect(Date.parse(result.nextAllowedAt)).toBeGreaterThan(Date.now());

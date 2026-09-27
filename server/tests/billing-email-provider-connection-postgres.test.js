@@ -89,6 +89,7 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.uuid('customer_id').primary().references('id').inTable('customers'); table.boolean('email_enabled');
       table.specificType('billing_channels', 'text[]');
       table.text('billing_email');
+      table.boolean('payment_receipt');
     });
     await mockPg.schema.createTable('messaging_suppression', (table) => {
       table.text('phone').primary(); table.text('reason'); table.boolean('active'); table.timestamp('created_at');
@@ -417,6 +418,45 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
       await mockPg('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: ['email'] });
+    }
+  }, 15000);
+
+  // Payment receipts sent before billing.receipt_notice existed used
+  // billing.notice; their retries keep working.
+  test('a pre-migration receipt on billing.notice still retries through the Email authority', async () => {
+    const stored = unregisteredRow('billing.notice', ['email_template', 'billing', 'payment_receipt']);
+    await mockPg('email_messages').insert(stored);
+    await expect(retryOne(stored)).resolves.toMatchObject({ sent: true });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  // A receipt still honors notification_prefs.payment_receipt, like the
+  // first send (receipt-delivery-queue.js).
+  test('a customer who turned receipts off gets no retried receipt', async () => {
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: false });
+    try {
+      const stored = unregisteredRow('billing.receipt_notice', ['email_template', 'billing', 'payment_receipt']);
+      await mockPg('email_messages').insert(stored);
+      await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, stopped: true, reason: 'receipt_opted_out' });
+      await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+        status: 'blocked', provider_retry_next_at: null,
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: null });
+    }
+  }, 15000);
+
+  test('an autopay pre-charge reminder honors the receipt switch on its retry', async () => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: false });
+    try {
+      const stored = billingReplayRow(chargeDate);
+      await mockPg('email_messages').insert(stored);
+      await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, stopped: true, reason: 'receipt_opted_out' });
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: customerId }).update({ payment_receipt: null });
     }
   }, 15000);
 
