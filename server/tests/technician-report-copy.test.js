@@ -152,6 +152,7 @@ describe('custom action credential screening', () => {
     'Opened rear gate using 2026-09-27',
     'Opened rear gate with 09/27/26',
     'Opened rear gate and found 100 ants, then entered 8842 at the keypad',
+    'Opened rear gate and found 100 German cockroaches, then entered 8842 at the keypad',
     'The rear gate is 2468 ml',
     'Opened rear gate and found 100 dead ants, then entered 8842 at the keypad',
   ])('rejects recorded access credentials: %s', (action) => {
@@ -209,6 +210,8 @@ describe('custom action credential screening', () => {
     'Opened rear gate on 09 - 27 - 2026',
     'Opened rear gate on 02/29/2024',
     'Opened rear gate and found 100 ants',
+    'Opened rear gate and found 100 German cockroaches',
+    'Opened rear gate and found 100 fire ants',
     'Opened rear gate and observed 200 ants',
     'Opened rear gate and treated station 2468',
     'Opened rear gate and serviced station 2468',
@@ -273,6 +276,7 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate using 2026-09-27',
     'Opened rear gate with 09/27/26',
     'Opened rear gate and found 100 ants, then entered 8842 at the keypad',
+    'Opened rear gate and found 100 German cockroaches, then entered 8842 at the keypad',
     'The rear gate is 2468 ml',
     'Opened rear gate and found 100 dead ants, then entered 8842 at the keypad',
   ])('does not publish disguised access instructions: %s', (instruction) => {
@@ -323,6 +327,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate on 09 - 27 - 2026',
     'Opened rear gate on 02/29/2024',
     'Opened rear gate and found 100 ants',
+    'Opened rear gate and found 100 German cockroaches',
+    'Opened rear gate and found 100 fire ants',
     'Opened rear gate and observed 200 ants',
     'Opened rear gate and treated station 2468',
     'Opened rear gate and serviced station 2468',

@@ -230,7 +230,9 @@ const REPORT_STRUCTURED_DATE_TEXT = String.raw`(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\
 const REPORT_STRUCTURED_DATE_RE = new RegExp(String.raw`\b${REPORT_STRUCTURED_DATE_TEXT}\b`, 'g');
 const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
 const REPORT_PAST_ACCESS_WORK_ACTION_RE = /\b(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?)\b/i;
-const REPORT_PEST_COUNT_RE = /\b(?:found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:(?:dead|live|living|active|inactive|winged|worker|adult|juvenile|small|large|young)\s+){0,2}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
+// A work verb plus a pest noun establishes a count, including bounded species
+// and state modifiers. Explicit access relationships are screened first.
+const REPORT_PEST_COUNT_RE = /\b(?:found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:[a-z][a-z’'-]{0,23}\s+){0,3}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
 const REPORT_SERVICE_IDENTIFIER_RE = /\b(?:treat(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?)\s+(?:bait\s+)?(?:station|trap|device|unit)\s*#?\s*\d{3,8}\b/gi;
 
 function isValidStructuredDate(value) {
