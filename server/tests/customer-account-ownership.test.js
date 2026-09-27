@@ -5,6 +5,18 @@ const {
 } = require('../services/customer-account-ownership');
 
 describe('canonical customer-account ownership', () => {
+  test('estimate-first writers fence the expected owner and reject drift before returning the locked row', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/customer-account-ownership'), 'utf8');
+    const start = src.indexOf('async function lockEstimateOwnerForUpdate');
+    const block = src.slice(start, start + 1200);
+    const fence = block.indexOf('await lockCustomerComms(trx, expectedOwnerId)');
+    const estimateLock = block.indexOf("trx('estimates')");
+    const ownerRecheck = block.indexOf("String(lockedEstimate.customer_id || '') !== String(expectedOwnerId || '')");
+    expect(fence).toBeGreaterThan(0);
+    expect(estimateLock).toBeGreaterThan(fence);
+    expect(ownerRecheck).toBeGreaterThan(estimateLock);
+  });
+
   test('a primary row without account_id and its sibling share the primary id', () => {
     const primary = { id: 'primary', account_id: null };
     const sibling = { id: 'sibling', account_id: 'primary' };

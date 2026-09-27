@@ -1,3 +1,7 @@
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
+
+class EstimateOwnerMovedError extends Error {}
+
 function canonicalCustomerAccountId(customer) {
   if (!customer?.id) return null;
   return String(customer.account_id || customer.id);
@@ -65,6 +69,23 @@ async function lockCustomerAccountRows(trx, customerIds, { forUpdate = false, co
   return query.select(...selected);
 }
 
+// Estimate-first writers share this fence with booking's customer-first
+// ownership checks. The expected owner comes from an unlocked read; fence it
+// before any row lock, then reject drift under the estimate lock. A caller
+// must never chase a newly observed owner after this throws.
+async function lockEstimateOwnerForUpdate(trx, estimate, { columns = [] } = {}) {
+  const expectedOwnerId = estimate?.customer_id ? String(estimate.customer_id) : null;
+  if (expectedOwnerId) await lockCustomerComms(trx, expectedOwnerId);
+  const selected = [...new Set(['id', 'customer_id', ...columns])];
+  const lockedEstimate = await trx('estimates')
+    .where({ id: estimate?.id }).forUpdate().first(...selected);
+  if (!lockedEstimate
+    || String(lockedEstimate.customer_id || '') !== String(expectedOwnerId || '')) {
+    throw new EstimateOwnerMovedError();
+  }
+  return lockedEstimate;
+}
+
 function estimateOwnershipMatchesLockedRows(snapshot, estimate, bookingCustomer, lockedCustomers) {
   if (!snapshot?.exists || !estimate) return false;
   const freshOwnerId = estimate.customer_id ? String(estimate.customer_id) : null;
@@ -101,12 +122,14 @@ async function validateEstimateOwnershipUnderLock(trx, snapshot, bookingCustomer
 }
 
 module.exports = {
+  EstimateOwnerMovedError,
   canonicalCustomerAccountId,
   sameCustomerAccount,
   estimateBelongsToCustomerAccount,
   loadEstimateOwnershipSnapshots,
   estimateOwnershipCustomerIds,
   lockCustomerAccountRows,
+  lockEstimateOwnerForUpdate,
   estimateOwnershipMatchesLockedRows,
   validateEstimateOwnershipUnderLock,
 };
