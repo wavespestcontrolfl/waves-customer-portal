@@ -14,19 +14,22 @@ describe("formatMeasuredAmount", () => {
     expect(formatMeasuredAmount(0.0625, "fl_oz")).toBe("⅜ tsp");
   });
 
-  it("rounds a single prescribed dose down, never up, and shows the exact fl oz when it had to round", () => {
-    // Fixed rate 8 fl oz / 100 gal in a 4-gal FlowZone: 2 tsp would be 0.333 fl oz, over the prescription.
-    expect(formatMeasuredAmount(0.32, "fl_oz")).toBe("1⅞ tsp (0.32 fl oz)");
-    expect(formatMeasuredAmount(0.16, "fl_oz")).toBe("⅞ tsp (0.16 fl oz)");
-    expect(formatMeasuredAmount(0.04, "fl_oz")).toBe("⅛ tsp (0.04 fl oz)");
-    expect(formatMeasuredAmount(0.01, "fl_oz")).toBe("under ⅛ tsp (0.01 fl oz)");
+  it("shows a single dose as spoons only when a spoon step measures it; otherwise the exact fl oz", () => {
+    // Fixed rate 8 fl oz / 100 gal in a 4-gal FlowZone: 1⅞ tsp is 2% under; 2 tsp would be over.
+    expect(formatMeasuredAmount(0.32, "fl_oz")).toBe("1⅞ tsp");
+    // ⅞ tsp would be 9% under and ⅛ tsp 48% under: the exact amount stands.
+    expect(formatMeasuredAmount(0.16, "fl_oz")).toBe("0.16 fl oz");
+    expect(formatMeasuredAmount(0.04, "fl_oz")).toBe("0.04 fl oz");
+    expect(formatMeasuredAmount(0.01, "fl_oz")).toBe("0.01 fl oz");
   });
 
-  it("never shows a spoon amount above the prescribed dose", () => {
+  it("never shows a spoon amount above a dose or more than 5% under it", () => {
     for (let hundredths = 1; hundredths < 100; hundredths += 1) {
       const flOz = hundredths / 100;
       const tsp = spoonTeaspoons(formatMeasuredAmount(flOz, "fl_oz"));
-      if (tsp != null) expect(tsp / 6).toBeLessThanOrEqual(flOz + 1e-9);
+      if (tsp == null) continue;
+      expect(tsp / 6).toBeLessThanOrEqual(flOz + 1e-9);
+      expect(tsp / 6).toBeGreaterThanOrEqual(flOz * 0.95 - 1e-9);
     }
   });
 
@@ -37,7 +40,7 @@ describe("formatMeasuredAmount", () => {
   });
 
   it("converts amounts stored in mL or liters instead of showing them", () => {
-    expect(formatMeasuredAmount(10, "ml")).toBe("2 tsp (0.338 fl oz)");
+    expect(formatMeasuredAmount(10, "ml")).toBe("2 tsp");
     expect(formatMeasuredAmount(59.147, "mL")).toBe("2 fl oz");
     expect(formatMeasuredAmount(1, "l")).toBe("33.81 fl oz");
     expect(formatMeasuredAmount(0, "ml")).toBe("0 fl oz");
@@ -84,8 +87,9 @@ describe("formatMeasuredRange", () => {
     expect(formatMeasuredRange(4.4, 8.8, "fl_oz")).toBe("4.4 fl oz – 8.8 fl oz");
   });
 
-  it("treats a fixed rate (no high end) as a single dose that never rounds up", () => {
-    expect(formatMeasuredRange(0.32, null, "fl_oz")).toBe("1⅞ tsp (0.32 fl oz)");
+  it("treats a fixed rate (no high end) as a single dose", () => {
+    expect(formatMeasuredRange(0.32, null, "fl_oz")).toBe("1⅞ tsp");
+    expect(formatMeasuredRange(0.04, null, "fl_oz")).toBe("0.04 fl oz");
   });
 
   it("formats dry ranges without mL", () => {

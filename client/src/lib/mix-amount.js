@@ -47,17 +47,17 @@ function asFlOz(amount, normalized) {
   return null;
 }
 
-// A single prescribed dose never rounds up: the spoon amount is the largest
-// eighth-teaspoon at or below it, with the exact fl oz beside it when the
-// two differ, so the measure never exceeds what was prescribed.
+// A single prescribed dose reads as spoons only when an eighth-teaspoon step
+// measures it: at or below the dose, never more than 5% under. Otherwise the
+// exact fl oz stands, so the spoon never over- or under-states the dose.
+const SPOON_TOLERANCE = 0.05;
 function liquidText(flOz) {
   if (flOz <= 0) return "0 fl oz";
-  if (flOz >= 1) return `${plainNumber(flOz)} fl oz`;
+  const precise = `${plainNumber(flOz)} fl oz`;
+  if (flOz >= 1) return precise;
   const exact = flOz * TSP_PER_FL_OZ;
   const tsp = Math.floor(exact * 8 + 1e-9) / 8;
-  const precise = `${plainNumber(flOz)} fl oz`;
-  if (tsp <= 0) return `under ⅛ tsp (${precise})`;
-  return exact - tsp < 0.005 ? teaspoonText(tsp) : `${teaspoonText(tsp)} (${precise})`;
+  return tsp > 0 && (exact - tsp) / exact <= SPOON_TOLERANCE ? teaspoonText(tsp) : precise;
 }
 
 /** One mix amount: a prescribed dose, an on-hand quantity, or a per-area rate. */
