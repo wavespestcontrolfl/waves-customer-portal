@@ -232,6 +232,21 @@ function periodAfter(toks, j) {
   return toks[k] === 'am' || toks[k] === 'pm' ? toks[k] : null;
 }
 
+function clockHour(n, period) {
+  return (n % 12) + (period === 'pm' ? 12 : 0);
+}
+
+// An hour with no am/pm of its own. A range's start takes its time from the
+// end's stated am/pm and the range's length ("eight to ten pm" is 8 PM, "11
+// to 1 pm" is 11 AM); otherwise it reads as business hours: 7-11 in the
+// morning, 12 and 1-6 in the afternoon.
+function rangeStartHour(toks, n, rangeEnd) {
+  const endPeriod = rangeEnd > 0 ? periodAfter(toks, rangeEnd + 1) : null;
+  if (!endPeriod) return clockHour(n, n >= 7 && n <= 11 ? 'am' : 'pm');
+  const end = hourNumber(toks[rangeEnd]);
+  return (clockHour(end, endPeriod) - ((end - n + 12) % 12) + 24) % 24;
+}
+
 /**
  * Hour mentions in one turn, in spoken order: { hour24, offHour, pos, end },
  * the turn-level token span of the number and its minutes (a range's whole
@@ -243,8 +258,9 @@ function periodAfter(toks, j) {
  * two"), both of which put it off the hour — a slot is always on the hour,
  * so such a mention can only disagree with one. A number running into a unit
  * of time is a length ("about two hours"). With no am/pm said with it, an
- * hour reads as business hours (7-11 morning; 12 and 1-6 afternoon): a
- * period said about another time ("my 9 AM visit") says nothing about it.
+ * hour reads as business hours (7-11 morning; 12 and 1-6 afternoon), or a
+ * range's start from its end's am/pm: a period said about another time ("my
+ * 9 AM visit") says nothing about it.
  */
 function extractHourMentions(turnText) {
   const mentions = [];
@@ -262,8 +278,7 @@ function extractHourMentions(turnText) {
       const period = periodAfter(toks, after);
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;
-      const pm = period ? period === 'pm' : n <= 6 || n === 12;
-      mentions.push({ hour24: (n % 12) + (pm ? 12 : 0), offHour, pos: offset + i, end: offset + Math.max(after, rangeEnd + 1) });
+      mentions.push({ hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, pos: offset + i, end: offset + Math.max(after, rangeEnd + 1) });
       i = after - 1;
     }
     offset += toks.length;

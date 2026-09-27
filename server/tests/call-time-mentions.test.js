@@ -1,5 +1,5 @@
 // Day references in labelled call transcripts. Fixtures are fictitious.
-const { parseDayMentions } = require('../services/call-time-mentions');
+const { parseDayMentions, extractHourMentions } = require('../services/call-time-mentions');
 
 // Sat Sep 26, 2026, 11:51 AM ET.
 const STARTED = new Date('2026-09-26T15:51:18Z');
@@ -44,5 +44,31 @@ describe('parseDayMentions', () => {
   test('mentions come back in spoken order with their token spans', () => {
     expect(parseDayMentions('not friday we will see you tomorrow', STARTED).map((m) => [m.kind, m.pos, m.end]))
       .toEqual([['weekday', 1, 2], ['tomorrow', 6, 7]]);
+  });
+});
+
+describe('extractHourMentions', () => {
+  const hours = (text) => extractHourMentions(text).map((m) => [m.hour24, m.offHour]);
+
+  test('a number is a clock time only when something marks it as one', () => {
+    expect(hours('Can we do Thursday at two? Two people will be home.')).toEqual([[14, false]]);
+    expect(hours('Around 9 works, or 3 pm, or four o clock, or noon.')).toEqual([[9, false], [15, false], [16, false], [12, false]]);
+  });
+
+  test('a bare hour reads as business hours whatever am/pm the call said elsewhere', () => {
+    expect(hours('My 9 AM visit is too early, can we do Thursday at two?')).toEqual([[9, false], [14, false]]);
+    expect(hours('At 7, or at 12, or at 6.')).toEqual([[7, false], [12, false], [18, false]]);
+  });
+
+  test('a range counts its start, reading the end\'s am/pm across noon', () => {
+    expect(hours('Two to four, or between eight and ten pm, or 11 to 1 pm.')).toEqual([[14, false], [20, false], [11, false]]);
+  });
+
+  test('minutes or a half/quarter lead-in put a time off the hour', () => {
+    expect(hours('At two ten, 2:30, two oh five, half past two.').map(([, off]) => off)).toEqual([true, true, true, true]);
+  });
+
+  test('a length of time is not a clock time', () => {
+    expect(hours('It takes about two hours, about two and a half hours, three to four hours. The service should last for two.')).toEqual([]);
   });
 });

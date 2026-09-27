@@ -83,6 +83,8 @@ const HEDGE_MARKERS = [
   ' let me see ', ' let me look ', ' let me find ', ' let me pull ', ' i ll look ', ' i will look ',
   ' need to check ', ' need to look ', ' see what i have ', ' see what we have ',
   ' see if i have ', ' see if we have ', ' check the schedule ', ' look at the schedule ',
+  // The caller deferring to someone or to later ("I need to ask my husband").
+  ' need to ask ', ' have to ask ', ' let me ask ', ' check with my ', ' talk to my ', ' think about it ',
 ];
 
 // An explicit refusal or withdrawal after the agreement ("that won't work",
@@ -98,36 +100,27 @@ const REFUSAL_MARKERS = [
   // is a later mention, and last-mention-wins already fails it).
   ' keep my original ', ' keep the original ', ' original appointment ', ' original time ', ' original day ',
   ' changed my mind ', ' change my mind ', ' on second thought ', ' leave it as is ', ' keep it as is ',
-  ' leave it where it is ', ' keep it where it is ',
+  ' leave it where it is ', ' keep it where it is ', ' instead ',
 ];
 
-// The agent's non-interrogative affirming close. Ordinary short commitment
-// closers ("got it", "done", "we'll mark it") sit alongside the more
-// explicit ones — real misses on the dry-run replay showed both shapes.
-// Commitment phrases: the agent taking the slot on ("we'll see you", "we'll
-// switch it", "I'll put you down").
+// The agent's affirming close: a commitment, the agent taking the slot on
+// ("we'll see you", "we'll switch it", "I'll put you down", "we'll mark
+// it"). Every agreement on the 1,089-call replay closed with one. A bare
+// acknowledgment ("okay", "sounds good") can answer anything ("I need to ask
+// my husband" — "Okay") and never affirms on its own.
 const COMMITMENT_MARKERS = [
-  'i ll do that', 'i will do that', 'we ll do that', 'we will do that', 'we ll do it', 'let s do that', 'let s do it',
+  'i ll do', 'i will do', 'we ll do', 'we will do', 'let s do that', 'let s do it', 'you re all set', 'you are all set',
   'we ll see you', 'i ll see you', 'we will see you', 'i will see you',
   'we ll see him', 'we ll see her', 'we ll see them',
   'i ll put you down', 'we ll put you down', 'i will put you down', 'we will put you down',
   'i ll move you', 'we ll move you', 'i will move you', 'we will move you',
   'got you down', 'i ll get you down', 'we ll get you down',
-  'sounds good', 'sounds great', 'sounds perfect',
   'we ll make it happen', 'i ll make it happen', 'we will make it happen',
   'we ll mark it', 'i ll mark it', 'we will mark it',
   'i ll change it', 'we ll change it', 'i will change it', 'we will change it',
   'i ll move it', 'we ll move it', 'i will move it', 'we will move it',
   'i ll switch it', 'we ll switch it', 'i will switch it', 'we will switch it',
 ];
-// A bare yes. It confirms only when the agent states the slot in that same
-// turn ("Okay, Thursday at two") or the turn is nothing but a short yes ("All
-// right. Yep."): "Okay, we also have a mosquito special" confirms nothing.
-const BARE_YES_MARKERS = [
-  'okay', 'ok', 'alright', 'all right', 'perfect', 'great', 'awesome',
-  'yep', 'yeah', 'yes', 'no problem', 'got it', 'done',
-];
-const SHORT_YES_MAX_TOKENS = 6;
 
 function padded(s) { return ` ${s} `; }
 function hasHedgeMarker(ns) {
@@ -137,11 +130,6 @@ function hasHedgeMarker(ns) {
 function hasAnyMarker(ns, markers) {
   const p = padded(ns);
   return markers.some((m) => p.includes(padded(m)));
-}
-function affirmsSlot(turn, statesSlot) {
-  if (hasAnyMarker(turn.ns, COMMITMENT_MARKERS)) return true;
-  if (!hasAnyMarker(turn.ns, BARE_YES_MARKERS)) return false;
-  return statesSlot || turn.ns.split(' ').length <= SHORT_YES_MAX_TOKENS;
 }
 function hasRefusalMarker(ns) {
   const p = padded(ns);
@@ -157,7 +145,7 @@ function hasRefusalMarker(ns) {
 const NEGATING_WORDS = new Set(['not', 'never', 'cannot', 't']);
 const NO_WORDS = new Set(['no', 'nope', 'nah']);
 const COURTESY_NEGATIONS = [
-  'no problem', 'not a problem', 'no worries', 'no need', 'don t worry', 'don t forget',
+  'no problem', 'not a problem', 'no worries', 'no need', 'don t worry', 'don t forget', 'don t hesitate',
   'don t need to be home', 'don t need to be there', 'don t have to be home', 'don t have to be there',
 ];
 function withoutCourtesy(toks) {
@@ -229,6 +217,13 @@ function answersClosingQuestion(turns, idx) {
   return agentIdx >= 0 && sentenceSpans(turns[agentIdx].raw).some((sentence) => sentence.question && isClosingQuestion(sentence.ns));
 }
 
+// After the agent's commitment, a caller question other than a closing one
+// ("can we do three?") means the slot is still being talked over.
+function callerReopensSlot(turns, affirmIdx) {
+  return turns.slice(affirmIdx + 1).some((t) => !t.agent
+    && sentenceSpans(t.raw).some((sentence) => sentence.question && !isClosingQuestion(sentence.ns)));
+}
+
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you
 // Thursday at two" refuses Friday, not Thursday.
 const CLAUSE_BREAKS = new Set(['but', 'so', 'however', 'although', 'though', 'instead']);
@@ -279,9 +274,9 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   const slot = slotFacts(confirmedStartAt, callStartedAt);
   if (!slot) return { ok: false, reason: 'unparseable_or_out_of_range_slot', window: null, excerpt: null };
   const turns = parseTurns(transcript);
-  if (!turns) return { ok: false, reason: 'unparseable_transcript', window: null, excerpt: null };
-  // Both speakers must be on it: an agreement takes two sides.
-  if (new Set(turns.map((t) => t.agent)).size < 2) return { ok: false, reason: 'one_sided_transcript', window: null, excerpt: null };
+  // Unlabeled lines (turn order cannot be trusted), or only one speaker on it:
+  // there is no two-sided agreement to read.
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return { ok: false, reason: 'unparseable_transcript', window: null, excerpt: null };
 
   const dayRefs = [];
   const hourRefs = [];
@@ -349,19 +344,20 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   const agentTurnFrom = (from) => turns.findIndex((t, i) => i >= from && t.agent);
   let affirmIdx = agentTurnFrom(anchorIdx);
   if (affirmIdx === anchorIdx && asksCaller(affirmIdx)) affirmIdx = agentTurnFrom(anchorIdx + 1);
-  if (affirmIdx === -1 || asksCaller(affirmIdx) || !affirmsSlot(turns[affirmIdx], affirmIdx === anchorIdx)) return failAt('no_affirming_agent_turn');
+  if (affirmIdx === -1 || asksCaller(affirmIdx) || !hasAnyMarker(turns[affirmIdx].ns, COMMITMENT_MARKERS)) return failAt('no_affirming_agent_turn');
 
   // A negation on the slot's own words, after it in the turn completing it,
-  // or anywhere up to the affirming turn (the caller's "no" to the proposal,
-  // the agent's "okay, I don't have that") turned it down, and so does a
-  // caller's afterwards ("No, please keep my original appointment") — unless
-  // it answers the agent's closing question ("anything else?" — "No, that's
-  // all").
-  const negationWindow = turns.slice(anchorIdx + 1).map((t, k) => anchorIdx + 1 + k).filter((idx) => idx <= affirmIdx || !turns[idx].agent)
-    .map((idx) => (idx > affirmIdx && answersClosingQuestion(turns, idx) ? turns[idx].ns.replace(/^(?:no|nope|nah)\b/, '') : turns[idx].ns));
+  // or in any later turn — the caller's "no" to the proposal, the agent's
+  // "okay, I don't have that", a caller's "No, please keep my original
+  // appointment" or the agent's "actually, we cannot move it" after the
+  // commitment — turned it down, unless it is a courtesy or a caller's "no"
+  // answering the agent's closing question ("anything else?" — "No, that's
+  // all"). So does a caller question after the commitment.
+  const laterTurns = turns.slice(anchorIdx + 1).map((t, k) => (!t.agent && answersClosingQuestion(turns, anchorIdx + 1 + k)
+    ? t.ns.replace(/^(?:no|nope|nah)\b/, '') : t.ns));
   if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord))
     || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord))
-    || [slotClauses[2], ...negationWindow].some(hasNegation)) {
+    || [slotClauses[2], ...laterTurns].some(hasNegation) || callerReopensSlot(turns, affirmIdx)) {
     return failAt('slot_refused', affirmIdx);
   }
 

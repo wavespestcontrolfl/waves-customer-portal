@@ -153,11 +153,16 @@ describe('rescheduleAgreementEvidence', () => {
 
   // A bare "okay" that moves on to something else confirms nothing; a short
   // yes to the slot does.
-  test('a bare yes confirms only when it states the slot or is nothing but a short yes', () => {
-    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, we also have a special on mosquito service this month.'))
-      .toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
-    expect(evidence('Caller: So I will see you Thursday at two, correct?\nAgent: All right. Yep.').ok).toBe(true);
-    expect(evidence('Caller: Can we do Thursday?\nAgent: Okay, Thursday at two.').ok).toBe(true);
+  // A bare acknowledgment answers whatever came before it ("I need to ask my
+  // husband" — "Okay"); only the agent committing to the slot affirms it.
+  test('only an agent commitment affirms the slot, never a bare acknowledgment', () => {
+    for (const reply of ['Okay, we also have a special on mosquito service this month.', 'All right. Yep.', 'Okay, Thursday at two.', 'Sounds good.', 'Okay, please hold.']) {
+      expect(evidence(`Caller: Can we do Thursday at two?\nAgent: ${reply}`)).toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+    }
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: I need to ask my husband.\nAgent: Okay, we will see you then.').ok).toBe(false);
+    for (const reply of ['We will do two o clock then.', 'Okay, you are all set for Thursday at two.', 'Great, I will put you down.']) {
+      expect(evidence(`Caller: Can we do Thursday at two?\nAgent: ${reply}`).ok).toBe(true);
+    }
   });
 
   // Words that are Object.prototype keys are just words, not numbers.
@@ -174,17 +179,18 @@ describe('rescheduleAgreementEvidence', () => {
     const confirmAsk = 'Caller: Can we move my visit?\nAgent: Okay, Thursday at two. Does that work for you?';
     expect(evidence(confirmAsk)).toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
     expect(evidence(`${confirmAsk}\nCaller: Yes, that works.\nAgent: Great, you are all set.`).ok).toBe(true);
+    expect(evidence(`${confirmAsk}\nCaller: Yes, that works.\nAgent: Great.`).ok).toBe(false);
     expect(evidence('Caller: Can we move my visit to Thursday at two?\nAgent: Okay, we will see you then. Anything else I can help with?\nCaller: No, that is all.').ok)
       .toBe(true);
   });
 
   // "No" to the proposal, or a slot the agent turns down while saying okay.
   test('a negation on the slot, however politely acknowledged, is not an agreement', () => {
-    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, but not Thursday.')).toMatchObject({ ok: false, reason: 'slot_refused' });
-    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, I don\'t have that.')).toMatchObject({ ok: false, reason: 'slot_refused' });
-    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, there are no Thursday openings.')).toMatchObject({ ok: false, reason: 'slot_refused' });
-    expect(evidence('Agent: Would Thursday at two work?\nCaller: No.\nAgent: Okay.')).toMatchObject({ ok: false, reason: 'slot_refused' });
-    expect(evidence('Caller: I can\'t do Thursday at two.\nAgent: Okay.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you then. Oh, but not Thursday.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, I will do what I can, I don\'t have that.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you, there are no Thursday openings.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: No.\nAgent: Okay, we will see you then.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: I can\'t do Thursday at two.\nAgent: Okay, we will see you then.')).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence('Caller: Can we do Thursday?\nAgent: We will see you Thursday at two, is that not good?').ok).toBe(false);
   });
 
@@ -220,7 +226,7 @@ describe('rescheduleAgreementEvidence', () => {
   // An am/pm said about another time ("my 9 AM visit") says nothing about a
   // bare "two", which reads as business hours.
   test('an am/pm belongs to its own time, not to every hour in the call', () => {
-    const r = evidence('Caller: My 9 AM appointment is too early; can we move it to Thursday at two?\nAgent: Yes, Thursday at two works.');
+    const r = evidence('Caller: My 9 AM appointment is too early; can we move it to Thursday at two?\nAgent: Yes, we will see you Thursday at two.');
     expect(r.ok).toBe(true);
     expect(evidence('Caller: Can we do Thursday morning?\nAgent: We will see you Thursday at 9 AM.', '2026-09-24T09:00:00-04:00').ok).toBe(true);
   });
@@ -251,9 +257,26 @@ describe('rescheduleAgreementEvidence', () => {
   // second has no marker of its own; a range is one time.
   test('hours offered as alternatives are not an agreed hour', () => {
     for (const offer of ['Thursday at two or at four', 'Thursday at two or three', 'Thursday at 2 pm or 4']) {
-      expect(evidence(`Caller: Can we do ${offer}?\nAgent: Sounds good.`)).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+      expect(evidence(`Caller: Can we do ${offer}?\nAgent: We will see you then.`)).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
     }
-    expect(evidence('Caller: Can we do Thursday between two and four?\nAgent: Sounds good.').ok).toBe(true);
+    expect(evidence('Caller: Can we do Thursday between two and four?\nAgent: We will see you then.').ok).toBe(true);
+  });
+
+  // After the commitment, the agent can take it back too, and a caller who
+  // corrects the time without a clock marker ("three instead", "can we do
+  // three?") is still talking it over.
+  test('a retraction or an unmarked correction after the commitment undoes it', () => {
+    const agreed = 'Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.';
+    expect(evidence(`${agreed}\nAgent: Actually, we cannot move it.\nCaller: Okay.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed}\nCaller: Actually three instead.\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed}\nCaller: Can we do three?\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed} Anything else?\nCaller: Is there anything else I need to do before then?`).ok).toBe(true);
+  });
+
+  test('a range takes its am/pm from its end', () => {
+    const evening = 'Caller: Can we move my visit?\nAgent: We will see you Thursday between eight and ten pm.';
+    expect(evidence(evening, '2026-09-24T08:00:00-04:00')).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+    expect(evidence(evening, '2026-09-24T20:00:00-04:00').ok).toBe(true);
   });
 
   test('an unlabeled transcript line fails closed rather than trusting turn order', () => {
