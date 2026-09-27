@@ -688,6 +688,21 @@ describe('explicit annual payment reminder channels', () => {
     expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
   });
 
+  test('prior delivery does not count as a send on an attempt that reaches no channel', async () => {
+    arm('push', 40);
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    reminderProgress.mockResolvedValueOnce([{
+      metadata: { notificationEventKey: 'annual-prepay-payment:term-1:1' },
+      delivered: new Set(['sms']),
+    }]);
+    sendReminderChannels.mockResolvedValueOnce({ complete: false, deliveredNow: [], results: {} });
+
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1))
+      .resolves.toEqual({ sent: false, termId: 'term-1', complete: false });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
+  });
+
   test('an unreadable stored choice retries without falling through to legacy Text', async () => {
     autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
     const release = query();
