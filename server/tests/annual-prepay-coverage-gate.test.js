@@ -182,6 +182,21 @@ describe('annualPrepayCoversVisit — fail-closed completion coverage gate', () 
     await expect(annualPrepayCoversVisit(unstampedVisit)).resolves.toBe(false);
   });
 
+  // A failed table probe answers false for that call only — it is never
+  // cached, so the NEXT call re-probes instead of treating the table as
+  // absent for the life of the process (which made syncTermForInvoicePayment
+  // silently no-op after one transient DB error).
+  test('a failed table probe is not cached — the next call re-probes and proceeds', async () => {
+    const hasTable = jest.fn()
+      .mockRejectedValueOnce(new Error('the database system is in recovery mode'))
+      .mockResolvedValue(true);
+    db.schema = { hasTable };
+    _private.resetCachesForTests();
+    await expect(_private.annualPrepayTableExists()).resolves.toBe(false);
+    await expect(_private.annualPrepayTableExists()).resolves.toBe(true);
+    expect(hasTable).toHaveBeenCalledTimes(2);
+  });
+
   test('no-config / no-stamp visit: NOT covered (short-circuit, no query)', async () => {
     coveredQuery({ forbidQuery: true });
     await expect(annualPrepayCoversVisit(

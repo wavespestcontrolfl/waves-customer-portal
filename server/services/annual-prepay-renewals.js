@@ -151,13 +151,20 @@ let termColsCache = null;
 let scheduledColsCache = null;
 let invoiceColsCache = null;
 
+// Only a SUCCESSFUL probe is cached (the same rule annualPrepayColumns
+// follows since #4921 r4). A failed probe answers false for THIS call only:
+// caching it turned one transient DB error — a local crash recovery, a
+// connection blip at boot — into "the table does not exist" for the life of
+// the process, so syncTermForInvoicePayment (and every other reader gated
+// on this) silently no-oped: a paid invoice left its term payment_pending
+// with no error anywhere.
 async function annualPrepayTableExists() {
   if (tableExistsCache != null) return tableExistsCache;
   try {
     tableExistsCache = await db.schema.hasTable('annual_prepay_terms');
   } catch (err) {
     logger.warn(`[annual-prepay] table detection failed: ${err.message}`);
-    tableExistsCache = false;
+    return false;
   }
   return tableExistsCache;
 }
@@ -9806,6 +9813,7 @@ module.exports = {
     termiteLateEscalationColumnForDaysOut,
     planPropertyForTerm,
     termNoticeAddress,
+    annualPrepayTableExists,
     TERMITE_EXTRA_NOTICE_DAYS,
     TERMITE_COPY_NOTICE_DAYS,
     TERMITE_30_LATE_NOTICE_COLUMN,
