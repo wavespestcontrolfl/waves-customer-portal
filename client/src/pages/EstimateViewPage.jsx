@@ -3714,7 +3714,69 @@ function AcceptanceRecordCard({ acceptance }) {
   );
 }
 
-export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
+// Missing-contact capture (owner ruling 2026-09-27): rendered in the same
+// card as the Accept button, right above it, only for whichever field(s)
+// contactGaps actually says are missing. Last name is required — the
+// caller gates confirmDisabled on it and this shows the inline error once
+// the field has been touched; email is optional/skippable (format is only
+// validated when something was typed, which is the caller's job via the
+// server's own 400 — this component just collects the value).
+export function ContactGapFields({
+  gaps = null,
+  lastName = '',
+  onLastNameChange,
+  onLastNameBlur,
+  lastNameTouched = false,
+  email = '',
+  onEmailChange,
+  disabled = false,
+}) {
+  if (!gaps || (!gaps.lastName && !gaps.email)) return null;
+  const lastNameMissing = gaps.lastName && lastNameTouched && !lastName.trim();
+  return (
+    <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+      {gaps.lastName ? (
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>Last name</span>
+          <input
+            type="text"
+            value={lastName}
+            onChange={(e) => onLastNameChange?.(e.target.value)}
+            onBlur={onLastNameBlur}
+            autoComplete="family-name"
+            maxLength={80}
+            disabled={disabled}
+            aria-required="true"
+            aria-invalid={lastNameMissing || undefined}
+            placeholder="Last name"
+            style={{ ...softExitInputStyle, ...(lastNameMissing ? { borderColor: W.red } : {}) }}
+          />
+          {lastNameMissing ? (
+            <span role="alert" style={{ fontSize: 13, color: W.red }}>Please enter your last name.</span>
+          ) : null}
+        </label>
+      ) : null}
+      {gaps.email ? (
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>Email (for your service reports and receipts)</span>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => onEmailChange?.(e.target.value)}
+            autoComplete="email"
+            inputMode="email"
+            maxLength={254}
+            disabled={disabled}
+            placeholder="you@example.com (optional)"
+            style={softExitInputStyle}
+          />
+        </label>
+      ) : null}
+    </div>
+  );
+}
+
+export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3817,6 +3879,7 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
       </div>
       {autoPaySlot}
       {acceptanceTermsSlot}
+      {contactSlot}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <button
           type="button"
@@ -5494,6 +5557,15 @@ function EstimateViewPageInner({ websiteMode = false }) {
   const [reservation, setReservation] = useState(null);
   const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
+  // Missing-contact capture (owner ruling 2026-09-27): rendered only when
+  // the server's contactGaps says a field is actually missing. Last name is
+  // required client-side (Accept stays disabled / shows an inline error
+  // until filled); email is optional and skippable. contactLastNameTouched
+  // gates the inline error to after the customer has actually left the
+  // field, so it doesn't render red on first paint.
+  const [contactLastName, setContactLastName] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+  const [contactLastNameTouched, setContactLastNameTouched] = useState(false);
   // Acceptance deposit (flat $49/$99). depositIntent holds the live
   // POST /deposit-intent response while the Payment Element modal is open;
   // the ref carries the paid PI id into accept (server live-verifies it —
@@ -6811,11 +6883,27 @@ function EstimateViewPageInner({ websiteMode = false }) {
     setSlotsRefreshSignal((v) => v + 1);
   }, [services, comboAxisKeys, comboModeActive]);
 
+  // contactGaps is booleans-only (server never sends the linked customer's
+  // real name/email) — lastName is REQUIRED (Accept stays disabled and shows
+  // an inline error until filled); email is optional/skippable, so a blank
+  // field never blocks the confirm.
+  const contactLastNameGap = !!data?.contactGaps?.lastName;
+  const contactEmailGap = !!data?.contactGaps?.email;
+  const contactLastNameMissing = contactLastNameGap && !contactLastName.trim();
+
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
     // blocks the flow before review, and the server 409s a draft accept.
     if (readOnlyPreview) {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
+      return;
+    }
+    // Required-field guard mirrors confirmDisabled below (defense in depth —
+    // the button is disabled while this is true, but a stale disabled-state
+    // read should never let a request through with a required field blank).
+    if (contactLastNameGap && !contactLastName.trim()) {
+      setContactLastNameTouched(true);
+      setError('Please enter your last name to continue.');
       return;
     }
     // Synchronous single-flight guard: React state (`processing`-style flags)
@@ -6921,6 +7009,12 @@ function EstimateViewPageInner({ websiteMode = false }) {
           // Attests the quote step's authorization checkbox was checked
           // (auto-satisfy accepts — Codex #3492 r11); server-enforced.
           prepayChargeConsentAccepted: prepayChargeAckRef.current?.consentAccepted === true ? true : undefined,
+          // Missing-contact capture: only sent when the field was actually
+          // rendered (a real contactGaps gap) and the customer typed
+          // something — email is optional/skippable, so a blank field sends
+          // nothing rather than an empty string.
+          contactLastName: contactLastNameGap && contactLastName.trim() ? contactLastName.trim() : undefined,
+          contactEmail: contactEmailGap && contactEmail.trim() ? contactEmail.trim() : undefined,
         }),
       });
       if (!r.ok) {
@@ -7099,7 +7193,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactLastNameGap, contactEmailGap, contactLastName, contactEmail]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -8892,6 +8986,18 @@ function EstimateViewPageInner({ websiteMode = false }) {
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
               <AcceptanceTermsLine terms={data.acceptanceTerms} />
             ) : null}
+            contactSlot={data?.contactGaps ? (
+              <ContactGapFields
+                gaps={data.contactGaps}
+                lastName={contactLastName}
+                onLastNameChange={setContactLastName}
+                onLastNameBlur={() => setContactLastNameTouched(true)}
+                lastNameTouched={contactLastNameTouched}
+                email={contactEmail}
+                onEmailChange={setContactEmail}
+                disabled={ctaPhase === 'submitting'}
+              />
+            ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
               ? (paymentPreference === 'prepay_annual'
                 ? 'Confirm & pay the 12-month plan'
@@ -8902,6 +9008,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
               // only confirm — the underlying review CTA stays disabled so
               // a plain confirm can't race the payment authorization
               // (pre-push Codex P0 r2).
+              || contactLastNameMissing
               || (inlineAutoPayActive && inlineCardIntent
                 ? !(inlineCardState.ready && inlineCardState.agreed)
                 : false)}

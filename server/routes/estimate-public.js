@@ -23,6 +23,13 @@ const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
+const {
+  computeContactGaps,
+  sanitizeContactLastName,
+  sanitizeContactEmail,
+  fillExistingCustomerLastName,
+  fillExistingCustomerEmail,
+} = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -9048,6 +9055,54 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
+    // Missing-contact capture (owner ruling 2026-09-27): the accept card
+    // asks for whatever's actually missing — last name and/or email — right
+    // above the Accept button. Sanitize/validate first (a malformed email
+    // 400s before any mutation); a blank/absent value is never an error —
+    // last name is server-optional (a stale tab loaded before this deployed
+    // must still be able to accept; the client enforces required) and email
+    // is optional/skippable by design. Applied ONLY to genuine gaps, and
+    // ONLY before customer resolution below, so the new-profile insert /
+    // ensureCustomerAccount and the phone-match disambiguation all see the
+    // real values instead of the 'Customer' placeholder / blank email.
+    // Never overwrites an existing value — computeContactGaps and the
+    // customers-table fills below (fillExistingCustomerLastName/Email) are
+    // both gap-guarded independently.
+    const { value: sanitizedContactLastName, error: contactLastNameError } = sanitizeContactLastName(req.body?.contactLastName);
+    if (contactLastNameError) {
+      return res.status(400).json({ error: contactLastNameError.message, code: contactLastNameError.code });
+    }
+    const { value: sanitizedContactEmail, error: contactEmailError } = sanitizeContactEmail(req.body?.contactEmail);
+    if (contactEmailError) {
+      return res.status(400).json({ error: contactEmailError.message, code: contactEmailError.code });
+    }
+    if (sanitizedContactLastName || sanitizedContactEmail) {
+      try {
+        const linkedCustomerForGaps = estimate.customer_id
+          ? await db('customers').where({ id: estimate.customer_id }).first('last_name', 'email')
+          : null;
+        const contactFillGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+        const estimateContactPatch = {};
+        if (sanitizedContactLastName && contactFillGaps.lastName) {
+          const firstToken = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean)[0] || 'Customer';
+          estimateContactPatch.customer_name = `${firstToken} ${sanitizedContactLastName}`;
+        }
+        if (sanitizedContactEmail && contactFillGaps.email) {
+          estimateContactPatch.customer_email = sanitizedContactEmail;
+        }
+        if (Object.keys(estimateContactPatch).length) {
+          await db('estimates').where({ id: estimate.id }).update(estimateContactPatch);
+          // Mutate the in-memory row so every downstream read in this
+          // handler (matchAcceptCustomerByPhone's several call sites,
+          // the new-profile nameParts split, firstName below) sees the
+          // supplied values instead of re-fetching.
+          Object.assign(estimate, estimateContactPatch);
+        }
+      } catch (e) {
+        logger.error(`[estimate-accept] contact-gap fill failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
+
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
     // Commercial auto-priced lawn/tree: approval-only manual-billing workflow.
@@ -10744,6 +10799,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
 
       let customerId = estimate.customer_id;
+      // Already-linked customer: fill its last_name/email ONLY if blank/the
+      // 'Customer' placeholder (the fill helpers re-check that under this
+      // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
+      // already fenced this row since acceptPreLockedCommsId === customerId
+      // here). Never overwrites a real value already on file.
+      if (customerId) {
+        if (sanitizedContactLastName) await fillExistingCustomerLastName(trx, customerId, sanitizedContactLastName);
+        if (sanitizedContactEmail) await fillExistingCustomerEmail(trx, customerId, sanitizedContactEmail);
+      }
       // Grouped multi-property accept: a sibling estimate in the same group
       // that already resolved its customer is the DETERMINISTIC owner of this
       // acceptance — reuse it instead of re-guessing by phone. A second
@@ -10785,6 +10849,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             throw err;
           }
           await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+          // Sibling's existing customer: same guarded, never-overwrite fill.
+          if (sanitizedContactLastName) await fillExistingCustomerLastName(trx, customerId, sanitizedContactLastName);
+          if (sanitizedContactEmail) await fillExistingCustomerEmail(trx, customerId, sanitizedContactEmail);
         }
       }
       if (!customerId && estimate.customer_phone) {
@@ -10819,6 +10886,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             err.code = 'CUSTOMER_BUSY_RETRY';
             throw err;
           }
+          // Reused an existing profile: fill its last_name/email ONLY if
+          // blank/the 'Customer' placeholder — same guarded helpers as the
+          // already-linked branch above, now under this authoritative lock.
+          if (sanitizedContactLastName) await fillExistingCustomerLastName(trx, customerId, sanitizedContactLastName);
+          if (sanitizedContactEmail) await fillExistingCustomerEmail(trx, customerId, sanitizedContactEmail);
         } else {
           const nameParts = (estimate.customer_name || 'New Customer').split(' ');
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
@@ -26659,6 +26731,24 @@ async function composeEstimateDataPayload(estimate, {
     // include-when-present so every other response stays byte-identical.
     const successReferral = await estimateReferralCardFor(estimate);
 
+    // Missing-contact prompt (owner ruling 2026-09-27): only meaningful
+    // while the estimate can still be accepted — isEstimateAcceptActive
+    // already excludes accepted/declined/expired and every off-customer-
+    // surface/unpublished state, so those never ask. Booleans only; the
+    // linked customer's own name/email are read here but never returned —
+    // computeContactGaps folds them down to lastName/email flags.
+    let contactGaps = null;
+    if (isEstimateAcceptActive(estimate) && !isPdfRenderPass) {
+      try {
+        const linkedCustomerForGaps = estimate.customer_id
+          ? await db('customers').where({ id: estimate.customer_id }).first('last_name', 'email')
+          : null;
+        contactGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+      } catch (e) {
+        logger.warn(`[estimate-data] contact-gap computation skipped: ${e.message}`);
+      }
+    }
+
     // "Want us to come look first?" consultation offer (GATE_ESTIMATE_
     // CONSULTATION_OFFER + GATE_LEAD_INSPECTION_LINK, consultation-first
     // lane, owner ruling 2026-09-23): a strongly-linked recurring-intent
@@ -26717,6 +26807,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(propertyGroup ? { propertyGroup } : {}),
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
+      ...(contactGaps ? { contactGaps } : {}),
       ...(consultationOffer ? { consultationOffer } : {}),
       // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): per lawn
       // frequency key, the program's annual application count when that

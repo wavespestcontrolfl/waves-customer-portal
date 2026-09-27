@@ -1603,3 +1603,140 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(storedEstimate().status).toBe('sent');
   });
 });
+
+describe('Missing-contact capture (contactLastName/contactEmail) — owner ruling 2026-09-27', () => {
+  function conversionOk(customerId = 'cust-1') {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId,
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+
+  test('a fresh accept with a single-token name: supplied last name replaces the "Customer" placeholder on the new profile', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-1',
+      token: 'tok-contact-1-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-1-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'testy@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const customerId = storedEstimate().customer_id;
+    expect(customerId).toBeTruthy();
+    const cust = db.__state.tables.customers.find((c) => c.id === customerId);
+    expect(cust.first_name).toBe('Testy');
+    expect(cust.last_name).toBe('Sample');
+    expect(cust.email).toBe('testy@example.com');
+    // The estimate row itself is patched too — downstream reads (retry
+    // rebuild, notifications) see the real name/email, not the placeholder.
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+    expect(storedEstimate().customer_email).toBe('testy@example.com');
+  });
+
+  test('regression baseline: with no contactLastName/contactEmail supplied, the new profile still gets the "Customer" placeholder', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-2',
+      token: 'tok-contact-2-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-2-x0123456789');
+    expect(res.status).toBe(200);
+
+    const customerId = storedEstimate().customer_id;
+    const cust = db.__state.tables.customers.find((c) => c.id === customerId);
+    expect(cust.first_name).toBe('Testy');
+    expect(cust.last_name).toBe('Customer');
+    expect(cust.email).toBeNull();
+  });
+
+  test('an existing linked customer with a blank last name/email gets them filled', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-3',
+      token: 'tok-contact-3-x0123456789',
+      customer_id: 'cust-blank',
+      customer_phone: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-blank', first_name: 'Pat', last_name: null, email: null, phone: null }];
+    conversionOk('cust-blank');
+
+    const res = await putAccept('tok-contact-3-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'pat@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-blank');
+    expect(cust.last_name).toBe('Sample');
+    expect(cust.email).toBe('pat@example.com');
+  });
+
+  test('an existing linked customer with a real last name/email on file is NEVER overwritten', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-4',
+      token: 'tok-contact-4-x0123456789',
+      customer_id: 'cust-real',
+      customer_phone: null,
+    }));
+    db.__state.tables.customers = [{
+      id: 'cust-real', first_name: 'Pat', last_name: 'Original', email: 'original@example.com', phone: null,
+    }];
+    conversionOk('cust-real');
+
+    const res = await putAccept('tok-contact-4-x0123456789', {
+      contactLastName: 'Different',
+      contactEmail: 'different@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-real');
+    expect(cust.last_name).toBe('Original');
+    expect(cust.email).toBe('original@example.com');
+  });
+
+  test('an invalid contactEmail 400s before any mutation — nothing commits', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-5',
+      token: 'tok-contact-5-x0123456789',
+      customer_id: null,
+    }));
+
+    const res = await putAccept('tok-contact-5-x0123456789', { contactEmail: 'not-an-email' });
+    expect(res.status).toBe(400);
+    expect(res.data.code).toBe('CONTACT_EMAIL_INVALID');
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.customers).toHaveLength(0);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a control character in contactLastName 400s before any mutation — nothing commits', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-6',
+      token: 'tok-contact-6-x0123456789',
+      customer_id: null,
+    }));
+
+    const res = await putAccept('tok-contact-6-x0123456789', { contactLastName: 'Sample\u0001Name' });
+    expect(res.status).toBe(400);
+    expect(res.data.code).toBe('CONTACT_LAST_NAME_INVALID');
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.customers).toHaveLength(0);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
