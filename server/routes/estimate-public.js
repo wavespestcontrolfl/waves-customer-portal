@@ -12589,34 +12589,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           .where({ id: customerId })
           .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
         if (!cust) return;
-        const review = require('../services/customer-geocode-review');
-        const reviewedCust = await review.reviewedCustomerLocation({ ...cust, id: customerId }, db);
-        if (reviewedCust.geocode_review_blocked) return;
-        const custCoords = (reviewedCust.latitude != null && reviewedCust.longitude != null)
-          ? { lat: Number(reviewedCust.latitude), lng: Number(reviewedCust.longitude) }
-          : await geocodeAddress(buildAddress(reviewedCust));
+        const custCoords = (cust.latitude != null && cust.longitude != null)
+          ? { lat: Number(cust.latitude), lng: Number(cust.longitude) }
+          : await geocodeAddress(buildAddress(cust));
         if (!custCoords) return;
         const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
         if (!(samePlaceMiles <= 0.15)) return;
-        await review.withCustomerReviewWriteFence(customerId, db, async (conn) => {
-          let visitUpdate = conn('scheduled_services')
-            .where({ source_estimate_id: estimate.id })
-            .whereNull('lat');
-          visitUpdate = review.excludeCustomerAutomaticGeocodeForId(visitUpdate, customerId);
-          await visitUpdate.update({ lat: estCoords.lat, lng: estCoords.lng });
-          if ((cust.latitude == null || cust.longitude == null)
-            && reviewedCust.latitude == null && reviewedCust.longitude == null) {
-            let customerUpdate = conn('customers').where({ id: customerId }).where(function () {
-              this.whereNull('latitude').orWhereNull('longitude');
-            });
-            customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
-            await customerUpdate.update({
-              latitude: custCoords.lat,
-              longitude: custCoords.lng,
-              updated_at: new Date(),
-            });
-          }
-        });
+        await db('scheduled_services')
+          .where({ source_estimate_id: estimate.id })
+          .whereNull('lat')
+          .update({ lat: estCoords.lat, lng: estCoords.lng });
+        if (cust.latitude == null || cust.longitude == null) {
+          await db('customers').where({ id: customerId }).update({
+            latitude: custCoords.lat,
+            longitude: custCoords.lng,
+            updated_at: new Date(),
+          });
+        }
       })().catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
