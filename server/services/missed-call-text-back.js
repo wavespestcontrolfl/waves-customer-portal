@@ -585,9 +585,12 @@ function providerBoundaryCheck(row, phone, attempt) {
       // could claim unseen and both would send. A voicemail claim committed
       // before this read is seen (back off — wait while it is provisional,
       // settle once it is consumed; classifySendOutcome releases this lane's
-      // claim either way); one committed after it came second, the voicemail
-      // lane answering a voicemail left after this text, which the owner's
-      // separate-lanes ruling lets through.
+      // claim either way). One committed after it came second. The
+      // voicemail lane deliberately never reads this lane's claims (owner
+      // ruling 2026-09-27: separate lanes — a voicemail left after this
+      // text still gets its quote link), so this one-sided order is the
+      // whole rule: this lane never sends after a voicemail claim it could
+      // have seen.
       const voicemailClaim = await dbi('voicemail_sms_claims').where({ phone }).first('outcome');
       if (voicemailClaim) {
         return voicemailClaim.outcome === VOICEMAIL_CLAIM_IN_FLIGHT
