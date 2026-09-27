@@ -4990,6 +4990,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['No se le dará ningún seguimiento.', 'fail'],
     ['Le llamaríamos para confirmar.', 'fail'],
     ['Le daríamos seguimiento.', 'fail'],
+    ['Quizás le llamaremos y daremos seguimiento.', 'fail'],
+    ['No vamos a llamar y dar seguimiento.', 'fail'],
   ])('spanish-capture requires a spoken follow-up promise, not just "gracias" (finding A): %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-capture');
@@ -5083,6 +5085,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Intentaríamos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Intentaríamos también enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Trataríamos de poder enviarle el presupuesto por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'No vamos a preparar y enviarle el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Intentaríamos preparar y enviarle el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Quizás prepararemos y enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Terminaremos sin enviar el presupuesto.', 'fail'],
     ['spanish-pricing-gate-off', 'No podemos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Entiendo que quiere un presupuesto para su propiedad.', 'fail'],
@@ -5717,6 +5722,11 @@ describe('voice relay eval — named spoken checks', () => {
       expect(conditionalFollowup.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
       expect(replay._internals.scenarioStatus({ checks: conditionalFollowup })).toBe('fail');
     }
+    for (const text of ['Pedí el domingo 4 de octubre a la una de la tarde. Quizás le llamaremos y daremos seguimiento.', 'Pedí el domingo 4 de octubre a la una de la tarde. No vamos a llamar y dar seguimiento.']) {
+      const sharedScope = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
+      expect(sharedScope.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
+      expect(replay._internals.scenarioStatus({ checks: sharedScope })).toBe('fail');
+    }
     // Pending/modal clauses describe the office's future confirmation; they
     // are not assertions that the appointment is already booked. Exercise
     // each through the full scenario so its required date/time and office
@@ -6084,6 +6094,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['No se le dará ningún seguimiento.', 'fail'],
     ['Le llamaríamos para confirmar.', 'fail'],
     ['Le daríamos seguimiento.', 'fail'],
+    ['Quizás le llamaremos y daremos seguimiento.', 'fail'],
+    ['No vamos a llamar y dar seguimiento.', 'fail'],
   ])('spanish-reservice-matched requires a spoken follow-up promise (finding A): %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');

@@ -200,8 +200,9 @@ outcome words behind a negation guard, a turnaround duration, a diagnosis. A sco
 affirmative clause, with every part of the regex satisfied there, so Spanish negation,
 conditionals and uncertainty such as "quizás", "tal vez" or a conditional-tense verb
 cannot satisfy an offer or delivery commitment. A negated or hedged predicate coordinated
-with `y` is scoped separately, and conditional morphology must act as a predicate rather
-than appear in a noun such as "mensajería". `no_spanish_estimate_delivery_date`
+with `y` is scoped separately when the other side is an independent assertion; a shared
+auxiliary still governs its coordinated verbs. Conditional morphology must act as a
+predicate rather than appear in a noun such as "mensajería". `no_spanish_estimate_delivery_date`
 separately rejects a written-estimate delivery promise tied to a weekday, week-relative
 phrase or numeric/spelled Spanish calendar date; a date that modifies when the estimate
 was requested remains historical context.
