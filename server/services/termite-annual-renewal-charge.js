@@ -1661,21 +1661,39 @@ async function resolveChargeableSavedMethod(customerId, termId) {
   }
 }
 
-// Self-contained sub-decision, extracted from decideAndCharge for the same
-// reason as resolveChargeableSavedMethod above (P1-5): would a card
-// surcharge push the collected total above the flat renewal fee the v3
-// agreement quoted? A quote failure is non-fatal — the caller's own
-// maxAuthorizedTotalCents ceiling on the actual charge still holds as the
-// fail-closed backstop, so this defaults to "no" rather than blocking.
-async function wouldSurchargeExceedFlatFee(successor, method, prepayAmountCents) {
+// THE ceiling rule for the automatic renewal charge (P1-5; Codex #4971 r12
+// P1). The v3 agreement authorized the FLAT renewal fee — no card surcharge
+// on top of it (termite-annual-signature-charge.js's own rule). What the
+// charge collects is its cash total (surcharge included) PLUS the account
+// credit it applies to the invoice: with auto-apply on, a $249 renewal and
+// $100 of credit quotes about $153.32 of cash — under the fee on its own,
+// but $253.32 of value in total. So, from the saved-card quote itself
+// (quoteInvoiceSavedCardCharge — its cash total and its projected credit;
+// the surcharge math is never redone here):
+//   cash total + projected credit  <=  fee
+// or the charge is not authorized (the pay link instead). When it is, the
+// provider boundary gets the SAME numbers: maxAuthorizedTotalCents — which
+// stays a CASH ceiling at chargeInvoiceWithSavedCard — is fee − projected
+// credit (the consented surcharge on the cash portion is zero), and
+// expectedTotal pins the cash total to the quote, so a different credit
+// application under the charge's own lock (which changes the cash) refuses
+// instead of letting a surcharge ride on the difference. A quote that
+// cannot be taken leaves nothing to verify the total against: the charge
+// is deferred (never attempted, the fence unclaimed) and leg 7a retries it.
+// Returns { unavailable } | { exceeds: true } | { options }.
+async function renewalChargeCeiling(successor, method, feeCents) {
+  let quote;
   try {
     const StripeService = require('./stripe');
-    const quote = await StripeService.quoteInvoiceSavedCardCharge(successor.prepay_invoice_id, method.paymentMethodRowId);
-    return Math.round(Number(quote?.total) * 100) > prepayAmountCents;
+    quote = await StripeService.quoteInvoiceSavedCardCharge(successor.prepay_invoice_id, method.paymentMethodRowId);
   } catch (err) {
-    logger.warn(`[termite-annual-renewal] pre-charge quote failed for term ${successor.id} — relying on the charge ceiling: ${err.message}`);
-    return false;
+    logger.warn(`[termite-annual-renewal] pre-charge quote failed for term ${successor.id} — the charge is deferred: ${err.message}`);
+    return { unavailable: err.message };
   }
+  const cashCents = Math.round(Number(quote?.total) * 100);
+  const creditCents = Math.round(Number(quote?.projectedCreditApplied || 0) * 100);
+  if (!Number.isFinite(cashCents) || cashCents + creditCents > feeCents) return { exceeds: true };
+  return { options: { expectedTotal: cashCents / 100, maxAuthorizedTotalCents: feeCents - creditCents } };
 }
 
 async function decideAndCharge(successor, parentTerm, conn = db) {
@@ -1695,14 +1713,18 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
 
   const prepayAmountCents = Math.round(Number(successor.prepay_amount) * 100);
 
-  // P1-5: pre-quote surcharge check, mirroring termite-annual-signature-
-  // charge.js's own (lines ~308-323): a credit-card surcharge that would
-  // push the collected total above the flat renewal fee the v3 agreement
-  // quoted is not authorized by that signature — that customer gets the
-  // pay link (showing the exact surcharge) instead of a silent over-
-  // collection. Checked BEFORE the attempt fence is even stamped.
-  if (await wouldSurchargeExceedFlatFee(successor, method, prepayAmountCents)) {
-    await deliverInvoiceAndStampSkip(successor, 'surcharge_not_authorized', 'A credit-card surcharge would exceed the flat renewal fee the v3 agreement quoted, so it was not charged.', conn);
+  // P1-5 / Codex #4971 r12 P1: the ceiling rule (renewalChargeCeiling) — a
+  // collected total (cash, surcharge included, plus applied credit) above
+  // the flat renewal fee is not authorized by the v3 signature: that
+  // customer gets the pay link (showing the exact surcharge) instead of a
+  // silent over-collection. Checked BEFORE the attempt fence is stamped.
+  const ceiling = await renewalChargeCeiling(successor, method, prepayAmountCents);
+  if (ceiling.unavailable) {
+    await stampSweepDeferred(successor, conn);
+    return { status: 'deferred', reason: 'charge_quote_unavailable' };
+  }
+  if (ceiling.exceeds) {
+    await deliverInvoiceAndStampSkip(successor, 'surcharge_not_authorized', 'A credit-card surcharge would take the amount collected (with any account credit applied) above the flat renewal fee the v3 agreement quoted, so it was not charged.', conn);
     return { status: 'surcharge_not_authorized' };
   }
 
@@ -1720,7 +1742,7 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
   const submitCharge = () => StripeService.chargeInvoiceWithSavedCard(successor.prepay_invoice_id, method.paymentMethodRowId, {
     customerInitiated: false,
     maxAuthorizedChargeCents: prepayAmountCents,
-    maxAuthorizedTotalCents: prepayAmountCents,
+    ...ceiling.options,
     requireAutopayForCustomerId: successor.customer_id,
     requireSelfPayCustomerId: successor.customer_id,
   });
@@ -2135,7 +2157,7 @@ async function renewalPayerRouting(successor, conn = db) {
       : null;
     if (invoice?.payer_id) return 'payer_billed';
     const resolved = await require('./payer').resolveForInvoice({
-      database: db, customerId: successor.customer_id, throwOnError: true,
+      database: conn, customerId: successor.customer_id, throwOnError: true,
     });
     return resolved?.payerId ? 'payer_billed' : null;
   } catch (err) {

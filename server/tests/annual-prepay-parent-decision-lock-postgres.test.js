@@ -163,16 +163,27 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     return res.rows[0].n;
   };
 
-  test('(a) the connection returns to the pool on a normal success', async () => {
+  // Codex #4971 r12 P1: the session lock now lives on a DEDICATED connection
+  // outside the pool (acquireRawConnection), destroyed afterwards — it never
+  // takes a pool slot, even while held. The (a)-(d) pool assertions below
+  // were written for the old pooled lock connection ("returned to the
+  // pool"); they now pin the stronger property: zero pool slots throughout.
+  test('(a) the lock takes no pool slot while held, and leaves none behind on success', async () => {
     const termId = 'lock-success-1';
     expect(db.client.pool.numUsed()).toBe(0);
-    const result = await withParentDecisionLock(termId, async () => 'ok');
+    let usedWhileHeld = null;
+    const result = await withParentDecisionLock(termId, async () => {
+      usedWhileHeld = db.client.pool.numUsed();
+      expect(await advisoryLockCount(termId)).toBe(1);
+      return 'ok';
+    });
     expect(result).toBe('ok');
+    expect(usedWhileHeld).toBe(0);
     expect(db.client.pool.numUsed()).toBe(0);
     expect(await advisoryLockCount(termId)).toBe(0);
   });
 
-  test('(a) the connection returns to the pool when fn() throws', async () => {
+  test('(a) a throwing fn() leaves no pool slot and no lock behind', async () => {
     const termId = 'lock-throw-1';
     await expect(withParentDecisionLock(termId, async () => { throw new Error('boom'); }))
       .rejects.toThrow('boom');
@@ -203,7 +214,7 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     expect(db.client.pool.numUsed()).toBe(0);
   });
 
-  test('(c) a genuine failure to acquire the lock still returns the connection, after a bounded wait, with one clear error', async () => {
+  test('(c) a genuine failure to acquire the lock fails after a bounded wait, with one clear error, and uses no pool slot', async () => {
     const termId = 'lock-timeout-1';
     await holder.raw('SELECT pg_advisory_lock(hashtext(?), hashtext(?::text))', ['annual-prepay-parent-decision', termId]);
     try {
@@ -222,7 +233,7 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     }
   });
 
-  test('(c)/(d) a decline racing an in-flight charge WAITS for it, then wins — never a spurious instant failure, and the pool is never asked for more than 2 connections', async () => {
+  test('(c)/(d) a decline racing an in-flight charge WAITS for it, then wins — never a spurious instant failure, and neither lock takes a pool slot', async () => {
     const termId = 'lock-contention-1';
     const order = [];
     let peakUsed = 0;
@@ -260,9 +271,30 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     // released — proof it genuinely waited rather than failing fast.
     expect(Date.now() - declineStartedAt).toBeGreaterThanOrEqual(200);
     expect(Date.now() - chargeStartedAt).toBeGreaterThanOrEqual(300);
-    // Never needed a 3rd connection: one per concurrently-held lock.
-    expect(peakUsed).toBeLessThanOrEqual(2);
+    // Both locks lived on their own dedicated sessions — the pool was never
+    // touched (it used to be one pooled connection per held lock).
+    expect(peakUsed).toBe(0);
     expect(db.client.pool.numUsed()).toBe(0);
+  });
+
+  // Codex #4971 r12 P1: the renewal charge's shape under the gate with the
+  // supported DB_POOL_MAX=2 — chargeInvoiceWithSavedCard's invoice
+  // transaction holds one pooled connection and, before it can finish,
+  // commits its submission marker on ANOTHER (commitInvoiceSavedCardChargeSubmission
+  // with the root handle). With the gate on a pooled connection that needed
+  // a third and waited until the pool timed out; now it completes.
+  test('a gated flow that nests an independent transaction inside its own transaction completes against a pool of 2', async () => {
+    const termId = 'lock-pool-shape-1';
+    const shape = withParentDecisionLock(termId, () => db.transaction(async (invoiceTrx) => {
+      await invoiceTrx.raw('SELECT 1');
+      const marker = await db.transaction(async (markerTrx) => (await markerTrx.raw('SELECT 2 AS n')).rows[0].n);
+      await invoiceTrx.raw('SELECT 3');
+      return marker;
+    }));
+    const timeout = sleep(5000).then(() => 'pool-starved');
+    await expect(Promise.race([shape, timeout])).resolves.toBe(2);
+    expect(db.client.pool.numUsed()).toBe(0);
+    expect(await advisoryLockCount(termId)).toBe(0);
   });
 
   test('(d) 20 sequential locks against a pool capped at 2 never exhaust it', async () => {
@@ -275,7 +307,9 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     }
   });
 
-  test('a lock this connection just released never leaks a lock_timeout onto the NEXT borrower of the same pooled connection', async () => {
+  // The lock's own lock_timeout is set on its dedicated session, which is
+  // destroyed afterwards — no pooled connection ever carries it.
+  test('the lock\'s lock_timeout never leaks onto a pooled connection', async () => {
     const baseline = (await db.raw('SHOW lock_timeout')).rows[0].lock_timeout;
     // Acquire+release several times (sets, then resets, lock_timeout on
     // whichever pooled connection tarn hands out each time — with a

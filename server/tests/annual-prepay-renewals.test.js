@@ -26,6 +26,10 @@ jest.mock('../models/db', () => {
     lockConn,
     acquireConnection: jest.fn(async () => lockConn),
     releaseConnection: jest.fn(async () => {}),
+    // The renewal gate's session lock (withParentDecisionLock) runs on a
+    // dedicated connection outside the pool (Codex #4971 r12 P1).
+    acquireRawConnection: jest.fn(async () => lockConn),
+    destroyRawConnection: jest.fn(async () => {}),
   };
   return dbFn;
 });

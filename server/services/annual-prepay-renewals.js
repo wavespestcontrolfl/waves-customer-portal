@@ -9107,6 +9107,19 @@ async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
 // on — locked with the parent, sorted, on the same connection (see
 // heldParentDecisionLockStore). Keys this async tree already holds are
 // skipped; all held → fn() runs directly (re-entrant).
+//
+// Codex #4971 r12 P1: the session lock lives on a DEDICATED connection
+// OUTSIDE the pool (knex's own acquireRawConnection — the same
+// connectionSettings, SSL and search_path the pool's connections get),
+// never a pooled one. A held gate used to pin a pool slot for its whole
+// body, and the gated flows open pooled transactions inside it (the renewal
+// charge's invoice transaction, which itself needs one more connection to
+// commit its submission marker): with the supported DB_POOL_MAX=2 the
+// charge waited on a connection only its own gate could free, until the
+// pool timed out. A gate now never consumes a pool slot, so no pool size
+// can deadlock a gated flow (the refund gate, the dispute handlers' gate,
+// the renewal gate). The connection is always destroyed afterwards — ending
+// the session releases anything a failed unlock left held.
 async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS, alsoTermIds = [] } = {}) {
   const held = heldDecisionKeys();
   const keys = [...new Set([termId, ...alsoTermIds].filter(Boolean).map(String))].filter((key) => !held.has(key)).sort();
@@ -9117,7 +9130,7 @@ async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_
   let lockConn = null;
   const locked = [];
   try {
-    lockConn = await db.client.acquireConnection();
+    lockConn = await db.client.acquireRawConnection();
     await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
     // Mark these terms as session-lock-held for the lifetime of fn()'s own
     // async tree — see heldParentDecisionLockStore's doc above.
@@ -9153,16 +9166,12 @@ async function releaseSessionDecisionLocks(lockConn, locked) {
     try {
       await lockConn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, key]);
     } catch (err) {
-      // A failed unlock on a still-usable session would return the
-      // connection to the pool WITH the lock held — poison it instead
-      // (mirrors acquireCancelCommitLock's own comment) so the pool
-      // destroys it; ending the session is what actually releases it.
-      lockConn.__knex__disposed = err;
-      logger.warn(`[annual-prepay] parent-decision lock release failed for term ${key} — connection poisoned so the pool destroys it: ${err.message}`);
+      // Ending the dedicated session below is what releases it anyway.
+      logger.warn(`[annual-prepay] parent-decision lock release failed for term ${key} — the lock session is closed instead: ${err.message}`);
       break;
     }
   }
-  try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+  try { await db.client.destroyRawConnection(lockConn); } catch { /* already gone: the server ended the session, and its locks with it */ }
 }
 
 async function recordDecision({ termId, action, adminUserId = null, notes = null, disposition = null, conn = db } = {}) {

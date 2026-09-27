@@ -1056,7 +1056,10 @@ describe('termite annual renewal charge', () => {
       expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'surcharge_not_authorized' }));
     });
 
-    test('a quote failure is non-fatal — falls through to the charge attempt, relying on the ceiling', async () => {
+    // Codex #4971 r12 P1: with no quote there is nothing to verify the total
+    // collected against (cash + applied credit) — the charge is deferred:
+    // never attempted, the fence unclaimed, rotated for leg 7a.
+    test('a quote failure defers the charge — no fence claim, no Stripe call, rotated for a retry', async () => {
       mockCommon();
       mockGraceHelpers({ graceDays: 30 });
       jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn() }));
@@ -1064,18 +1067,83 @@ describe('termite annual renewal charge', () => {
       jest.doMock('../services/recurring-card-on-file', () => ({
         resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-1' })),
       }));
-      mockSignatureChargePrivate({ classifyVerifiedChargeImpl: jest.fn(() => ({ status: 'paid' })) });
       const chargeInvoiceWithSavedCard = jest.fn(async () => ({ status: 'paid' }));
       const quoteInvoiceSavedCardCharge = jest.fn(async () => { throw new Error('quote unavailable'); });
       jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge }));
 
       const { _private } = require('../services/termite-annual-renewal-charge');
       const successor = baseSuccessor();
-      const { conn } = makeDecideConn({ successor });
+      const { conn, claimUpdate, deferredUpdate } = makeDecideConn({ successor });
       const outcome = await _private.decideAndCharge(successor, baseParent(), conn);
 
-      expect(outcome.status).toBe('charged');
-      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      expect(outcome).toEqual({ status: 'deferred', reason: 'charge_quote_unavailable' });
+      expect(claimUpdate).not.toHaveBeenCalled();
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+    });
+
+    // Codex #4971 r12 P1 — ONE ceiling: cash total (surcharge included) +
+    // the credit the charge applies must not exceed the flat renewal fee;
+    // the provider gets the matching cash ceiling and the pinned cash total.
+    describe('the renewal charge ceiling counts applied account credit', () => {
+      function load(quote) {
+        mockCommon();
+        mockGraceHelpers({ graceDays: 30 });
+        const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
+        jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+        jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+        jest.doMock('../services/recurring-card-on-file', () => ({
+          resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-1' })),
+        }));
+        mockSignatureChargePrivate({ classifyVerifiedChargeImpl: jest.fn(() => ({ status: 'paid' })) });
+        const chargeInvoiceWithSavedCard = jest.fn(async () => ({ status: 'paid' }));
+        jest.doMock('../services/stripe', () => ({
+          assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
+          chargeInvoiceWithSavedCard,
+          quoteInvoiceSavedCardCharge: jest.fn(async () => quote),
+        }));
+        return { chargeInvoiceWithSavedCard, sendViaSMSAndEmail };
+      }
+
+      test('a $249 renewal with $100 of credit on a surcharged card ($153.32 cash, $253.32 in total) is never auto-charged — the pay link instead', async () => {
+        const { chargeInvoiceWithSavedCard, sendViaSMSAndEmail } = load({ base: 149, surcharge: 4.32, total: 153.32, projectedCreditApplied: 100 });
+        const { _private } = require('../services/termite-annual-renewal-charge');
+        const { conn, claimUpdate, skipStampUpdate } = makeClaimConn();
+
+        const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
+
+        expect(outcome.status).toBe('surcharge_not_authorized');
+        expect(claimUpdate).not.toHaveBeenCalled();
+        expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+        expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+        expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'surcharge_not_authorized' }));
+      });
+
+      test('no credit, no surcharge: charged exactly as before — cash ceiling = the fee, the cash total pinned to the quote', async () => {
+        const { chargeInvoiceWithSavedCard } = load({ base: 249, surcharge: 0, total: 249, projectedCreditApplied: 0 });
+        const { _private } = require('../services/termite-annual-renewal-charge');
+        const successor = baseSuccessor();
+        const { conn } = makeDecideConn({ successor });
+
+        await _private.decideAndCharge(successor, baseParent(), conn);
+
+        expect(chargeInvoiceWithSavedCard).toHaveBeenCalledWith('succ-invoice-1', 'pm-1', expect.objectContaining({
+          maxAuthorizedChargeCents: 24900, maxAuthorizedTotalCents: 24900, expectedTotal: 249,
+        }));
+      });
+
+      test('ACH (no surcharge) with $100 of credit: charged with a cash ceiling of fee − credit, so cash + credit never exceeds the fee', async () => {
+        const { chargeInvoiceWithSavedCard } = load({ base: 149, surcharge: 0, total: 149, projectedCreditApplied: 100 });
+        const { _private } = require('../services/termite-annual-renewal-charge');
+        const successor = baseSuccessor();
+        const { conn } = makeDecideConn({ successor });
+
+        await _private.decideAndCharge(successor, baseParent(), conn);
+
+        expect(chargeInvoiceWithSavedCard).toHaveBeenCalledWith('succ-invoice-1', 'pm-1', expect.objectContaining({
+          maxAuthorizedChargeCents: 24900, maxAuthorizedTotalCents: 14900, expectedTotal: 149,
+        }));
+      });
     });
 
     test('a genuine Stripe decline (wavesCardDecline): one attempt, one "declined" bell, pay-link delivered, and the customer SMS fires', async () => {
