@@ -1045,7 +1045,10 @@ async function sendCustomerMessageCore(input) {
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
   // proves no leg was sent. Accepted or uncertain remains authoritative.
-  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent') {
+  // A prior visible App event settles its original copy independently of
+  // a later native guard refusal; never replace that event's witness.
+  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent'
+    && !(providerOutcome.provider === 'push' && providerOutcome.error === 'app_event_already_visible')) {
     providerOutcome = {
       ...providerOutcome,
       blocked: true,

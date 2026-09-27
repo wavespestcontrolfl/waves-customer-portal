@@ -58,19 +58,22 @@ async function recordContact({
   if (!idempotencyKey) throw new Error('collections ledger insert returned no id');
   const existing = await db('collections_contact_ledger')
     .where({ idempotency_key: idempotencyKey })
-    .first('id', 'metadata');
+    .first('id', 'metadata', 'occurred_at');
   if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
-  // A reused reservation is being re-attempted NOW (codex r5): refresh
-  // occurred_at so the 24h frequency window starts at the actual delivery
-  // attempt, not the first failed one. Later timestamp = longer window —
-  // the safe direction; a refresh failure propagates (caller holds).
-  await db('collections_contact_ledger')
-    .where({ id: existing.id })
-    .update({ occurred_at: occurredAt });
   const existingMeta = typeof existing.metadata === 'string'
-    ? JSON.parse(existing.metadata)
-    : (existing.metadata || {});
-  return { id: existing.id, metadata: existingMeta, reused: true };
+    ? JSON.parse(existing.metadata) : (existing.metadata || {});
+  // Only a confirmed failed reservation can attempt again. Preserve a
+  // delivered/resolved event's original window, including a concurrent stamp.
+  let contactAt = existing.occurred_at;
+  if (existingMeta.send_failed === true) {
+    const changed = await db('collections_contact_ledger').where({ id: existing.id })
+      .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
+        JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+      ]).update({ occurred_at: occurredAt });
+    if (Number(changed) === 1) contactAt = occurredAt;
+  }
+  return { id: existing.id, metadata: existingMeta, reused: true,
+    ...(contactAt ? { occurred_at: contactAt } : {}) };
 }
 
 /**

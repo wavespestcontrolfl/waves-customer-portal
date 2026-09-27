@@ -1013,6 +1013,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // a definite failed delivery stamps send_failed, while an unknown outcome
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
+  const originalDeliveryTimes = [];
   let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
   // A spacing-window denial keeps the selected Email owed on this step; a
   // durable one (flag, suppression) waives it so the step cannot be pinned
@@ -1037,8 +1038,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     if (emailLedger) {
       const claim = selectedChannels !== null && typeof ContactLedger.claimAttempt === 'function'
         ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
-      if (claim.delivered) emailResult = { ok: true, deduped: true };
-      else if (claim.resolved) {
+      if (claim.delivered) {
+        emailResult = { ok: true, deduped: true };
+        if (emailLedger.occurred_at) originalDeliveryTimes.push(emailLedger.occurred_at);
+      } else if (claim.resolved) {
         emailResult = {
           ok: false,
           delivered: false,
@@ -1116,6 +1119,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
       if (claim.delivered) {
         smsSent = true;
+        if (ledger.occurred_at) originalDeliveryTimes.push(ledger.occurred_at);
         continue;
       }
       if (!claim.allowed) { holdStep(); continue; }
@@ -1142,6 +1146,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       const delivery = billingLegDeliveryState(channel, result || {});
       if (delivery) {
         smsSent = true;
+        if (delivery === 'deduped' && result.eventVisibleAt) originalDeliveryTimes.push(result.eventVisibleAt);
         if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
           && !await ContactLedger.markDelivered(ledger, ...(result.eventVisibleAt ? [{ occurredAt: result.eventVisibleAt }] : []))) holdStep();
@@ -1356,6 +1361,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     return;
   }
 
+  const freshDelivery = actualSmsSent || appSent || (emailResult.ok && !emailResult.deduped);
+  const originalAt = originalDeliveryTimes.length
+    ? new Date(Math.max(...originalDeliveryTimes.map((time) => new Date(time).getTime()))) : row.last_touch_at;
   const nextIndex = row.step_index + 1;
   // anchor_at (set when an admin edit shifted the due date) overrides the
   // send-time anchor so the whole remaining cadence stays on one timeline.
@@ -1366,7 +1374,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
     step_index: nextIndex,
-    last_touch_at: new Date(),
+    last_touch_at: freshDelivery ? new Date() : originalAt,
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
@@ -1375,7 +1383,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
   // A repaired original event advances its step without a new outbound touch.
-  if (selectedChannels !== null && !actualSmsSent && !appSent && !emailResult.ok) return;
+  if (selectedChannels !== null && !freshDelivery) return;
 
   // Log to customer_interactions for the 360 view
   try {

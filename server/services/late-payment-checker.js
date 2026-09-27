@@ -165,7 +165,7 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = '
   const claim = typeof ContactLedger.claimAttempt === 'function'
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
-  if (claim.delivered) return { sent: true, deduped: true, deliveryOutcome: 'accepted' };
+  if (claim.delivered) return { sent: true, deduped: true, deliveryOutcome: 'accepted', eventVisibleAt: ledger.occurred_at };
   if (!claim.allowed) return { sent: false, deferred: true, code: 'PRIOR_TEXT_OUTCOME_UNCONFIRMED' };
   let result;
   try { result = await dispatch(); }
@@ -409,6 +409,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       if (!emailLedger) return;
       const claim = await claimReservedEmail(ContactLedger, emailLedger);
       if (claim.delivered) {
+        emailResult = { ok: true, deduped: true };
         emailDelivered = true;
         return;
       }
@@ -446,7 +447,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
         && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')));
     const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
       && !emailDelivered && !terminalEmailResolved;
-    const repaired = !emailDelivered && delivery.results.push?.reason === 'app_event_already_visible' && Object.values(delivery.results).every((result) => result.deduped === true);
+    const repaired = (!emailDelivered || emailResult?.deduped === true)
+      && delivery.results.push?.deduped === true
+      && Object.values(delivery.results).every((result) => !result.sent || result.deduped === true);
     const activityInsert = db('activity_log').insert({
       ...(repaired ? { created_at: delivery.results.push.eventVisibleAt } : {}),
       customer_id: customer.id,
@@ -838,7 +841,9 @@ const LatePaymentService = {
         const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
           && !emailDelivered && !terminalEmailResolved;
 
-        const repaired = !emailDelivered && delivery.results.push?.reason === 'app_event_already_visible' && Object.values(delivery.results).every((result) => result.deduped === true);
+        const repaired = (!emailDelivered || emailResult?.deduped === true)
+          && delivery.results.push?.deduped === true
+          && Object.values(delivery.results).every((result) => !result.sent || result.deduped === true);
         if (delivery.sentChannels) {
           if (repaired) skipped++; else notified++;
           logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);

@@ -44,7 +44,9 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       for (const key of ['recipient_type', 'category', 'title', 'body', 'icon', 'link']) table.text(key);
     });
     await mockPg.schema.createTable('collections_contact_ledger', (table) => {
-      table.uuid('id').primary(); table.jsonb('metadata'); table.timestamp('occurred_at');
+      table.uuid('id').primary().defaultTo(mockPg.raw('gen_random_uuid()')); table.jsonb('metadata'); table.timestamp('occurred_at');
+      table.text('idempotency_key').unique(); table.uuid('customer_id'); table.jsonb('invoice_ids');
+      for (const key of ['channel', 'purpose', 'source']) table.text(key);
     });
     await mockPg.schema.createTable('autopay_log', (table) => {
       table.increments('id'); table.uuid('customer_id'); table.text('event_type');
@@ -125,13 +127,20 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       expect(progress.created_at).toEqual(visibleAt);
       expect(progress.amount_cents).toBeNull();
       const ledgerId = randomUUID();
-      await mockPg('collections_contact_ledger').insert({ id: ledgerId, metadata: {}, occurred_at: new Date() });
+      await mockPg('collections_contact_ledger').insert({ id: ledgerId, metadata: { send_failed: true },
+        idempotency_key: `billing-app:${invoiceId}`, occurred_at: new Date() });
       expect(await require('../services/collections/contact-ledger').markDelivered({ id: ledgerId }, {
         occurredAt: retried.created_at,
       })).toBe(true);
       const ledger = await mockPg('collections_contact_ledger').where({ id: ledgerId }).first();
       expect(ledger.metadata.delivered).toBe(true);
       expect(ledger.occurred_at).toEqual(visibleAt);
+      const contact = await require('../services/collections/contact-ledger').recordContact({
+        customerId, channel: 'push', purpose: 'balance_reminder', source: 'app-qa', idempotencyKey: `billing-app:${invoiceId}`,
+      });
+      expect(contact.occurred_at).toEqual(visibleAt);
+      expect((await mockPg('collections_contact_ledger').where({ id: ledgerId }).first()).occurred_at).toEqual(visibleAt);
+      expect(await require('../services/collections/contact-ledger').claimAttempt(contact)).toMatchObject({ delivered: true, allowed: false });
     } finally { transactionSpy.mockRestore(); }
   }, 15000);
 });

@@ -16,6 +16,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
+  claimAttempt: jest.fn(async () => ({ allowed: true })),
 }));
 
 jest.mock('../services/logger', () => ({
@@ -146,6 +147,7 @@ describe('invoice follow-up email sidecar', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
+    require('../services/collections/contact-ledger').claimAttempt.mockReset().mockResolvedValue({ allowed: true });
     BillingEmailAuthority.loadBillingEmailContext.mockReset().mockResolvedValue({
       category: 'invoice',
       recipient: { email: 'billing@example.com', name: 'Taylor' },
@@ -631,10 +633,19 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test.each([false, true, 'prior', 'bell'])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
-    if (appSelected === 'prior') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible' });
+  test.each([false, true, 'prior', 'bell', 'prior+old-email', 'prior+fresh-email'])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+    const visibleAt = new Date('2026-05-20T14:00:00Z');
+    const prior = String(appSelected).startsWith('prior');
+    const withEmail = String(appSelected).includes('email');
+    const repaired = prior && appSelected !== 'prior+fresh-email';
+    if (prior) sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    if (appSelected === 'prior+old-email') {
+      const ledger = require('../services/collections/contact-ledger');
+      ledger.claimAttempt.mockResolvedValueOnce({ allowed: false, delivered: true });
+      ledger.recordContact.mockResolvedValueOnce({ id: 'email-old', metadata: {}, occurred_at: visibleAt });
+    }
     if (appSelected === 'bell') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true });
-    const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: ['push'] } : {}) };
+    const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: withEmail ? ['email', 'push'] : ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
     const sequenceUpdate = chain();
@@ -660,7 +671,8 @@ describe('invoice follow-up email sidecar', () => {
     await InvoiceFollowUps.runPending();
 
     if (appSelected) {
-      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      if (appSelected === 'prior+fresh-email') expect(EmailTemplates.sendTemplate).toHaveBeenCalled();
+      else expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
       expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', to: null }));
     } else {
       expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'invoice.followup_3_day' }));
@@ -670,8 +682,11 @@ describe('invoice follow-up email sidecar', () => {
       step_index: 1,
       status: 'active',
     }));
-    if (appSelected === 'prior') {
+    expect(sequenceUpdate.update.mock.calls[0][0].last_touch_at).toEqual(repaired ? visibleAt : new Date());
+    if (appSelected === 'prior+fresh-email') expect(finalInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({ interaction_type: 'email_outbound' }));
+    if (repaired) {
       expect(require('../services/collections/contact-ledger').markDelivered).toHaveBeenCalled();
+      expect(emailInteraction.insert).not.toHaveBeenCalled();
       expect(finalInteraction.insert).not.toHaveBeenCalled();
       expect(require('../services/collections/contact-ledger').markSendFailed).not.toHaveBeenCalled();
     }

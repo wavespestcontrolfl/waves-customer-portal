@@ -494,6 +494,23 @@ test('request delivery forwards the queued status and transition identity to the
 });
 
 describe('explicit billing channel combinations', () => {
+  test('a later native guard refusal preserves an observed original App event', async () => {
+    prefs.billing_channels = ['push'];
+    const visibleAt = new Date(Date.now() - 86400000);
+    Twilio.sendSMS.mockImplementation(async (_to, _body, hooks) => {
+      expect(await hooks.preSendCheck()).toMatchObject({ ok: false });
+      expect(hooks.explicitPushOnly).toBe(true);
+      return { success: false, appUnavailable: true, error: 'app_event_already_visible', eventVisibleAt: visibleAt };
+    });
+    const result = await sendCustomerMessage({ ...input, purpose: 'billing', preSendCheck: async () => false,
+      metadata: { billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', notificationEventKey: 'billing:prior', appOnly: true } });
+    expect(result).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(require('../services/messaging/billing-channel-routing').billingLegDeliveryState('push', result)).toBe('deduped');
+    expect(result.bellPersisted).toBeUndefined();
+    expect(result.providerMessageId).toBeUndefined();
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  });
+
   test('an already visible App event keeps its settlement evidence without a Text fallback', async () => {
     prefs.billing_channels = ['push'];
     const visibleAt = new Date(Date.now() - 86400000);
