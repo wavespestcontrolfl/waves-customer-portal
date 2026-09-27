@@ -23,6 +23,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { runInventoryAgent, drainAgentQueue, productUnchangedSinceAgent } = require('../services/purchase-receipts/inventory-agent');
 const inventoryOperations = require('../services/inventory-operations');
 const notifications = require('../services/notification-service');
+const { undoLine } = require('../../ops/agents/inventory-agent-undo');
 
 const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
@@ -336,6 +337,120 @@ jest.setTimeout(30000);
     await run({ ok: true, json: decision });
     const [bell] = await bellsFor(line.id);
     expect(bell.message || bell.body || JSON.stringify(bell)).toMatch(/restock request for Taurus SC is still open/);
+  });
+
+  test('an EXISTING count product whose default_unit is still the admin default and never used yet: the restock fixes it to each (review item 1)', async () => {
+    const [trapProduct] = await mockConn('products_catalog').insert({
+      name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: '12 count', inventory_unit: null, default_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Victor Rat Trap 12 Count', product_id: trapProduct.id, quantity: 5 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: trapProduct.id, new_product: null,
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    const result = await run({ ok: true, json: decision });
+    expect(result).toMatchObject({ logged: 1, held: 0 });
+    const updated = await mockConn('products_catalog').where({ id: trapProduct.id }).first();
+    expect(updated).toMatchObject({ inventory_unit: 'each', default_unit: 'each' });
+    expect(await stockOf(trapProduct.id)).toBe(60); // 5 ordered x 12 count
+    const [bell] = await bellsFor(line.id);
+    expect(bell.body).toMatch(/application unit to each/);
+  });
+
+  test('an EXISTING count product whose default_unit already carries usage and can\'t take a count holds for a person instead of silently deducting nothing later (review item 1)', async () => {
+    const [trapProduct] = await mockConn('products_catalog').insert({
+      name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: '12 count', inventory_unit: null, default_unit: 'oz', inventory_on_hand: 5,
+    }).returning('*');
+    // Prior usage under the ounce-based default_unit — this product is
+    // already "in service" that way, so the agent must not silently flip it.
+    await mockConn('product_inventory_movements').insert({
+      product_id: trapProduct.id, movement_type: 'correction', quantity: 5, unit: 'oz', stock_before: 0, stock_after: 5,
+      metadata: { source: 'admin_manual_adjustment' },
+    });
+    const line = await pendingLine({ raw_title: 'Victor Rat Trap 12 Count', product_id: trapProduct.id, quantity: 5 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: trapProduct.id, new_product: null,
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    const result = await run({ ok: true, json: decision });
+    expect(result).toMatchObject({ logged: 0, held: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_unsure' });
+    expect(saved.agent_decision).toMatchObject({ reason: 'application_unit_incompatible_with_count' });
+    expect(await stockOf(trapProduct.id)).toBe(5); // never applied
+    const [bell] = await bellsFor(line.id);
+    expect(bell.body).toMatch(/application unit can't take a count/);
+  });
+
+  test('undo restores container_size/inventory_unit/inventory_on_hand/default_unit to their originals on an EXISTING product (review item 2)', async () => {
+    const [trapProduct] = await mockConn('products_catalog').insert({
+      name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: '12 count', inventory_unit: null, default_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Victor Rat Trap 12 Count', product_id: trapProduct.id, quantity: 5 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: trapProduct.id, new_product: null,
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    // Confirm the agent really did change all three fields, so the undo
+    // assertion below is proof of restoration, not a no-op.
+    const afterAgent = await mockConn('products_catalog').where({ id: trapProduct.id }).first();
+    expect(afterAgent).toMatchObject({ inventory_unit: 'each', default_unit: 'each', inventory_on_hand: '60.0000' });
+
+    const outcome = await undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} });
+    expect(outcome).toEqual({ executed: true });
+
+    const restored = await mockConn('products_catalog').where({ id: trapProduct.id }).first();
+    expect(restored).toMatchObject({ container_size: '12 count', inventory_unit: null, default_unit: 'oz' });
+    expect(Number(restored.inventory_on_hand)).toBe(0);
+    const savedLine = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(savedLine.status).toBe('agent_unsure');
+    expect(savedLine.agent_decision.undoneAt).toEqual(expect.any(String));
+    // The compensating movement is still on the ledger (kept, never edited).
+    const movements = await mockConn('product_inventory_movements').where({ product_id: trapProduct.id }).orderBy('created_at', 'asc');
+    expect(movements).toHaveLength(2); // the original restock + the undo's correction
+    expect(movements[1]).toMatchObject({ movement_type: 'correction' });
+  });
+
+  test('undo returns an originally-UNTRACKED product to null (not 0) — inventory_on_hand and its unit both revert (review item 2)', async () => {
+    const [bare] = await mockConn('products_catalog').insert({
+      name: 'Granular Bait Untracked', active: true, category: 'bait', container_size: null, inventory_unit: null, default_unit: 'oz', inventory_on_hand: null,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Granular Bait Untracked 16 oz Bag', product_id: bare.id, quantity: 2 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: bare.id, new_product: null,
+      reading: { size_text: '16 oz', size_number: 16, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const afterAgent = await mockConn('products_catalog').where({ id: bare.id }).first();
+    expect(afterAgent.container_size).toBe('16 oz'); // setContainerSize fired
+    expect(Number(afterAgent.inventory_on_hand)).toBe(32); // 2 x 16 oz — no longer untracked
+
+    await undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} });
+
+    const restored = await mockConn('products_catalog').where({ id: bare.id }).first();
+    expect(restored.container_size).toBeNull();
+    expect(restored.inventory_unit).toBeNull();
+    expect(restored.inventory_on_hand).toBeNull(); // back to untracked, never 0
+    expect(restored.default_unit).toBe('oz');
+  });
+
+  test('undo dry-runs by default and refuses when the product changed since the agent\'s restock', async () => {
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-undo-refuse' });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const dryRun = await undoLine(mockConn, { lineArg: line.id, execute: false, log: () => {} });
+    expect(dryRun).toEqual({ executed: false });
+    expect(await stockOf(taurus.id)).toBe(156); // dry run never writes
+
+    // Something else touches the product after the agent's restock.
+    await inventoryOperations.adjustStock(taurus.id, { movementType: 'correction', setTotal: 999, unit: 'fl_oz' }, { source: 'admin_manual_adjustment' });
+    await expect(undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} }))
+      .rejects.toThrow(/product changed after the agent's restock/);
+    expect(await stockOf(taurus.id)).toBe(999); // refused — untouched
   });
 
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
