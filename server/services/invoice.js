@@ -254,7 +254,7 @@ function invoiceHasDepositCreditLine(invoice) {
 // discount FULLY backed by negative lines (the common case) compares equal
 // and is unaffected — those lines ride through the retotal and
 // calculateUpdateFinancials prices them fresh.
-function invoiceHasUnbackedDocumentDiscount(invoice, lineItems) {
+async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
   const storedCents = Math.round(parseFloat(invoice?.discount_amount || 0) * 100);
   if (!(storedCents > 0)) return false;
   const items = Array.isArray(lineItems) ? lineItems : parseInvoiceLineItems(lineItems);
@@ -264,7 +264,56 @@ function invoiceHasUnbackedDocumentDiscount(invoice, lineItems) {
     if (!Number.isFinite(rawAmt) || rawAmt >= 0) return sum;
     return sum + Math.round(-rawAmt * 100);
   }, 0);
-  return backedCents < storedCents;
+  if (backedCents < storedCents) return true;
+
+  // backedCents >= storedCents looks fully backed by the sum test alone,
+  // but create()'s combined-discount cap (this file, ~3786-3850) only
+  // scales the invoice_discounts AUDIT rows and the labeling math when the
+  // combined discount exceeds the subtotal — it never rewrites the negative
+  // line item's OWN amount/unit_price, which was already mutated to its
+  // pre-cap value a few lines earlier (Codex P1). So a capped invoice can
+  // store a negative line at its full pre-cap dollars while discount_amount
+  // itself was capped at the subtotal, making backedCents equal storedCents
+  // even though part of the discount was a document-level discountIds pick
+  // that never became its own line. That capped shape is indistinguishable
+  // from a legitimate single line item that happens to be exactly 100% of
+  // the subtotal (no capping involved at all) by the cents sum alone — so
+  // treat discount_amount === subtotal as merely AMBIGUOUS and disambiguate
+  // with persisted provenance instead of trusting the sum.
+  const subtotalCents = Math.round(parseFloat(invoice?.subtotal || 0) * 100);
+  if (!(subtotalCents > 0) || storedCents !== subtotalCents) return false;
+
+  // Ambiguous shape. invoice_discounts (recordInvoiceDiscounts, best-effort
+  // at create time) is the only persisted provenance of which discount rows
+  // actually contributed. A row whose discount_id matches none of the
+  // invoice's current negative lines is a document-level pick with no line
+  // backing it, regardless of what the cents sum alone would suggest.
+  if (conn) {
+    try {
+      const rows = await conn("invoice_discounts").where({ invoice_id: invoice.id });
+      if (rows.length > 0) {
+        const lineDiscountIds = new Set(
+          items
+            .filter((li) => {
+              const qty = li?.quantity != null ? Number(li.quantity) : 1;
+              const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+              return Number.isFinite(rawAmt) && rawAmt < 0;
+            })
+            .map((li) => (li?.discount_id != null ? String(li.discount_id) : null))
+            .filter(Boolean),
+        );
+        return rows.some(
+          (r) => !r.discount_id || !lineDiscountIds.has(String(r.discount_id)),
+        );
+      }
+    } catch {
+      // Could not verify provenance — fall through and refuse conservatively.
+    }
+  }
+  // No usable provenance (older invoice, or the best-effort audit insert
+  // never landed): cannot prove the capped discount has no document-level
+  // component. Refuse rather than risk silently zeroing one.
+  return true;
 }
 
 // Linked-visit guards for unvoidInvoice (Codex #3493 r2/r3). Runs TWICE:
@@ -7487,10 +7536,19 @@ const InvoiceService = {
       // including zero. Checking the submitted array instead would treat
       // "the discount line staff just deleted" as evidence the discount was
       // never reconstructable and refuse the edit outright.
-      if (invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items)) {
-        throw new Error(
+      if (await invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items, db)) {
+        const err = new Error(
           "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of editing line items",
         );
+        // Operator-actionable conflict, not a server fault (Codex P2) — same
+        // isOperational/statusCode/status/code shape the discount-stacking
+        // gate-divergence error above already uses, which PUT /:id's catch
+        // checks FIRST (admin-invoices.js).
+        err.statusCode = 409;
+        err.status = 409;
+        err.isOperational = true;
+        err.code = "UNBACKED_DOCUMENT_DISCOUNT";
+        throw err;
       }
       const customer = await db("customers")
         .where({ id: invoice.customer_id })
@@ -7550,10 +7608,16 @@ const InvoiceService = {
       // at all would otherwise silently zero a document-level discount that
       // was never backed by a line, increasing the total on a request that
       // never touched the discount.
-      if (invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items)) {
-        throw new Error(
+      if (await invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items, db)) {
+        const err = new Error(
           "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of changing the tax rate",
         );
+        // Same operational-409 shape as the line-item branch above (Codex P2).
+        err.statusCode = 409;
+        err.status = 409;
+        err.isOperational = true;
+        err.code = "UNBACKED_DOCUMENT_DISCOUNT";
+        throw err;
       }
       const existingLineItems =
         typeof invoice.line_items === "string"
