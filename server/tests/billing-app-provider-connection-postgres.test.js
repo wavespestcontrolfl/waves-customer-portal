@@ -77,4 +77,32 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       }
     } finally { await scheduler.rollback(); }
   }, 15000);
+
+  test('a committed bell with a lost acknowledgement cannot authorize a changed native quote', async () => {
+    await mockPg('invoices').where({ id: invoiceId }).update({ due_cents: 4900 });
+    const database = require('../models/db');
+    const transaction = database.transaction;
+    const transactionSpy = jest.spyOn(database, 'transaction').mockImplementationOnce(async (...args) => {
+      await transaction(...args);
+      throw new Error('commit acknowledgement lost');
+    });
+    const options = { dedupeKey: `billing-quote:${invoiceId}`, awaitPush: true };
+    try {
+      const first = await NotificationService.notifyCustomer(customerId, 'billing', 'Balance due', 'Balance: $49.00', {
+        ...options, pushOptions: { shouldContinue: windowGuardFrom(async ({ database }) => {
+          const row = await database('invoices').where({ id: invoiceId }).forUpdate().first();
+          return { ok: row.due_cents === 4900 };
+        }) },
+      });
+      expect(first).toBeNull();
+      expect(await mockPg('notifications')).toHaveLength(1);
+      // Payment after the bell commit is after that copy's delivery.
+      await mockPg('invoices').where({ id: invoiceId }).update({ due_cents: 2500 });
+      const retried = await NotificationService.notifyCustomer(customerId, 'billing', 'Balance due', 'Balance: $25.00', options);
+      expect(retried).toMatchObject({ body: 'Balance: $49.00', deduped: true,
+        push: { queued: false, accepted: 0, reason: 'dedupe_payload_changed' } });
+      expect(await mockPg('notifications')).toHaveLength(1);
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    } finally { transactionSpy.mockRestore(); }
+  }, 15000);
 });
