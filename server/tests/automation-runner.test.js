@@ -271,19 +271,19 @@ describe('automation runner suppression guardrails', () => {
     }));
   });
 
-  function paymentFailedQueues({ enrollmentUpdate = chain(), sendUpdate = chain(), extraEnrollmentReads = [] } = {}) {
+  function paymentFailedQueues({ enrollmentUpdate = chain(), sendUpdate = chain(), suppressions = [] } = {}) {
     const enrollment = {
       id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
       current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
     };
     setDbQueues({
-      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate, ...extraEnrollmentReads],
+      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
       automation_templates: [chain({ first: { key: 'payment_failed', name: 'Payment Failed', asm_group: 'service' } })],
       automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Payment issue',
         html_body: '<p>Please update payment.</p>', text_body: 'Please update payment.',
         from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
       automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), sendUpdate],
-      email_suppressions: [chain({ result: [] })],
+      email_suppressions: [chain({ result: suppressions })],
     });
     return { enrollmentUpdate, sendUpdate };
   }
@@ -398,6 +398,20 @@ describe('automation runner suppression guardrails', () => {
       expect(result).toEqual({ sent: false, deferred: true, reason: block.reason });
       expect(enrollmentUpdate.update).not.toHaveBeenCalled();
     }
+  });
+
+  test('a suppression on the address snapshotted at enrollment does not cancel a step whose billing recipient moved', async () => {
+    // The old address bounced; billing now goes to the bookkeeper.
+    const { enrollmentUpdate } = paymentFailedQueues({
+      suppressions: [{ suppression_type: 'bounce', group_key: null, status: 'active' }],
+    });
+    authorizeBillingRecipient('bookkeeper@example.com', 'Jordan Lee');
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false, deferred: true, reason: 'billing_recipient_changed',
+    });
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ email: 'bookkeeper@example.com' }));
+    expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
   });
 
   test('an operator test send goes straight to the test address, outside the billing authority', async () => {

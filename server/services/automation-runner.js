@@ -126,9 +126,12 @@ function requiresTermiteBond(templateKey) {
   return templateKey === 'service_renewal';
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
   if (testRecipient) return null;
-  const suppression = await activeAutomationSuppressionFor(template, recipient);
+  // A billing send checks suppression for the CURRENT billing recipient,
+  // inside the shared billing email authority under its recipient lock; the
+  // address snapshotted at enrollment may no longer be the one it goes to.
+  const suppression = billingSend ? null : await activeAutomationSuppressionFor(template, recipient);
   if (suppression) {
     const reason = automationSuppressionReason(suppression);
     return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason: 'email_suppressed' });
@@ -668,8 +671,9 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
 
+  const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
-    sendId: sendRow.id, testRecipient });
+    sendId: sendRow.id, testRecipient, billingSend });
   if (deliveryBlock) return deliveryBlock;
 
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
@@ -685,7 +689,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
   });
   try {
-    const res = template.key === 'payment_failed' && enrollment.customer_id && !testRecipient
+    const res = billingSend
       ? await sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
       : await dispatch();
     if (res?.sent === false) return res;
