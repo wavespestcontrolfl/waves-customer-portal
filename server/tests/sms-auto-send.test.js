@@ -183,3 +183,39 @@ describe('server-enforced eligibility — escalation short-circuit (no DB)', () 
     expect(r.blockers.join(' ')).toMatch(/escalation/i);
   });
 });
+
+// The one deliberate DB-touching case in this otherwise pure-logic file:
+// gratitudeCandidatePage's own query-builder shape is the exact surface the
+// pre-push audit's P1 flagged (a v11-only filter would silently stop
+// discovering real-answers-drafted candidates once GATE_SMS_REAL_ANSWERS
+// goes live). Isolated per-test via jest.doMock + resetModules so the rest
+// of the file stays DB-free.
+describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized prompt version (pre-push audit P1)', () => {
+  afterEach(() => {
+    jest.dontMock('../models/db');
+    jest.resetModules();
+  });
+
+  test('the candidate query filters on BOTH PROMPT_VERSION and REAL_ANSWERS_PROMPT_VERSION, never just the static one', () => {
+    jest.resetModules();
+    const whereInCalls = [];
+    const query = {};
+    for (const method of [
+      'join', 'where', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'select', 'whereNotExists',
+    ]) query[method] = jest.fn(() => query);
+    query.whereIn = jest.fn((...args) => { whereInCalls.push(args); return query; });
+    const mockDb = jest.fn(() => query);
+    jest.doMock('../models/db', () => mockDb);
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const fresh = require('../services/sms-auto-send');
+    fresh.gratitudeCandidatePage({ activatedAt: new Date(0), now: new Date(), cursor: null, pageSize: 100 });
+
+    expect(whereInCalls).toHaveLength(1);
+    expect(whereInCalls[0][0]).toBe('md.prompt_version');
+    expect(whereInCalls[0][1]).toEqual(
+      expect.arrayContaining([drafter.PROMPT_VERSION, drafter.REAL_ANSWERS_PROMPT_VERSION])
+    );
+    expect(whereInCalls[0][1]).toHaveLength(2);
+  });
+});

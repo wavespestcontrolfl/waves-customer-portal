@@ -295,7 +295,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
  * Any open request/card is a reason to abstain because a courtesy closer must
  * not conceal operational work.
  */
-async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Date() }) {
+async function claimGratitudeSend({ draftId, smsLogId, confidence, promptVersion = null, now = new Date() }) {
   // Process-local, so it needs no lock: see GRATITUDE_ROLLOUT_SETTLE_MS.
   if (!gratitudeRolloutSettled()) return null;
   const suggest = require('./sms-suggest-mode');
@@ -308,8 +308,16 @@ async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Dat
 
     // Gate, epoch, timing, immutable rows, live customer, exact endpoints,
     // complete context and fixed reply are all re-read inside the lock.
+    // prompt_version is the one field that's write-once at insert (nothing
+    // ever updates message_drafts.prompt_version after the draft is
+    // created), so trusting the caller's copy here is trusting an immutable
+    // fact, not a mutable one the re-read discipline above exists to catch —
+    // it judges the version THIS row was drafted under, not "whichever
+    // prompt is live right now" (a v11 row must not fail after a later gate
+    // flip on, nor a v12 row after a later flip off). Null (an
+    // unaware/older caller) still fails closed, same as before.
     if (!isEnabled('smsGratitudeReplies')) return null;
-    const checked = await readGratitudeContext({ draftId, smsLogId, now, activatedAt: gratitudeActivation(), dbh: trx, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+    const checked = await readGratitudeContext({ draftId, smsLogId, now, activatedAt: gratitudeActivation(), dbh: trx, expectedPromptVersion: promptVersion });
     if (!checked.ok) return null;
     const { inbound, customer, draft, expectedReply } = checked;
     const modeRow = await trx('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
@@ -481,8 +489,10 @@ async function maybeAutoSend(params = {}) {
 
     // (5)+(6) Claim under the lock + guard-gauntlet. The ordinary lane parks
     // sibling cards; gratitude refuses them and leaves them untouched.
+    // promptVersion threads the caller's own copy of the row's stamped
+    // version through — see claimGratitudeSend's comment on the re-read.
     const claim = gratitudeLane
-      ? await claimGratitudeSend({ draftId: params.draftId, smsLogId: params.smsLogId, confidence: params.confidence })
+      ? await claimGratitudeSend({ draftId: params.draftId, smsLogId: params.smsLogId, confidence: params.confidence, promptVersion: params.promptVersion })
       : await claimAutoSend({ ...params, customerId: ready.customerId });
     if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
     return await dispatchClaimedSend({
@@ -580,7 +590,20 @@ async function autoSendReadiness(params, gratitudeLane) {
 async function reloadGratitudeCaller({
   draftId, smsLogId, customer, inboundMessage, reply, model = null, promptVersion = null,
 }) {
-  const context = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+  // expectedPromptVersion judges the STORED row, not "whichever prompt is
+  // live right now" — a v11 draft made before a real-answers gate flip must
+  // not start failing after the flip, and a v12 draft must not fail after
+  // the gate flips back off. `promptVersion` is exactly the right value: the
+  // drafter set it once, at insert, to whichever version actually generated
+  // THIS row (sms-shadow-drafter.js's generateGroundedDraft resolves it per
+  // draft), and draftShadowReply threads that same value all the way through
+  // maybeAutoSend's params — the `promptVersion === context.draft.prompt_version`
+  // check two lines below ALREADY proves the two agree; reusing it here (in
+  // place of the static PROMPT_VERSION, which never moves once the gate goes
+  // live) lets a genuinely current v11 OR v12 row pass this contract check
+  // instead of only v11 forever. Null (an older/unaware caller) still fails
+  // closed, same as before.
+  const context = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: promptVersion });
   if (!context.ok) return { reason: context.reason };
   const matches = (customer?.id || null) === context.customer.id
     && inboundMessage === context.inbound.message_body
@@ -824,14 +847,25 @@ const SWEEP_PAGE_SIZE = 100;
  * never be claimed again and are excluded.
  */
 function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
+  const drafter = require('./sms-shadow-drafter');
+  // Both currently-recognized live prompt versions are eligible candidates —
+  // not just PROMPT_VERSION (which never moves once GATE_SMS_REAL_ANSWERS
+  // goes live; it stays 'house_voice_v11' forever by design). The gratitude
+  // special-case text is identical in both v11 and the real-answers
+  // rewrite, so which one drafted a row makes no safety difference to the
+  // sweep — but a v11-only filter would silently stop discovering v12
+  // candidates the moment the gate flips on, and never resume until it
+  // flips back off. This is a DISCOVERY filter (no single row to compare
+  // against yet), so it's a membership check rather than the per-row
+  // "whichever version this draft actually used" the claim/reload sites use.
   const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({
       'md.status': 'shadow',
       'md.intent': GRATITUDE_INTENT,
-      'md.prompt_version': require('./sms-shadow-drafter').PROMPT_VERSION,
       's.direction': 'inbound',
     })
+    .whereIn('md.prompt_version', [drafter.PROMPT_VERSION, drafter.REAL_ANSWERS_PROMPT_VERSION].filter(Boolean))
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)
     .where('s.created_at', '>=', new Date(now.getTime() - MAX_REPLY_AGE_MS))
@@ -1089,4 +1123,5 @@ module.exports = {
   maybeAutoSend,
   processGratitudeAutoSendCandidates,
   reconcileAutoSendClaims,
+  gratitudeCandidatePage,
 };
