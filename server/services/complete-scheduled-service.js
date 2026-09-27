@@ -4107,6 +4107,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       perApplicationFee: svc.cust_per_application_fee,
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
+      // Codex round 4 P1: without this, a fully-discounted $0 per-application
+      // visit (estimated_price 0, positive primary_line_price) fell back to
+      // per_application_fee here and billed the acceptance fee on completion
+      // — contradicting the schedule prediction and Charge Now, which both
+      // already pass primaryLinePrice.
+      primaryLinePrice: svc.primary_line_price,
     });
     // The inspection-credit amount is resolved from the LOCKED row inside
     // the completion transaction (below), never from this pre-lock read: a

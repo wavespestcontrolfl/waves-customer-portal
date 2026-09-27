@@ -460,4 +460,57 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     expect(screen.getByRole('button', { name: /Review visit details/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
   });
+
+  // Codex round 4 P2: an unpriced payer-billed visit's prediction supplies
+  // the acceptance fee as `amount`, making `total` positive here exactly
+  // like the priced-fee case above — but the AR belongs to the third-party
+  // payer's AP inbox, never in-person collection, and the mint endpoint's
+  // payer guard categorically refuses it. hasChargeableAmount must exclude
+  // a 'payer' prediction kind, never offer "Review & checkout" for it.
+  it('an unpriced payer-billed visit never offers "Review & checkout" for the predicted fee', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: null,
+          waveguardTier: null,
+          monthlyRate: null,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'payer', amount: 97.2, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getAllByText(/\$97\.20/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Review visit details/i })).toBeInTheDocument();
+  });
+
+  // The same exclusion via the resolved billedToPayer stamp alone (no
+  // 'payer' prediction kind) — the finding's OTHER named signal.
+  it('a billedToPayer visit never offers "Review & checkout" even with a positive predicted amount', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: null,
+          waveguardTier: null,
+          monthlyRate: null,
+          billedToPayer: true,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 97.2, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+  });
 });

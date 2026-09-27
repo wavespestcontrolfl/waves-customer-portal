@@ -280,7 +280,14 @@ export default function MobileCheckoutSheet({
   // invoice's own payer flag (via inv.open). Raw payerId is deliberately NOT
   // consulted — an inactive per-job payer resolves self-pay and the visit's
   // invoice IS collectible.
-  const payerBilled = !!service.billedToPayer;
+  // Codex round 4 P2: `service.billedToPayer` alone missed an UNPRICED
+  // payer visit with no attached invoice yet — its prediction kind is
+  // 'payer' (the server resolver's ONLY other payer signal here), and
+  // without it `price` below falls through to predictionGrossAmount /
+  // predictionAmount, making this sheet preview a positive, chargeable
+  // total the mint endpoint's payer guard then refuses outright.
+  const predictionKind = service.billingLane?.prediction?.kind || null;
+  const payerBilled = !!service.billedToPayer || predictionKind === 'payer';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
@@ -335,7 +342,15 @@ export default function MobileCheckoutSheet({
   // same principle as the server round-2 fix: an unconfirmed/unsafe base
   // must never be diluted by stacking an extra on top of it and calling
   // the sum safe (codex round-2 P2).
-  const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice;
+  // An UNPRICED payer-billed visit with no already-attached collectible
+  // invoice (openVisitInvoice/processingVisitInvoice are already null for
+  // it, above) has nothing THIS sheet may collect in person — `price`
+  // above fell through to the prediction's acceptance-fee amount, and the
+  // AR is the payer's AP inbox; the server refuses the mint categorically.
+  // Scoped to `!hasOwnPrice`: a visit with its OWN stamped price is an
+  // existing, separately-tested self-pay flow this must not disable.
+  const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
+    || (!hasOwnPrice && payerBilled && !invoicePreview);
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says

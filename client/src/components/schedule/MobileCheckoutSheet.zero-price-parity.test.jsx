@@ -79,3 +79,44 @@ describe('MobileCheckoutSheet — estimatedPrice: 0 defers to the fee prediction
     expect(screen.queryByRole('button', { name: 'Charge $40.00' })).not.toBeInTheDocument();
   });
 });
+
+// Codex round 4 P2: the SAME unpriced per-application prediction, but for a
+// third-party payer. `price` still falls through to the predicted fee (as
+// above), making this sheet preview a positive, seemingly-chargeable total
+// — but the payer's AR is the payer's AP inbox, never in-person collection,
+// and the mint endpoint's payer guard refuses this outright. nothingToCharge
+// must disable Charge for it exactly like a genuinely $0 visit does.
+describe('MobileCheckoutSheet — a payer-billed prediction never offers to collect the predicted fee', () => {
+  const PAYER_PREDICTION_SERVICE = {
+    id: 'svc-payer-1',
+    serviceType: 'Quarterly Pest Control',
+    serviceTypeDisplay: 'Quarterly Pest Control',
+    estimatedPrice: null,
+    windowStart: '11:00:00',
+    estimatedDuration: 60,
+    billingLane: {
+      mode: 'per_application',
+      source: 'explicit',
+      monthlyRate: null,
+      prediction: { kind: 'payer', amount: 97.2, conflictStampedPrice: false },
+    },
+  };
+
+  it('disables Charge for an unpriced payer prediction, never offering the predicted fee', () => {
+    render(<MobileCheckoutSheet service={PAYER_PREDICTION_SERVICE} onClose={() => {}} />);
+    expect(screen.queryByRole('button', { name: /^Charge \$97\.20$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeDisabled();
+  });
+
+  it('disables Charge via the resolved billedToPayer stamp alone, even with an invoice-kind prediction', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...PAYER_PREDICTION_SERVICE, billedToPayer: true,
+          billingLane: { ...PAYER_PREDICTION_SERVICE.billingLane, prediction: { kind: 'invoice', amount: 97.2, conflictStampedPrice: false } } }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /^Charge \$97\.20$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeDisabled();
+  });
+});

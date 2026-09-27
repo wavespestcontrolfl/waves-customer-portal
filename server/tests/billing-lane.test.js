@@ -4,6 +4,8 @@ const {
   impliedMonthlyStampForWrite,
   membershipDuesCoverVisit,
   predictCompletionBilling,
+  hasAuthoritativeZeroPrice,
+  completionInvoiceAmount,
 } = require('../services/billing-lane');
 
 // #3140 resolution: admin/IB writes that TRANSITION a row into the
@@ -333,6 +335,32 @@ describe('predictCompletionBilling', () => {
       };
       expect(predictCompletionBilling(perApp))
         .toEqual({ kind: 'auto_charge', amount: 40, grossAmount: 40, conflictStampedPrice: false });
+    });
+
+    // Codex round 4 P1: Number(null) === 0 and Number('') === 0 — a row that
+    // was simply NEVER PRICED (estimatedPrice null/'') must not be read as a
+    // deliberately-frozen $0 just because a positive primary_line_price
+    // happens to be on file. hasAuthoritativeZeroPrice requires an ACTUAL
+    // stamped zero; without this the acceptance-fee fallback silently
+    // vanished for every unpriced per-application row that also carries a
+    // base price (pre-fix this test asserted 'no_charge'/'fully_discounted').
+    test('null/empty estimatedPrice with a positive primaryLinePrice is NOT an authoritative zero — the fee fallback still applies', () => {
+      expect(hasAuthoritativeZeroPrice(null, 100)).toBe(false);
+      expect(hasAuthoritativeZeroPrice('', 100)).toBe(false);
+      expect(hasAuthoritativeZeroPrice(undefined, 100)).toBe(false);
+      // A genuine stamped 0 is unaffected by this guard.
+      expect(hasAuthoritativeZeroPrice(0, 100)).toBe(true);
+
+      const perApp = {
+        ...memberBase, lane: 'per_application', billingMode: 'per_application',
+        estimatedPrice: null, primaryLinePrice: 100, perApplicationFee: 97.2, monthlyRate: null,
+      };
+      expect(predictCompletionBilling(perApp))
+        .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+      expect(completionInvoiceAmount({
+        estimatedPrice: null, isCallback: false, perApplicationBilling: true,
+        perApplicationFee: 97.2, monthlyRate: null, billingMode: 'per_application', primaryLinePrice: 100,
+      })).toBe(97.2);
     });
   });
 });

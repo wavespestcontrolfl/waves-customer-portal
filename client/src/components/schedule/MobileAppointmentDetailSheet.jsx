@@ -324,7 +324,21 @@ export default function MobileAppointmentDetailSheet({
   // a one-off prepaid visit, in which case we fall back to the original
   // single-visit "Prepaid $X via Y" copy below.
   const seriesCtx = service.prepaidSeriesContext || null;
-  const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered && !siblingCoveredInvoice;
+  // Codex round 4 P2: a payer-billed prediction (kind 'payer', or the
+  // service's own billedToPayer stamp) routes AR to the third-party payer's
+  // AP inbox, never in-person collection — the server's payer guard refuses
+  // any invoice POST for it. Reading `total` alone missed this for an
+  // UNPRICED payer visit whose new server prediction supplies the
+  // acceptance fee: `price` above falls through to
+  // billingLane.prediction.amount for ANY non-callback/non-prepaid kind,
+  // 'payer' included, making `total` positive with nothing this sheet may
+  // offer to collect. Scoped to `!hasOwnPrice` — a visit with its OWN
+  // stamped price never reads the prediction for `price` at all (mirrors
+  // MobileCheckoutSheet), so it stays the existing, separately-tested
+  // self-pay flow regardless of a payer stamp.
+  const isPayerBilled = !hasOwnPrice && (predictionKind === 'payer' || !!service.billedToPayer);
+  const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered
+    && !siblingCoveredInvoice && !isPayerBilled;
   // Fully prepay-covered visits collect nothing, so the line items and total
   // read $0.00 — the monthlyRate fallback figure looks like a bill due when
   // the customer already paid the year up front. Partially prepaid visits

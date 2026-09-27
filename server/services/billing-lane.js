@@ -162,7 +162,13 @@ function membershipDuesCoverVisit({
 // predicate so the two can never be told apart in one spot and conflated in
 // another.
 function hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice) {
-  return Number(estimatedPrice) === 0 && primaryLinePrice != null && Number(primaryLinePrice) > 0;
+  // Codex round 4 P1: estimatedPrice must be an ACTUAL stamped zero, not
+  // absent — Number(null) === 0 and Number('') === 0, so without this guard
+  // a never-priced row (null/'') with a positive primary_line_price on file
+  // was misread as a deliberately free visit and skipped its fee fallback.
+  return estimatedPrice != null && estimatedPrice !== ''
+    && Number(estimatedPrice) === 0
+    && primaryLinePrice != null && Number(primaryLinePrice) > 0;
 }
 
 // Per-application customers bill the explicit visit price, else the

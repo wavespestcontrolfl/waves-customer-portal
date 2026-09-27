@@ -191,7 +191,7 @@ export default function BillingLaneCard({ billingLane, style, onSendCardLink, se
             sibling-covered row's line above already names the other
             service and says "same trip". */}
         {breakdown.length > 0 && billingLane.prediction?.kind !== 'covered_sibling_invoice' && (
-          <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>
+          <div style={{ fontSize: 14, color: MUTED, marginTop: 4 }}>
             Includes {breakdown.join(' + ')} (same trip).
           </div>
         )}
