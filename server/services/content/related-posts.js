@@ -271,6 +271,41 @@ function candidateFromAutonomousRun(row) {
   };
 }
 
+// The registry is the only durable inventory for Astro-authored posts that
+// have neither a blog_posts row nor an autonomous run. Accept only its
+// strongest state: an Astro source is present, the workflow is published,
+// and the live-status sweep verified the canonical route.
+function candidateFromRegistryRow(row) {
+  const safeRow = row || {};
+  const metadata = parseJsonObject(safeRow.metadata);
+  const frontmatter = parseJsonObject(metadata.frontmatter);
+  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean) || null;
+  const requiredStates = [
+    [safeRow.content_type, 'blog'],
+    [safeRow.reconciliation_status, 'astro_only'],
+    [safeRow.workflow_status, 'published'],
+    [safeRow.astro_status, 'present'],
+    [safeRow.live_status, 'live'],
+  ];
+  if (!rawPath || !requiredStates.every(([actual, expected]) => actual === expected) || safeRow.noindex_detected === true) return null;
+  const pathSites = normalizeSpokeSites([rawPath]);
+  if (/^https?:\/\//i.test(rawPath) && pathSites.length === 0) return null;
+  const configuredSites = normalizeSpokeSites(frontmatter.domains || frontmatter.target_sites);
+  return {
+    id: safeRow.id,
+    title: safeRow.title || frontmatter.title || null,
+    path: normalizePathForCompare(rawPath),
+    keyword: safeRow.target_keyword || frontmatter.primary_keyword || null,
+    city: safeRow.target_city || null,
+    service: safeRow.target_service || null,
+    category: safeRow.category || frontmatter.category || null,
+    targetSites: configuredSites.length ? configuredSites : (pathSites.length ? pathSites : null),
+    workflowStatus: 'published',
+    astroStatus: 'live',
+    pathVerified: true,
+  };
+}
+
 /**
  * getRelatedPostsForBrief(target, opts) → Promise<[{ title, path, keyword }]>
  *
@@ -296,6 +331,25 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       'cb.city as brief_city',
       'cb.service as brief_service'
     );
+  const registryRows = await database('content_registry')
+    .select(
+      'id',
+      'canonical_url',
+      'canonical_url_normalized',
+      'live_url',
+      'content_type',
+      'workflow_status',
+      'astro_status',
+      'live_status',
+      'reconciliation_status',
+      'noindex_detected',
+      'title',
+      'target_keyword',
+      'target_city',
+      'target_service',
+      'category',
+      'metadata'
+    );
   const candidates = (rows || [])
     .map((row) => {
       try { return candidateFromRow(row); }
@@ -311,6 +365,12 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       if (candidate) candidates.push(candidate);
     } catch { /* malformed historical row: exclude it */ }
   }
+  for (const row of registryRows || []) {
+    try {
+      const candidate = candidateFromRegistryRow(row);
+      if (candidate) candidates.push(candidate);
+    } catch { /* malformed registry row: exclude it */ }
+  }
   return rankRelatedPosts(target, candidates, { limit });
 }
 
@@ -320,6 +380,7 @@ module.exports = {
   rankRelatedPosts,
   candidateFromRow,
   candidateFromAutonomousRun,
+  candidateFromRegistryRow,
   getRelatedPostsForBrief,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };

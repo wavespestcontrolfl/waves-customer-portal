@@ -12,6 +12,7 @@ const {
   getRelatedPostsForBrief,
   candidateFromRow,
   candidateFromAutonomousRun,
+  candidateFromRegistryRow,
   RELATED_POSTS_DEFAULT_LIMIT,
 } = require('../services/content/related-posts');
 
@@ -270,21 +271,62 @@ describe('candidateFromAutonomousRun', () => {
   });
 });
 
+describe('candidateFromRegistryRow', () => {
+  const liveAstroOnly = {
+    id: 'registry-1',
+    canonical_url_normalized: '/termite/direct-astro-post/',
+    content_type: 'blog',
+    reconciliation_status: 'astro_only',
+    workflow_status: 'published',
+    astro_status: 'present',
+    live_status: 'live',
+    noindex_detected: false,
+    title: 'Direct Astro Termite Post',
+    target_keyword: 'termite mud tubes',
+    target_service: 'termite',
+    metadata: { frontmatter: { domains: ['wavespestcontrol.com'] } },
+  };
+
+  test('accepts a verified live Astro-only blog and preserves its domain', () => {
+    expect(candidateFromRegistryRow(liveAstroOnly)).toMatchObject({
+      path: '/termite/direct-astro-post/',
+      service: 'termite',
+      targetSites: ['wavespestcontrol.com'],
+      workflowStatus: 'published',
+      astroStatus: 'live',
+      pathVerified: true,
+    });
+  });
+
+  test.each([
+    ['not Astro-only', { reconciliation_status: 'matched' }],
+    ['not live', { live_status: 'missing' }],
+    ['not published', { workflow_status: 'draft' }],
+    ['not a blog', { content_type: 'page' }],
+    ['noindexed', { noindex_detected: true }],
+    ['off-fleet canonical', { canonical_url_normalized: 'https://example.com/termite/post/' }],
+  ])('rejects %s registry rows', (_label, override) => {
+    expect(candidateFromRegistryRow({ ...liveAstroOnly, ...override })).toBeNull();
+  });
+});
+
 describe('getRelatedPostsForBrief — DB wrapper', () => {
-  function fakeDb({ blogRows = [], autonomousRows = [] } = {}) {
+  function fakeDb({ blogRows = [], autonomousRows = [], registryRows = [] } = {}) {
     const autonomousQuery = {};
     autonomousQuery.leftJoin = jest.fn(() => autonomousQuery);
     autonomousQuery.where = jest.fn(() => autonomousQuery);
     autonomousQuery.whereNotNull = jest.fn(() => autonomousQuery);
     autonomousQuery.select = jest.fn().mockResolvedValue(autonomousRows);
-    const database = jest.fn((table) => (table === 'blog_posts'
-      ? { select: jest.fn().mockResolvedValue(blogRows) }
-      : autonomousQuery));
+    const database = jest.fn((table) => {
+      if (table === 'blog_posts') return { select: jest.fn().mockResolvedValue(blogRows) };
+      if (table === 'content_registry') return { select: jest.fn().mockResolvedValue(registryRows) };
+      return autonomousQuery;
+    });
     database.autonomousQuery = autonomousQuery;
     return database;
   }
 
-  test('combines verified-live blog rows with completed autonomous new-blog runs', async () => {
+  test('combines verified-live DB, autonomous, and Astro-only registry posts', async () => {
     const rows = [
       { id: 'a', title: 'Termite Bait Stations Explained', keyword: 'termite bait stations', tag: 'Termites', category: 'termite', slug: 'bait-stations', city: null, target_sites: null, status: 'published', astro_status: 'live', astro_live_url: '/termite/bait-stations/' },
       { id: 'b', title: 'Queued Termite Draft', keyword: 'termite draft', tag: 'Termites', category: 'termite', slug: 'queued-draft', city: null, target_sites: null, status: 'queued', astro_status: 'draft', astro_live_url: null },
@@ -304,15 +346,34 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
       brief_service: 'termite',
       draft_payload: { frontmatter: { title: 'Autonomous Termite Post', primary_keyword: 'termite bait systems' } },
     }];
-    const database = fakeDb({ blogRows: rows, autonomousRows });
+    const registryRows = [{
+      id: 'registry-1',
+      canonical_url_normalized: '/termite/direct-astro-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Direct Astro Termite Post',
+      target_keyword: 'termite bait placement',
+      target_service: 'termite',
+      metadata: { frontmatter: {} },
+    }];
+    const database = fakeDb({ blogRows: rows, autonomousRows, registryRows });
     const out = await getRelatedPostsForBrief({ service: 'termite', keyword: 'termite bait stations' }, { database });
     expect(database).toHaveBeenCalledWith('blog_posts');
     expect(database).toHaveBeenCalledWith('autonomous_runs');
+    expect(database).toHaveBeenCalledWith('content_registry');
     expect(database.autonomousQuery.where).toHaveBeenCalledWith({
       'autonomous_runs.outcome': 'completed_published',
       'autonomous_runs.action_type': 'new_supporting_blog',
     });
-    expect(out.map((r) => r.path)).toEqual(['/termite/bait-stations/', '/termite/autonomous-post/']);
+    expect(out.map((r) => r.path)).toEqual([
+      '/termite/bait-stations/',
+      '/termite/autonomous-post/',
+      '/termite/direct-astro-post/',
+    ]);
     expect(out.some((r) => r.path.includes('termite-legacy-slug'))).toBe(false);
     expect(out.some((r) => r.path.includes('failed-build'))).toBe(false);
   });
