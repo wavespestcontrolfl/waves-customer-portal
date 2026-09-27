@@ -377,12 +377,14 @@ describe('late-payment email sidecar', () => {
     serviceDateClause: '',
     payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
   });
-  const disabled = { code: 'BILLING_EMAIL_DISABLED', blocked: true, reason: 'Email notifications are disabled for this customer' };
+  // A terminal refusal the shared authority can actually still produce (the
+  // portal-wide email switch no longer can — owner ruling 2026-09-26).
+  const noRecipient = { code: 'NO_EMAIL_RECIPIENT', blocked: true, reason: 'No billing email on file' };
 
   test('the shared check refusing at preparation skips the email', async () => {
     setDbQueues({ invoices: [chain({ first: invoice() })] });
-    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: disabled });
-    expect(await lateEmail()).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: noRecipient });
+    expect(await lateEmail()).toEqual({ ok: false, skipped: true, reason: 'missing_email' });
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
@@ -414,23 +416,25 @@ describe('late-payment email sidecar', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('a fresh email opt-out before provider handoff prevents dispatch', async () => {
+  test('a fresh terminal refusal at the provider boundary prevents dispatch', async () => {
     setDbQueues({ invoices: [chain({ first: invoice() })], customer_interactions: [chain()] });
     const dispatch = jest.fn();
     BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
-      state.boundaryBlock = disabled;
+      state.boundaryBlock = noRecipient;
       return { ok: false };
     });
     EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
       await withProviderHandoff(dispatch);
       return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
     });
-    expect(await lateEmail()).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+    expect(await lateEmail()).toEqual({ ok: false, skipped: true, reason: 'missing_email' });
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  test('legacy email opt-out still sends SMS without recording an email delivery', async () => {
-    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: disabled });
+  // Owner ruling 2026-09-26: the portal-wide email switch never blocks a
+  // billing email, so the legacy (no explicit choice) path still sends both.
+  test('legacy path sends both SMS and email even with the portal-wide email switch off', async () => {
+    const emailInteraction = chain();
     const smsInteraction = chain();
     ContactLedger.recordContact
       .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
@@ -446,20 +450,17 @@ describe('late-payment email sidecar', () => {
       ],
       sms_log: [chain({ first: { count: '0' } }), chain({ first: null })],
       notification_prefs: [chain({ first: { email_enabled: false } })],
-      customer_interactions: [smsInteraction],
+      customer_interactions: [emailInteraction, smsInteraction],
     });
 
     await BalanceReminder.latePaymentCheck();
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['sms', 'email']);
     expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
-    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'led-email' }),
-      expect.objectContaining({ reason: 'email_disabled' }),
-    );
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
     expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
     expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: 'sms_outbound',
@@ -497,8 +498,8 @@ describe('late-payment email sidecar', () => {
     );
   });
 
-  test('email opt-out with explicit Email and Text still sends SMS without recording an email delivery', async () => {
-    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: disabled });
+  test('an explicit Email and Text selection still sends both with the portal-wide email switch off', async () => {
+    const emailInteraction = chain();
     const smsInteraction = chain();
     ContactLedger.recordContact
       .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
@@ -515,24 +516,17 @@ describe('late-payment email sidecar', () => {
       sms_log: [chain({ first: null })],
       notification_prefs: [chain({ first: { email_enabled: false, billing_channels: ['email', 'sms'] } })],
       collections_contact_ledger: [chain({ result: [] }), chain({ result: [] })],
-      customer_interactions: [smsInteraction],
+      customer_interactions: [emailInteraction, smsInteraction],
     });
 
     await BalanceReminder.latePaymentCheck();
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['email', 'sms']);
     expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
-    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'led-email' }),
-      expect.objectContaining({
-        code: 'email_disabled',
-        resolved: true,
-        resolution: 'email_terminal_refusal',
-      }),
-    );
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
     expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
     expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: 'sms_outbound',

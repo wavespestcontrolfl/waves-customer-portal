@@ -212,7 +212,7 @@ describe('billing reminder per-channel delivery progress', () => {
   });
 
   test.each([
-    'missing_email', 'billing_email_not_selected', 'email_disabled',
+    'missing_email', 'billing_email_not_selected',
   ])('terminal Email refusal %s resolves its leg without claiming delivery', async (reason) => {
     const send = jest.fn(async (channel) => (channel === 'email'
       ? { ok: false, skipped: true, reason, deliveryOutcome: 'not_sent' }
@@ -230,7 +230,6 @@ describe('billing reminder per-channel delivery progress', () => {
   test.each([
     'NO_EMAIL_RECIPIENT',
     'BILLING_EMAIL_NOT_SELECTED',
-    'BILLING_EMAIL_DISABLED',
     'EMAIL_SUPPRESSED',
   ])('canonical permanent Email refusal %s resolves without claiming delivery', async (code) => {
     const send = jest.fn(async (channel) => (channel === 'email'

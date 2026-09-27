@@ -20,7 +20,6 @@ const { isDefiniteRejection } = require('./sendgrid-mail');
 // (the loser is soft-deleted) and INVOICE_CUSTOMER_MISMATCH (the invoice
 // moved to the winner). The next run re-reads them all.
 const FINAL_REASONS = Object.freeze({
-  BILLING_EMAIL_DISABLED: 'email_disabled',
   NO_EMAIL_RECIPIENT: 'missing_email',
   INVOICE_PAYER_BILLED: 'invoice_payer_billed',
 });

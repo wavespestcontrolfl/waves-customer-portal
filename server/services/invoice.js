@@ -263,6 +263,185 @@ function invoiceHasDepositCreditLine(invoice) {
   );
 }
 
+// A stored invoice.discount_amount that exceeds what the invoice's negative
+// line items actually back is (at least partly) a document-level discount
+// (InvoiceService.create's `discountIds` picks — see the "manual discount"
+// math elsewhere in this file) that calculateUpdateFinancials cannot
+// reconstruct: it derives discount_amount ENTIRELY from negative line items
+// in the submitted array (manualDiscountRows is always [] on the edit
+// path), so retotaling such an invoice from its line items alone would
+// silently zero (or shrink) the discount and increase the total. Compared
+// in CENTS, and as a SUM — not "any negative line exists" (Codex P0, this
+// branch's own second push): create() can combine a line-item discount
+// with a document-level discountIds pick on the SAME invoice (e.g. a $5
+// negative line plus a $10 document pick stores discount_amount=15), and a
+// single backed dollar must never green-light the whole stored figure. A
+// discount FULLY backed by negative lines (the common case) compares equal
+// and is unaffected — those lines ride through the retotal and
+// calculateUpdateFinancials prices them fresh.
+async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
+  const storedCents = Math.round(parseFloat(invoice?.discount_amount || 0) * 100);
+  if (!(storedCents > 0)) return false;
+  const items = Array.isArray(lineItems) ? lineItems : parseInvoiceLineItems(lineItems);
+  const backedCents = items.reduce((sum, li) => {
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    if (!Number.isFinite(rawAmt) || rawAmt >= 0) return sum;
+    return sum + Math.round(-rawAmt * 100);
+  }, 0);
+  if (backedCents < storedCents) return true;
+
+  // backedCents >= storedCents looks fully backed by the sum test alone,
+  // but create()'s combined-discount cap (this file, ~3786-3850) only
+  // scales the invoice_discounts AUDIT rows and the labeling math when the
+  // combined discount exceeds the subtotal — it never rewrites the negative
+  // line item's OWN amount/unit_price, which was already mutated to its
+  // pre-cap value a few lines earlier (Codex P1). So a capped invoice can
+  // store a negative line at its full pre-cap dollars while discount_amount
+  // itself was capped at the subtotal, making backedCents equal storedCents
+  // even though part of the discount was a document-level discountIds pick
+  // that never became its own line. That capped shape is indistinguishable
+  // from a legitimate single line item that happens to be exactly 100% of
+  // the subtotal (no capping involved at all) by the cents sum alone — so
+  // treat discount_amount === subtotal as merely AMBIGUOUS and disambiguate
+  // with persisted provenance instead of trusting the sum.
+  const subtotalCents = Math.round(parseFloat(invoice?.subtotal || 0) * 100);
+  if (!(subtotalCents > 0) || storedCents !== subtotalCents) return false;
+
+  // Ambiguous shape. invoice_discounts (recordInvoiceDiscounts, best-effort
+  // at create time) is the only persisted provenance of which discount rows
+  // actually contributed. Matched by OCCURRENCE COUNT per discount_id, never
+  // mere set membership (Codex round-4 P0): with stacking off, create() lets
+  // the SAME catalog discount be picked BOTH as a document-level discountIds
+  // entry AND as a separate line-item discount on the same invoice — two
+  // audit rows sharing one discount_id, only one of them backed by a line.
+  // A set-membership check ("does this id appear on any current line?")
+  // would see the id once and wave both rows through. If invoice_discounts
+  // has MORE rows for a given discount_id than the invoice has current
+  // negative lines carrying that same discount_id, the excess is an
+  // unbacked document-level occurrence of that catalog discount.
+  //
+  // A NULL discount_id row is never a document-level pick: create()'s
+  // manualDiscounts (the discountIds picks) always resolve a real catalog
+  // `discounts` row and record ITS id (recordInvoiceDiscounts: `d.id ||
+  // null`) — a null id only ever comes from the OTHER audit-row source, a
+  // plain literal negative line item with no discount_id/discount_for at
+  // all (Codex round-2 P1: a $50 service + a literal -$50 credit is a
+  // supported create() shape and must not be treated as document-level
+  // provenance just because it has no id to match against).
+  if (conn) {
+    try {
+      const rows = await conn("invoice_discounts").where({ invoice_id: invoice.id });
+      if (rows.length > 0) {
+        const lineDiscountIdCounts = new Map();
+        items
+          .filter((li) => {
+            const qty = li?.quantity != null ? Number(li.quantity) : 1;
+            const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+            return Number.isFinite(rawAmt) && rawAmt < 0;
+          })
+          .forEach((li) => {
+            if (li?.discount_id == null) return;
+            const key = String(li.discount_id);
+            lineDiscountIdCounts.set(key, (lineDiscountIdCounts.get(key) || 0) + 1);
+          });
+        const rowIdCounts = new Map();
+        rows.forEach((r) => {
+          if (!r.discount_id) return;
+          const key = String(r.discount_id);
+          rowIdCounts.set(key, (rowIdCounts.get(key) || 0) + 1);
+        });
+        return [...rowIdCounts].some(
+          ([key, count]) => count > (lineDiscountIdCounts.get(key) || 0),
+        );
+      }
+    } catch {
+      // Could not verify provenance — fall through and refuse conservatively.
+    }
+  }
+  // No usable provenance (older invoice, or the best-effort audit insert
+  // never landed): cannot prove the capped discount has no document-level
+  // component. Refuse rather than risk silently zeroing one.
+  return true;
+}
+
+// invoiceHasUnbackedDocumentDiscount's capped-shape disambiguation reads
+// invoice_discounts as the invoice's discount provenance — but update()'s
+// own line-item retotal never wrote that table (the pre-existing "KNOWN
+// LIMITATION (accepted)" a few hundred lines down, previously reporting-only:
+// changing/removing a discount through an edit left the create-time audit
+// rows in place). Once that stale table is CONSULTED for correctness rather
+// than just reporting, staleness becomes a real bug (Codex round 3): edit an
+// invoice's line items away from what it was created with, and the OLD
+// discount_id rows will never match the NEW lines, permanently refusing every
+// later edit of an invoice that in fact carries no document-level discount
+// at all. Called after every successful line-item retotal to keep the table
+// in sync with what is actually backing the invoice NOW — replacing the old
+// rows entirely, mirroring create()'s own shape (discount_id, discount_name,
+// discount_dollars) for each current negative line. Never touches
+// discounts.times_applied/total_discount_given (those ledger counters are
+// a separate, still-accepted limitation — reversing them would need a
+// dedicated primitive this fix doesn't add). Best-effort: a failure here
+// must not roll back or fail an otherwise-successful edit.
+async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discountAmount, conn) {
+  try {
+    const items = Array.isArray(lineItems) ? lineItems : parseInvoiceLineItems(lineItems);
+    const rawRows = items
+      .filter((li) => {
+        if (li?.category === "deposit_credit") return false;
+        const qty = li?.quantity != null ? Number(li.quantity) : 1;
+        const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+        return Number.isFinite(rawAmt) && rawAmt < 0;
+      })
+      .map((li) => ({
+        discount_id: li?.discount_id || null,
+        discount_name: li?.description || null,
+        rawDollars: Math.abs(Number(li?.amount ?? li?.unit_price) || 0),
+      }));
+    const rawSum = Math.round(rawRows.reduce((s, r) => s + r.rawDollars, 0) * 100) / 100;
+    const targetDollars = Math.round(parseFloat(discountAmount || 0) * 100) / 100;
+    // calculateUpdateFinancials caps discountAmount at subtotal (Math.min)
+    // WITHOUT rescaling each line's own stored dollars — same shape as
+    // create()'s own cap (~3786-3850). Scale each row proportionally so the
+    // audit rows sum to the ACTUALLY-applied discountAmount, never the
+    // inflated raw per-line dollars (Codex round-5 P1): a $50 service with a
+    // literal -$100 credit applies only $50, not $100. Remainder absorbed by
+    // the row with the most headroom, mirroring create()'s own rounding rule.
+    const factor = rawSum > 0 ? Math.min(1, targetDollars / rawSum) : 0;
+    const rows = rawRows.map((r) => ({
+      invoice_id: invoiceId,
+      discount_id: r.discount_id,
+      discount_name: r.discount_name,
+      discount_dollars: Math.round(r.rawDollars * factor * 100) / 100,
+    }));
+    if (rows.length > 0 && factor < 1) {
+      const scaledSum = Math.round(rows.reduce((s, r) => s + r.discount_dollars, 0) * 100) / 100;
+      const remainder = Math.round((targetDollars - scaledSum) * 100) / 100;
+      if (remainder !== 0) {
+        const targetIdx = rows.reduce(
+          (bestIdx, r, i) => (r.discount_dollars > rows[bestIdx].discount_dollars ? i : bestIdx),
+          0,
+        );
+        rows[targetIdx] = {
+          ...rows[targetIdx],
+          discount_dollars: Math.round((rows[targetIdx].discount_dollars + remainder) * 100) / 100,
+        };
+      }
+    }
+    // SAVEPOINT (nested transaction) so a failure here rolls back only
+    // itself — never the caller's edit transaction, which a raw failed
+    // statement inside a Postgres txn would otherwise abort even though
+    // this catch swallows the JS error (same technique create()'s own
+    // best-effort invoice_discounts write above uses).
+    await conn.transaction(async (sp) => {
+      await sp("invoice_discounts").where({ invoice_id: invoiceId }).del();
+      if (rows.length > 0) await sp("invoice_discounts").insert(rows);
+    });
+  } catch (err) {
+    logger.warn(`[invoice] Could not reconcile invoice_discounts on edit: ${err.message}`);
+  }
+}
+
 // Linked-visit guards for unvoidInvoice (Codex #3493 r2/r3). Runs TWICE:
 // pre-transaction as a fast fail, and again INSIDE the restore transaction
 // on the freshly-locked invoice row — a cancellation, free re-service
@@ -2038,6 +2217,100 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
       validator: "check_invoice_deposit_settlement" };
   }
   return { ok: true };
+}
+
+// The invoice-delivery provider handoff: hold the invoice row and its deposit
+// ledger (withInvoiceDepositSettlement) from `precondition` through the
+// provider request, so a void, payment, Bill-To change or credit cannot commit
+// between the check and the send. Shared by the immediate send (claim held)
+// and a queued notice's replay (withDeferredInvoiceProviderHandoff).
+// `retryableSetupErrors` makes an error thrown before the provider call a
+// retry rather than a refusal: the immediate send reports it to the operator,
+// a queued replay would otherwise drop the notice on a transient lock
+// conflict.
+async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispatch, { retryableSetupErrors = false } = {}) {
+  let dispatchedOutcome = null;
+  let providerStarted = false;
+  try {
+    const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+      invoiceId,
+      async (trx, current) => {
+        const verdict = await precondition(trx, current);
+        if (!verdict.ok) return verdict;
+        providerStarted = true;
+        dispatchedOutcome = await dispatch();
+        return dispatchedOutcome;
+      },
+    );
+    return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
+      validator: "check_invoice_deposit_settlement" };
+  } catch (err) {
+    // A commit/connection error AFTER provider acceptance cannot be
+    // rewritten as a definite non-send: that would restore the send
+    // claim and offer an automatic retry of a message the customer
+    // already received. Preserve the provider's actual provenance;
+    // normal delivered bookkeeping remains idempotent.
+    if (dispatchedOutcome
+      && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
+      logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
+      return { ...dispatchedOutcome, settlementHandoffError: err.message };
+    }
+    if (providerStarted) {
+      return { sent: false, blocked: true, deliveryOutcome: "uncertain",
+        code: err.code || "INVOICE_PROVIDER_OUTCOME_UNCERTAIN", error: err.message,
+        retryable: false, validator: "check_invoice_deposit_settlement" };
+    }
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
+      retryable: err.retryable === true || retryableSetupErrors, validator: "check_invoice_deposit_settlement" };
+  }
+}
+
+// A queued invoice notice (invoice_send_deferred) replays without the send
+// claim its original attempt held, so it re-runs the claim-less invoice
+// checks the notice's Email provider retry uses (invoice-send-replay-
+// eligibility.js): same customer, still collectible, a send-finalizable
+// status, something still due, a linked visit that ran. `database` is the
+// caller's locked transaction.
+async function deferredInvoiceDeliveryRefusal(meta, database) {
+  const { invoiceSendRefusal } = require("./messaging/invoice-send-replay-eligibility");
+  return invoiceSendRefusal({ ...meta, source_entry_point: "invoice_send_deferred" }, database);
+}
+
+// The queued replay's Text/App legs (and a plain queued text): the same
+// locked handoff as the immediate send, with the claim-less checks.
+async function withDeferredInvoiceProviderHandoff(meta, dispatch) {
+  if (!meta?.invoice_id) {
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_UNREADABLE", error: "Queued invoice notice has no invoice",
+      reason: "Queued invoice notice has no invoice", validator: "check_invoice_replay_eligibility" };
+  }
+  return withCheckedInvoiceProviderHandoff(meta.invoice_id, async (trx) => {
+    const refusal = await deferredInvoiceDeliveryRefusal(meta, trx);
+    if (!refusal) return { ok: true };
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_REPLAY_INELIGIBLE", error: refusal.reason, reason: refusal.reason,
+      retryable: refusal.retryable === true, validator: "check_invoice_replay_eligibility" };
+  }, dispatch, { retryableSetupErrors: true });
+}
+
+// The queued replay's Email leg: the same checks, run under the Email
+// authority's own lock on the invoice row (the authority passes its
+// transaction as `database`), never inside a second invoice lock.
+async function checkDeferredInvoiceEmailDelivery(meta, { database } = {}) {
+  if (!database) {
+    return { ok: false, code: "INVOICE_LOCK_UNAVAILABLE",
+      reason: "Queued invoice email check ran without the invoice lock", retryable: true };
+  }
+  try {
+    const refusal = await deferredInvoiceDeliveryRefusal(meta, database);
+    return refusal
+      ? { ok: false, code: "INVOICE_REPLAY_INELIGIBLE", reason: refusal.reason, retryable: refusal.retryable === true }
+      : { ok: true };
+  } catch (err) {
+    return { ok: false, code: err.code || "INVOICE_REPLAY_CHECK_FAILED", reason: err.message, retryable: true };
+  }
 }
 
 // Codex round-3 P2 (#4963): the ONE test for "did this leg actually reach
@@ -5476,46 +5749,13 @@ const InvoiceService = {
             sendClaimToken: invoice.send_claim_token, sendInvoice,
           });
         },
-        withProviderHandoff: async (dispatch) => {
-          let dispatchedOutcome = null;
-          let providerStarted = false;
-          try {
-            const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
-              invoiceId,
-              async (trx, current) => {
-                const precondition = await checkInvoiceDeliveryPreconditions(trx, current, {
-                  sendClaimToken: invoice.send_claim_token, sendInvoice,
-                });
-                if (!precondition.ok) return precondition;
-                providerStarted = true;
-                dispatchedOutcome = await dispatch();
-                return dispatchedOutcome;
-              },
-            );
-            return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
-              code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
-              validator: "check_invoice_deposit_settlement" };
-          } catch (err) {
-            // A commit/connection error AFTER provider acceptance cannot be
-            // rewritten as a definite non-send: that would restore the send
-            // claim and offer an automatic retry of a message the customer
-            // already received. Preserve the provider's actual provenance;
-            // normal delivered bookkeeping below remains idempotent.
-            if (dispatchedOutcome
-              && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
-              logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
-              return { ...dispatchedOutcome, settlementHandoffError: err.message };
-            }
-            if (providerStarted) {
-              return { sent: false, blocked: true, deliveryOutcome: "uncertain",
-                code: err.code || "INVOICE_PROVIDER_OUTCOME_UNCERTAIN", error: err.message,
-                retryable: false, validator: "check_invoice_deposit_settlement" };
-            }
-            return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-              code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
-              retryable: err.retryable === true, validator: "check_invoice_deposit_settlement" };
-          }
-        },
+        withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
+          invoiceId,
+          (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
+            sendClaimToken: invoice.send_claim_token, sendInvoice,
+          }),
+          dispatch,
+        ),
       });
       // Available to the catch block's retry call too (declared outside the
       // try block) — see finalizeInvoiceAfterSms above.
@@ -7828,6 +8068,35 @@ const InvoiceService = {
           "This invoice has account credit applied (prepaid) — reverse the applied credit before editing line items",
         );
       }
+      // Document-level discount with no line-item backing (see
+      // invoiceHasUnbackedDocumentDiscount above): calculateUpdateFinancials
+      // derives discount_amount ENTIRELY from negative lines in the
+      // submitted array, so it cannot reconstruct a manual discountIds pick
+      // that never became a line. Decline rather than silently zero the
+      // discount.
+      //
+      // Checked against the invoice's STORED (pre-edit) line items, never
+      // the submitted ones (Codex pre-push P1): an edit that intentionally
+      // REMOVES an existing, already line-item-backed discount is legitimate
+      // — the stored discount_amount was backed at save time, so the new
+      // submission correctly recomputes it down to whatever remains,
+      // including zero. Checking the submitted array instead would treat
+      // "the discount line staff just deleted" as evidence the discount was
+      // never reconstructable and refuse the edit outright.
+      if (await invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items, db)) {
+        const err = new Error(
+          "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of editing line items",
+        );
+        // Operator-actionable conflict, not a server fault (Codex P2) — same
+        // isOperational/statusCode/status/code shape the discount-stacking
+        // gate-divergence error above already uses, which PUT /:id's catch
+        // checks FIRST (admin-invoices.js).
+        err.statusCode = 409;
+        err.status = 409;
+        err.isOperational = true;
+        err.code = "UNBACKED_DOCUMENT_DISCOUNT";
+        throw err;
+      }
       const customer = await db("customers")
         .where({ id: invoice.customer_id })
         .first();
@@ -7878,6 +8147,24 @@ const InvoiceService = {
         throw new Error(
           "This invoice has account credit applied (prepaid) — reverse the applied credit before changing the tax rate",
         );
+      }
+      // Same unbacked-document-discount fence as the line-item retotal
+      // branch above (Codex P0): this branch ALSO calls
+      // calculateUpdateFinancials, which derives discount_amount entirely
+      // from negative line items — a tax_rate-only body with no line_items
+      // at all would otherwise silently zero a document-level discount that
+      // was never backed by a line, increasing the total on a request that
+      // never touched the discount.
+      if (await invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items, db)) {
+        const err = new Error(
+          "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of changing the tax rate",
+        );
+        // Same operational-409 shape as the line-item branch above (Codex P2).
+        err.statusCode = 409;
+        err.status = 409;
+        err.isOperational = true;
+        err.code = "UNBACKED_DOCUMENT_DISCOUNT";
+        throw err;
       }
       const existingLineItems =
         typeof invoice.line_items === "string"
@@ -8081,6 +8368,13 @@ const InvoiceService = {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
+      }
+      // Keep the discount provenance table in sync with what actually backs
+      // this invoice's line items NOW (see reconcileInvoiceDiscountProvenance
+      // above) — in the SAME transaction as the edit itself, best-effort
+      // (never aborts an otherwise-successful edit).
+      if (updates.line_items && data.line_items !== undefined) {
+        await reconcileInvoiceDiscountProvenance(id, data.line_items, data.discount_amount, client);
       }
       // Phase 2: an edited accrued invoice changes the statement total — reroll in
       // the SAME transaction so a reroll failure ABORTS the edit; we never commit
@@ -10664,6 +10958,8 @@ InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'cance
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
+InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderHandoff;
+InvoiceService.checkDeferredInvoiceEmailDelivery = checkDeferredInvoiceEmailDelivery;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;
@@ -10673,6 +10969,7 @@ module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
+module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;

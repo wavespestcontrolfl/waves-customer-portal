@@ -435,13 +435,18 @@ async function sendCustomerMessageCore(input) {
   }
   // Invoice delivery needs one lock boundary that covers whichever provider
   // the canonical router actually chooses (push-first, push+SMS, or Twilio).
-  // Keep this narrowly scoped to the invoice-send entry point: other callers
-  // use the stronger recipient/consent handoffs above, whose transaction is
-  // also threaded into their fresh suppression reads.
+  // Keep this narrowly scoped to the invoice-send entry point and its queued
+  // replay (the scheduler replays invoice_send_deferred rows under the
+  // invoice lock too — deferred-replay-registry.js): other callers use the
+  // stronger recipient/consent handoffs above, whose transaction is also
+  // threaded into their fresh suppression reads.
+  const invoiceDeliveryEntry = input.entryPoint === 'invoice_send_via_sms'
+    || (input.entryPoint === 'scheduled_sms_cron'
+      && input.metadata?.original_entry_point === 'invoice_send_deferred');
   const providerHandoffAllowed = input.audience === 'customer'
     && (sendInput.channel === 'sms' || (sendInput.channel === 'push' && input.metadata?.billingDeliveryLeg === 'push'))
     && input.purpose === 'payment_link'
-    && input.entryPoint === 'invoice_send_via_sms';
+    && invoiceDeliveryEntry;
   // The SAME invoice-send entry point's explicit billing Email leg (a
   // customer selection of Email, fanned out by dispatchBillingChannels)
   // never takes withProviderHandoff — that handoff's own
@@ -457,7 +462,7 @@ async function sendCustomerMessageCore(input) {
     && sendInput.channel === 'email'
     && input.metadata?.billingDeliveryLeg === 'email'
     && input.purpose === 'payment_link'
-    && input.entryPoint === 'invoice_send_via_sms';
+    && invoiceDeliveryEntry;
   if (withProviderHandoff && !billingEmailLeg
     && (typeof withProviderHandoff !== 'function' || !providerHandoffAllowed || withSmsHandoff)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
