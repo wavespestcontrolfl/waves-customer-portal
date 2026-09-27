@@ -28,7 +28,10 @@ const { randomUUID } = require('node:crypto');
 
 jest.setTimeout(120000);
 
-const ymdOffset = (days) => new Date(Date.now() + days * 24 * 3600 * 1000).toISOString().slice(0, 10);
+const { addETDays, etDateString } = require('../utils/datetime-et');
+// Match the production sweep's Eastern business date. UTC date arithmetic
+// makes yesterday equal today between midnight UTC and midnight ET.
+const ymdOffset = (days) => etDateString(addETDays(new Date(), days));
 const daysAgo = (days) => new Date(Date.now() - days * 24 * 3600 * 1000);
 
 postgres('portal renewal decline — station-retrieval chronology (real helper, migrated Postgres)', () => {
@@ -44,7 +47,11 @@ postgres('portal renewal decline — station-retrieval chronology (real helper, 
     const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
-    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    // The test holds one connection for its rollback transaction while the
+    // real retrieval helper and notification writer each open their own
+    // transaction. Two slots deadlock the harness as soon as a due candidate
+    // reaches the provider-independent task path.
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 4 } });
     require('../models/db').connection = database;
     Renewals = require('../services/annual-prepay-renewals');
     ({ termRetrievalDedupeKey } = require('../services/cancellation-processor'));

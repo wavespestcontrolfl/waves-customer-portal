@@ -209,7 +209,12 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     };
   }
 
-  const etToday = () => new Date().toISOString().slice(0, 10);
+  // Production due/coverage checks use the Eastern business date. Building
+  // fixtures from UTC makes "yesterday" become today between midnight UTC
+  // and midnight ET, so genuinely due terms disappear from the candidate
+  // scan and current anchored coverage can be judged against a different
+  // day than the fixture itself.
+  const etToday = () => jest.requireActual('../utils/datetime-et').etDateString();
   const ymd = (value) => (value instanceof Date
     ? [value.getFullYear(), String(value.getMonth() + 1).padStart(2, '0'), String(value.getDate()).padStart(2, '0')].join('-')
     : String(value).slice(0, 10));

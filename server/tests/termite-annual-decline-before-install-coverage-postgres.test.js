@@ -189,7 +189,10 @@ describeOrSkip('a decided-lapse termite term (declined before install) gets real
     return { db, anchorTermToInstallation };
   }
 
-  const etDateString = () => new Date().toISOString().slice(0, 10);
+  // Production anchoring/coverage checks use the Eastern business date.
+  // A UTC "today" is tomorrow in ET between midnight UTC and midnight ET,
+  // so the install visit would read as not-yet-happened in that window.
+  const etDateString = () => jest.requireActual('../utils/datetime-et').etDateString();
   const addYear = (ymdStr) => {
     const d = new Date(`${ymdStr}T00:00:00Z`);
     d.setUTCFullYear(d.getUTCFullYear() + 1);
