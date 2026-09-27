@@ -382,6 +382,19 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance only if you can photograph the activity without approaching or disturbing the mound. Do not place objects near the ants.",
         "why": "Mound shape and activity help us compare ant groups while keeping you clear of stinging workers."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -542,6 +555,19 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the whole nest shape and location without approaching or disturbing the nest.",
         "why": "An open umbrella comb versus a paper-covered nest separates paper wasps from yellowjackets and hornets."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        }
       }
     },
     {
@@ -582,6 +608,13 @@
       "next_photo": {
         "ask": "From a safe distance, use camera zoom to show the spines or hairs and color pattern. Do not approach, touch, or handle it.",
         "why": "Spine density and color tell a merely fuzzy caterpillar from one with venomous spines."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          }
+        }
       }
     },
     {
@@ -784,6 +817,18 @@
       "next_photo": {
         "ask": "A wide photo of the whole animal from a safe distance, including the tail.",
         "why": "Overall size, coloring, and tail shape separate iguanas, tegus, and monitors, which need different responses."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        }
       }
     },
     {
@@ -796,6 +841,19 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the whole snake and body pattern only if already visible. Never approach, disturb, or handle it.",
         "why": "Head shape and banding pattern are the safe way to tell a venomous snake from a look-alike."
+      },
+      "generic_guidance": {
+        "referral": "wildlife_trapper",
+        "compatibility": {
+          "safety": {
+            "venomous": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Venomous Snake Removal",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
       }
     },
     {

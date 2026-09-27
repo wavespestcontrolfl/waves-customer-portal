@@ -390,6 +390,41 @@ function unnamedV2ResultFor({ level = 'unknown', nodeId = null, headline = "We c
   };
 }
 
+// Route regression backed by the real catalog answer builder and v1 mapper.
+// Only provider orchestration is mocked in this suite.
+function realCatalogV2ResultFor(slug, confidence = 0.95) {
+  const catalog = jest.requireActual('../services/species-catalog');
+  const { buildAnswer, mapToV1, resolveCandidate } = jest.requireActual('../services/photo-id-v2/pest-engine');
+  const candidate = { ...resolveCandidate({ slug, confidence }), checked: true, verified: true };
+  const built = buildAnswer({
+    candidates: [candidate], disagreed: false, disagreementNode: null,
+    escalationTriggered: false, openaiAnswered: false, openaiStoodInAlone: false,
+    qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+  });
+  return {
+    ok: true,
+    v2: {
+      version: 2,
+      catalog_version: catalog.CATALOG_VERSION,
+      tier: built.tier,
+      answer: built.answer,
+      group: built.group,
+      entry: built.entry,
+      evidence: built.evidence,
+      candidates: built.candidatesBlock,
+      next_photo: built.nextPhoto,
+      referral: built.referral,
+    },
+    v1: mapToV1(built),
+    internal: {
+      models: { candidates: null, verify: null, escalation: null },
+      escalation_triggered: false,
+      escalation_reasons: [],
+      disagreed: false,
+    },
+  };
+}
+
 async function post(base, path, body, headers = {}) {
   return fetch(`${base}${path}`, {
     method: 'POST',
@@ -1407,6 +1442,41 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
       expect(body.next_step.body).toContain('(941) 297-5749');
       // A referral is a routing note, never a request — no prefill.
       expect(body.next_step.request_prefill).toBeUndefined();
+    });
+  });
+
+  test('gate on: a real draft venomous-snake climb stores generic high-risk routing and returns a referral', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor('florida-cottonmouth');
+    expect(engineResult).toMatchObject({
+      v2: {
+        tier: 'needs_more_evidence',
+        answer: { level: 'subgroup', node_id: 'venomous-snakes' },
+        entry: null,
+        referral: { kind: 'wildlife_trapper' },
+      },
+      v1: {
+        species_slug: null,
+        service_line: 'none',
+        urgency: 'high',
+        report_contract: { safety: { venomous: true } },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('referral');
+      expect(body.result.label).toBeNull();
+      expect(body.v2.answer.headline).toBe('Looks like a venomous snake');
+      expect(body.v2.answer.headline).not.toMatch(/cottonmouth/i);
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'high' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({ safety: { venomous: true } });
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('referral');
     });
   });
 

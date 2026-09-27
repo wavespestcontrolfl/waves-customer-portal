@@ -977,7 +977,7 @@ function buildAnswer(ctx) {
     candidatesBlock,
     nextPhoto,
     referral: referralFor(entry, genericGuidance?.referral),
-    genericCompatibility: genericGuidance?.compatibility,
+    genericCompatibility: Object.assign({ safety: {} }, genericGuidance?.compatibility),
     tier,
     topEntrySlug: entry?.slug || null,
   };
@@ -1097,7 +1097,11 @@ function mapToV1(built) {
       inspectionRequired: inheritIdentityOnly ? !!namedService.inspection_first : true,
       urgency: namedEntry.urgency,
     },
-    generic: { ...DEFAULT_GENERIC_COMPATIBILITY, ...built.genericCompatibility },
+    generic: {
+      ...DEFAULT_GENERIC_COMPATIBILITY,
+      ...built.genericCompatibility,
+      safety: { ...DEFAULT_GENERIC_COMPATIBILITY.safety, ...Object(built.genericCompatibility).safety },
+    },
   }[compatibilityKind];
   const {
     safety, serviceLine, serviceKey, serviceLabel, inspectionRequired, urgency,

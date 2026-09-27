@@ -136,6 +136,76 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   });
 
   test.each([
+    'eastern-diamondback-rattlesnake',
+    'dusky-pygmy-rattlesnake',
+    'florida-cottonmouth',
+    'eastern-coral-snake',
+  ])('a high-confidence draft %s climb keeps generic venom and wildlife referral guidance', (slug) => {
+    const built = answerFor(slug, { approved: false });
+    expect(built).toMatchObject({
+      answer: { level: 'subgroup', node_id: 'venomous-snakes', wording: 'group_only' },
+      entry: null,
+      topEntrySlug: null,
+      referral: { kind: 'wildlife_trapper' },
+    });
+    expect(built.answer.headline).toBe('Looks like a venomous snake');
+    expect(built.answer.headline).not.toMatch(/diamondback|pygmy|cottonmouth|coral/i);
+
+    const mapped = mapToV1(built);
+    expect(mapped).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'high' });
+    expect(mapped.report_contract).toMatchObject({
+      identification: { slug: null, category: 'wildlife', contested: true },
+      safety: { stinging: false, venomous: true, disease_vector: false, structural_threat: false },
+      service: { line: 'none', key: null, label: 'Venomous Snake Removal', inspection_required: false },
+    });
+  });
+
+  test('low-confidence and mixed-snake results do not receive venomous-snake guidance', () => {
+    const base = {
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    };
+    const genuinelyLow = buildAnswer({
+      ...base,
+      candidates: [{ ...candidate('eastern-coral-snake', { approved: false }), confidence: 0.5 }],
+    });
+    expect(genuinelyLow.answer.level).toBe('unknown');
+    expect(genuinelyLow.referral).toBeNull();
+    expect(mapToV1(genuinelyLow).report_contract).toMatchObject({
+      urgency: 'low', safety: { venomous: false }, service: { line: 'pest' },
+    });
+
+    const mixed = buildAnswer({
+      ...base,
+      candidates: [
+        { ...candidate('eastern-coral-snake', { approved: false }), confidence: 0.55 },
+        { ...candidate('southern-water-snake', { approved: false }), confidence: 0.3 },
+      ],
+    });
+    expect(mixed.answer).toMatchObject({ level: 'group', node_id: 'snakes' });
+    expect(mixed.referral).toBeNull();
+    expect(mapToV1(mixed).report_contract).toMatchObject({
+      urgency: 'low', safety: { venomous: false }, service: { line: 'pest' },
+    });
+  });
+
+  test.each([
+    ['fire-ant', 'fire-ants', { stinging: true, venomous: true }, 'pest', 'pest', 'high'],
+    ['paper-wasp', 'social-wasps', { stinging: true, venomous: true }, 'pest', 'pest', 'moderate'],
+    ['puss-caterpillar', 'stinging-caterpillars', { stinging: true, venomous: false }, 'pest', null, 'low'],
+    ['green-iguana', 'large-lizards', { disease_vector: true }, 'none', null, 'moderate'],
+  ])('an audited draft %s climb retains shared generic hazards without a species identity',
+    (slug, nodeId, safety, line, key, urgency) => {
+      const built = answerFor(slug, { approved: false });
+      expect(built).toMatchObject({
+        answer: { level: 'subgroup', node_id: nodeId }, entry: null, topEntrySlug: null, referral: null,
+      });
+      const mapped = mapToV1(built);
+      expect(mapped).toMatchObject({ species_slug: null, service_line: line, urgency });
+      expect(mapped.report_contract).toMatchObject({ safety, service: { line, key } });
+    });
+
+  test.each([
     ['american-dog-tick', 'pest', 'General Pest Control', 'high'],
     ['lone-star-tick', 'pest', 'General Pest Control', 'high'],
     ['blacklegged-tick', 'pest', 'General Pest Control', 'moderate'],

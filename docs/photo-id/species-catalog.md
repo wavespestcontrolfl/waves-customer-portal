@@ -37,6 +37,14 @@ ant; we can't yet tell you which kind"):
 ladder for any id, and `nextPhoto(id)` to get the one photo that would narrow
 a category/group/subgroup/entry further.
 
+When an unapproved entry climbs to a generic node, that node may carry
+`generic_guidance`. It records safety and routing facts shared by every
+descendant represented by that node; omitted compatibility fields keep the
+neutral generic defaults. This keeps a generic result such as “a venomous
+snake” on the high-urgency wildlife referral path without naming an
+unapproved species. Mixed or lower-confidence results that stop above that
+node do not inherit its guidance.
+
 ## Files
 
 - `index.json` — `catalog_version`, `section` ("pest" — this catalog does not

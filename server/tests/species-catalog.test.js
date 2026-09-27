@@ -377,6 +377,47 @@ describe('index.json — groups, subgroups, next_photo', () => {
     }
   });
 
+  test('unmatched generic hazard nodes retain shared safety and conservative routing', () => {
+    const expected = {
+      'fire-ants': { trueSafety: ['stinging', 'venomous'], serviceLine: 'pest', serviceKey: 'pest', urgency: 'high' },
+      'social-wasps': { trueSafety: ['stinging', 'venomous'], serviceLine: 'pest', serviceKey: 'pest', urgency: 'moderate' },
+      'stinging-caterpillars': { trueSafety: ['stinging'], safetyOnly: true },
+      'large-lizards': { trueSafety: ['disease_vector'], serviceLine: 'none', serviceKey: null, urgency: 'moderate' },
+      'venomous-snakes': {
+        trueSafety: ['venomous'], serviceLine: 'none', serviceKey: null, urgency: 'high', referral: 'wildlife_trapper',
+      },
+    };
+    const urgencyRank = { low: 0, moderate: 1, high: 2 };
+
+    for (const [nodeId, contract] of Object.entries(expected)) {
+      const node = catalog.getSubgroup(nodeId);
+      const descendants = allEntries.filter((entry) => entry.subgroup === nodeId);
+      expect(descendants.length).toBeGreaterThan(1);
+      expect(node.generic_guidance).toBeTruthy();
+      if (contract.safetyOnly) {
+        expect(node.generic_guidance.compatibility).toEqual({ safety: { stinging: true } });
+      } else {
+        expect(node.generic_guidance.compatibility).toMatchObject({
+          serviceLine: contract.serviceLine, serviceKey: contract.serviceKey, urgency: contract.urgency,
+        });
+      }
+      for (const flag of contract.trueSafety) {
+        const entryFlag = flag === 'stinging' ? 'stings' : flag;
+        expect(descendants.every((entry) => entry.safety[entryFlag] === true)).toBe(true);
+        expect(node.generic_guidance.compatibility.safety[flag]).toBe(true);
+      }
+      if (!contract.safetyOnly) {
+        expect(descendants.every((entry) => entry.service.line === contract.serviceLine)).toBe(true);
+        expect(descendants.every((entry) => entry.service.key === contract.serviceKey)).toBe(true);
+        expect(descendants.every((entry) => urgencyRank[entry.urgency] >= urgencyRank[contract.urgency])).toBe(true);
+      }
+      if (contract.referral) {
+        expect(descendants.every((entry) => entry.service.referral === contract.referral)).toBe(true);
+        expect(node.generic_guidance.referral).toBe(contract.referral);
+      }
+    }
+  });
+
   test('every look_alike_groups entry names real groups', () => {
     for (const lag of index.look_alike_groups) {
       for (const g of lag.groups) expect(groupIds.has(g)).toBe(true);
