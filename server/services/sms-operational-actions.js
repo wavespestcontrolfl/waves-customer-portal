@@ -734,7 +734,10 @@ const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
 // settlement stamp: a late webhook records a settlement from hours or days
 // ago (stripe-webhook.js), which the watermark has long passed.
 const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
-// Rows captured before the flag existed stay eligible.
+// Read against the event page's candidate row, like RETRY_AFTER_SQL and
+// SOURCE_AT: `cc` is the open call_commitments row and `s` its source
+// sms_log row (openRows in refreshSmsCommitments). Rows captured before the
+// flag existed stay eligible.
 const MONEY_KIND = `cc.kind IN (${PAYMENT_WITNESS_KINDS.map((v) => `'${v}'`).join(', ')})
   AND COALESCE((cc.sms_context->>'money_answerable')::boolean, true)`;
 // Whose estimate a deposit is on: the customer's own, or an unowned one a
