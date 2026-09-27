@@ -290,6 +290,33 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     }
   });
 
+  test('retry rejects while the customer mirror is empty and the primary location retains a pin', async () => {
+    await mockConnection('customer_properties').update(PIN);
+
+    await expect(act({ action: 'retry' })).rejects.toMatchObject({
+      statusCode: 409, code: 'pin_present',
+    });
+
+    expect((await customer()).latitude).toBeNull();
+    expect(await primary()).toMatchObject({ latitude: String(PIN.latitude), longitude: String(PIN.longitude) });
+    expect(await review()).toBeUndefined();
+    expect(await audits()).toEqual([]);
+    expect(require('../services/geocoder').ensureCustomerGeocoded).not.toHaveBeenCalled();
+  });
+
+  test('revoke clears a primary mirror that diverged from the reviewed customer pin', async () => {
+    const divergentPrimary = { latitude: 27.4887654, longitude: -82.5887654 };
+    await act();
+    await mockConnection('customer_properties').update(divergentPrimary);
+
+    await act({ action: 'revoke' });
+
+    expect(await customer()).toMatchObject({ latitude: null, longitude: null });
+    expect(await primary()).toMatchObject({ latitude: null, longitude: null });
+    expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+    expect(await review()).toMatchObject({ status: 'needs_pin', reason: 'verification_revoked' });
+  });
+
   test.each(['outside_service_area', 'revoke'])('%s broadcasts every cleared visit after commit', async action => {
     await act();
     dispatch.emitDispatchJobUpdate.mockClear();
