@@ -524,6 +524,19 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
     );
   }
   const candidateModel = ARGS['candidate-model'];
+  // Every run needs ANTHROPIC_API_KEY in THIS process's environment (each
+  // child inherits `...process.env` — see runOnce): the two current-*
+  // conditions always run the current Anthropic model, an Anthropic
+  // candidate needs it too, and --judge grades through an Anthropic primary.
+  // Without it the baselines fail every call, and an OpenAI candidate's paid
+  // calls would buy a comparison with nothing to compare against — so the
+  // run is refused before any child starts, same as the OpenAI key below.
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error(
+      "ANTHROPIC_API_KEY is not set in this process's environment — the two current-* conditions "
+      + '(and any Anthropic candidate) would fail every call, leaving no baseline to compare against.',
+    );
+  }
   // Checked BEFORE any child runs: an id this repo does not recognize (or an
   // OpenAI candidate with no key) would otherwise run four full conditions
   // only to have the relay silently reject the override on every "candidate"

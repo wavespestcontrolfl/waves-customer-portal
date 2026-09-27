@@ -43,6 +43,18 @@ function stubChild(responses) {
 
 const CONDITION = { id: 'current-block', env: {} };
 
+// runBenchmark refuses to start without ANTHROPIC_API_KEY (the current-*
+// baselines always run Anthropic). Every test here runs stubbed children, so
+// a placeholder key stands in; the preflight's own test deletes it.
+let SAVED_ANTHROPIC_KEY;
+beforeEach(() => {
+  SAVED_ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+});
+afterEach(() => {
+  if (SAVED_ANTHROPIC_KEY === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = SAVED_ANTHROPIC_KEY;
+});
+
 describe('runOnce — a completed run vs. an inconclusive one vs. a real crash', () => {
   test('status "pass" (exit 0) is a completed run', async () => {
     const execFileImpl = stubChild([{
@@ -959,6 +971,17 @@ describe('OpenAI candidates — GATE_VOICE_RELAY_OPENAI wiring', () => {
   test('buildConditions never sets the gate for an anthropic candidate (unchanged behavior)', () => {
     const conditions = buildConditions('claude-haiku-4-5-20251001', 'anthropic');
     for (const c of conditions) expect(c.env).not.toHaveProperty('GATE_VOICE_RELAY_OPENAI');
+  });
+
+  // Codex r13 P2: the current-* baselines always run Anthropic — without its
+  // key an OpenAI candidate would spend on calls with nothing to compare.
+  test.each(['gpt-6-sol', 'claude-haiku-4-5-20251001'])('rejects %s with no ANTHROPIC_API_KEY, before any child process runs', async (model) => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    delete process.env.ANTHROPIC_API_KEY;
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: [`--candidate-model=${model}`, '--trials=1'], execFileImpl }))
+      .rejects.toThrow(/ANTHROPIC_API_KEY is not set/);
+    expect(execFileImpl).not.toHaveBeenCalled();
   });
 
   test('rejects an OpenAI candidate with no OPENAI_API_KEY, before any child process runs', async () => {

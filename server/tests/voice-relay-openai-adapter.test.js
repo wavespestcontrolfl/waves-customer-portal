@@ -114,19 +114,30 @@ describe('gate — production default unchanged, opt-in only', () => {
     expect(resolveSessionModel({ sandbox: true })).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
   });
 
-  // Many suites replace '../config/feature-gates' wholesale with a narrow
-  // `{ isEnabled, gateEnvValue }` stub that predates this gate — a session
-  // resolved under one must not throw, and must apply the same strict rule.
-  test('a narrow feature-gates stub (no voiceRelayOpenaiLive export) neither throws nor loosens the gate', () => {
+  // Codex r13 P2: the gate is feature-gates' canonical voiceRelayOpenaiLive()
+  // alone — a stubbed value governs, never the ambient env (no second reader).
+  test('the gate is read only through feature-gates voiceRelayOpenaiLive — a stub governs, not the env', () => {
+    const ctx = { openaiContext: true };
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined, voiceRelayOpenaiLive: () => false }));
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      expect(require('../services/voice-agent/relay-conversation').isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(false);
+    });
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined, voiceRelayOpenaiLive: () => true }));
+      delete process.env.GATE_VOICE_RELAY_OPENAI;
+      expect(require('../services/voice-agent/relay-conversation').isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(true);
+    });
+    jest.dontMock('../config/feature-gates');
+  });
+
+  test('an ordinary production session never reads the gate (a stub without it still resolves)', () => {
     jest.isolateModules(() => {
       jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined }));
       const fresh = require('../services/voice-agent/relay-conversation');
-      const ctx = { openaiContext: true };
-      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(false);
-      process.env.GATE_VOICE_RELAY_OPENAI = 'TRUE';
-      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(false);
-      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
-      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(true);
+      process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
+      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(false);
+      expect(fresh.resolveSessionModel({ sandbox: false }).model).toBe(MODELS.DEFAULTS.VOICE);
     });
     jest.dontMock('../config/feature-gates');
   });
