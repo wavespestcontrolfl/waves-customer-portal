@@ -84,6 +84,16 @@ const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
 const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-gate');
 
+async function releasePageEditLockConnection(lockConn, unlockError) {
+  // Tarn still owns this checkout. Mark it disposed so Knex rejects it,
+  // close it now so the session lock clears, then release the checkout so
+  // Tarn removes it from `used`.
+  if (!unlockError) return db.client.releaseConnection(lockConn);
+  lockConn.__knex__disposed = `page-edit advisory unlock failed: ${unlockError.message}`;
+  try { await db.client.destroyRawConnection(lockConn); }
+  finally { await db.client.releaseConnection(lockConn); }
+}
+
 // Bucket for operator-authored intercept briefs (intercept-brief-seeder),
 // single-sourced with the sync guardrail-option derivation (the writer's
 // in-loop self-lint shares it) — a light module, so the runner's claim path
@@ -1610,13 +1620,8 @@ class AutonomousRunner {
         }
       }
       if (lockConn) {
-        try {
-          // Tarn still owns this checkout. Mark it disposed so Knex destroys
-          // it during validation, then release the checkout back to Tarn;
-          // closing the socket directly would leave a dead entry in `used`.
-          if (unlockError) lockConn.__knex__disposed = `page-edit advisory unlock failed: ${unlockError.message}`;
-          await db.client.releaseConnection(lockConn);
-        } catch { /* pool reaps */ }
+        try { await releasePageEditLockConnection(lockConn, unlockError); }
+        catch { /* pool reaps */ }
       }
     }
   }
