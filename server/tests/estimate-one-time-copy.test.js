@@ -691,6 +691,25 @@ describe('server-rendered page', () => {
     expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
   });
 
+  test.each([
+    ['oneTime with empty root', (row) => ({ specItems: [], oneTime: { specItems: [row] } })],
+    ['oneTime with unrelated root', (row) => ({ specItems: [{ service: 'one_time_pest', price: 250 }], oneTime: { specItems: [row] } })],
+    ['nested oneTime with empty root', (row) => ({ specItems: [], results: { oneTime: { specItems: [row] } } })],
+  ])('projected copy retains current nested warranty removal with %s specItems', (_name, currentShape) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 900, price: 900 };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [row] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      {
+        result: currentShape({ ...row, warrantyTier: 'none', warrantyAdder: 0 }),
+        engineResult: { oneTime: { items: [{ ...row, warrantyTier: 'one_year_retreat', warrantyAdder: 0 }] } },
+      },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
   test('ambiguous duplicate raw rows cannot lend projected warranty proof', () => {
     const projected = {
       service: 'trenching', label: 'Termite Trenching', amount: 900,

@@ -303,6 +303,26 @@ describe('estimate assistant no-guarantee context', () => {
     expect(context.oneTime.items.flatMap((row) => row.purchasedTerms || [])).toEqual([]);
   });
 
+  test.each([
+    ['oneTime with empty root', (row) => ({ specItems: [], oneTime: { specItems: [row] } })],
+    ['oneTime with unrelated root', (row) => ({ specItems: [{ service: 'one_time_pest', price: 250 }], oneTime: { specItems: [row] } })],
+    ['nested oneTime with empty root', (row) => ({ specItems: [], results: { oneTime: { specItems: [row] } } })],
+  ])('current nested warranty removal survives %s specItems', (_name, currentShape) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', price: 1200 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: {
+        result: currentShape({ ...row, warrantyTier: 'none', warrantyAdder: 0 }),
+        engineResult: { oneTime: { items: [{ ...row, warrantyTier: 'one_year_retreat', warrantyAdder: 0 }] } },
+      },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items.flatMap((item) => item.purchasedTerms || [])).toEqual([]);
+    expect(answerEstimateQuestionFallback('Does the trenching warranty include an annual inspection?', context))
+      .not.toContain('Annual inspection during the warranty period');
+  });
+
   test('ambiguous duplicate raw trenching rows cannot prove purchased terms', () => {
     const mapped = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat' };

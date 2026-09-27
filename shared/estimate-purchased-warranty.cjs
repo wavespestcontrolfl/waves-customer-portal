@@ -50,16 +50,12 @@ function rawOneTimeWarrantyEvidenceItems(result = {}) {
   const nested = result.results?.oneTime && typeof result.results.oneTime === 'object'
     ? result.results.oneTime
     : {};
-  const specItems = Array.isArray(result.specItems)
-    ? result.specItems
-    : [
-      ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
-      ...(Array.isArray(nested.specItems) ? nested.specItems : []),
-    ];
   return [...new Set([
     ...(Array.isArray(oneTime.items) ? oneTime.items : []),
     ...(Array.isArray(nested.items) ? nested.items : []),
-    ...specItems,
+    ...(Array.isArray(result.specItems) ? result.specItems : []),
+    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+    ...(Array.isArray(nested.specItems) ? nested.specItems : []),
     ...(Array.isArray(result.lineItems) ? result.lineItems : []),
   ].filter((item) => item && typeof item === 'object'))];
 }
