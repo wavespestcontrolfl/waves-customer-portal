@@ -201,12 +201,10 @@ describe('voicemail lead text-back gates', () => {
       },
     );
 
-    test('the hold check runs for this number, against calls before this voicemail, ignoring the lane\'s own texts', async () => {
+    test('the hold check runs for this number from this voicemail\'s time — every call with it read, this one included — ignoring the lane\'s own texts', async () => {
       const at = new Date('2026-09-26T15:00:00Z');
       await sendVoicemailQuoteLink(args({ call: { id: 'call-9', twilio_call_sid: 'CA-test-1', created_at: at } }));
-      expect(autoTextHoldReason).toHaveBeenCalledWith(PHONE, expect.objectContaining({
-        callAt: at, excludeCallLogId: 'call-9', excludeMessageTypes: [MESSAGE_TYPE],
-      }));
+      expect(autoTextHoldReason).toHaveBeenCalledWith(PHONE, { callAt: at, excludeMessageTypes: [MESSAGE_TYPE] });
     });
 
     test('a hold that appears while the claims, lookup and render run is caught at the handoff — both claims released', async () => {
@@ -433,8 +431,7 @@ describe('voicemail lead text-back send outcomes', () => {
     const meta = JSON.parse(queued.payload.metadata);
     expect(meta.consent_basis).toEqual(expect.objectContaining({ status: 'transactional_allowed' }));
     expect(meta.lead_id).toBe(LEAD_ID);
-    // The replay re-runs the holds against the originating call.
-    expect(meta.call_log_id).toBe('call-7');
+    // The replay re-runs the holds from the originating call's time.
     expect(new Date(meta.call_created_at)).toEqual(callAt);
     expect(stampsFor()).toContain('scheduled');
     expect(phoneClaimOutcomes()).toContain('scheduled');

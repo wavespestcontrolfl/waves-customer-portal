@@ -251,7 +251,7 @@ describe('deferred-replay registry', () => {
   describe('voicemail quote-link replay re-runs the auto-text holds', () => {
     const { autoTextHoldReason } = require('../services/messaging/auto-text-holds');
     const meta = {
-      lead_id: 'lead-1', voicemail_phone: '+19415550101', call_log_id: 'call-7', call_created_at: '2026-09-26T23:30:00.000Z',
+      lead_id: 'lead-1', voicemail_phone: '+19415550101', call_created_at: '2026-09-26T23:30:00.000Z',
     };
 
     test('a hold that appeared since the voicemail stops the queued text', async () => {
@@ -259,7 +259,7 @@ describe('deferred-replay registry', () => {
       autoTextHoldReason.mockResolvedValueOnce('quote_on_file');
       expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toEqual({ eligible: false, reason: 'quote_on_file' });
       expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', {
-        callAt: new Date('2026-09-26T23:30:00.000Z'), excludeCallLogId: 'call-7', excludeMessageTypes: ['voicemail_quote_link'],
+        callAt: new Date('2026-09-26T23:30:00.000Z'), excludeMessageTypes: ['voicemail_quote_link'],
       });
     });
 

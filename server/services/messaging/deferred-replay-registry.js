@@ -936,7 +936,6 @@ const REGISTRY = {
           const { autoTextHoldReason } = require('./auto-text-holds');
           const hold = await autoTextHoldReason(meta.voicemail_phone, {
             callAt: meta.call_created_at ? new Date(meta.call_created_at) : undefined,
-            excludeCallLogId: meta.call_log_id || null,
             excludeMessageTypes: ['voicemail_quote_link'],
           });
           if (hold) return { eligible: false, reason: hold };

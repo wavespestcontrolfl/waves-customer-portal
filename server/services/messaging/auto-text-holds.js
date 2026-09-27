@@ -15,8 +15,10 @@
  *   asked_not_to_be_contacted — asked not to be contacted on any call,
  *                               including the one setting the text off (a
  *                               reprocess can correct it after a deferral)
- *   not_a_prospect            — an earlier call showed a salesperson, vendor,
- *                               robocall, wrong number or job applicant
+ *   not_a_prospect            — a call with this number, the one setting
+ *                               the text off included, showed a salesperson,
+ *                               vendor, robocall, wrong number or job
+ *                               applicant
  *   recent_conversation       — texted with us, either way, from 7 days
  *                               before this call up to now (so a deferred
  *                               send replayed later still sees a text that
@@ -54,9 +56,10 @@ function matches(column, digits) {
 }
 
 // sms_log rows that are a text that actually reached the other side — the
-// definition lead-auto-reply.js's delayed-reply check uses: an inbound text,
-// or an outbound one Twilio accepted (a real SM/MM sid) that was not
-// scheduled, cancelled or bounced. Never an unresolved send reservation.
+// ONE definition, shared with lead-auto-reply.js's delayed-reply check: an
+// inbound text, or an outbound one Twilio accepted (a real SM/MM sid) that
+// was not scheduled, cancelled or bounced. Never an unresolved send
+// reservation.
 function deliveredTexts(dbi = db) {
   return excludeUnresolvedSendReservations(dbi('sms_log'))
     .where((q) => q.where({ direction: 'inbound' })
@@ -65,26 +68,25 @@ function deliveredTexts(dbi = db) {
         .where((st) => st.whereNull('status').orWhereNotIn('status', UNSENT_STATUSES))));
 }
 
-// Earlier calls with this number, either direction — never a Sandy sandbox
-// test call, whose extraction says nothing about the real caller.
-function callsWith(dbi, digits, excludeCallLogId) {
+// Every call with this number, either direction, the one setting the text
+// off included (a reprocess after a deferral can re-judge it) — never a
+// Sandy sandbox test call, whose extraction says nothing about the real
+// caller.
+function callsWith(dbi, digits) {
   return dbi('call_log')
     .modify((q) => whereNotSandboxCall(q))
-    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits)))
-    .modify((q) => { if (excludeCallLogId) q.whereNot('id', excludeCallLogId); });
+    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits)));
 }
 
 /**
  * @param {string} phone                        the number about to be texted
  * @param {object} [opts]
  * @param {Date}   [opts.callAt]                when the call that sets the text off came in (window start = 7 days before it)
- * @param {string} [opts.excludeCallLogId]      that call itself — not an "earlier" call for not_a_prospect (the
- *                                              lane already judged it); still read for do-not-contact
  * @param {string[]} [opts.excludeMessageTypes] the lane's own sms_log types (its one-shot, not a conversation)
  * @returns {Promise<string|null>} a hold reason, or null when the text may go
  */
 async function autoTextHoldReason(phone, {
-  callAt = new Date(), excludeCallLogId = null, excludeMessageTypes = [], dbi = db,
+  callAt = new Date(), excludeMessageTypes = [], dbi = db,
 } = {}) {
   const digits = phoneDigits(phone);
   if (!digits) return null;
@@ -111,18 +113,25 @@ async function autoTextHoldReason(phone, {
   // field (a call processed with V2 off, unavailable or schema-failed). Read
   // from ANY stored extraction, valid or not, and from the call setting this
   // text off too: an opt-out is honoured wherever it was heard.
-  const doNotContact = await callsWith(dbi, digits, null)
+  const doNotContact = await callsWith(dbi, digits)
     .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'do_not_contact_request' = 'true'")
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"do_not_contact_request"\\s*:\\s*true'`))
     .first('id');
   if (doNotContact) return 'asked_not_to_be_contacted';
 
   // Only a VALID V2 extraction's nature counts (a schema-failed one can
-  // persist a normalized but wrong call_nature); the legacy fields cover a
-  // call without one.
-  const notAProspect = await callsWith(dbi, digits, excludeCallLogId)
-    .where((q) => q.where((v2) => v2.where('v2_extraction_status', 'valid')
-      .whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES]))
+  // persist a normalized but wrong call_nature); the legacy labels are what
+  // the processor itself acted on, and the only label on a call processed
+  // before V2 or with it off or failed. The call setting this text off
+  // counts too: the voicemail route vetoes neither a vendor nor a job
+  // applicant, so one naming a service still becomes a lead. A vendor V2
+  // cleared of spam (a property manager, a referral partner) still holds:
+  // the automated quote link is for a homeowner, and the lead and the
+  // office's callback are untouched.
+  const notAProspect = await callsWith(dbi, digits)
+    .where((q) => q
+      .where((v2) => v2.where('v2_extraction_status', 'valid')
+        .whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES]))
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"is_spam"\\s*:\\s*true'`)
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"call_type"\\s*:\\s*"(spam|wrong_number)"'`))
     .first('id');

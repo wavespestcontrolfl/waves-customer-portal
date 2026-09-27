@@ -164,12 +164,11 @@ async function clearLeadClaim(leadId) {
 
 // The shared hold check's options for this voicemail (the early check and
 // the recheck at the handoff): its own call opens the recent-conversation
-// window, is not an "earlier" call, and the lane's own texts are its
-// one-shot's business, not a conversation.
+// window, and the lane's own texts are its one-shot's business, not a
+// conversation.
 function holdOptions(call) {
   return {
     callAt: call.created_at ? new Date(call.created_at) : new Date(),
-    excludeCallLogId: call.id || null,
     excludeMessageTypes: [MESSAGE_TYPE],
   };
 }
@@ -444,9 +443,8 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
           // row's to_phone column — this copy just reaches the hooks.
           voicemail_phone: phone,
           call_sid: call.twilio_call_sid || null,
-          // The originating call, for the replay's hold recheck: it is not an
-          // "earlier" call, and its time opens the recent-conversation window.
-          call_log_id: call.id || null,
+          // The originating call's time, for the replay's hold recheck: it
+          // opens the recent-conversation window.
           call_created_at: call.created_at || null,
           original_block_code: result.code || null,
           // The scheduled-SMS cron replays this row through sendCustomerMessage,
