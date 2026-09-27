@@ -4530,6 +4530,38 @@ async function isUnpaidGracePendingTerm(term, conn) {
   return !reallyPaid;
 }
 
+// Extracted from reconcileOneCoveredTermInSweep (complexity reduction, no
+// behavior change): the pending-completion grant reversal leg, verbatim.
+async function reverseCancelledPendingCompletionGrantsInSweep(term, conn, summary) {
+  try {
+    const grants = await conn('customer_credit_ledger')
+      .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+      .where('note', 'like', `%term ${term.id},%`)
+      .where('delta', '>', 0)
+      .select('note', 'invoice_id');
+    for (const grant of grants) {
+      const visitMatch = String(grant.note || '').match(/visit ([0-9a-f-]+)\)/i);
+      const visitId = visitMatch ? visitMatch[1] : null;
+      // The grant row carries the exact invoice the credit was issued
+      // against — check THAT invoice, not the visit's latest (a re-invoiced
+      // visit must not mask its refunded original, and a pre-grant void
+      // must not trigger a reversal).
+      if (!visitId || !grant.invoice_id) continue;
+      const grantInvoice = await conn('invoices')
+        .where({ id: grant.invoice_id })
+        .first('id', 'status');
+      if (!grantInvoice) continue;
+      const status = String(grantInvoice.status || '').toLowerCase();
+      if (!INVOICE_CANCELLED_STATUSES.has(status)) continue;
+      // The reversal is marker-deduped, so re-running for an
+      // already-reversed grant is a no-op.
+      summary.reversed += await reversePendingWindowCompletionCredits(term, conn, { visitId });
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
+  }
+}
+
 // Extracted from reconcileCoveredTermsSweep (complexity reduction, no
 // behavior change — the eslint complexity/max-depth gate on this diff):
 // the per-term body of the sweep's dated loop, unchanged apart from
@@ -4584,33 +4616,7 @@ async function reconcileOneCoveredTermInSweep(term, conn, todayKey, summary) {
   } catch (err) {
     logger.warn(`[annual-prepay] sweep extension-credit restore failed for term ${term.id}: ${err.message}`);
   }
-  try {
-    const grants = await conn('customer_credit_ledger')
-      .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
-      .where('note', 'like', `%term ${term.id},%`)
-      .where('delta', '>', 0)
-      .select('note', 'invoice_id');
-    for (const grant of grants) {
-      const visitMatch = String(grant.note || '').match(/visit ([0-9a-f-]+)\)/i);
-      const visitId = visitMatch ? visitMatch[1] : null;
-      // The grant row carries the exact invoice the credit was issued
-      // against — check THAT invoice, not the visit's latest (a re-invoiced
-      // visit must not mask its refunded original, and a pre-grant void
-      // must not trigger a reversal).
-      if (!visitId || !grant.invoice_id) continue;
-      const grantInvoice = await conn('invoices')
-        .where({ id: grant.invoice_id })
-        .first('id', 'status');
-      if (!grantInvoice) continue;
-      const status = String(grantInvoice.status || '').toLowerCase();
-      if (!INVOICE_CANCELLED_STATUSES.has(status)) continue;
-      // The reversal is marker-deduped, so re-running for an
-      // already-reversed grant is a no-op.
-      summary.reversed += await reversePendingWindowCompletionCredits(term, conn, { visitId });
-    }
-  } catch (err) {
-    logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
-  }
+  await reverseCancelledPendingCompletionGrantsInSweep(term, conn, summary);
 }
 
 async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
@@ -4638,7 +4644,6 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   try {
     const termCols = await annualPrepayColumns(conn);
     if (termCols.dispute_suspended_at) {
-      const todayKey = dateOnly(today) || etDateString();
       const staleMarked = await coveredTermsAsOf(conn, null)
         .whereNotNull('t.dispute_suspended_at')
         .select('t.*');

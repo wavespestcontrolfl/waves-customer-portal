@@ -3,6 +3,27 @@ const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 
+// Counters that mean the termite renewal sweep did something worth a log
+// line; a quiet night (only candidatesScanned / reconcileNeverAttemptedScanned)
+// stays silent. The leg lives outside checkAndSend so that function's
+// complexity stays at its baseline.
+const TERMITE_RENEWAL_ACTIVITY_KEYS = [
+  'minted', 'charged', 'failed', 'graceLapsed', 'noWitnessBelled', 'unanchoredBelled',
+  'staleOverdueBelled', 'lapseEffectsReconciled', 'reconcileNeverReachedStripeBelled',
+  'graceReconciliationDeferred', 'parentRenewedStamped', 'graceRetiredSettled',
+];
+
+async function runTermiteRenewalChargeLeg() {
+  try {
+    const { runTermiteAnnualRenewalSweep } = require('../termite-annual-renewal-charge');
+    const renewalCharge = await runTermiteAnnualRenewalSweep();
+    if (!TERMITE_RENEWAL_ACTIVITY_KEYS.some((key) => renewalCharge[key])) return;
+    logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.graceRetiredSettled} grace-retired (already settled), ${renewalCharge.graceReconciliationDeferred} grace-deferred (charge reconciliation pending), ${renewalCharge.noWitnessBelled} no-witness bells, ${renewalCharge.unanchoredBelled} unanchored bells, ${renewalCharge.staleOverdueBelled} stale-overdue bells, ${renewalCharge.lapseEffectsReconciled} lapse-effects reconciled, ${renewalCharge.reconcileNeverAttemptedScanned} never-attempted scanned, ${renewalCharge.reconcileNeverReachedStripeBelled} never-reached-Stripe bells, ${renewalCharge.parentRenewedStamped} parent-renewed backstop stamps`);
+  } catch (err) {
+    logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
+  }
+}
+
 class RenewalReminder {
   /**
    * Check all customers for upcoming renewal dates and send reminders
@@ -53,20 +74,9 @@ class RenewalReminder {
     // off). Mints a renewal successor for every due, witnessed, undecided
     // termite term, charges the saved consented method at most once, and
     // voids/retires any successor whose grace period lapsed unpaid.
-    // Independent try/catch, same as every other leg in this workflow.
-    try {
-      const { runTermiteAnnualRenewalSweep } = require('../termite-annual-renewal-charge');
-      const renewalCharge = await runTermiteAnnualRenewalSweep();
-      if (renewalCharge.minted || renewalCharge.charged || renewalCharge.failed || renewalCharge.graceLapsed
-        || renewalCharge.noWitnessBelled || renewalCharge.unanchoredBelled || renewalCharge.staleOverdueBelled
-        || renewalCharge.lapseEffectsReconciled || renewalCharge.reconcileNeverReachedStripeBelled
-        || renewalCharge.graceReconciliationDeferred || renewalCharge.parentRenewedStamped
-        || renewalCharge.graceRetiredSettled) {
-        logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.graceRetiredSettled} grace-retired (already settled), ${renewalCharge.graceReconciliationDeferred} grace-deferred (charge reconciliation pending), ${renewalCharge.noWitnessBelled} no-witness bells, ${renewalCharge.unanchoredBelled} unanchored bells, ${renewalCharge.staleOverdueBelled} stale-overdue bells, ${renewalCharge.lapseEffectsReconciled} lapse-effects reconciled, ${renewalCharge.reconcileNeverAttemptedScanned} never-attempted scanned, ${renewalCharge.reconcileNeverReachedStripeBelled} never-reached-Stripe bells, ${renewalCharge.parentRenewedStamped} parent-renewed backstop stamps`);
-      }
-    } catch (err) {
-      logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
-    }
+    // Independent try/catch (inside the helper), same as every other leg
+    // in this workflow.
+    await runTermiteRenewalChargeLeg();
 
     // OWNER RULING (2026-07-13): "renewal" language is reserved for termite
     // bonds — the one service with a real fixed term. WaveGuard and mosquito
