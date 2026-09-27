@@ -3734,7 +3734,7 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
   // Pending PRs belong to the poller. Other blog failures are terminal,
   // observable skips; no portal visit or email reply is required.
   if (run.action_type === 'new_supporting_blog' && patch.outcome === 'completed_pending_review'
-    && patch.skip_reason !== 'astro_pr_pending_merge') {
+    && !['astro_pr_pending_merge', 'gate_infrastructure_error'].includes(patch.skip_reason)) {
     patch = { ...patch, outcome: 'skipped' };
   }
   Object.assign(run, patch, { total_ms: Date.now() - t0, completed_at: new Date() });

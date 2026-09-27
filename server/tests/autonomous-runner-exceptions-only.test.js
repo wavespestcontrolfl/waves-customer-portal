@@ -271,7 +271,9 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
       }) },
     });
 
-    await expect(runner.runNext()).resolves.toMatchObject({ skip_reason: 'gate_infrastructure_error' });
+    await expect(runner.runNext()).resolves.toMatchObject({
+      outcome: 'completed_pending_review', skip_reason: 'gate_infrastructure_error',
+    });
     expect(queue.pendingReview).toHaveBeenCalledWith('opp_unknown_gap', 'gate_infrastructure_error', { claimToken: claimedAt });
     expect(queue.defer).not.toHaveBeenCalled();
   });
