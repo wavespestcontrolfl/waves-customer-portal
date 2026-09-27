@@ -2272,6 +2272,25 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(JSON.stringify(evidence.records)).not.toContain('941-555-0123');
   });
 
+  test('Codex #4996 r8: a card payment shows the invoice amount beside the surcharged charge, and an untitled invoice shows its service', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-1001',
+      title: null, service_type: 'Termite Treatment', total: 100, subtotal: 100, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    const card = (extra) => ({ customer_id: message.customer_id, status: 'paid', payment_date: etDateString(after), processor: 'stripe', created_at: after, ...extra });
+    await mockPg('payments').insert([
+      card({ amount: 102.90, base_amount_cents: 10000, surcharge_amount_cents: 290, stripe_payment_intent_id: 'pi_card_invoice',
+        metadata: JSON.stringify({ invoice_id: invoice.id }) }),
+      card({ amount: 92.57, base_amount_cents: 9000, surcharge_amount_cents: 257, stripe_payment_intent_id: 'pi_card_dues',
+        metadata: JSON.stringify({ billed_month: '2026-09' }) })]);
+    const commitment = { kind: 'other', description: 'Did my $100 termite payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    expect(evidence.records.find((r) => r.payment_source === 'invoice').text)
+      .toBe(`Payment of $102.90 ($100.00 plus a $2.90 card surcharge) toward invoice WPC-2026-1001 (Termite Treatment) received ${etDateString(after)}; the invoice is paid in full`);
+    expect(evidence.records.find((r) => r.payment_source === 'ledger').text)
+      .toBe(`Payment of $92.57 ($90.00 plus a $2.57 card surcharge) recorded ${etDateString(after)} (monthly plan charge for 2026-09)`);
+  });
+
   test('Codex #4996 r7: a no-show or cancellation fee takes its property from the visit or estimate its payment row names', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);

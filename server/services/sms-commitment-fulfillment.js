@@ -166,6 +166,15 @@ const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).
 // A method is shown only as one of these; the free-form method some writers
 // accept (the /prepaid route) never reaches the model.
 const KNOWN_TENDERS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card', 'ach', 'other']);
+// A card payment's amount includes its surcharge (stripe.js); the invoice
+// amount it paid rides beside it, so either figure can be matched (Codex
+// #4996 r8).
+function paidAmount(total, row) {
+  const surcharge = Number(row.surcharge_amount_cents) || 0;
+  const base = Number(row.base_amount_cents) || 0;
+  const charged = `$${Number(total).toFixed(2)}`;
+  return surcharge > 0 && base > 0 ? `${charged} ($${(base / 100).toFixed(2)} plus a $${(surcharge / 100).toFixed(2)} card surcharge)` : charged;
+}
 // A deposit's amount is its face value; a card deposit also collected a
 // surcharge (estimate-deposits.js), so the charged total is what the
 // customer's statement shows (Codex #4996 r6).
@@ -300,8 +309,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .whereRaw(NOT_FULLY_REFUNDED('p'))
           .whereRaw(`${settledAtSql} > ? AND ${settledAtSql} <= ?`, [after, now])
           .distinctOn('p.id').orderBy('p.id').orderByRaw(`(${exactMatchSql} OR ${manualMatchSql}) DESC, pinv.id`)
-          .select('p.id', 'p.amount as payment_amount', 'p.refund_amount', conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id',
-            'pinv.title', 'pinv.invoice_number',
+          .select('p.id', 'p.amount as payment_amount', 'p.base_amount_cents', 'p.surcharge_amount_cents', 'p.refund_amount',
+            conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id', 'pinv.title', 'pinv.service_type', 'pinv.invoice_number',
             conn.raw('COALESCE(pinv_visit.property_id, fee_visit.property_id, fee_estimate.property_id, sfc_estimate.property_id) AS property_id'),
             conn.raw('COALESCE(p.stripe_payment_intent_id, p.id::text) AS charge_key'),
             conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
@@ -332,7 +341,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           // email an operator typed by hand — it never reaches the model.
           // Only the structured method (CREDIT_PAYMENT_METHODS, validated at
           // the admin-customers.js writer) does, when set.
-          .select('lp.id', 'lp.amount', 'lp.refund_amount', 'lp.payment_date', 'lp.created_at', conn.raw("lp.metadata->>'method' as method"),
+          .select('lp.id', 'lp.amount', 'lp.base_amount_cents', 'lp.surcharge_amount_cents', 'lp.refund_amount', 'lp.payment_date', 'lp.created_at',
+            conn.raw("lp.metadata->>'method' as method"),
             // The monthly-dues charge stamps the month it collects for
             // (stripe.js, billing-cron.js); a retry keeps the original month.
             conn.raw("lp.metadata->>'billed_month' AS billed_month"),
@@ -368,12 +378,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         const legs = [
           invoicePayments.map(({ paid_in_full: paidInFull, charge_key: _charge, charge_total: chargeTotal, charge_invoices: chargeInvoices, ...row }) => ({
             ...row, payment_source: 'invoice',
-            text: `Payment of $${Number(row.payment_amount).toFixed(2)} toward invoice ${row.invoice_number || row.invoice_id}`
-              + `${row.title ? ` (${row.title})` : ''} received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
+            text: `Payment of ${paidAmount(row.payment_amount, row)} toward invoice ${row.invoice_number || row.invoice_id}`
+              + `${row.title || row.service_type ? ` (${row.title || row.service_type})` : ''}`
+              + ` received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
               + `${paidInFull ? '; the invoice is paid in full' : ''}`
               + `${Number(chargeInvoices) > 1 ? `; part of one $${Number(chargeTotal).toFixed(2)} charge covering ${chargeInvoices} invoices` : ''}` })),
           ledger.map(({ method, billed_month: billedMonth, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
-            text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${tender(method)}`
+            text: `Payment of ${paidAmount(row.amount, row)} recorded ${dateOnlyString(row.payment_date)}${tender(method)}`
               + `${/^\d{4}-\d{2}$/.test(billedMonth || '') ? ` (monthly plan charge for ${billedMonth})` : ''}${refundNote(row.refund_amount)}` })),
           deposits.map(({ service_interest: service, ...row }) => ({ ...row, payment_source: 'deposit', text: depositText(row, service) })),
           prepaidVisits.map(({ prepaid_method: method, prepaid_total: total, prepaid_visits: visits, ...row }) => ({ ...row, payment_source: 'prepaid',
