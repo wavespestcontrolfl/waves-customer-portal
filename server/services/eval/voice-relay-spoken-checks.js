@@ -67,8 +67,7 @@ const SPANISH_DENIED_REQUEST_RE = new RegExp(`\\bno\\s+${SPANISH_PENDING_AUXILIA
 const SPANISH_NON_PENDING_NEGATION_RE = /\b(?:nunca|jam[aá]s|tampoco)\b|\bno\s+(?!(?:est[aá]|qued[oó]|fue|ha\s+sido)(?![a-záéíóúñü]))/i;
 const SPANISH_PARTICIPLE = '(?:[a-záéíóúñü]+(?:ad|id)[oa]s?|abiert[oa]s?|cubiert[oa]s?|dich[oa]s?|escrit[oa]s?|hech[oa]s?|muert[oa]s?|puest[oa]s?|rot[oa]s?|vist[oa]s?|vuelt[oa]s?)';
 const SPANISH_PAST_AUXILIARY = '(?:(?:he|has|ha|hemos|hab[eé]is|han|hab[ií]a(?:s|mos|n)?)(?:\\s+sido)?|fui|fuiste|fue|fuimos|fuisteis|fueron|era|eras|[eé]ramos|erais|eran)';
-const SPANISH_ASSERTION_PARTICIPLE = '(?:(?:enviad|mandad|preparad|entregad|recibid|ofrecid|llamad|contactad|comunicad|confirmad)[oa]s?|escrit[oa]s?|devuelt[oa]s?|hech[oa]s?|puest[oa]s?)';
-const SPANISH_COMPLETED_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:se\\s+)?(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg|lleg|recib|ofrec|escrib|devolv)(?:ó|ió|aron|ieron|aba|aban|ía|ían)|(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg)é|(?:recib|ofrec|escrib|devolv)í|${SPANISH_PAST_AUXILIARY}\\s+${SPANISH_ASSERTION_PARTICIPLE}|(?:dio|dieron|puso|pusieron|hizo|hicieron))(?![a-záéíóúñü])`, 'i');
+const SPANISH_COMPLETED_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:se\\s+)?(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg|lleg|recib|ofrec|escrib|devolv)(?:ó|ió|aron|ieron|aba|aban|ía|ían)|(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg)é|(?:recib|ofrec|escrib|devolv)í|${SPANISH_PAST_AUXILIARY}\\s+${SPANISH_PARTICIPLE}|(?:dio|dieron|puso|pusieron|hizo|hicieron))(?![a-záéíóúñü])`, 'i');
 const SPANISH_FUTURE_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:${SPANISH_ASSERTION_VERB}|${SPANISH_IRREGULAR_FUTURE_STEM})(?:é|ás|á|emos|éis|án)|ser(?:é|ás|á|emos|éis|án)\\s+${SPANISH_PARTICIPLE}|va(?:mos|n)?\\s+a\\s+${SPANISH_ASSERTION_VERB}(?:le|les|nos|se)?)(?![a-záéíóúñü])`, 'i');
 const SPANISH_GROUNDED_CONTINUATION_RE = /\b((?:el|su)\s+t[eé]cnico)\b[^;]*;\s*((?:llega|viene|estar[aá])\s+hoy\b[^.!?]*)/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
@@ -141,7 +140,9 @@ function assertedSpokenMatch(text, re, { prospective = false } = {}) {
     const futureForms = [...evidence.matchAll(new RegExp(SPANISH_FUTURE_ASSERTION_RE.source, 'gi'))];
     const completedAt = completedForms.reduce((last, form) => form.index, -1);
     const futureAt = futureForms.reduce((last, form) => form.index, -1);
-    const completed = prospective && (Boolean(sharedPast) || completedAt > futureAt);
+    // The nearest finite auxiliary governs the delivery predicate, even
+    // when an earlier coordinated predicate used another tense.
+    const completed = prospective && completedAt > futureAt;
     if (!denied && !uncertain && !completed) return match;
   }
   return null;
