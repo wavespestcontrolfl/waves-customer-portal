@@ -800,7 +800,25 @@ async function stageOne(conn, call, now, boundary = null) {
   // AT THE MOMENT OF STAGING is never queued at all — this is what bounds
   // an off->on re-enable, long downtime, or a backlog to "the office sees
   // it was missed," never a burst of hours-late texts.
-  if (now.getTime() - new Date(send_at).getTime() > STAGING_STALE_MS) {
+  //
+  // Measured from the send-WINDOW-ADJUSTED time, never the raw nominal
+  // offset (codex #5018 round-2 P2): computeSendAt's call-end + 2h offset
+  // can itself land before 8 AM ET — a call ending at 1 AM computes a
+  // nominal send_at around 3 AM, hours before dispatch is ever allowed at
+  // all. Measuring staleness against that too-early instant terminally
+  // discarded a call staged at, say, 4:30 AM even though its actual first
+  // legal send (today's 8 AM open) was still nearly 3.5 hours away.
+  // isWithinSendWindowET/nextSendWindowOpenET (send-window.js, the same
+  // shared helper this file already uses for the dispatch-time window
+  // check below) compose the adjustment with no hand-rolled ET math:
+  // already-legal (within the window) keeps the nominal instant as is;
+  // otherwise nextSendWindowOpenET resolves the next open — the SAME
+  // calendar day's 8 AM for an early-morning instant (its own `hour < 8`
+  // branch never advances the date), the next day's 8 AM for an
+  // at/after-8-PM instant.
+  const nominalSendAt = new Date(send_at);
+  const legalSendAt = isWithinSendWindowET(nominalSendAt) ? nominalSendAt : nextSendWindowOpenET(nominalSendAt);
+  if (now.getTime() - legalSendAt.getTime() > STAGING_STALE_MS) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason: 'stale_at_staging', staged_at });
     return 'skipped';
   }

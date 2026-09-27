@@ -212,6 +212,101 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     } finally { require('../models/db').mockReset(); }
   });
 
+  // codex #5018 round-2 P1: dispatch()'s own sms_log insert runs INSIDE the
+  // caller's handoff transaction. If that transaction rolls back, or its own
+  // commit fails, AFTER Twilio accepted the message, the in-transaction
+  // insert rolls back with it even though the SMS genuinely sent — the catch
+  // below used to just log a warning and return success, silently losing the
+  // ONE piece of durable evidence linkSentRecently and delivery reconciliation
+  // read. Recreate the row on the base connection outside the dead
+  // transaction, with every field the in-transaction insert would have
+  // written.
+  test('a caller transaction that fails AFTER Twilio accepted recreates the sms_log row on the base connection, with the same fields', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-01T15:00:00Z'));
+    const trxInsert = jest.fn(async () => {});
+    // knex convention: calling the trx itself as a function selects a table.
+    const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    const baseInserted = [];
+    require('../models/db').mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
+      return {
+        // No row exists yet on the base connection — the transaction really
+        // did roll back, taking its own in-transaction insert with it.
+        where: () => ({ first: async () => undefined }),
+        insert: async (row) => { baseInserted.push(row); },
+      };
+    });
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM, customerId: 'cust-1', adminUserId: 'admin-1',
+        notificationEventKey: 'payment-expiry:pm-1:9:2026:expired',
+        withSmsHandoff: async (dispatch) => {
+          // The SDK call and the in-transaction sms_log insert both
+          // "succeed" on trx — then the caller's own transaction fails to
+          // commit (or the handoff wrapper throws some other error) AFTER
+          // that, exactly mirroring a real commit failure.
+          await dispatch(trx);
+          throw new Error('commit failed');
+        },
+      });
+      // Known acceptance is preserved — never surfaced as a send failure.
+      expect(result.success).toBe(true);
+      expect(result.sid).toBe('SM_ok');
+      // The doomed in-transaction insert still ran once (on trx, not db).
+      expect(trxInsert).toHaveBeenCalledTimes(1);
+      // Recreated exactly once, on the base connection.
+      expect(baseInserted).toHaveLength(1);
+      const row = baseInserted[0];
+      expect(row).toMatchObject({
+        customer_id: 'cust-1',
+        direction: 'outbound',
+        from_phone: FROM,
+        to_phone: TO,
+        message_body: 'Reminder body',
+        twilio_sid: 'SM_ok',
+        status: 'sent',
+        created_at: new Date('2026-01-01T15:00:00Z'),
+        message_type: 'manual',
+        admin_user_id: 'admin-1',
+      });
+      expect(JSON.parse(row.metadata)).toMatchObject({
+        pre_handoff_stamp: true,
+        notificationEventKey: 'payment-expiry:pm-1:9:2026:expired',
+      });
+    } finally { jest.useRealTimers(); require('../models/db').mockReset(); }
+  });
+
+  // The other half of the same fix: a caller whose transaction ACTUALLY
+  // committed (the row genuinely exists) but which threw some unrelated
+  // later error — e.g. releasing its own advisory lock after commit — must
+  // never get a duplicate row for the one send that already landed.
+  test('a caller transaction whose commit actually succeeded, but which threw a later error, does not duplicate the sms_log row', async () => {
+    const trxInsert = jest.fn(async () => {});
+    const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    const baseInsert = jest.fn(async () => {});
+    require('../models/db').mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
+      return {
+        // The commit already landed — a row with this SID genuinely exists.
+        where: () => ({ first: async () => ({ id: 'already-there' }) }),
+        insert: baseInsert,
+      };
+    });
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM,
+        withSmsHandoff: async (dispatch) => {
+          await dispatch(trx);
+          throw new Error('some unrelated post-commit error');
+        },
+      });
+      expect(result.success).toBe(true);
+      expect(trxInsert).toHaveBeenCalledTimes(1);
+      expect(baseInsert).not.toHaveBeenCalled();
+    } finally { require('../models/db').mockReset(); }
+  });
+
   test.each([
     ['stamps human_authored on the sms_log row for a composer-typed body', { humanAuthored: true }, true],
     ['leaves human_authored off for an automated or unchanged-draft manual send', { humanAuthored: false }, false],
@@ -421,6 +516,27 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'SMS_HANDOFF_CHECK_FAILED', retryable: true });
     expect(mockTwilioCreate).not.toHaveBeenCalled();
     expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
+  });
+
+  // codex #5018 round-2 P1: the post-acceptance sms_log recovery fallback
+  // must be gated on genuine provider acceptance — a handoff that fails
+  // BEFORE dispatch() ever runs (the provider was never reached) must never
+  // touch sms_log at all, recovery included.
+  test('the post-acceptance sms_log recovery never runs when the provider was not reached at all', async () => {
+    const dbSmsLog = jest.fn();
+    require('../models/db').mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
+      dbSmsLog();
+      return { where: () => ({ first: async () => undefined }), insert: async () => {} };
+    });
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+        withSmsHandoff: async () => { throw Object.assign(new Error('connection unavailable'), { code: '08006' }); },
+      });
+      expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'SMS_HANDOFF_CHECK_FAILED' });
+      expect(mockTwilioCreate).not.toHaveBeenCalled();
+      expect(dbSmsLog).not.toHaveBeenCalled();
+    } finally { require('../models/db').mockReset(); }
   });
 
   test.each([

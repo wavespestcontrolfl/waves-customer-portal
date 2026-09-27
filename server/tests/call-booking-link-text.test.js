@@ -884,6 +884,64 @@ describe('stage', () => {
     expect(decided).toBe('pending'); // sent on schedule, nothing lost to the cap
   });
 
+  // codex #5018 round-2 P2: computeSendAt's call-end + 2h offset can itself
+  // land before the 8 AM ET send window even opens — a call ending at
+  // 1 AM ET computes a nominal send_at around 3 AM. The staleness cap must
+  // measure from the WINDOW-ADJUSTED first legal send moment (today's 8 AM
+  // ET here), never that too-early nominal instant — a 1 AM call staged at
+  // 4:30 AM is barely over an hour past the (illegal) 3 AM offset, but
+  // more than three hours BEFORE its actual first legal send.
+  test('a 1 AM ET call staged at 4:30 AM ET is not stale — its nominal offset is before the window even opens', async () => {
+    const now = new Date('2026-09-26T08:30:00Z'); // 4:30 AM ET
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    conn.raw = jest.fn(() => 'RAW');
+    const call = {
+      id: 'call-1am', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date('2026-09-26T05:00:00Z'), duration_seconds: 90, // 1:00 AM ET, ends ~1:01:30 AM ET
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
+      metadata: { lead_id: 'lead-1' },
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now, new Date('2020-01-01'));
+    expect(decided).toBe('pending'); // NOT stale_at_staging — the actual first legal send is still hours away
+  });
+
+  // The other half of the same fix: a call whose WINDOW-ADJUSTED send time
+  // (not its raw nominal offset) is genuinely more than an hour in the past
+  // must still be caught as stale — the fix narrows the false positive, it
+  // does not disable the cap for early-morning calls.
+  test('a 1 AM ET call staged more than an hour past its window-adjusted (8 AM ET) send time is still stale_at_staging', async () => {
+    const now = new Date('2026-09-26T13:05:00Z'); // 9:05 AM ET — 65 minutes past the 8 AM ET window open
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    const rawBindings = [];
+    conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
+    const call = {
+      id: 'call-1am-late', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date('2026-09-26T05:00:00Z'), duration_seconds: 90, // 1:00 AM ET
+      transcription: STAGE_TWO_WAY_TRANSCRIPT,
+      metadata: { lead_id: 'lead-1' },
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { status: 'validated_accept', inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now, new Date('2020-01-01'));
+    expect(decided).toBe('skipped');
+    const parsed = rawBindings.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text);
+    expect(parsed.call_booking_link_text.reason).toBe('stale_at_staging');
+  });
+
   test('STAGING_STALE_MS is exactly one hour', () => {
     expect(STAGING_STALE_MS).toBe(60 * 60 * 1000);
   });

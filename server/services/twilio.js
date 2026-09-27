@@ -1091,6 +1091,65 @@ const TwilioService = {
       const sentToKnownOwnerPhone = isKnownOwnerPhone(to);
       let message;
       let dispatchStarted = false;
+      // sms_log row shape shared by dispatch()'s own in-transaction insert
+      // and the post-handoff-rollback recovery insert below (codex #5018
+      // round-2 P1) — one field list, never two hand-maintained copies that
+      // could drift. Reads `message`/`handoffAt` at CALL time, so it is
+      // safe to define here, before dispatch() ever sets either — this
+      // function is only ever invoked once both are set.
+      const buildSmsLogRow = () => ({
+        customer_id: options.customerId || null,
+        direction: "outbound",
+        from_phone: fromNumber,
+        to_phone: to,
+        message_body: body,
+        twilio_sid: message.sid,
+        status: "sent",
+        created_at: handoffAt,
+        message_type: options.messageType || "manual",
+        admin_user_id: options.adminUserId || null,
+        // Decision linkage makes the sent row recoverable: if the process
+        // dies after Twilio accepts but before the caller resolves the
+        // Agent Review decisions (composer send or scheduled-SMS cron),
+        // the nightly suggest sweep resolves the used decision and ignores
+        // the parked ones from this linkage instead of reopening cards on
+        // an answered thread.
+        // scheduled_sms_log_id ties this provider row back to the queued
+        // row that dispatched it, so stale-claim recovery can prove the
+        // send happened instead of retrying (double-send) or reopening.
+        // pre_handoff_stamp marks created_at as the PRE-handoff capture
+        // above — the delayed-callback readers (21610/30006 ordering)
+        // apply their race grace only to rows WITHOUT it (hook P1: the
+        // grace exists for legacy post-handoff writers; backdating a
+        // pre-stamped row misorders a START received between handoff and
+        // the carrier verdict).
+        metadata: JSON.stringify({
+          pre_handoff_stamp: true,
+          ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
+          // Which explicit billing-channel leg this accepted send IS
+          // (billing-channel-routing.js's sendBillingLeg) — scopes a later
+          // replay's notificationEventKey dedupe lookup
+          // (messaging/billing-text-leg-dedupe.js) to an explicit billing
+          // Text leg, never a legacy send or another producer's own reuse
+          // of the same-shaped key.
+          ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
+          ...(options.humanAuthored === true ? { human_authored: true } : {}),
+          ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
+          ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
+          ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
+          ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
+            ? { parked_decision_ids: options.parkedDecisionIds }
+            : {}),
+          ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+          ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+          // The visit this send is about, on the primary row itself: the
+          // messaging audit is best-effort, and readers that scope by
+          // property (SMS commitment evidence) must not depend on it
+          // (Codex #4816 r41). Same key the push proof row uses.
+          // The visit and its send-time property (Codex #4816 r41/r49).
+          ...noticeScopeStamp,
+        }),
+      });
       // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an
       // OPTIONAL trx — send-customer-message.js's own withSmsHandoff bridge
       // (the sole path every withSmsHandoff caller in the repo funnels
@@ -1307,59 +1366,7 @@ const TwilioService = {
         // lock cannot release until this commits (or the transaction
         // rolls back with it, exactly like any other write inside it).
         try {
-          await (trx || db)("sms_log").insert({
-            customer_id: options.customerId || null,
-            direction: "outbound",
-            from_phone: fromNumber,
-            to_phone: to,
-            message_body: body,
-            twilio_sid: message.sid,
-            status: "sent",
-            created_at: handoffAt,
-            message_type: options.messageType || "manual",
-            admin_user_id: options.adminUserId || null,
-            // Decision linkage makes the sent row recoverable: if the process
-            // dies after Twilio accepts but before the caller resolves the
-            // Agent Review decisions (composer send or scheduled-SMS cron),
-            // the nightly suggest sweep resolves the used decision and ignores
-            // the parked ones from this linkage instead of reopening cards on
-            // an answered thread.
-            // scheduled_sms_log_id ties this provider row back to the queued
-            // row that dispatched it, so stale-claim recovery can prove the
-            // send happened instead of retrying (double-send) or reopening.
-            // pre_handoff_stamp marks created_at as the PRE-handoff capture
-            // above — the delayed-callback readers (21610/30006 ordering)
-            // apply their race grace only to rows WITHOUT it (hook P1: the
-            // grace exists for legacy post-handoff writers; backdating a
-            // pre-stamped row misorders a START received between handoff and
-            // the carrier verdict).
-            metadata: JSON.stringify({
-              pre_handoff_stamp: true,
-              ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
-              // Which explicit billing-channel leg this accepted send IS
-              // (billing-channel-routing.js's sendBillingLeg) — scopes a later
-              // replay's notificationEventKey dedupe lookup
-              // (messaging/billing-text-leg-dedupe.js) to an explicit billing
-              // Text leg, never a legacy send or another producer's own reuse
-              // of the same-shaped key.
-              ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
-              ...(options.humanAuthored === true ? { human_authored: true } : {}),
-              ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
-              ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
-              ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
-              ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
-                ? { parked_decision_ids: options.parkedDecisionIds }
-                : {}),
-              ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
-              ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
-              // The visit this send is about, on the primary row itself: the
-              // messaging audit is best-effort, and readers that scope by
-              // property (SMS commitment evidence) must not depend on it
-              // (Codex #4816 r41). Same key the push proof row uses.
-              // The visit and its send-time property (Codex #4816 r41/r49).
-              ...noticeScopeStamp,
-            }),
-          });
+          await (trx || db)("sms_log").insert(buildSmsLogRow());
         } catch (logErr) {
           logger.error(`SMS log failed: ${logErr.message}`);
         }
@@ -1404,6 +1411,26 @@ const TwilioService = {
             // The read-only guard may fail to commit after Twilio accepts.
             // Preserve that known acceptance so callers cannot retry the SMS.
             logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
+            // codex #5018 round-2 P1: dispatch()'s own sms_log insert ran
+            // INSIDE the caller's handoff transaction (trx || db, above) —
+            // if that transaction rolled back, or its own commit itself
+            // failed (this catch), the insert rolls back with it even
+            // though Twilio genuinely accepted the message. Readers like
+            // linkSentRecently and delivery reconciliation would then see
+            // no evidence at all and permit a duplicate send. Recreate the
+            // row on the base connection, outside the now-dead
+            // transaction — never `trx`, which the caller's own rollback
+            // may already have released or which never committed at all.
+            // Idempotent on twilio_sid: a caller whose commit actually
+            // SUCCEEDED and only threw some later, unrelated error (e.g.
+            // releasing its own advisory lock after commit) must never get
+            // a duplicate row for the one send that already landed.
+            try {
+              const alreadyLogged = await db('sms_log').where({ twilio_sid: message.sid }).first('id');
+              if (!alreadyLogged) await db('sms_log').insert(buildSmsLogRow());
+            } catch (recoveryErr) {
+              logger.error(`SMS log recovery insert failed after handoff rollback: ${recoveryErr.message}`);
+            }
           }
         }
         if (!acceptedMessage) {
