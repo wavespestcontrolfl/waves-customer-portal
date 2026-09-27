@@ -17198,6 +17198,12 @@ function oneTimeItemsForRender(estResult, estData) {
     debrisRemovalIncluded: row.debrisRemovalIncluded === true,
     creditableWithinDays: row.creditableWithinDays || null,
     includesScreening: row.includesScreening === true,
+    // Trapping allowance (owner ruling 2026-09-26): the copy pack renders
+    // the saved count; dropping these made every quote read as legacy
+    // unlimited callbacks (codex #4932 pre-push P1).
+    includedFollowUps: row.includedFollowUps ?? null,
+    includedCallbacks: row.includedCallbacks ?? null,
+    unlimitedCallbacks: typeof row.unlimitedCallbacks === 'boolean' ? row.unlimitedCallbacks : null,
     includedScope: row.includedScope || null,
     retainerBilling: row.retainerBilling || null,
     atticSqFt: row.atticSqFt ?? null,
@@ -17662,6 +17668,13 @@ function normalizeOneTimeBreakdown(estData) {
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
         creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
         includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
+        // Trapping allowance the copy pack renders (codex #4932 pre-push P1).
+        // Keep every other service's public item shape byte-compatible.
+        ...(service === 'rodent_trapping' ? {
+          includedFollowUps: item.includedFollowUps ?? null,
+          includedCallbacks: item.includedCallbacks ?? null,
+          unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
+        } : {}),
         includedScope: item.includedScope || null,
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
@@ -25082,6 +25095,20 @@ async function buildPricingBundleInner(estimate) {
     })), estimate, estData), treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(snapshotBundle));
   }
 
+  // A sent snapshot above is a frozen customer promise. Recomputed engine
+  // quotes below are live, so a trapping replay reads the active catalog row
+  // on this request instead of trusting this process's pricing singleton.
+  // This also closes the 10-minute estimate-cache window when another server
+  // process handled the Service Library edit.
+  const v1 = readV1Shape(estData);
+  let engineInputs = v1 ? null : extractEngineInputs(estData);
+  if (engineInputs) {
+    const hasRodentTrapping = !!engineInputs.services?.rodentTrapping;
+    engineInputs = await require('../services/pricing-engine/trusted-catalog-pricing')
+      .withTrustedCatalogPricing(engineInputs, { database: db });
+    if (hasRodentTrapping) clearEstimatePricingCache(estimate);
+  }
+
   const cached = getEstimatePricingCache(estimate);
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
@@ -25100,7 +25127,6 @@ async function buildPricingBundleInner(estimate) {
 
   // v1 shape (admin UI estimates) — read pre-computed pestTiers directly.
   // This is the dominant path until Session 11 retires the client engine.
-  const v1 = readV1Shape(estData);
   if (v1) {
     const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
     // v1 shapes cannot carry an operator floor breach today (the operator
@@ -25291,8 +25317,6 @@ async function buildPricingBundleInner(estimate) {
   // Otherwise: engine-invocation path (modular-engine inputs / IB-sourced
   // estimates with engineInputs.services.pest shape). Runs generateEstimate
   // 3x with varied pest frequency.
-  const engineInputs = extractEngineInputs(estData);
-
   // No engine inputs saved → fall back to the single-frequency view using
   // stored totals. Not ideal but safer than fabricating a multi-frequency
   // ladder from nothing. React renders a simplified PriceCard.

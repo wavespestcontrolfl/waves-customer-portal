@@ -19,6 +19,7 @@ const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
+const { redactAccessCodes } = require('../context-aggregator');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -345,14 +346,55 @@ function catalogApprovedForReport(row) {
   return true;
 }
 
+const DETERMINISTIC_APPLICATION_ROLES = new Map([
+  ['herbicide', 'weed-control application'],
+  ['weed', 'weed-control application'],
+  ['weed control', 'weed-control application'],
+  ['fertilizer', 'fertilizer application'],
+  ['nutrient', 'fertilizer application'],
+  ['micronutrient', 'fertilizer application'],
+  ['insecticide', 'insect-control application'],
+  ['igr', 'insect-control application'],
+  ['bait', 'bait application'],
+  ['insect', 'insect-control application'],
+  ['fungicide', 'disease-control application'],
+  ['disease', 'disease-control application'],
+  ['wetting agent', 'moisture-support application'],
+  ['wetting', 'moisture-support application'],
+  ['moisture', 'moisture-support application'],
+  ['biostimulant', 'soil-support application'],
+  ['soil support', 'soil-support application'],
+  ['growth regulator', 'growth-regulator application'],
+  ['pgr', 'growth-regulator application'],
+]);
+
+const DETERMINISTIC_METHOD_LABELS = {
+  perimeter_spray: 'perimeter spray',
+  broadcast_spray: 'broadcast spray',
+  spot_treatment: 'spot treatment',
+  granular_broadcast: 'granular broadcast',
+  soil_drench: 'soil drench',
+  root_injection: 'root injection',
+  soil_injection: 'soil injection',
+  bait_placement: 'bait placement',
+  station_check: 'station check',
+  fog_ulv: 'fog/ULV application',
+  foliar_spray: 'foliar spray',
+  trunk_injection: 'trunk injection',
+  pin_stream: 'pin stream application',
+};
+
 // Re-entry / rainfast / active-ingredient data for the products applied today.
 // Matched by catalog id (preferred) or name, and filtered to APPROVED,
-// label-verified rows only — unapproved catalog rows must not drive customer copy.
+// label-verified rows only. The same query also binds each selected application
+// to an approved broad role for the provider-failure fallback. Product names and
+// active ingredients never enter that fallback evidence.
 async function loadProductSafety(products, knex) {
   const list = Array.isArray(products) ? products : [];
   const ids = [...new Set(list.map((p) => p && p.productId).filter(Boolean))];
   const names = [...new Set(list.map((p) => cleanText(p && p.name)).filter(Boolean))];
-  if (!ids.length && !names.length) return [];
+  const empty = { safetyFacts: [], deterministicApplications: [] };
+  if (!ids.length && !names.length) return empty;
   try {
     const rows = await knex('products_catalog')
       .where(function matchCatalog() {
@@ -365,23 +407,48 @@ async function loadProductSafety(products, knex) {
       .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number',
         'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'irrigation_required',
         'approved_for_service_report');
-    return rows
-      .filter(catalogApprovedForReport)
-      .map((r) => ({
-        name: cleanText(r.name),
-        activeIngredient: cleanText(r.active_ingredient) || null,
-        // Preserve a real DB null (unknown REI) — finiteOrNull(null) is 0, which
-        // would misrender an unknown REI as an until-dry/zero claim downstream.
-        reiHours: r.rei_hours == null ? null : finiteOrNull(r.rei_hours),
-        rainfastMinutes: finiteOrNull(r.rainfast_minutes),
-        reentryText: truncate(r.reentry_summary || r.reentry_text, 200) || null,
-        // Tri-state: true = label requires watering-in, false = label says no
-        // irrigation needed, null = unknown (omitted from the prompt).
-        irrigationRequired: r.irrigation_required == null ? null : Boolean(r.irrigation_required),
-      }));
+    const approvedRows = rows.filter(catalogApprovedForReport);
+    const safetyFacts = approvedRows.map((r) => ({
+      name: cleanText(r.name),
+      activeIngredient: cleanText(r.active_ingredient) || null,
+      // Preserve a real DB null (unknown REI) — finiteOrNull(null) is 0, which
+      // would misrender an unknown REI as an until-dry/zero claim downstream.
+      reiHours: r.rei_hours == null ? null : finiteOrNull(r.rei_hours),
+      rainfastMinutes: finiteOrNull(r.rainfast_minutes),
+      reentryText: truncate(r.reentry_summary || r.reentry_text, 200) || null,
+      // Tri-state: true = label requires watering-in, false = label says no
+      // irrigation needed, null = unknown (omitted from the prompt).
+      irrigationRequired: r.irrigation_required == null ? null : Boolean(r.irrigation_required),
+    }));
+    const rowsById = new Map(approvedRows.map((row) => [String(row.id), row]));
+    const rowsByName = new Map(approvedRows.map((row) => [cleanText(row.name).toLowerCase(), row]));
+    const deterministicApplications = list.flatMap((selected) => {
+      const catalog = selected?.productId
+        ? rowsById.get(String(selected.productId))
+        : rowsByName.get(cleanText(selected?.name).toLowerCase());
+      const role = [catalog?.category, catalog?.product_type]
+        .map((value) => DETERMINISTIC_APPLICATION_ROLES.get(cleanText(value).toLowerCase().replace(/[_-]+/g, ' ')))
+        .find(Boolean);
+      if (!role) return [];
+      const method = cleanText(redactAccessCodes(selected?.applicationMethod));
+      const area = cleanText(redactAccessCodes(selected?.applicationArea));
+      const areaValueText = cleanText(redactAccessCodes(selected?.areaValue));
+      const areaValue = Number(areaValueText);
+      const positiveMeasurement = Number.isFinite(areaValue) && areaValue > 0;
+      return [{
+        role,
+        method: Object.hasOwn(DETERMINISTIC_METHOD_LABELS, method) ? DETERMINISTIC_METHOD_LABELS[method] : null,
+        area: area || null,
+        areaValue: positiveMeasurement ? areaValueText : null,
+        areaUnit: positiveMeasurement
+          ? cleanText(redactAccessCodes(selected?.areaUnit)) || null
+          : null,
+      }];
+    });
+    return { safetyFacts, deterministicApplications };
   } catch (err) {
     logger.warn(`[report-copy-context] product-safety load failed: ${err.message}`);
-    return [];
+    return empty;
   }
 }
 
@@ -453,7 +520,7 @@ async function buildReportCopyContext({
   const lng = finiteOrNull(customer?.longitude);
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
-  const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments] = await Promise.all([
+  const [priorVisits, productEvidence, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments] = await Promise.all([
     loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
@@ -475,6 +542,7 @@ async function buildReportCopyContext({
       ? loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessmentId, serviceYmd, knex })
       : Promise.resolve({ today: null, prior: null }),
   ]);
+  const productSafety = productEvidence.safetyFacts;
 
   // Respect the same customer-visibility gate the normal report paths use: when
   // Pest Pressure is hidden (feature off, showOnCustomerReport off, service line
@@ -514,6 +582,21 @@ async function buildReportCopyContext({
 
   if (targets.length) {
     sections.push(`TARGETS TAGGED TODAY (tech-tagged, per product — pests, weeds/diseases, or nutrition goals): ${targets.join(', ')}`);
+  }
+
+  if (productEvidence.deterministicApplications.length) {
+    const applications = productEvidence.deterministicApplications.map((application) => [
+      application.role,
+      application.method ? `selected method: ${application.method}` : null,
+      application.area ? `selected area: ${application.area}` : null,
+      application.areaValue && application.areaUnit
+        ? `treated area entered: ${application.areaValue} ${application.areaUnit}`
+        : null,
+    ].filter(Boolean).join('; '));
+    sections.push(
+      'APPLICATION DETAILS (selected product entries for THIS VISIT; catalog-approved roles, with only supplied method and area values. Do not infer additional scope, quantity, targets, or outcomes):\n'
+      + applications.map((application) => `- ${application}`).join('\n'),
+    );
   }
 
   // Photo-scored lawn assessment (tech-confirmed scores only — the free-text
@@ -663,7 +746,11 @@ async function buildReportCopyContext({
     monthNum,
   };
 
-  return { contextText, signals };
+  return {
+    contextText,
+    signals,
+    deterministicApplications: productEvidence.deterministicApplications,
+  };
 }
 
 module.exports = {

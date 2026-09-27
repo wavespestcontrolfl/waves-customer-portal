@@ -25,7 +25,7 @@ const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, t
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 
-const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate, dateOnlyString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -70,6 +70,8 @@ const {
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
+const { gateEnvValue } = require('../config/feature-gates');
+const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
 // package rules, species gating) lives in ONE place — the obligation module
@@ -284,22 +286,248 @@ function irrigationSettingsOnFile(prefs) {
     || parseConfirmedFields(prefs.irrigation_confirmed_fields).some((f) => IRRIGATION_ON_FILE_CONFIRMED.has(f));
 }
 
+const PREVIOUS_RECOMMENDATION_VISIT_LIMIT = 3;
+const PREVIOUS_RECOMMENDATION_ITEM_LIMIT = 12;
+const PREVIOUS_RECOMMENDATION_SCAN_LIMIT = 500;
+const RECOMMENDATION_FIELD_PATTERN = /(^|_)(?:recommendation|recommendations|recommended)(?:_|$)/i;
+// Governed rodent options include no-action and already-completed states.
+// Neither is a recommendation to carry into a later visit.
+const NEGATIVE_RECOMMENDATION_PATTERN = /^(?:no|false|none|not recommended|no action needed|no follow-up needed|not needed at this time|no service needed at this time|completed previously)$/i;
+
+function recommendationTextValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .filter((item) => typeof item === 'string' || typeof item === 'number')
+    .map((item) => String(item).replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function frozenRecommendationTexts(finding = {}) {
+  const rawValues = recommendationTextValues(finding.value);
+  if (rawValues.some((value) => NEGATIVE_RECOMMENDATION_PATTERN.test(value))) return [];
+  const parts = recommendationTextValues(finding.customerValueParts);
+  return parts.length ? parts : recommendationTextValues(finding.customerValueLabel);
+}
+
+function legacyRecommendationTexts(values, frozenKeys) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return [];
+  const texts = [];
+  for (const [key, value] of Object.entries(values)) {
+    if (frozenKeys.has(key) || !RECOMMENDATION_FIELD_PATTERN.test(key)) continue;
+    for (const raw of recommendationTextValues(value)) {
+      if (NEGATIVE_RECOMMENDATION_PATTERN.test(raw)) continue;
+      const mapped = ActivityIndicators.customerLabelForValue(key, raw);
+      texts.push(mapped === raw && /^(?:yes|true)$/i.test(raw)
+        ? `${ActivityIndicators.customerLabelForField(key)}: ${raw}`
+        : mapped);
+    }
+  }
+  return texts;
+}
+
+function recommendationTextsFromSnapshot(snapshot = null) {
+  const texts = recommendationTextValues(snapshot?.nextStepChips)
+    .filter((text) => !NEGATIVE_RECOMMENDATION_PATTERN.test(text));
+  const frozenKeys = new Set();
+  const findings = Array.isArray(snapshot?.findings) ? snapshot.findings : [];
+  for (const finding of findings) {
+    const key = String(finding?.fieldKey || '');
+    if (!RECOMMENDATION_FIELD_PATTERN.test(key)) continue;
+    const frozenTexts = frozenRecommendationTexts(finding);
+    // Current snapshots freeze the exact customer copy in findings. Raw
+    // value reconstruction remains only when the legacy finding omitted it.
+    if (!frozenTexts.length) continue;
+    frozenKeys.add(key);
+    texts.push(...frozenTexts);
+  }
+  return texts.concat(legacyRecommendationTexts(snapshot?.values, frozenKeys));
+}
+
+function recommendationHistoryFromRecord(record = {}, visitLine = '') {
+  const structured = parseJsonObject(record.structured_notes);
+  if (structured.backfill || String(structured.visitOutcome || '') === 'incomplete') {
+    return { eligible: false, texts: [] };
+  }
+  const serviceData = parseJsonObject(record.service_data);
+  const primaryLine = String(record.service_line || '').trim() || detectServiceLine(record.service_type);
+  // Delivery posture describes intent. The report token proves that a
+  // customer-facing artifact was actually published for this record.
+  const reportPublished = Boolean(record.report_view_token);
+  const recordVisible = reportPublished
+    && String(structured.typedReportDelivery || 'auto_send') === 'auto_send';
+  const primaryVisible = recordVisible && primaryLine === visitLine;
+  const snapshots = [];
+  if (primaryVisible && serviceData.typedReportSnapshot
+    && typeof serviceData.typedReportSnapshot === 'object') {
+    snapshots.push(serviceData.typedReportSnapshot);
+  }
+  const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots.filter((snapshot) => snapshot
+      && recordVisible
+      && typeof snapshot === 'object'
+      && snapshot.delivery === 'auto_send'
+      && detectServiceLine(snapshot.type) === visitLine)
+    : [];
+  const texts = [
+    ...(primaryVisible ? recommendationTextValues(structured.formRecommendations) : []),
+    ...snapshots.flatMap(recommendationTextsFromSnapshot),
+    ...companionSnapshots.flatMap(recommendationTextsFromSnapshot),
+  ];
+  const seen = new Set();
+  return {
+    eligible: primaryVisible || companionSnapshots.length > 0,
+    texts: texts.filter((text) => {
+      const key = text.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+  };
+}
+
+function recommendationPremiseKey({
+  propertyAddressLine1, propertyAddressLine2, propertyCity, propertyZip,
+  serviceAddressLine1, serviceAddressLine2, serviceCity, serviceZip,
+}) {
+  const linkedProperty = String(propertyAddressLine1 || '').trim();
+  const address = linkedProperty
+    ? {
+      address_line1: propertyAddressLine1,
+      address_line2: propertyAddressLine2,
+      city: propertyCity,
+      zip: propertyZip,
+    }
+    : {
+      address_line1: serviceAddressLine1,
+      address_line2: serviceAddressLine2,
+      city: serviceCity,
+      zip: serviceZip,
+    };
+  return String(address.address_line1 || '').trim() ? addressKey(address) : '';
+}
+
+async function loadPreviousRecommendations({ customerId, serviceType, serviceId, visitDay, propertyScope }) {
+  if (!customerId || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDay || ''))) return [];
+  const visitLine = detectServiceLine(serviceType);
+  const currentPropertyId = propertyScope?.propertyId || null;
+  const currentPremiseKey = recommendationPremiseKey(propertyScope || {});
+  // A property-scoped history read must have either the linked property id or
+  // a canonical legacy appointment address. Unknown premise is not evidence
+  // that a customer-wide record belongs to this appointment.
+  if (!currentPropertyId && !currentPremiseKey) return [];
+  const output = [];
+  const eligibleVisits = new Set();
+  const seenRecommendations = new Set();
+  let offset = 0;
+  let reachedVisitLimit = false;
+  while (!reachedVisitLimit) {
+    const rows = await db('service_records')
+      .leftJoin('scheduled_services as history_visit', 'history_visit.id', 'service_records.scheduled_service_id')
+      .leftJoin('customer_properties as history_property', 'history_property.id', 'history_visit.property_id')
+      .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' })
+      .where('service_records.service_date', '<=', visitDay)
+      .orderBy('service_records.service_date', 'desc')
+      .orderBy('service_records.created_at', 'desc')
+      .orderBy('service_records.id', 'desc')
+      .limit(PREVIOUS_RECOMMENDATION_SCAN_LIMIT)
+      .offset(offset)
+      .select(
+        'service_records.id as id', 'service_records.scheduled_service_id as scheduled_service_id',
+        'service_records.service_type as service_type', 'service_records.service_line as service_line',
+        'service_records.service_date as service_date', 'service_records.structured_notes as structured_notes',
+        'service_records.service_data as service_data', 'service_records.report_view_token as report_view_token',
+        'history_visit.id as history_visit_id', 'history_visit.customer_id as history_visit_customer_id',
+        'history_visit.property_id as history_property_id',
+        'history_visit.service_address_line1 as history_service_address_line1',
+        'history_visit.service_address_line2 as history_service_address_line2',
+        'history_visit.service_address_city as history_service_address_city',
+        'history_visit.service_address_zip as history_service_address_zip',
+        'history_property.address_line1 as history_property_address_line1',
+        'history_property.address_line2 as history_property_address_line2',
+        'history_property.city as history_property_city', 'history_property.zip as history_property_zip',
+      )
+      .catch(() => []);
+    // Property provenance is a distinct pipeline stage before visibility and
+    // visit counting. Linked ids are authoritative when present on both
+    // appointments; otherwise the canonical linked-property/legacy-stamp
+    // address proves the premise.
+    const propertyRows = rows.filter((row) => {
+      if (!row.history_visit_id
+        || String(row.history_visit_customer_id || '') !== String(customerId)) return false;
+      const historyPropertyId = row.history_property_id || null;
+      if (currentPropertyId && historyPropertyId) {
+        return String(currentPropertyId) === String(historyPropertyId);
+      }
+      const historyPremiseKey = recommendationPremiseKey({
+        propertyAddressLine1: row.history_property_address_line1,
+        propertyAddressLine2: row.history_property_address_line2,
+        propertyCity: row.history_property_city,
+        propertyZip: row.history_property_zip,
+        serviceAddressLine1: row.history_service_address_line1,
+        serviceAddressLine2: row.history_service_address_line2,
+        serviceCity: row.history_service_address_city,
+        serviceZip: row.history_service_address_zip,
+      });
+      return !!currentPremiseKey && historyPremiseKey === currentPremiseKey;
+    });
+    for (const row of propertyRows) {
+      if (String(row.scheduled_service_id || '') === String(serviceId || '')) continue;
+      const history = recommendationHistoryFromRecord(row, visitLine);
+      // Apply property provenance and customer visibility before the three-
+      // visit bound so other premises, backfills, incomplete/suppressed
+      // reports, and internal-only companions cannot consume a slot.
+      if (!history.eligible) continue;
+      // A scheduled visit may intentionally own multiple completed records.
+      // The resolved visit link is the counting unit, including legacy visits
+      // whose property identity came from their canonical address stamp.
+      const visitKey = `scheduled:${row.history_visit_id}`;
+      if (!eligibleVisits.has(visitKey)) {
+        if (eligibleVisits.size >= PREVIOUS_RECOMMENDATION_VISIT_LIMIT) {
+          reachedVisitLimit = true;
+          continue;
+        }
+        eligibleVisits.add(visitKey);
+      }
+      const serviceDate = dateOnlyString(row.service_date) || '';
+      for (const text of history.texts) {
+        const recommendationKey = text.toLowerCase();
+        if (seenRecommendations.has(recommendationKey)) continue;
+        seenRecommendations.add(recommendationKey);
+        output.push({ text, serviceDate, serviceRecordId: row.id });
+        if (output.length >= PREVIOUS_RECOMMENDATION_ITEM_LIMIT) return output;
+      }
+    }
+    if (reachedVisitLimit || rows.length < PREVIOUS_RECOMMENDATION_SCAN_LIMIT) break;
+    offset += rows.length;
+  }
+  return output;
+}
+
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
-// tip-picker payload (tips-from-your-tech PR 2). Gate-off answers
-// { available: false } and the client keeps the free-text Observations /
-// Recommendations boxes. Gate-on returns the whole registry grouped for the
-// visit's service line and season (tip-library.tipsForVisit — nothing is
-// hidden, the client searches), plus two per-customer facts the picker
-// renders as marks: when each tip was last frozen into one of this
-// customer's reports in the last 90 days (so a repeat is deliberate), and
-// whether the property already has irrigation on file (the portal tip's
-// condition). Read-only.
+// tip-picker payload plus the independently gated completion-choice history.
+// When both gates are off this remains a no-read availability probe. Read-only.
 router.get('/:serviceId/tech-tips', async (req, res, next) => {
   try {
-    if (!techTipsGateOn()) return res.json({ available: false });
+    const completionChoicesEnabled = gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES');
+    const tipsEnabled = techTipsGateOn();
+    if (!tipsEnabled && !completionChoicesEnabled) {
+      return res.json({ available: false, completionChoicesEnabled: false });
+    }
     const svc = await db('scheduled_services')
-      .where({ id: req.params.serviceId })
-      .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id');
+      .leftJoin('customer_properties as current_property', 'current_property.id', 'scheduled_services.property_id')
+      .where({ 'scheduled_services.id': req.params.serviceId })
+      .first(
+        'scheduled_services.id as id', 'scheduled_services.customer_id as customer_id',
+        'scheduled_services.service_type as service_type', 'scheduled_services.scheduled_date as scheduled_date',
+        'scheduled_services.technician_id as technician_id', 'scheduled_services.property_id as property_id',
+        'scheduled_services.service_address_line1 as service_address_line1',
+        'scheduled_services.service_address_line2 as service_address_line2',
+        'scheduled_services.service_address_city as service_address_city',
+        'scheduled_services.service_address_zip as service_address_zip',
+        'current_property.address_line1 as current_property_address_line1',
+        'current_property.address_line2 as current_property_address_line2',
+        'current_property.city as current_property_city', 'current_property.zip as current_property_zip',
+      );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit (the customer's tip
     // history and irrigation status are customer data); admins keep
@@ -313,9 +541,33 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     // The visit's calendar day as YYYY-MM-DD (same derivation the rest of
     // this file uses for scheduled_date) — never `new Date('YYYY-MM-DD')`,
     // which is UTC midnight, i.e. the previous ET evening.
-    const visitDay = svc.scheduled_date
-      ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
-      : null;
+    const visitDay = dateOnlyString(svc.scheduled_date) || null;
+    const previousRecommendations = completionChoicesEnabled
+      ? await loadPreviousRecommendations({
+        customerId: svc.customer_id,
+        serviceType: svc.service_type,
+        serviceId: svc.id,
+        visitDay,
+        propertyScope: {
+          propertyId: svc.property_id,
+          propertyAddressLine1: svc.current_property_address_line1,
+          propertyAddressLine2: svc.current_property_address_line2,
+          propertyCity: svc.current_property_city,
+          propertyZip: svc.current_property_zip,
+          serviceAddressLine1: svc.service_address_line1,
+          serviceAddressLine2: svc.service_address_line2,
+          serviceCity: svc.service_address_city,
+          serviceZip: svc.service_address_zip,
+        },
+      })
+      : [];
+    if (!tipsEnabled) {
+      return res.json({
+        available: false,
+        completionChoicesEnabled: true,
+        previousRecommendations,
+      });
+    }
     const library = tipsForVisit({
       serviceLine: detectServiceLine(svc.service_type),
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
@@ -325,9 +577,11 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     // cutoff a day early through the Eastern evening. service_date is a
     // DATE column, so the bound is the ET day string itself.
     const sentSinceDay = etDateString(addETDays(new Date(), -90));
-    const [sentRows, prefs] = await Promise.all([
-      svc.customer_id
-        ? db('service_records')
+    let sentRows = [];
+    let prefs = null;
+    if (svc.customer_id) {
+      [sentRows, prefs] = await Promise.all([
+        db('service_records')
           .where({ customer_id: svc.customer_id })
           .whereRaw("structured_notes->'techTips' IS NOT NULL")
           // "sent" means the customer could open it: typedReportDelivery is
@@ -339,33 +593,31 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
           .where('service_date', '>=', sentSinceDay)
           .orderBy('service_date', 'desc')
           .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
-          .catch(() => [])
-        : [],
-      // The real settings, never irrigation_system (defaults on since
-      // 20260828000002 — proves nothing about the schedule the tip asks for).
-      svc.customer_id
-        ? db('property_preferences').where({ customer_id: svc.customer_id })
+          .catch(() => []),
+        // The real settings, never irrigation_system (defaults on since
+        // 20260828000002 — proves nothing about the schedule the tip asks for).
+        db('property_preferences').where({ customer_id: svc.customer_id })
           .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_system_type', 'irrigation_zones', 'rain_sensor', 'irrigation_confirmed_fields')
-          .catch(() => null)
-        : null,
-    ]);
+          .catch(() => null),
+      ]);
+    }
     // Newest first, so the first date seen per id is the most recent send.
     // Values are YYYY-MM-DD calendar days (service_date is a DATE column;
     // pg hands it back as a Date at UTC midnight) — the client formats the
     // day from its components, never through new Date().
-    const lastSent = {};
-    for (const row of sentRows) {
-      const day = String(row.service_date instanceof Date ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
-      const tips = Array.isArray(row.tech_tips) ? row.tech_tips : [];
-      for (const tip of tips) {
-        if (tip?.id && day && !lastSent[tip.id]) lastSent[tip.id] = day;
-      }
-    }
+    const lastSent = Object.fromEntries(sentRows.flatMap((row) => {
+      const day = dateOnlyString(row.service_date) || '';
+      return (Array.isArray(row.tech_tips) ? row.tech_tips : [])
+        .filter((tip) => tip?.id && day)
+        .map((tip) => [tip.id, day]);
+    }).reverse());
     res.json({
       available: true,
+      completionChoicesEnabled,
       ...library,
       lastSent,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
+      ...(completionChoicesEnabled ? { previousRecommendations } : {}),
     });
   } catch (err) { next(err); }
 });

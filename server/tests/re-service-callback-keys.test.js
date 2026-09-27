@@ -19,3 +19,24 @@ describe('re-service callback keys', () => {
     expect(isReService({ serviceKey: 'rodent_trapping', serviceName: 'Rodent Trapping Service' })).toBe(false);
   });
 });
+
+// Owner ruling 2026-09-26: visit 3+ of a trapping job is the $95
+// rodent_trap_check_additional row. It must bill at completion — members
+// included — so it can be neither a callback (is_callback skips every
+// completion invoice lane and zeroes member bookings) nor an always-free
+// service type by name.
+describe('rodent_trap_check_additional is a billable visit', () => {
+  const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+  const NAME = 'Rodent Trap Check - Additional';
+
+  test('not a callback by key or by name', () => {
+    expect(RE_SERVICE_SERVICE_KEYS.has('rodent_trap_check_additional')).toBe(false);
+    expect(isReService({ serviceKey: 'rodent_trap_check_additional', serviceName: NAME, serviceType: NAME })).toBe(false);
+  });
+
+  test('its catalog name is not an always-free service type', () => {
+    expect(isAlwaysFreeServiceType(NAME)).toBe(false);
+    const migration = require('../models/migrations/20260927000001_rodent_trap_check_additional');
+    expect(migration.NEW_KEY).toBe('rodent_trap_check_additional');
+  });
+});
