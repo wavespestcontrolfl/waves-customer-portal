@@ -20,9 +20,9 @@
 // cookie-free read-depth counts from blog_read_depth_daily (hub rows; the
 // portal's POST /api/public/blog-read-depth) for the same Eastern days: how
 // many readers' screens reached 25/50/75/100% of the article and the "keep
-// reading" row, plus the half-read and keep-reading rates per Cloudflare post
-// view. Beacon counts are exact while Cloudflare views are sampled, so a small
-// post's rates are rough and can pass 100%.
+// reading" row, plus the half-read and keep-reading rates per page load that
+// runs the counter (reloads included, bfcache restores not). Beacon counts are
+// exact while Cloudflare loads are sampled, so a small post's rates are rough.
 //
 // Writes nothing. Needs CF_API_TOKEN (Account Analytics read) and CF_ACCOUNT_ID
 // from the environment; CF_RUM_SITE_TAG overrides the site lookup. Read depth
@@ -127,6 +127,35 @@ function countsAsPageView(navigationType) {
   return COUNTED_NAVIGATION_TYPES.has(key);
 }
 
+// Navigation types that do NOT run a page's scripts from scratch: a bfcache
+// restore brings the page (and the read-depth milestones it already sent)
+// back as it was, and in-page route changes load nothing. Every other type —
+// reloads and ordinary back/forward loads included — runs the read-depth
+// counter again, so those loads belong in the denominator of read-depth
+// rates even though summarize() leaves them out of fresh views.
+const NON_LOADING_NAVIGATION_TYPES = new Set(['back-forward-cache', 'routing-apis', 'soft-navigation']);
+
+function runsPageScripts(navigationType) {
+  if (navigationType == null || navigationType === '') return true;
+  const key = String(navigationType).trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return !NON_LOADING_NAVIGATION_TYPES.has(key);
+}
+
+/** Per blog post, the page loads that can send read-depth beacons. */
+function blogPostLoads(groups) {
+  const byPath = new Map();
+  let total = 0;
+  for (const g of groups || []) {
+    const n = toCount(g.views);
+    if (!n || !runsPageScripts(g.navigationType)) continue;
+    const path = normalizePath(g.path);
+    if (classifyPath(path) !== 'blog-post') continue;
+    byPath.set(path, (byPath.get(path) || 0) + n);
+    total += n;
+  }
+  return { byPath, total };
+}
+
 function isInternalHost(host) {
   return HUB_HOSTS.has(String(host || '').trim().toLowerCase());
 }
@@ -219,12 +248,21 @@ function emptyDepth() {
 
 /**
  * Joins the window's read-depth counts — rows of { path, milestone, count }
- * summed from blog_read_depth_daily (hub only) — onto the Cloudflare per-post
- * views from summarize(). Rates are per Cloudflare post view: exact beacon
- * counts over sampled views, so a small post can read above 100%. Counts for
- * posts Cloudflare did not sample still reach the totals.
+ * summed from blog_read_depth_daily (hub only) — onto the posts from
+ * summarize(). Rates are per page load that runs the counter (`loads` from
+ * blogPostLoads: reloads included, bfcache restores not), so both sides count
+ * the same population; beacon counts are exact while Cloudflare loads are
+ * sampled, so a small post's rates are still rough. Counts for posts
+ * Cloudflare did not sample still reach the totals. `start`/`end` are the
+ * window's Eastern days (`end` exclusive): a window that ends on or before
+ * the first counted day has no coverage at all, never zeros.
  */
-function addReadDepth(summary, depthRows, { start } = {}) {
+function addReadDepth(summary, depthRows, { start, end, loads } = {}) {
+  let coverage = 'full';
+  if (end != null && end <= READ_DEPTH_LIVE_SINCE) coverage = 'none';
+  else if (start != null && start <= READ_DEPTH_LIVE_SINCE) coverage = 'partial';
+  if (coverage === 'none') return { liveSince: READ_DEPTH_LIVE_SINCE, coverage, totals: null, posts: [] };
+
   const byPath = new Map();
   const totals = emptyDepth();
   for (const row of depthRows || []) {
@@ -236,15 +274,17 @@ function addReadDepth(summary, depthRows, { start } = {}) {
     byPath.get(path)[key] += count;
     totals[key] += count;
   }
-  const rate = (n, views) => (views > 0 ? n / views : null);
-  const views = summary.totals.blogViews;
+  const rate = (n, d) => (d > 0 ? n / d : null);
+  const postLoads = (p) => (loads ? loads.byPath.get(p.path) || 0 : p.views);
+  const totalLoads = loads ? loads.total : summary.totals.blogViews;
   return {
     liveSince: READ_DEPTH_LIVE_SINCE,
-    partialWindow: start != null && start <= READ_DEPTH_LIVE_SINCE,
-    totals: { ...totals, halfRate: rate(totals.r50, views), nextRate: rate(totals.next, views) },
+    coverage,
+    totals: { ...totals, loads: totalLoads, halfRate: rate(totals.r50, totalLoads), nextRate: rate(totals.next, totalLoads) },
     posts: summary.posts.map((p) => {
       const d = byPath.get(p.path) || emptyDepth();
-      return { path: p.path, views: p.views, ...d, halfRate: rate(d.r50, p.views), nextRate: rate(d.next, p.views) };
+      const n = postLoads(p);
+      return { path: p.path, loads: n, ...d, halfRate: rate(d.r50, n), nextRate: rate(d.next, n) };
     }),
   };
 }
@@ -255,19 +295,23 @@ function formatReadDepth(lines, readDepth, top) {
     lines.push('Read depth: not included (needs DATABASE_PUBLIC_URL; see the usage header).');
     return;
   }
+  if (readDepth.coverage === 'none') {
+    lines.push(`Read depth: none for this window (counting began ${readDepth.liveSince}, Eastern).`);
+    return;
+  }
   const t = readDepth.totals;
   lines.push('### Read depth (cookie-free counts, hub)');
   lines.push('');
-  if (readDepth.partialWindow) {
+  if (readDepth.coverage === 'partial') {
     lines.push(`- Counting began ${readDepth.liveSince} (Eastern), so this window is only partly covered.`);
   }
   lines.push(`- Readers reaching 25 / 50 / 75 / 100% of a post: ${t.r25} / ${t.r50} / ${t.r75} / ${t.r100}; reaching the keep-reading row: ${t.next}`);
-  lines.push(`- Half-read: ${pct(t.halfRate)} of post views; reached keep reading: ${pct(t.nextRate)} (Cloudflare views are sampled, so rates are approximate)`);
+  lines.push(`- Half-read: ${pct(t.halfRate)} of ${t.loads} post loads; reached keep reading: ${pct(t.nextRate)} (loads include reloads, which re-run the counter; Cloudflare samples, so rates are approximate)`);
   lines.push('');
-  lines.push(`| Post (top ${top} by views) | Views | 25% | 50% | 100% | Keep reading | Half-read | Reached keep reading |`);
-  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|');
+  lines.push(`| Post (top ${top} by views) | Loads | 25% | 50% | 75% | 100% | Keep reading | Half-read | Reached keep reading |`);
+  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const p of readDepth.posts.slice(0, top)) {
-    lines.push(`| ${p.path} | ${p.views} | ${p.r25} | ${p.r50} | ${p.r100} | ${p.next} | ${pct(p.halfRate)} | ${pct(p.nextRate)} |`);
+    lines.push(`| ${p.path} | ${p.loads} | ${p.r25} | ${p.r50} | ${p.r75} | ${p.r100} | ${p.next} | ${pct(p.halfRate)} | ${pct(p.nextRate)} |`);
   }
 }
 
@@ -441,11 +485,12 @@ async function main() {
   }
   const window = resolveWindow({ days: positiveInt(args.days, 7), end: args.end });
   const siteTag = await hubSiteTag(accountId);
-  const summary = summarize(await fetchGroups(accountId, siteTag, window.slices));
+  const groups = await fetchGroups(accountId, siteTag, window.slices);
+  const summary = summarize(groups);
   let readDepth = null;
   try {
     const depthRows = await fetchReadDepth(window);
-    if (depthRows) readDepth = addReadDepth(summary, depthRows, { start: window.startStr });
+    if (depthRows) readDepth = addReadDepth(summary, depthRows, { start: window.startStr, end: window.endStr, loads: blogPostLoads(groups) });
   } catch (err) {
     // The Cloudflare half still prints; say why read depth is missing.
     console.warn(`warning: read depth unavailable (${err.code || err.message})`);
@@ -466,6 +511,7 @@ if (require.main === module) {
 
 module.exports = {
   addReadDepth,
+  blogPostLoads,
   classifyPath,
   countsAsPageView,
   formatMarkdown,
