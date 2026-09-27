@@ -8,7 +8,9 @@ const ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', ...ADDRESS_FIELDS, 'latitude', 'longitude'];
 const reviewEnabled = () => typeof gateEnvValue === 'function' && gateEnvValue('GATE_GEOCODE_REVIEW');
 const addressSnapshot = customer => ADDRESS_FIELDS.map(field => customer[field] ?? null);
-const sameAddress = (customer, review) => JSON.stringify(addressSnapshot(customer)) === JSON.stringify(review?.address_snapshot);
+const normalizedAddress = values => (values || []).map(value => value || null);
+const sameAddress = (customer, review) => JSON.stringify(normalizedAddress(addressSnapshot(customer)))
+  === JSON.stringify(normalizedAddress(review?.address_snapshot));
 const hasPin = customer => ['latitude', 'longitude'].every(field => customer[field] != null && Number.isFinite(Number(customer[field])) && Number(customer[field]) !== 0);
 const samePin = (customer, review) => hasPin(customer) && ['latitude', 'longitude'].every(field => Number(customer[field]) === Number(review[field]));
 const completeAddress = customer => ['address_line1', 'city', 'state', 'zip'].every(field => String(customer[field] || '').trim())
