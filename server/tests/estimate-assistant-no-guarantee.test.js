@@ -745,6 +745,49 @@ describe('estimate assistant no-guarantee context', () => {
       .toEqual(['Purchased termite bond: 5-year term with re-treatment coverage.']);
   });
 
+  test.each([
+    ['disabled snake-case option, paid warranty', { show_one_time_option: false }, 117],
+    ['disabled snake-case option, included warranty', { show_one_time_option: false }, 0],
+    ['disabled camel-case option', { showOneTimeOption: false }, 117],
+    ['absent one-time option', {}, 117],
+  ])('recurring estimates retain purchased add-on terms: %s', (_name, option, warrantyAdder) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 900, ...option },
+      estData: { result: {
+        recurring: { services: [{ service: 'pest', name: 'Pest Control', monthly: 55 }] },
+        oneTime: { items: [{ service: 'trenching', label: 'Termite Trenching', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder }] },
+      } },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.services.map((row) => row.service)).toEqual(['pest']);
+    expect(context.oneTime.items[0].purchasedTerms)
+      .toContain('Annual inspection during the warranty period');
+    expect(answerEstimateQuestionFallback('What warranty does the trenching include?', context))
+      .toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['unselected warranty', { warrantyTier: 'none', warrantyAdder: 0 }],
+    ['missing purchase evidence', { warrantyTier: 'one_year_retreat' }],
+  ])('a hidden one-time option does not invent add-on coverage: %s', (_name, warranty) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 900, show_one_time_option: false },
+      estData: { result: {
+        recurring: { services: [{ service: 'pest', name: 'Pest Control', monthly: 55 }] },
+        oneTime: { items: [{ service: 'trenching', label: 'Termite Trenching', amount: 900,
+          ...warranty }] },
+      } },
+      noGuaranteeClaims: true,
+    });
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.oneTime).toBeNull();
+    expect(answerEstimateQuestionFallback('What warranty does the trenching include?', context))
+      .not.toMatch(/annual inspection|purchased.*warranty/i);
+  });
+
   test('mixed purchased warranty answers stay scoped to the named service', () => {
     const trenching = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat', warrantyAdder: 0 };

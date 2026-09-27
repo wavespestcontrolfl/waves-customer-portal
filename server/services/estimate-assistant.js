@@ -826,11 +826,12 @@ function buildEstimateAssistantContext({
   const firstName = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0]
     || cleanText(estimate.customerFirstName);
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
-  // Expose separately-billed one-time add-ons that have their own Ask Waves chip
-  // (German-roach cleanout, Bora-Care) even on a recurring estimate, so the
-  // assistant context carries the row the chip's question is about.
+  // Expose separately-billed add-ons with their own Ask Waves chip or proven
+  // purchased terms even when this recurring estimate offers no one-time plan.
+  // The plan selector must not hide the purchased scope of a billed add-on.
   const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(
-    (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row),
+    (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row)
+      || row.purchasedTerms?.length > 0,
   );
   const exposeOneTimeContext = !quoteRequired
     && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
