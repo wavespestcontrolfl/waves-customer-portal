@@ -104,7 +104,8 @@ async function createScratchDb() {
     sms_sent_at timestamptz,
     email_sent_at timestamptz,
     stripe_payment_intent_id text,
-    stripe_charge_id text
+    stripe_charge_id text,
+    payer_id uuid
   )`);
   await db.raw(`CREATE TABLE payments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -114,6 +115,9 @@ async function createScratchDb() {
     stripe_charge_id text,
     updated_at timestamptz
   )`);
+  // The account-deletion read (successorRecoveryRefusal, Codex #4971 r10):
+  // a term's customer with no row here reads as live.
+  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY, deleted_at timestamptz)');
   await db.raw(`CREATE TABLE stripe_invoice_charge_attempts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     invoice_id uuid NOT NULL,
@@ -1057,6 +1061,105 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
         status: 'payment_pending', renewal_charge_failure_kind: 'outcome_pending', renewal_charge_claim_retired_at: null,
       });
       expect((await db('invoices').where({ id: invoice.id }).first()).status).toBe('overdue');
+    });
+  });
+
+  // Codex #4971 r10 P1s — the charge's provider boundary (stripe.js, under
+  // the invoice / customer locks; its own suite) refuses a payer-stamped
+  // invoice (PAYER_BILLED_GUARD) and a deleted account (CUSTOMER_DELETED).
+  // Here, what the renewal does with each refusal, and its pay-link
+  // clearance for the same two shapes — on real rows.
+  describe('r10: payer-stamped renewal invoices and deleted accounts', () => {
+    let Renewals5;
+    let originalLock;
+    beforeEach(() => {
+      Renewals5 = require('../services/annual-prepay-renewals');
+      originalLock = Renewals5.withParentDecisionLock;
+      Renewals5.withParentDecisionLock = (_termId, fn) => fn();
+      require('../services/stripe').assertNoInvoiceChargeReconciliationPending.mockImplementation(async () => undefined);
+      mockVoidInvoice.mockImplementation(async (invoiceId) => {
+        await db('invoices').where({ id: invoiceId }).update({ status: 'void' });
+        await db('annual_prepay_terms').where({ prepay_invoice_id: invoiceId }).update({ status: 'cancelled' });
+        return {};
+      });
+    });
+    afterEach(() => {
+      Renewals5.withParentDecisionLock = originalLock;
+      require('../services/stripe').assertNoInvoiceChargeReconciliationPending.mockImplementation(async () => { throw new Error('reconciliation pending (test)'); });
+      mockVoidInvoice.mockReset();
+    });
+
+    // A minted, unpresented renewal whose charge fence was claimed (the
+    // charge was about to run), behind a live paid parent.
+    async function claimedRenewal(invoiceFields = {}) {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000) });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      const invoice = await insertInvoice({ status: 'draft', ...invoiceFields });
+      // The window starts the day after the parent's term_end (the default)
+      // and a fresh mint keeps its whole grace window.
+      const successor = await insertSuccessor(parent, invoice, {
+        created_at: new Date(),
+        renewal_charge_attempted_at: new Date(), renewal_charge_failure_kind: 'outcome_pending',
+      });
+      return { parent, invoice, successor };
+    }
+    const guardError = (code, message) => Object.assign(new Error(message), { code });
+
+    test('an invoice stamped to a payer (the payer since cleared from the customer): the refusal is the payer follow-through — no homeowner pay link, one payer bell', async () => {
+      const { invoice, successor } = await claimedRenewal({ payer_id: randomUUID() });
+
+      const handled = await Charge._private.handleChargeFailure(successor, guardError('PAYER_BILLED_GUARD', 'Invoice is billed to a third-party payer'), db);
+
+      expect(handled).toBe(true);
+      expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/third-party payer/i), expect.any(String), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${successor.id}:payer_billed`,
+      }));
+      expect(await db('annual_prepay_terms').where({ id: successor.id }).first()).toMatchObject({ status: 'payment_pending', renewal_charge_failure_kind: 'payer_refused' });
+      expect(mockVoidInvoice).not.toHaveBeenCalled();
+      // The pay-link clearance reads the invoice's own Bill-To, whatever the
+      // customer default says (the payer resolver reads self-pay here).
+      await expect(Charge._private.deliverRenewalInvoice(successor, db)).resolves.toMatchObject({ ok: false, code: 'payer_billed' });
+      expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect((await db('invoices').where({ id: invoice.id }).first()).status).toBe('draft');
+    });
+
+    test('a customer who deleted their account after the mint: the refusal withdraws the renewal — voided, cancelled, one staff bell, no pay link', async () => {
+      const { invoice, successor } = await claimedRenewal();
+      await db('customers').insert({ id: customerId, deleted_at: new Date() });
+
+      const handled = await Charge._private.handleChargeFailure(successor, guardError('CUSTOMER_DELETED', 'This customer account was deleted'), db);
+
+      expect(handled).toBe(true);
+      expect(mockVoidInvoice).toHaveBeenCalledWith(invoice.id, { requireUnsettled: true });
+      expect((await db('annual_prepay_terms').where({ id: successor.id }).first()).status).toBe('cancelled');
+      expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/withdrawn/i), expect.stringContaining('deleted their account'), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${successor.id}:renewal_withdrawn`,
+      }));
+    });
+
+    test('a deleted account never gets a pay link: the clearance withdraws the renewal instead of sending', async () => {
+      const { invoice, successor } = await claimedRenewal();
+      await db('customers').insert({ id: customerId, deleted_at: new Date() });
+
+      await expect(Charge._private.deliverRenewalInvoice(successor, db)).resolves.toMatchObject({ ok: false, withheld: true });
+
+      expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(mockVoidInvoice).toHaveBeenCalledWith(invoice.id, { requireUnsettled: true });
+      expect((await db('annual_prepay_terms').where({ id: successor.id }).first()).status).toBe('cancelled');
+    });
+
+    test('a live self-pay customer: the pay link still goes out as before', async () => {
+      const { invoice, successor } = await claimedRenewal();
+      await db('customers').insert({ id: customerId, deleted_at: null });
+
+      await Charge._private.deliverRenewalInvoice(successor, db);
+
+      expect(mockSendViaSMSAndEmail).toHaveBeenCalledWith(invoice.id, expect.objectContaining({ firstDeliveryOnly: true }));
+      expect(mockVoidInvoice).not.toHaveBeenCalled();
     });
   });
 

@@ -13,6 +13,14 @@
 // no-consent/no-method/surcharge/decline/refused/ambiguous branches and
 // their bells + SMS gating, the grace-lapse void + retrieval task + parent
 // cancel stamp, the stuck-successor reconcile passes, and the gate.
+
+// Codex #4971 r10 P1: successorRecoveryRefusal reads the customer's
+// deletion (a deleted account's renewal is withdrawn). The conn fakes
+// answer it with a live customer unless a test says otherwise.
+function liveCustomerQuery(customer = { deleted_at: null }) {
+  return { where: jest.fn(() => ({ first: jest.fn(async () => customer) })) };
+}
+
 describe('termite annual renewal charge', () => {
   afterEach(() => {
     jest.resetModules();
@@ -206,6 +214,8 @@ describe('termite annual renewal charge', () => {
       if (table === 'payments') {
         return { whereRaw: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(undefined) }) };
       }
+      if (table === 'customers') return liveCustomerQuery();
+
       if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
       return {
         where: jest.fn((filter) => {
@@ -318,6 +328,7 @@ describe('termite annual renewal charge', () => {
             }),
           };
         }
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       return { conn, scanQ, stampUpdates };
@@ -754,6 +765,8 @@ describe('termite annual renewal charge', () => {
         // ledger check, run only once the invoice above reads paid.
         return { whereRaw: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(undefined) }) };
       }
+      if (table === 'customers') return liveCustomerQuery();
+
       if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
       return {
         where: jest.fn((filter) => ({
@@ -833,6 +846,7 @@ describe('termite annual renewal charge', () => {
       if (table === 'invoices') {
         return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(eligibilityInvoice) }) };
       }
+      if (table === 'customers') return liveCustomerQuery();
       throw new Error(`unexpected table ${table} in eligibility trx`);
     });
     // Codex round-4 P1: decideAndCharge's own stampRenewalChargeSkip runs
@@ -888,6 +902,7 @@ describe('termite annual renewal charge', () => {
           })),
         };
       }
+      if (table === 'customers') return liveCustomerQuery();
       throw new Error(`unexpected table ${table} on outer conn`);
     });
     conn.transaction = jest.fn(async (cb) => cb(trx));
@@ -1089,6 +1104,7 @@ describe('termite annual renewal charge', () => {
       const dbMock = jest.fn((table) => {
         if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551212', first_name: 'Pat' }) }) };
         if (table === 'invoices') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ token: 'tok-1' }) }) };
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       jest.doMock('../models/db', () => dbMock);
@@ -2040,6 +2056,8 @@ describe('termite annual renewal charge', () => {
       if (table === 'notifications') {
         return { where: jest.fn(() => ({ whereRaw: jest.fn(() => ({ first: jest.fn().mockResolvedValue(notificationsTaskRow) })) })) };
       }
+      if (table === 'customers') return liveCustomerQuery();
+
       if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
       return {
         where: jest.fn(() => ({
@@ -2086,6 +2104,7 @@ describe('termite annual renewal charge', () => {
       if (table === 'invoices') {
         return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(freshInvoice) }) };
       }
+      if (table === 'customers') return liveCustomerQuery();
       throw new Error(`unexpected table ${table} in lapse-eligibility trx`);
     });
     conn.transaction = jest.fn(async (cb) => cb(trx));
@@ -2891,6 +2910,7 @@ describe('termite annual renewal charge', () => {
       const scanQ = tableQuery([]);
       const conn = jest.fn((table) => {
         if (table === 'annual_prepay_terms as t') return scanQ;
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
 
@@ -3123,6 +3143,7 @@ describe('termite annual renewal charge', () => {
       const empty = tableQuery([]);
       const conn = jest.fn((table) => {
         if (table === 'annual_prepay_terms as t') return empty;
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -3169,6 +3190,7 @@ describe('termite annual renewal charge', () => {
           // parent lookup inside the reconcile loop.
           return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(parent) }) };
         }
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -3224,6 +3246,7 @@ describe('termite annual renewal charge', () => {
         if (table === 'annual_prepay_terms') {
           return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(parent) }) };
         }
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -3290,6 +3313,7 @@ describe('termite annual renewal charge', () => {
         if (table === 'annual_prepay_terms') return eligibleParentQuery;
         if (table === 'invoices') return undeliveredInvoice;
         if (table === 'stripe_invoice_charge_attempts as a') return noAttempt;
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -3338,6 +3362,7 @@ describe('termite annual renewal charge', () => {
         }
         if (table === 'annual_prepay_terms') return eligibleParentQuery;
         if (table === 'invoices') return deliveredInvoice;
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -3415,6 +3440,7 @@ describe('termite annual renewal charge', () => {
           const q = { where: jest.fn(() => q), first: jest.fn().mockResolvedValue(submittedAttempt) };
           return q;
         }
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -3759,6 +3785,7 @@ describe('termite annual renewal charge', () => {
         if (table === 'invoices') return { where: jest.fn(() => ({ first: jest.fn(async () => ({ status: 'paid', paid_at: new Date() })) })) };
         // The successor's own ledger (successorPaymentBacksRenewal): no refund.
         if (table === 'payments') return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => undefined) })) };
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       conn.raw = jest.fn((sql) => sql);
@@ -3889,6 +3916,7 @@ describe('termite annual renewal charge', () => {
           const q = { where: jest.fn(() => q), first: jest.fn(async () => undefined) };
           return q;
         }
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       return { conn, updates };
@@ -4111,6 +4139,7 @@ describe('termite annual renewal charge', () => {
           };
         }
         if (table === 'invoices') return { where: jest.fn(() => ({ first: jest.fn(async () => invoice) })) };
+        if (table === 'customers') return liveCustomerQuery();
         throw new Error(`unexpected table ${table}`);
       });
       return { conn, updates };
@@ -4228,6 +4257,8 @@ describe('termite annual renewal charge', () => {
       const { _private } = require('../services/termite-annual-renewal-charge');
       const scans = [];
       const conn = jest.fn((table) => {
+        if (table === 'customers') return liveCustomerQuery();
+
         if (table !== 'annual_prepay_terms as t') throw new Error(`unexpected table ${table}`);
         const q = {};
         for (const m of ['whereNotNull', 'whereNull', 'where', 'whereRaw', 'whereNotExists', 'orderByRaw', 'orderBy', 'select']) q[m] = jest.fn(() => q);

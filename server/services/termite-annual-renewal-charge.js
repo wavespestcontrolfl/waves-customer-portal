@@ -1808,6 +1808,13 @@ async function handleRefusalAtSubmission(successor, refusal, conn) {
 }
 
 async function handleChargeFailure(successor, err, conn = db) {
+  // Codex #4971 r10 P1: refused at the provider boundary because the account
+  // was deleted — not a decline (no pay link, no charge-failed notice): the
+  // renewal is withdrawn (its under-gate re-check, successorRecoveryRefusal,
+  // reads the same deletion). Handled once the withdrawal is not deferred.
+  if (err?.code === 'CUSTOMER_DELETED') {
+    return (await withdrawRenewalSuccessor(successor, 'the customer deleted their account before the renewal charge', conn)) !== 'deferred';
+  }
   const { classifyChargeError } = require('./termite-annual-signature-charge')._private;
   const classification = classifyChargeError(err);
   logger.error(`[termite-annual-renewal] renewal charge failed for term ${successor.id}: ${classification.status} (${classification.reason})`);
@@ -2071,8 +2078,16 @@ async function ringRenewalBell(successor, kind, reason) {
 // (self-pay: the homeowner may be billed), 'payer_billed' (a third-party
 // payer owns this bill — no homeowner pay link is owed), or
 // 'payer_unverifiable' (the lookup failed — fail closed, retry later).
-async function renewalPayerRouting(successor) {
+async function renewalPayerRouting(successor, conn = db) {
   try {
+    // Codex #4971 r10 P1: the invoice's OWN Bill-To first — a payer stamped
+    // at mint stays the payer's bill even after the customer's default payer
+    // is cleared (stripe.js refuses its charge under the invoice lock with
+    // PAYER_BILLED_GUARD; InvoiceService's send path suppresses it too).
+    const invoice = successor.prepay_invoice_id
+      ? await conn('invoices').where({ id: successor.prepay_invoice_id }).first('payer_id')
+      : null;
+    if (invoice?.payer_id) return 'payer_billed';
     const resolved = await require('./payer').resolveForInvoice({
       database: db, customerId: successor.customer_id, throwOnError: true,
     });
@@ -2114,7 +2129,7 @@ async function withPayLinkClearance(successor, conn, context, send) {
       logger.warn(`[termite-annual-renewal] renewal pay link withheld for term ${successor.id}: ${refused}`);
       return { ok: false, withheld: true, code: 'delivery_refused', outcome: refused, error: `delivery refused (${refused})` };
     }
-    const payerRouting = await renewalPayerRouting(successor);
+    const payerRouting = await renewalPayerRouting(successor, conn);
     if (payerRouting) {
       logger.warn(`[termite-annual-renewal] renewal pay link withheld for term ${successor.id}: ${payerRouting}`);
       return { ok: false, withheld: true, code: payerRouting, error: payerRouting };
@@ -2941,6 +2956,13 @@ async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
 // pay link now would only hand the next grace-lapse tick a "presented"
 // renewal to lapse and retrieve on the spot.
 async function successorRecoveryRefusal(successor, conn) {
+  // Codex #4971 r10 P1: an account deleted after the mint (routes/auth.js
+  // DELETE /account stamps customers.deleted_at and leaves Auto Pay armed)
+  // is never renewed — no charge (stripe.js refuses it under the customer
+  // lock: CUSTOMER_DELETED), no pay link to an archived account, and the
+  // renewal is withdrawn (void + cancel, one staff bell). Durable.
+  const customer = await conn('customers').where({ id: successor.customer_id }).first('deleted_at');
+  if (customer?.deleted_at) return { reason: 'the customer deleted their account', retire: true };
   if (successor.renewed_from_term_id) {
     const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
     const parentEligibility = await parentRefusalForSuccessor(conn, successor, parent);
@@ -3479,6 +3501,7 @@ module.exports = {
     INVOICE_EVIDENCE_COLUMNS,
     resolvePendingChargeOutcome,
     handleRefusalAtSubmission,
+    handleChargeFailure,
     successorDisputeSuspended,
     whereSuccessorNotDisputeSuspended,
     successorShapeBacksRenewal,

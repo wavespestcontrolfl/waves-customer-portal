@@ -57,6 +57,30 @@ const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, isInvoi
 // who began an ACH entry (attaching a us_bank_account PM) then switches to
 // Card. Detect that specific rejection so the caller can recover by minting a
 // fresh PI for the selected tender rather than failing the switch.
+// A third-party payer's bill is never collected from the homeowner's saved
+// method. The refusal carries PAYER_BILLED_GUARD (Codex #3492 r10) so every
+// caller re-routes the bill to the payer instead of treating it as a decline
+// (and handing the homeowner a pay link).
+function payerBilledGuardError(message) {
+  return Object.assign(new Error(message), { code: 'PAYER_BILLED_GUARD' });
+}
+
+// chargeInvoiceWithSavedCard's Bill-To check on the LOCKED invoice row (see
+// its call site): a payer stamped on the invoice always refuses.
+function assertLockedInvoiceNotPayerBilled(lockedInvoice) {
+  if (lockedInvoice.payer_id) {
+    throw payerBilledGuardError('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+  }
+}
+
+// requireAutopayForCustomerId's deleted-account check on the LOCKED customer
+// row (see its call site).
+function assertLockedCustomerNotDeleted(lockedCustomer) {
+  if (lockedCustomer?.deleted_at) {
+    throw Object.assign(new Error('This customer account was deleted — Auto Pay is not armed. Review before charging.'), { code: 'CUSTOMER_DELETED' });
+  }
+}
+
 function isIncompatibleAttachedMethodError(err) {
   const message = String(err?.message || err?.raw?.message || '').toLowerCase();
   return message.includes('incompatible with the attached paymentmethod')
@@ -2043,7 +2067,7 @@ const StripeService = {
     // invoice — the saved card belongs to invoice.customer_id (the homeowner),
     // but this bill is the payer's. AR routes to the payer AP inbox.
     if (invoice.payer_id) {
-      throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+      throw payerBilledGuardError('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
     }
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
@@ -2105,6 +2129,17 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
+        // The invoice's OWN Bill-To, under its row lock (Codex #4971 r10 P1).
+        // A payer stamped on the invoice (at mint — InvoiceService.create
+        // persists it — or by a writer racing the unlocked read above) makes
+        // it the payer's bill whatever the customer's default payer reads
+        // now: the self-pay re-resolves below see only the CURRENT default,
+        // so a payer cleared after the stamp read "self-pay" there. The
+        // unlocked check above already refuses payer_id for every caller;
+        // this closes its race. (A packet WITHDRAWN from the customer to a
+        // payer — payer_id still null — is refused by the row-aware
+        // assertInvoiceCollectible right below.)
+        assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
         // Frozen-consent hard cap, enforced against the LOCKED invoice
         // (Codex #3153 r7 P0) and BEFORE any account-credit application
@@ -2175,8 +2210,15 @@ const StripeService = {
           const lockedCustomer = await trx('customers')
             .where({ id: requireAutopayForCustomerId })
             .forUpdate()
-            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status', 'billing_mode', 'monthly_rate', 'waveguard_tier');
+            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status', 'billing_mode', 'monthly_rate', 'waveguard_tier', 'deleted_at');
           lockedCustomerRow = lockedCustomer || null;
+          // A deleted account's Auto Pay is not armed (Codex #4971 r10 P1),
+          // for EVERY caller of this option: account deletion only stamps
+          // customers.deleted_at (routes/auth.js DELETE /account) and leaves
+          // autopay_enabled set, while the monthly billing cron already
+          // excludes deleted customers. Detectable, so a caller can retire
+          // the charge instead of treating it as a decline.
+          assertLockedCustomerNotDeleted(lockedCustomer);
           if (!lockedCustomer || !(await customerOnAutopay(lockedCustomer, { db: trx }))) {
             throw new Error('Auto Pay is no longer active for this customer.');
           }
