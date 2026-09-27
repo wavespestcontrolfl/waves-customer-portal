@@ -11,6 +11,13 @@
  * using the same models/db-mock-forwards-to-a-transaction pattern as
  * invoice-create-discount-stacking-postgres.test.js — every fixture rolls
  * back.
+ *
+ * Also covers the same PR's shared invoiceHasUnbackedDocumentDiscount fence
+ * (item A) on update()'s OWN line-item retotal path — specifically the
+ * Codex pre-push round-2 fix for checking it against the invoice's STORED
+ * line items, never the submitted ones (an edit that intentionally removes
+ * an already line-item-backed discount must succeed, not be refused as
+ * "unreconstructable").
  */
 jest.setTimeout(30000);
 let mockConnection;
@@ -97,4 +104,64 @@ postgres('InvoiceService.update — first-application split-source provenance fe
     expect(updated.title).toBe('First Service Application (updated)');
     expect(Number(updated.total)).toBe(97.2);
   });
+
+  test('removing an EXISTING, already line-item-backed discount succeeds — checked against the STORED line items, not the submission', async () => {
+    const { invoiceId } = await fixtureWithBackedDiscount();
+    // The submission drops the negative "Referral credit" line entirely —
+    // a deliberate removal, not evidence the discount was never
+    // reconstructable. Codex pre-push P1 (round 2): checking the SUBMITTED
+    // array here would see no negative line and wrongly refuse this.
+    const updated = await InvoiceService.update(invoiceId, {
+      line_items: [{ description: 'First service application', quantity: 1, unit_price: 97.20, amount: 97.20 }],
+    });
+    expect(Number(updated.discount_amount)).toBe(0);
+    expect(Number(updated.total)).toBe(97.2);
+  });
+
+  test('a document-level discount with NO backing line item ANYWHERE (never had one) still refuses the retotal', async () => {
+    const { invoiceId } = await fixtureWithUnbackedDiscount();
+    await expect(InvoiceService.update(invoiceId, {
+      line_items: [{ description: 'First service application', quantity: 1, unit_price: 120, amount: 120 }],
+    })).rejects.toThrow(/document-level discount with no backing line item/i);
+    const stored = await trx('invoices').where({ id: invoiceId }).first();
+    expect(Number(stored.total)).toBe(82.20);
+  });
+
+  async function fixtureWithBackedDiscount() {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic backed-discount fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+    });
+    await trx('invoices').insert({
+      id: invoiceId, customer_id: customerId,
+      token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+      status: 'draft', title: 'First Service Application',
+      line_items: JSON.stringify([
+        { description: 'First service application', quantity: 1, unit_price: 97.20, amount: 97.20 },
+        { description: 'Referral credit', quantity: 1, unit_price: -9.72, amount: -9.72 },
+      ]),
+      discount_amount: 9.72, subtotal: 97.20, total: 87.48,
+    });
+    return { customerId, invoiceId };
+  }
+
+  async function fixtureWithUnbackedDiscount() {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic unbacked-discount fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+    });
+    await trx('invoices').insert({
+      id: invoiceId, customer_id: customerId,
+      token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+      status: 'draft', title: 'First Service Application',
+      // A document-level discountIds pick — discount_amount is positive
+      // but NO negative line was ever added to line_items (InvoiceService
+      // .create's manualDiscounts never touch line_items — see invoice.js).
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 91.20, amount: 91.20 }]),
+      discount_amount: 9.00, subtotal: 91.20, total: 82.20,
+    });
+    return { customerId, invoiceId };
+  }
 });

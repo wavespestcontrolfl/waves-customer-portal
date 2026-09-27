@@ -7543,7 +7543,16 @@ const InvoiceService = {
       // derives discount_amount ENTIRELY from negative lines in the submitted
       // array, so it cannot reconstruct a manual discountIds pick that never
       // became a line. Decline rather than silently zero the discount.
-      if (invoiceHasUnbackedDocumentDiscount(invoice, updates.line_items)) {
+      //
+      // Checked against the invoice's STORED (pre-edit) line items, never
+      // the submitted ones (Codex pre-push P1): an edit that intentionally
+      // REMOVES an existing, already line-item-backed discount is legitimate
+      // — the stored discount_amount was backed at save time, so the new
+      // submission correctly recomputes it down to whatever remains,
+      // including zero. Checking the submitted array instead would treat
+      // "the discount line staff just deleted" as evidence the discount was
+      // never reconstructable and refuse the edit outright.
+      if (invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items)) {
         throw new Error(
           "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of editing line items",
         );

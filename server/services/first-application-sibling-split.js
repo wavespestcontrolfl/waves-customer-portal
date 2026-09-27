@@ -346,28 +346,35 @@ function resolveBaseApplicationLineIndex(moved, invoice, lineItems) {
   return { lineIndex: indexes[0] };
 }
 
+// Members that still might need a split off this invoice: not the
+// invoice-holding row itself, never a completed row's money, already-priced
+// (idempotent no-op — this is also what makes a move BACK to the same day a
+// no-op: once split, a row bills its own amount regardless of date), and
+// still sharing the invoice row's date (nothing diverged). A CHEAP, pure
+// filter with no DB reads — used as an early gate (Codex P1: money-safety
+// checks and the decline billing-review alert must never run for a same-day
+// no-op save that has nothing to split, regardless of what the invoice's
+// line items happen to look like) and again inside computeSiblingSplits to
+// build the actual per-sibling amounts.
+function divergingUnpricedSiblings(invoiceRow, members) {
+  const invoiceDate = dateOnly(invoiceRow.scheduled_date);
+  return members.filter((m) => String(m.id) !== String(invoiceRow.id)
+    && !m.completed_at
+    && m.estimated_price == null
+    && dateOnly(m.scheduled_date) !== invoiceDate);
+}
+
 // Peels each diverging, unpriced sibling's own anchored share off the
 // combined line total. Pure arithmetic over already-locked rows — no DB
 // reads or writes (those are applySplitMutation's job).
 function computeSiblingSplits(invoiceRow, members, lineItems, lineIndex) {
-  const invoiceDate = dateOnly(invoiceRow.scheduled_date);
-  const siblings = members
-    .filter((m) => String(m.id) !== String(invoiceRow.id))
+  const candidates = divergingUnpricedSiblings(invoiceRow, members)
     .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 
   let remaining = roundMoney(lineItems[lineIndex].amount ?? lineItems[lineIndex].unit_price);
   const splits = [];
   const declines = [];
-  for (const sib of siblings) {
-    // Never touch a completed sibling's money.
-    if (sib.completed_at) continue;
-    // Already split (or never unpriced to begin with) — idempotent no-op.
-    // This is also what makes a move BACK to the same day a no-op: once
-    // split, each row bills its own amount regardless of date, so there is
-    // nothing left to peel and nothing to double-reduce.
-    if (sib.estimated_price != null) continue;
-    // Still on the same trip as the invoice row — nothing has diverged.
-    if (dateOnly(sib.scheduled_date) === invoiceDate) continue;
+  for (const sib of candidates) {
     const share = anchoredSplitPerVisit(sib);
     if (!(share > 0)) {
       declines.push({ id: sib.id, reason: 'no_anchored_split' });
@@ -393,6 +400,18 @@ async function classifySplitEligibility(trx, scheduledServiceId) {
   const located = await findLockedFirstApplicationInvoice(trx, moved, members);
   if (located.skip) return located.skip;
   const { invoice, invoiceRow } = located;
+
+  // Cheap gate BEFORE any money-safety judgment, decline, or billing-review
+  // alert (Codex P1): a caller that supplies scheduled_date unconditionally
+  // whenever it appears in the payload (admin-schedule.js's update-details
+  // save calls this on ANY scheduled_date field present, even resubmitted
+  // unchanged) must never raise a false "needs manual review" alert over
+  // an invoice's setup fee/discount/payment-plan shape when nothing here
+  // actually diverged — there is nothing for this module to split either
+  // way, so the invoice's own shape is irrelevant.
+  if (!divergingUnpricedSiblings(invoiceRow, members).length) {
+    return { action: 'skipped', reason: 'no_diverging_unpriced_sibling', moved, invoice };
+  }
 
   const lineItems = parseLineItems(invoice.line_items);
   if (!lineItems) return { action: 'skipped', reason: 'unreadable_line_items', moved, invoice };

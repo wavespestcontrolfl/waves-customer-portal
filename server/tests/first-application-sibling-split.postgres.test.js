@@ -416,6 +416,40 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(result.reason).toBe('discount_or_credit_present');
   }));
 
+  test('a same-day resave (scheduled_date resubmitted unchanged) never declines or alerts, even when the invoice carries a setup fee — nothing diverged, so the invoice shape is irrelevant', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    const withFee = [
+      { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+      { description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 },
+    ];
+    await trx('invoices').where({ id: ids.invoiceId }).update({ line_items: JSON.stringify(withFee), total: 252.60 });
+    // admin-schedule.js's update-details save calls the reconciler whenever
+    // scheduled_date is present in the payload, even resubmitted UNCHANGED
+    // (e.g. saving a window/notes edit alongside the same date) — simulate
+    // that exact no-op write.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-01' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('skipped');
+    expect(result.reason).toBe('no_diverging_unpriced_sibling');
+
+    const alerts = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' });
+    expect(alerts.length).toBe(0);
+    const state = await readState(trx, ids);
+    expect(state.lawn.estimated_price).toBeNull();
+    expect(Number(state.invoice.total)).toBe(252.60);
+  }));
+
+  test('the invoice-holding row itself resaved with the same date never declines or alerts either, even with a document-level discount', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('invoices').where({ id: ids.invoiceId }).update({ discount_amount: 15.36, total: 138.24 });
+    await trx('scheduled_services').where({ id: ids.pestId }).update({ scheduled_date: '2026-10-01' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.pestId);
+    expect(result.action).toBe('skipped');
+    expect(result.reason).toBe('no_diverging_unpriced_sibling');
+    const alerts = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' });
+    expect(alerts.length).toBe(0);
+  }));
+
   test('a declined split raises a durable billing-review notification the office will see, deduped per invoice', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     const withFee = [
