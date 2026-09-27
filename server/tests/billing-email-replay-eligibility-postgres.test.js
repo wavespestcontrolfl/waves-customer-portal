@@ -44,6 +44,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
       table.text('status'); table.date('scheduled_date'); table.text('service_type');
+      table.boolean('is_recurring');
       table.integer('payer_id'); table.text('po_number'); table.boolean('self_pay_override');
     });
     await mockPg.schema.createTable('customers', (table) => {
@@ -56,6 +57,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg.schema.createTable('invoices', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.integer('payer_id');
       table.text('status'); table.decimal('total'); table.decimal('credit_applied');
+      table.uuid('scheduled_service_id'); table.date('due_date'); table.timestamp('created_at');
     });
     await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
       table.uuid('invoice_id'); table.text('status'); table.timestamp('last_touch_at'); table.timestamp('next_touch_at');
@@ -145,9 +147,10 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     const date = etDateString(addETDays(new Date(), 1));
     await mockPg('customers').insert({ id: customerId, billing_mode: 'per_visit' });
     await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId,
-      status: 'confirmed', scheduled_date: date, service_type: 'Pest Control' });
+      status: 'confirmed', scheduled_date: date, service_type: 'Pest Control', is_recurring: true });
     await mockPg('invoices').insert(invoiceIds.map((id, index) => ({
       id, customer_id: customerId, status: 'sent', total: index ? '60.00' : '40.00', credit_applied: '0.00',
+      scheduled_service_id: visitId, due_date: etDateString(addETDays(new Date(), -8)),
     })));
     await mockPg('collections_contact_ledger').insert(row(ownId, {
       source: 'previsit_balance_reminder', channel: 'email', invoice_ids: JSON.stringify(invoiceIds),
@@ -160,12 +163,51 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
   test('paid debt invalidates the saved quote while a fresh quote can reuse its reservation', async () => {
     delete process.env.GATE_COLLECTIONS_POLICY;
     const meta = await previsitFixture();
+    await expect(require('../services/previsit-balance-reminder').overdueRecurringInvoices(customerId, new Date(), mockPg))
+      .resolves.toHaveLength(2);
     await expect(billingEmailReplayEligible(meta, mockPg)).resolves.toEqual({ eligible: true });
     await mockPg('invoices').where({ id: meta.invoice_ids[0] }).update({ status: 'paid' });
     await expect(billingEmailReplayEligible(meta, mockPg))
       .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
     await expect(billingEmailReplayEligible({ ...meta, invoice_ids: [meta.invoice_ids[1]], rendered_amount: '60.00' }, mockPg))
       .resolves.toEqual({ eligible: true });
+  });
+
+  test.each(['extended due date', 'nonrecurring visit', 'unlinked invoice'])('replay rejects %s and preserves the original overdue recurring eligibility', async (change) => {
+    const meta = await previsitFixture();
+    const check = require('../services/previsit-balance-reminder').quotedBalanceStillOwed({
+      visit: { id: visitId, customer_id: customerId, scheduled_date: meta.appointment_date, service_type: meta.appointment_service_type },
+      quotedInvoices: meta.invoice_ids.map((id, index) => ({ id, due: index ? 60 : 40 })), quotedDuesCents: 0,
+    });
+    await expect(check({ database: mockPg })).resolves.toEqual({ ok: true });
+    await expect(billingEmailReplayEligible(meta, mockPg)).resolves.toEqual({ eligible: true });
+    if (change === 'extended due date') {
+      await mockPg('invoices').where({ id: meta.invoice_ids[0] }).update({ due_date: etDateString(addETDays(new Date(), 7)) });
+    } else if (change === 'nonrecurring visit') {
+      const oldVisitId = randomUUID();
+      await mockPg('scheduled_services').insert({ id: oldVisitId, customer_id: customerId, is_recurring: false });
+      await mockPg('invoices').where({ id: meta.invoice_ids[0] }).update({ scheduled_service_id: oldVisitId });
+    } else {
+      await mockPg('invoices').where({ id: meta.invoice_ids[0] }).update({ scheduled_service_id: null });
+    }
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+    await expect(check({ database: mockPg })).resolves.toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED' });
+  });
+
+  test('a one-time upcoming visit refuses reminder copy even when its quoted debt is still recurring', async () => {
+    const meta = await previsitFixture();
+    const oldVisitId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: oldVisitId, customer_id: customerId, is_recurring: true });
+    await mockPg('invoices').whereIn('id', meta.invoice_ids).update({ scheduled_service_id: oldVisitId });
+    await mockPg('scheduled_services').where({ id: visitId }).update({ is_recurring: false });
+    const check = require('../services/previsit-balance-reminder').quotedBalanceStillOwed({
+      visit: { id: visitId, customer_id: customerId, scheduled_date: meta.appointment_date, service_type: meta.appointment_service_type },
+      quotedInvoices: meta.invoice_ids.map((id, index) => ({ id, due: index ? 60 : 40 })), quotedDuesCents: 0,
+    });
+    await expect(check({ database: mockPg })).resolves.toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED' });
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-visit-no-longer-recurring', retryable: false });
   });
 
   test('stopped dunning refuses a frozen aggregate with policy dark', async () => {
@@ -211,7 +253,8 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
   test.each(['previsit', 'annual-prepay'])('a failed %s quote read preserves the Email authority transaction', async (producer) => {
     const meta = await previsitFixture();
     const check = producer === 'previsit'
-      ? require('../services/previsit-balance-reminder').quotedBalanceStillOwed({ customerId, scheduledServiceId: visitId,
+      ? require('../services/previsit-balance-reminder').quotedBalanceStillOwed({ visit: { id: visitId, customer_id: customerId,
+        scheduled_date: meta.appointment_date, service_type: meta.appointment_service_type },
         quotedInvoices: [{ id: meta.invoice_ids[0], due: 40 }], quotedDuesCents: 0 })
       : require('../services/annual-prepay-renewals')._private.invoiceStillOwedAsQuoted({ customerId,
         invoiceId: meta.invoice_ids[0], amountDue: 40 });

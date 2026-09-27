@@ -92,6 +92,7 @@ const VISIT = {
   service_type: 'Pest Control',
   scheduled_date: '2026-08-20',
   payer_id: null,
+  is_recurring: true,
   first_name: 'Sandy',
   phone: '+19415550100',
   billing_mode: null,
@@ -437,20 +438,34 @@ describe('quotedBalanceStillOwed (provider handoff recheck of the quoted balance
   const { quotedBalanceStillOwed } = require('../services/previsit-balance-reminder');
   const live = { id: 'inv-9', customer_id: 'cust-1', status: 'sent', total: '96.60', payer_id: null };
 
-  function invoicesDb(rows) {
-    db.mockImplementation((table) => {
-      if (table !== 'invoices') throw new Error(`Unexpected table ${table}`);
-      const q = { whereIn: jest.fn(() => q), then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
-      return q;
-    });
+  function boundaryDb(rows, visit = { ...VISIT, status: 'confirmed' }) {
+    return (table) => {
+      if (table === 'scheduled_services') return chain({ first: visit });
+      if (table === 'invoices') return chain({ result: rows });
+      throw new Error(`Unexpected table ${table}`);
+    };
+  }
+  function invoicesDb(rows, visit) {
+    db.mockImplementation(boundaryDb(rows, visit));
   }
   const check = () => quotedBalanceStillOwed({
-    customerId: 'cust-1', scheduledServiceId: 'ss-1', quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
+    visit: VISIT, quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
   })();
 
   test('passes while every quoted invoice still owes exactly the quoted amount', async () => {
     invoicesDb([live]);
     await expect(check()).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['cancelled', { status: 'cancelled' }],
+    ['rescheduled', { scheduled_date: '2026-08-21' }],
+    ['changed service', { service_type: 'Termite' }],
+    ['no longer recurring', { is_recurring: false }],
+    ['missing', null],
+  ])('holds the leg when its visit is %s', async (_label, change) => {
+    invoicesDb([live], change ? { ...VISIT, status: 'confirmed', ...change } : null);
+    await expect(check()).resolves.toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true });
   });
 
   test.each([
@@ -511,11 +526,10 @@ describe('quotedBalanceStillOwed (provider handoff recheck of the quoted balance
   });
 
   test.each(['database', 'dbi'])('boundary reads reuse the %s authority transaction through a savepoint', async (key) => {
-    const query = { whereIn: jest.fn(async () => [live]) };
-    const savepoint = jest.fn(() => query);
+    const savepoint = jest.fn(boundaryDb([live]));
     const transaction = { isTransaction: true, transaction: jest.fn(async (callback) => callback(savepoint)) };
     const predicate = quotedBalanceStillOwed({
-      customerId: 'cust-1', scheduledServiceId: 'ss-1', quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
+      visit: VISIT, quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
     });
     await expect(predicate({ [key]: transaction })).resolves.toEqual({ ok: true });
     expect(require('../services/payer').resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ database: savepoint }));

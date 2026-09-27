@@ -12,7 +12,13 @@ jest.mock('../services/invoice-helpers', () => ({
   invoiceAmountDue: jest.fn((invoice) => Number(invoice.total) - Number(invoice.credit_applied || 0)),
 }));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
-jest.mock('../services/previsit-balance-reminder', () => ({ currentDuesAllowanceCents: jest.fn(async () => 0) }));
+jest.mock('../services/previsit-balance-reminder', () => ({
+  currentDuesAllowanceCents: jest.fn(async () => 0),
+  // SQL eligibility is exercised against real PostgreSQL; this suite pins
+  // the replay's use of the selector and its saved invoice set.
+  overdueRecurringInvoices: jest.fn(async (customerId, _now, database) => database('invoices')
+    .where({ customer_id: customerId }).select('*')),
+}));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn() }));
 jest.mock('../services/invoice-followups', () => ({ isDunningStopped: jest.fn() }));
 
@@ -218,7 +224,7 @@ describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
     notificationEventKey: 'previsit-balance:visit-1', collections_ledger_id: 'own-email', rendered_amount: '100.00',
     invoice_ids: ['invoice-1', 'invoice-2'] };
   const visit = { id: 'visit-1', customer_id: customerId, status: 'confirmed',
-    scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'General Pest Control' };
+    scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'General Pest Control', is_recurring: true };
   const invoices = [
     { id: 'invoice-1', customer_id: customerId, status: 'sent', total: '40.00' },
     { id: 'invoice-2', customer_id: customerId, status: 'sent', total: '60.00' },

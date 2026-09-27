@@ -491,6 +491,7 @@ async function repairPushProof({ appNotification, body, customerId, notification
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
+  let bell = {};
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
@@ -545,7 +546,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         ...(appointmentId ? { metadata: { proof_scope: proofScope } } : {}),
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
-      if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' };
+      bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
+      if (appNotification?.push?.reason === 'push_in_flight') {
+        return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight', ...bell };
+      }
       // notifyCustomer returns null only when its dedupe lock/read or the
       // notification insert failed, before any bell or push exists. For a
       // notice with a durable replay owner that is an infrastructure failure
@@ -556,7 +560,6 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     // A persisted in-app bell is customer-visible even when no device accepts
     // the push; callers that must not undo a seen notice read bellPersisted.
-    const bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
     if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
@@ -574,7 +577,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // families retain their existing fallback policy.
       if (explicitPushOnly && appNotification?.push?.retryable && hasDurableAppReplay(messageType, billingDeliveryCategory)) {
         return { delivered: false, retryable: true, deliveryOutcome: 'uncertain', reason: 'native_provider_retryable',
-          retryAfterMs: appNotification.push.retryAfterMs || 60000 };
+          retryAfterMs: appNotification.push.retryAfterMs || 60000, ...bell };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
       return { delivered: false, deliveryOutcome: 'not_sent', ...bell };
@@ -724,7 +727,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (deliveryOutcome === 'accepted') {
       return acceptedResult || { delivered: true, deliveryOutcome: 'accepted', sid: 'push:delivered' };
     }
-    return { delivered: false, retryable: deliveryOutcome === 'uncertain', deliveryOutcome, reason: 'push_attempt_failed' };
+    return { delivered: false, retryable: deliveryOutcome === 'uncertain', deliveryOutcome, reason: 'push_attempt_failed', ...bell };
   }
 }
 

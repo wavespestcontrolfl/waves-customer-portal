@@ -151,8 +151,8 @@ describe('estimate add-service request workflow', () => {
     expect(normalizeRequestedServiceKey('pool cleaning')).toBeNull();
   });
 
-  test('prices termite bait station requests from the saved property inputs', () => {
-    const revision = buildEstimateServiceRevisionDraft(baseEstimate(), 'termite_bait');
+  test('prices termite bait station requests from the saved property inputs', async () => {
+    const revision = await buildEstimateServiceRevisionDraft(baseEstimate(), 'termite_bait');
 
     expect(revision.serviceKey).toBe('termite_bait');
     expect(revision.serviceLabel).toBe('Termite Bait Stations');
@@ -164,26 +164,26 @@ describe('estimate add-service request workflow', () => {
     }));
   });
 
-  test('seasonal mosquito offers price the seasonal program, not monthly12', () => {
-    const revision = buildEstimateServiceRevisionDraft(baseEstimate(), 'Seasonal Mosquito');
+  test('seasonal mosquito offers price the seasonal program, not monthly12', async () => {
+    const revision = await buildEstimateServiceRevisionDraft(baseEstimate(), 'Seasonal Mosquito');
 
     expect(revision.serviceKey).toBe('mosquito');
     expect(revision.status).toBe('priced');
     expect(revision.draftEstimateData.inputs.services.mosquito).toEqual({ tier: 'seasonal' });
   });
 
-  test('legacy mosquito CTAs still price the monthly program', () => {
-    const revision = buildEstimateServiceRevisionDraft(baseEstimate(), 'WaveGuard Mosquito');
+  test('legacy mosquito CTAs still price the monthly program', async () => {
+    const revision = await buildEstimateServiceRevisionDraft(baseEstimate(), 'WaveGuard Mosquito');
 
     expect(revision.status).toBe('priced');
     expect(revision.draftEstimateData.inputs.services.mosquito).toEqual({ tier: 'monthly' });
   });
 
-  test('replays prior qualifying services so cross-sell drafts price at the combined tier', () => {
+  test('replays prior qualifying services so cross-sell drafts price at the combined tier', async () => {
     const estimate = baseEstimate();
     estimate.estimate_data.priorQualifyingServices = ['lawn_care', 'mosquito'];
 
-    const revision = buildEstimateServiceRevisionDraft(estimate, 'termite_bait');
+    const revision = await buildEstimateServiceRevisionDraft(estimate, 'termite_bait');
 
     expect(revision.status).toBe('priced');
     expect(revision.draftEstimateData.inputs.priorQualifyingServices).toEqual(['lawn_care', 'mosquito']);
@@ -192,10 +192,10 @@ describe('estimate add-service request workflow', () => {
     expect(revision.updated.tier).toBe('Platinum');
   });
 
-  test('builds a draft revision without mutating the live estimate', () => {
+  test('builds a draft revision without mutating the live estimate', async () => {
     const estimate = baseEstimate();
     const originalMonthly = estimate.monthly_total;
-    const revision = buildEstimateServiceRevisionDraft(estimate, 'lawn_care');
+    const revision = await buildEstimateServiceRevisionDraft(estimate, 'lawn_care');
 
     expect(revision.status).toBe('priced');
     expect(revision.serviceKey).toBe('lawn_care');

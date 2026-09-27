@@ -1105,6 +1105,7 @@ async function sendCustomerMessageCore(input) {
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
     };
   }
 
