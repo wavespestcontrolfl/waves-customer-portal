@@ -944,6 +944,49 @@ const OUR_NUMBER = '+19415550100';
       const notif = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('read_at');
       expect(notif.read_at).toBeTruthy(); // retired (marked read) — mirrors repeat-caller-bell's own supersedeMissedCallAdmin cleanup
     });
+
+    test('a TRANSIENT failure in the FINAL post-dispatch recheck never retires an already-written bell — only a POSITIVELY confirmed supersession does (Codex #5019 r15 P1)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+
+      // FOUR calls happen in order: findPromiseToRing's own eager
+      // pre-check refresh, then shouldContinue (the bell write) and
+      // beforePush (the push) each run stillEligible once — all three
+      // succeed genuinely, the promise really is still open. Only the
+      // FOURTH (the post-dispatch retire check, run after all three)
+      // hits a synthetic transient outage.
+      const spy = jest.spyOn(commitments, 'refreshFulfillment')
+        .mockResolvedValueOnce({ checked: 1, fulfilled: 0, hinted: 0, cleared: 0, failed: 0 })
+        .mockResolvedValueOnce({ checked: 1, fulfilled: 0, hinted: 0, cleared: 0, failed: 0 })
+        .mockResolvedValueOnce({ checked: 1, fulfilled: 0, hinted: 0, cleared: 0, failed: 0 })
+        .mockRejectedValueOnce(new Error('synthetic transient outage'));
+
+      triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+        expect(await opts.shouldContinue()).toBe(true);
+        await mockConn('notifications').insert({
+          id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'fixture',
+          metadata: { triggerKey: 'promise_chaser', dedupeKey: opts.dedupeKey, payload: { commitmentId: payload?.commitmentId, callLogId: payload?.callLogId } },
+        });
+        expect(await opts.beforePush()).toBe(true);
+        return { bellWritten: true, push: { sent: 1 } };
+      });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      spy.mockRestore();
+
+      // The valid, genuinely-delivered bell is left exactly as it is — an
+      // unverifiable recheck is never treated as "confirmed superseded".
+      const notif = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('read_at');
+      expect(notif.read_at).toBeNull();
+      // And the delivery fact still settles normally — bellWritten is
+      // true and the bell was never retired.
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeTruthy();
+    });
   });
 
   test('205 non-SLA commitments on the number never crowd out the one SLA promise — the kind filter is now in the QUERY, not a client-side filter after the page (Codex #5019 r10 P2)', async () => {

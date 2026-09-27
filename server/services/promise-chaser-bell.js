@@ -386,7 +386,22 @@ async function ringForCall(call, now = new Date()) {
   // opt-out, silencing an actually-still-open promise for the rest of the
   // ET day). Read below, right before deciding whether to settle.
   let stillEligibleBlocked = false;
+  // Whether the MOST RECENT stillEligible() call POSITIVELY established
+  // supersession — a successful check that genuinely found the promise
+  // renewed past this callback, closed, or already followed up — never
+  // merely "a lookup couldn't verify" (Codex #5019 r15 P1). Reset at the
+  // START of every call so it reflects only that one invocation: a
+  // transient DB failure (or an ambiguous missing row) fails closed for
+  // shouldContinue/beforePush's own SEND decision the same as before, but
+  // the SEPARATE post-dispatch retire decision below must never treat
+  // "couldn't verify" as "confirmed superseded" — that would retire an
+  // ALREADY-WRITTEN, genuinely valid bell, and the unconditional
+  // alreadyRung check finds that SAME notifications row on every later
+  // tick with no delivery fact to explain why nothing is ever retried,
+  // permanently hiding a real alert behind one bad connection.
+  let stillEligibleConfirmedSuperseded = false;
   const stillEligible = async () => {
+    stillEligibleConfirmedSuperseded = false;
     const ok = await (async () => {
       try {
         // Every read below runs on the CRON-HELD connection, not a fresh
@@ -447,11 +462,21 @@ async function ringForCall(call, now = new Date()) {
           // too, not just at selection time, or a renewal landing in this
           // exact gap would let a stale obligation ring anyway.
           const renewedNow = await commitments.obligationRenewedAt(trx, current);
-          if (renewedNow && renewedNow.getTime() >= call.created_at.getTime()) return false;
+          if (renewedNow && renewedNow.getTime() >= call.created_at.getTime()) {
+            stillEligibleConfirmedSuperseded = true;
+            return false;
+          }
           const stillLive = await commitments.stillOpenIds(trx, [current.id], { now: new Date() });
-          if (!stillLive.has(current.id)) return false;
+          if (!stillLive.has(current.id)) {
+            stillEligibleConfirmedSuperseded = true;
+            return false;
+          }
           const followedNow = await followedUpIds(trx, [current]);
-          return !followedNow.has(current.id);
+          if (followedNow.has(current.id)) {
+            stillEligibleConfirmedSuperseded = true;
+            return false;
+          }
+          return true;
         }, { connection: getHeldConnection() });
       } catch {
         return false;
@@ -501,21 +526,30 @@ async function ringForCall(call, now = new Date()) {
   const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0
     || (!stillEligibleBlocked && (stats.suppressed || stats.policySilenced))));
   // Retire a bell the FINAL check rejected — mirrors repeat-caller-bell.js's
-  // own post-dispatch cleanup exactly (Codex #5019 r11 P2): shouldContinue
-  // (the bell write) and beforePush (the push, a moment later) both run
-  // stillEligible, but nothing re-checks it again after both finish. If the
-  // promise was fulfilled in that exact gap — allowed through at the bell
-  // write, rejected by the time beforePush ran — the bell notification row
-  // already exists and stays visible forever (nothing ever marks it read),
-  // and delivered above still reads true, so the delivery fact still gets
-  // written. One more independent stillEligible() call, exactly like
-  // repeat-caller-bell's own `if (stats?.bellWritten && !await stillEligible())`,
-  // catches this: retire the now-stale bell through the SAME shared
-  // notification-service helper that bell already uses (never touched here
-  // before), and never write the fact for a bell we just took back down —
-  // the promise being truly gone is harmless to leave unsettled either way,
-  // since the next tick's own findPromiseToRing already excludes it.
-  const bellSuperseded = Boolean(stats?.bellWritten) && !(await stillEligible());
+  // own post-dispatch cleanup exactly (Codex #5019 r11 P2, then r15 P1):
+  // shouldContinue (the bell write) and beforePush (the push, a moment
+  // later) both run stillEligible, but nothing re-checks it again after
+  // both finish. If the promise was fulfilled in that exact gap — allowed
+  // through at the bell write, rejected by the time beforePush ran — the
+  // bell notification row already exists and stays visible forever
+  // (nothing ever marks it read), and delivered above still reads true, so
+  // the delivery fact still gets written. One more independent
+  // stillEligible() call, exactly like repeat-caller-bell's own
+  // `if (stats?.bellWritten && !await stillEligible())`, catches this —
+  // retiring the now-stale bell through the SAME shared notification-
+  // service helper that bell already uses (never touched here before).
+  // Gated on stillEligibleConfirmedSuperseded too (r15 P1): stillEligible
+  // also returns false on a merely UNVERIFIABLE recheck (a transient DB
+  // blip, an ambiguous missing row) — treating that as "confirmed
+  // superseded" would retire an ALREADY-WRITTEN, genuinely valid bell on
+  // nothing more than a bad connection, and the unconditional alreadyRung
+  // check then finds that SAME row on every later tick with no delivery
+  // fact to explain why nothing is ever retried — permanently hiding a
+  // real alert. Only a POSITIVE verdict (genuinely renewed, closed, or
+  // already followed up) retires it; an unverifiable recheck leaves the
+  // valid bell exactly as it is, and the fact still settles below.
+  const recheckStillWanted = await stillEligible();
+  const bellSuperseded = Boolean(stats?.bellWritten) && !recheckStillWanted && stillEligibleConfirmedSuperseded;
   if (bellSuperseded) {
     await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id, triggerKey: 'promise_chaser' })
       .catch((err) => logger.warn(`[promise-chaser-bell] failed to retire a superseded bell for ${dedupeKey}: ${err.message}`));
