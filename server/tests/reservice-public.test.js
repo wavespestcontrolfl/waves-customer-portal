@@ -650,7 +650,7 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     setReview(null);
     const booking = require('../routes/booking')._internals;
     jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
-    const coords = jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
     const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
       slots: [], nearby: false,
       days: [{
