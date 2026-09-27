@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
-const { invoiceAmountDue } = require('./invoice-helpers');
+const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
@@ -171,6 +171,32 @@ async function overdueRecurringInvoices(customerId, now = new Date()) {
     .select('invoices.*', 'ifs.last_touch_at as followup_last_touch_at');
 }
 
+// Keep the live sweep's eligibility and recent-contact filtering in one
+// selector so every candidate is screened by the same evidence reads.
+async function freshOverdueRecurringInvoices(customerId, now = new Date()) {
+  const overdue = await overdueRecurringInvoices(customerId, now);
+  const cutoff = new Date(now.getTime() - RECENT_TOUCH_HOURS * 3600 * 1000);
+  const legacyTouches = await db('activity_log')
+    .where({ customer_id: customerId, action: 'late_payment_reminder' })
+    .where('created_at', '>=', cutoff)
+    .select('metadata');
+  const legacyDunnedIds = new Set(legacyTouches.map((row) => {
+    try {
+      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+      return meta?.invoiceId == null ? null : String(meta.invoiceId);
+    } catch {
+      return null;
+    }
+  }).filter(Boolean));
+  return overdue.filter((invoice) => isInvoiceCollectibleStatus(invoice.status)
+    && !invoiceWithdrawnFromCustomer(invoice)
+    && invoiceAmountDue(invoice) > 0
+    && !legacyDunnedIds.has(String(invoice.id))
+    && [invoice.last_reminder_at, invoice.followup_last_touch_at]
+      .filter(Boolean)
+      .every((touch) => new Date(touch) < cutoff));
+}
+
 async function runSweep({ now = new Date() } = {}) {
   if (!gateEnabled()) return { skipped: true, reason: 'gate_off' };
   if (!(await smsTemplateActive())) return { skipped: true, reason: 'template_inactive' };
@@ -240,35 +266,7 @@ async function runSweep({ now = new Date() } = {}) {
         logger.warn(`[previsit-balance] payer resolve failed for visit ${visit.id} — skipping to be safe: ${payerErr.message}`);
         payerBilled = true;
       }
-      const overdue = await overdueRecurringInvoices(visit.customer_id, now);
-      // Recently-touched overdue invoices stay with the follow-up engine.
-      const cutoff = new Date(now.getTime() - RECENT_TOUCH_HOURS * 3600 * 1000);
-      // The legacy 10:00 late-payment checker dedupes its sends via
-      // activity_log rows (action 'late_payment_reminder', metadata
-      // .invoiceId) — it stamps neither invoices.last_reminder_at nor a
-      // follow-up sequence, so without this read the 10:05 sweep re-texts
-      // an invoice the checker dunned five minutes earlier (Codex r5). A
-      // failed read counts as untouched: the checker's own insert is
-      // best-effort (.catch(() => {})), so absence never guaranteed silence.
-      let legacyDunnedIds = new Set();
-      try {
-        const legacyTouches = await db('activity_log')
-          .where({ customer_id: visit.customer_id, action: 'late_payment_reminder' })
-          .where('created_at', '>=', cutoff)
-          .select('metadata');
-        legacyDunnedIds = new Set(legacyTouches.map((row) => {
-          try {
-            const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-            return meta?.invoiceId || null;
-          } catch { return null; }
-        }).filter(Boolean));
-      } catch (activityErr) {
-        logger.warn(`[previsit-balance] activity_log read failed for customer ${visit.customer_id}: ${activityErr.message}`);
-      }
-      const freshAll = overdue.filter((inv) => !legacyDunnedIds.has(inv.id)
-        && [inv.last_reminder_at, inv.followup_last_touch_at]
-          .filter(Boolean)
-          .every((touch) => new Date(touch) < cutoff));
+      const freshAll = await freshOverdueRecurringInvoices(visit.customer_id, now);
 
       // Collections policy, per channel, BEFORE the claim (gate off ⇒ both
       // permitted without consulting, eligible set null = no filtering —

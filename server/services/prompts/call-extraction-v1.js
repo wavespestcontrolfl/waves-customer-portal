@@ -27,7 +27,12 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // end is not carried: window_end is the job-duration block and the quoted
 // arrival window is always derived from the start (sms-time-format.js).
 // New instructions the model must follow, so this is a new cohort.
-const PROMPT_VERSION = 'v11';
+// v12: caller.relationship_to_property "home_buyer" (schema 1.15.0; owner
+// ruling 2026-09-26: a buyer under contract ordering their own WDO
+// inspection is authorized like a lender or realtor). Buyers calling for
+// themselves were told to use "other", so this changes what the model
+// returns for them: a new cohort.
+const PROMPT_VERSION = 'v12';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -158,9 +163,9 @@ EMAIL:
 - ATTRIBUTION: an email the caller relays FOR another named person ("the buyer is Joseph — his email is ...", "her email is ...") is THAT person's email. It goes on that person's secondary-contact entry and NEVER into caller.email, even though the caller is the one speaking it. The same rule applies to phone numbers and caller.phone_e164.
 
 CALLER RELATIONSHIP (relationship_to_property) AND on_site_authorization:
-- A realtor / buyer's or seller's agent calling about a sale, closing, or inspection is "real_estate_agent". A lender, loan officer, or title/closing coordinator is "lender". Use "other" only when no enum value fits.
+- A realtor / buyer's or seller's agent calling about a sale, closing, or inspection is "real_estate_agent". A lender, loan officer, or title/closing coordinator is "lender". A caller who is BUYING the property themselves (under contract, closing pending, not the owner yet — "we're buying the house", "we close next month") is "home_buyer"; once they say they already own it, they are "owner". Use "other" only when no enum value fits.
 - Most homeowners never say "it's my house". Someone arranging service for where they live ("my yard", "our kitchen", "come out to the house") is the owner or a household member: use "owner" when they speak as the resident, "spouse_partner" when they say so, and "unknown" ONLY when the call gives no signal either way. Never infer a non-owner relationship from a missing statement.
-- on_site_authorization is about whether THIS caller may authorize work at the property. It is true for an owner, a spouse/partner, and for any caller who says they can authorize it. Set it false ONLY when the caller is explicitly a third party (tenant, property manager, realtor, lender, employee, HOA, other) AND nothing on the call says they may authorize the work. An "unknown" relationship never justifies false on its own.
+- on_site_authorization is about whether THIS caller may authorize work at the property. It is true for an owner, a spouse/partner, and for any caller who says they can authorize it. Set it false ONLY when the caller is explicitly a third party (tenant, property manager, realtor, lender, home buyer, employee, HOA, other) AND nothing on the call says they may authorize the work. An "unknown" relationship never justifies false on its own.
 
 UNIT BEDROOMS (property.bedroom_count):
 - When the caller states the size of their apartment/condo UNIT in bedrooms ("one-bedroom", "2 bed 2 bath", "studio" = 0), set property.bedroom_count to that integer. Only what was spoken — never infer it from square footage, rent, or the property type; null otherwise.
@@ -298,7 +303,7 @@ TRIAGE FLAGS — Set flags for situations requiring human review:
 - out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte/DeSoto counties.
 - hoa_common_area_requires_approval: hoa_common_area_service is true.
 - commercial_requires_quote: Commercial property needing custom quote.
-- caller_not_authorized: Caller is EXPLICITLY a third party (tenant, property_manager, real_estate_agent, lender, employee, hoa_board_member, other) AND on_site_authorization is false. Never for owner, spouse_partner, or unknown.
+- caller_not_authorized: Caller is EXPLICITLY a third party (tenant, property_manager, real_estate_agent, lender, home_buyer, employee, hoa_board_member, other) AND on_site_authorization is false. Never for owner, spouse_partner, or unknown.
 - no_sms_consent_captured: No explicit SMS consent obtained.
 - address_unverifiable: Address is vague or incomplete.
 - prior_complaint_unresolved: Caller mentioned an unresolved complaint.
