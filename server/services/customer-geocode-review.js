@@ -62,13 +62,19 @@ async function getReviewDetail(customerId, conn = db) {
 }
 
 const ADDRESS_MATCH_SQL = 'r.address_snapshot = jsonb_build_array(c.address_line1, c.address_line2, c.city, c.state, c.zip)';
-const HAS_PIN_SQL = '(c.latitude IS NOT NULL AND c.longitude IS NOT NULL AND c.latitude <> 0 AND c.longitude <> 0)';
-const VERIFIED_PIN_SQL = `(r.status = 'verified' AND ${ADDRESS_MATCH_SQL} AND ${HAS_PIN_SQL} AND c.latitude = r.latitude AND c.longitude = r.longitude)`;
+const PRIMARY_HAS_PIN_SQL = '(p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND p.latitude <> 0 AND p.longitude <> 0)';
+const EFFECTIVE_LAT_SQL = `(CASE WHEN ${PRIMARY_HAS_PIN_SQL} THEN p.latitude ELSE c.latitude END)`;
+const EFFECTIVE_LNG_SQL = `(CASE WHEN ${PRIMARY_HAS_PIN_SQL} THEN p.longitude ELSE c.longitude END)`;
+const HAS_PIN_SQL = `(${EFFECTIVE_LAT_SQL} IS NOT NULL AND ${EFFECTIVE_LNG_SQL} IS NOT NULL AND ${EFFECTIVE_LAT_SQL} <> 0 AND ${EFFECTIVE_LNG_SQL} <> 0)`;
+const VERIFIED_PIN_SQL = `(r.status = 'verified' AND ${ADDRESS_MATCH_SQL} AND ${HAS_PIN_SQL} AND ${EFFECTIVE_LAT_SQL} = r.latitude AND ${EFFECTIVE_LNG_SQL} = r.longitude)`;
 
 async function listReviewQueue({ limit = 25, offset = 0 } = {}, conn = db) {
   const upcoming = conn('scheduled_services').select('customer_id').min('scheduled_date as next_visit_date')
     .whereIn('status', ['pending', 'confirmed']).where('scheduled_date', '>=', etDateString(new Date())).groupBy('customer_id');
   const query = conn('customers as c').leftJoin('customer_geocode_reviews as r', 'r.customer_id', 'c.id')
+    .leftJoin('customer_properties as p', function () {
+      this.on('p.customer_id', '=', 'c.id').andOnVal('p.active', '=', true).andOnVal('p.is_primary', '=', true);
+    })
     .leftJoin(upcoming.as('visits'), 'visits.customer_id', 'c.id').whereNull('c.deleted_at')
     .whereRaw("(NULLIF(btrim(c.address_line1), '') IS NOT NULL OR visits.next_visit_date IS NOT NULL)")
     .whereRaw(`NOT COALESCE(${VERIFIED_PIN_SQL}, false)`)
