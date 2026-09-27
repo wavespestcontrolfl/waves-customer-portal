@@ -9,7 +9,7 @@
  * (this same function, run against the real shared db module before the
  * script does anything else) is for.
  */
-const { assertReadOnly, siteOneReplayItems } = require('../../ops/agents/inventory-agent-replay');
+const { assertReadOnly, amazonReplayItems, siteOneReplayItems } = require('../../ops/agents/inventory-agent-replay');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -77,5 +77,26 @@ describe('siteOneReplayItems', () => {
   test('a pending or unreadable invoice yields nothing', () => {
     expect(siteOneReplayItems(email, null)).toEqual([]);
     expect(siteOneReplayItems(email, { pending: true, lines: [] })).toEqual([]);
+  });
+});
+
+// An Amazon line the live sweep holds for a person is never decided by the
+// replay (2026-09-27 pre-push audit): an explicitly invalid quantity (null)
+// is not a quantity of 1.
+describe('amazonReplayItems', () => {
+  test('a null quantity or a missing order number is held, exactly as the sweep holds it', () => {
+    expect(amazonReplayItems({ orderNumber: '111-2222222-3333333', items: [
+      { title: 'Taurus SC Termiticide 78 oz', quantity: 2 },
+      { title: 'Bifen XTS Insecticide 96 oz', quantity: null },
+    ] })).toEqual([
+      { vendor: 'amazon', title: 'Taurus SC Termiticide 78 oz', quantity: 2, heldAs: null },
+      { vendor: 'amazon', title: 'Bifen XTS Insecticide 96 oz', quantity: 0, heldAs: 'unverified' },
+    ]);
+    expect(amazonReplayItems({ orderNumber: null, items: [{ title: 'Taurus SC Termiticide 78 oz', quantity: 1 }] }))
+      .toEqual([{ vendor: 'amazon', title: 'Taurus SC Termiticide 78 oz', quantity: 1, heldAs: 'no_order_number' }]);
+  });
+
+  test('an unparsed email yields nothing', () => {
+    expect(amazonReplayItems(null)).toEqual([]);
   });
 });

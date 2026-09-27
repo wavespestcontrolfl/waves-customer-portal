@@ -81,7 +81,7 @@ const { classifyItem, AGENT_HANDOFF_STATUSES } = require(server('services/purcha
 const { parseAmazonDeliveredEmail, parseAmazonShippedEmail, AMAZON_DELIVERY_FROM, AMAZON_SHIPPED_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { decideForTitle, loadAllowedCategories, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
-const { siteOneHold } = require(server('services/purchase-receipts/sweep'));
+const { amazonLine, siteOneHold } = require(server('services/purchase-receipts/sweep'));
 const { dispatchWithFallback } = require(server('services/llm/call'));
 // The shared pool dispatchWithFallback's telemetry can write through —
 // required here ONLY so assertReadOnly can prove it's read-only too; every
@@ -129,14 +129,10 @@ async function amazonTitles(conn, since) {
   const columns = ['id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at'];
   const delivered = await conn('emails').select(columns)
     .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%']).where('received_at', '>=', since);
-  for (const email of delivered) {
-    for (const item of parseAmazonDeliveredEmail(email)?.items || []) items.push({ vendor: 'amazon', title: item.title, quantity: item.quantity ?? 1 });
-  }
+  for (const email of delivered) items.push(...amazonReplayItems(parseAmazonDeliveredEmail(email)));
   const shipped = await conn('emails').select(columns)
     .whereRaw('LOWER(from_address) = ?', [AMAZON_SHIPPED_FROM]).whereRaw('subject ILIKE ?', ['Shipped:%']).where('received_at', '>=', since);
-  for (const email of shipped) {
-    for (const item of parseAmazonShippedEmail(email)?.items || []) items.push({ vendor: 'amazon', title: item.title, quantity: item.quantity ?? 1 });
-  }
+  for (const email of shipped) items.push(...amazonReplayItems(parseAmazonShippedEmail(email)));
   return items;
 }
 
@@ -152,6 +148,19 @@ async function siteOneTitles(conn, since) {
     items.push(...siteOneReplayItems(email, invoice));
   }
   return items;
+}
+
+// The Amazon lines the live sweep would hand the agent — the sweep's own
+// amazonLine decides: a line with an explicitly invalid quantity (null; an
+// absent one already defaults to 1 in the parser) or an email with no
+// order number is held for a person and never reaches the agent, so it is
+// counted but not decided (2026-09-27 pre-push audit). Held lines come back
+// flagged so the summary can say how many there were.
+function amazonReplayItems(parsed) {
+  return (parsed?.items || []).map((raw) => {
+    const { item, holdAs } = amazonLine(raw, parsed.orderNumber);
+    return { vendor: 'amazon', title: item.title, quantity: item.quantity, heldAs: holdAs || null };
+  });
 }
 
 // The SiteOne lines the live sweep would hand the agent, each keeping its
@@ -202,10 +211,13 @@ async function main() {
   await assertReadOnly(sharedDb);
   const conn = readOnlyConn();
   try {
-    const [amazon, siteOneItems] = await Promise.all([amazonTitles(conn, SINCE), siteOneTitles(conn, SINCE)]);
+    const [amazonAll, siteOneItems] = await Promise.all([amazonTitles(conn, SINCE), siteOneTitles(conn, SINCE)]);
+    const amazon = amazonAll.filter((item) => !item.heldAs);
+    const heldForPerson = amazonAll.length - amazon.length;
     const items = dedupe([...amazon, ...siteOneItems]);
     console.log(`${items.length} distinct past purchase title(s) since ${SINCE.toISOString().slice(0, 10)} `
-      + `(${amazon.length} Amazon item mention(s), ${siteOneItems.length} SiteOne line mention(s) before dedupe).`);
+      + `(${amazon.length} Amazon item mention(s), ${siteOneItems.length} SiteOne line mention(s) before dedupe; `
+      + `${heldForPerson} Amazon line(s) the sweep holds for a person — never the agent's — left out).`);
 
     const rows = [];
     let unresolvedCount = 0;
@@ -262,4 +274,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assertReadOnly, siteOneReplayItems };
+module.exports = { assertReadOnly, amazonReplayItems, siteOneReplayItems };

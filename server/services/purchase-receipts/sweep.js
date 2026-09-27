@@ -335,8 +335,9 @@ module.exports = {
   // line the agent gate stranded is restored to the status it would have
   // held under without the agent, and rings the SAME "not added" bell text.
   HELD_REASONS,
-  // Reused by ops/agents/inventory-agent-replay.js: a SiteOne line the live
-  // sweep holds for a person (a return, an unverified UOM or invoice) never
-  // reaches the agent, so the replay skips it the same way.
-  siteOneHold,
+  // Reused by ops/agents/inventory-agent-replay.js: a line the live sweep
+  // holds for a person (Amazon: an invalid quantity or no order number;
+  // SiteOne: a return, an unverified UOM or invoice) never reaches the
+  // agent, so the replay leaves it out the same way.
+  amazonLine, siteOneHold,
 };
