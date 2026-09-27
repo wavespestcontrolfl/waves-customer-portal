@@ -277,6 +277,40 @@ describe('structural denials', () => {
     expect(result.denialReasons).toEqual([]);
   });
 
+  test('sms keeps its allowed decision but exposes a dropped-invoice snapshot as incomplete', async () => {
+    armAllowedBaseline();
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => {
+      opts.onResolveFailure(); // a second candidate could not be proven self-pay
+      return [invoiceRow()];
+    });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'sms', purpose: 'balance_reminder', now: WED_11AM_EDT,
+    });
+    expect(result).toMatchObject({
+      allowed: true,
+      eligibleInvoiceIds: ['inv-1'],
+      balanceIncomplete: 'payer resolve failed',
+    });
+    expect(result.denialReasons).toEqual([]);
+  });
+
+  test('a truncated empty invoice snapshot remains visible on an allowed dues-only verdict', async () => {
+    armAllowedBaseline({ invoices: [] });
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => {
+      opts.onTruncation();
+      return [];
+    });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'email', purpose: 'balance_reminder', offLedgerBalanceCents: 12800, now: WED_11AM_EDT,
+    });
+    expect(result).toMatchObject({
+      allowed: true,
+      eligibleInvoiceIds: [],
+      balanceIncomplete: 'candidate bound hit',
+    });
+    expect(result.denialReasons).toEqual([]);
+  });
+
   test('dues context is NOT a bypass: zero dues, voice channel, and late_payment purpose all still require an invoice', async () => {
     armAllowedBaseline({ invoices: [] });
     const zeroDues = await ContactPolicy.evaluate('cust-1', {
@@ -339,6 +373,7 @@ describe('structural denials', () => {
     const result = await evalVoice();
     expect(result.allowed).toBe(false);
     expect(result.denialReasons).toEqual(['policy_evaluation_error']);
+    expect(result.balanceIncomplete).toBe('policy evaluation failed');
   });
 
   test('FAIL CLOSED: an open-balance loader rejection is a denial', async () => {
