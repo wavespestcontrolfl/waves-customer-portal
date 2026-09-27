@@ -273,6 +273,31 @@ describe('deferred-replay registry', () => {
     expect(fallback).toHaveBeenCalledTimes(1);
   });
 
+  test('invoice_send_deferred re-runs the invoice checks under the invoice lock at each provider boundary; nothing else registers one', async () => {
+    const invoice = {
+      withDeferredInvoiceProviderHandoff: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
+      checkDeferredInvoiceEmailDelivery: jest.fn(async () => ({ ok: true })),
+    };
+    jest.doMock('../services/invoice', () => invoice);
+    try {
+      const { deferredProviderHandoff, deferredBillingEmailPreSendCheck } = require('../services/messaging/deferred-replay-registry');
+      const meta = { invoice_id: 'inv-1', customer_id: 'cust-1' };
+      const dispatch = jest.fn();
+      await expect(deferredProviderHandoff('invoice_send_deferred', meta)(dispatch))
+        .resolves.toEqual({ sent: true, deliveryOutcome: 'accepted' });
+      expect(invoice.withDeferredInvoiceProviderHandoff).toHaveBeenCalledWith(meta, dispatch);
+      const ctx = { channel: 'email', database: 'locked-trx' };
+      await expect(deferredBillingEmailPreSendCheck('invoice_send_deferred', meta)(ctx)).resolves.toEqual({ ok: true });
+      expect(invoice.checkDeferredInvoiceEmailDelivery).toHaveBeenCalledWith(meta, ctx);
+      for (const entryPoint of Object.keys(_registry).filter((entry) => entry !== 'invoice_send_deferred')) {
+        expect(deferredProviderHandoff(entryPoint, meta)).toBeUndefined();
+        expect(deferredBillingEmailPreSendCheck(entryPoint, meta)).toBeUndefined();
+      }
+    } finally {
+      jest.dontMock('../services/invoice');
+    }
+  });
+
   // Pre-push audit P1 #A: billingDispatchOutcome's own "representative"
   // outcome can report sent:true/accepted while another SELECTED leg is
   // still pending (Email retryable, Text accepted) — the registry's
