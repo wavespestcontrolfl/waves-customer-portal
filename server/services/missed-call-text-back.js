@@ -233,7 +233,12 @@ function keepClaim(phone, outcome, claimed) {
 // provider boundary (owner: "only if nobody has called or texted them by
 // then"): no customer record knows the number now, we haven't called them
 // since the missed call, no later call from them was answered (by a person
-// or Sandy) or left a voicemail, and no SMS either way since the missed call.
+// or Sandy) or left a voicemail, and no SMS either way since the missed call
+// other than this lane's own. This lane's texts are the one-shot claim's
+// business (priorTextReason / the boundary claim), never contact — and at
+// the boundary Twilio may already have written THIS attempt's 'sending'
+// provider-handoff reservation row (gratitude coordination), which must not
+// read as someone having texted them.
 async function stillUncontacted(phone, row, dbi = db) {
   if (await knownCallerPhoneExists(dbi, phone)) return false;
   const digits = phone.replace(/\D/g, '').slice(-10);
@@ -258,6 +263,7 @@ async function stillUncontacted(phone, row, dbi = db) {
   const smsSince = await dbi('sms_log')
     .where((q) => q.where('to_phone', phone).orWhere('from_phone', phone))
     .where('created_at', '>=', row.created_at)
+    .whereRaw("COALESCE(message_type, '') <> ?", [MESSAGE_TYPE])
     .first('id');
   return !smsSince;
 }
@@ -381,11 +387,9 @@ async function precheckRow(row, now) {
 // next sweep pass, until its send slot closes).
 async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFenced) {
   try {
-    // Also doubles as a safety net on a resumed lease: if a prior attempt
-    // sent the text but crashed before settling 'sent', stillUncontacted
-    // finds that same sms_log row and this retry skips instead of sending
-    // a second text — settled here as already_contacted rather than sent,
-    // which is a fine label for "a message already went to this number".
+    // A resumed lease whose earlier attempt sent the text but crashed before
+    // settling 'sent' is caught by priorTextReason below (the claim row, or
+    // this lane's own sms_log row) — never double-texted.
     if (!(await stillUncontacted(phone, row))) {
       await settleFenced('skipped:already_contacted');
       return { outcome: 'skipped', reason: 'already_contacted' };

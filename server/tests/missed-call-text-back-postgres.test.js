@@ -87,6 +87,9 @@ jest.setTimeout(30000);
     // `ON CONFLICT (phone) DO NOTHING`.
     await database.raw('ALTER TABLE ??.?? ADD PRIMARY KEY (phone)', [schema, 'voicemail_sms_claims']);
     await database.raw('ALTER TABLE ??.?? ALTER COLUMN created_at SET DEFAULT now()', [schema, 'voicemail_sms_claims']);
+    // The provider-handoff reservation insert relies on sms_log's own defaults.
+    await database.raw('ALTER TABLE ??.?? ALTER COLUMN id SET DEFAULT gen_random_uuid()', [schema, 'sms_log']);
+    await database.raw('ALTER TABLE ??.?? ALTER COLUMN created_at SET DEFAULT now()', [schema, 'sms_log']);
     mockConn = database;
   });
   beforeEach(() => {
@@ -376,6 +379,35 @@ jest.setTimeout(30000);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
       expect(await claimRow()).toBeUndefined();
       expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:not_missed');
+    });
+
+    test('the provider-handoff reservation Twilio writes for THIS send first (gratitude coordination) is not mistaken for contact', async () => {
+      const { prepareProviderHandoffReservation } = require('../services/messaging/provider-handoff-reservation');
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
+        before: async (input) => {
+          const prepared = await prepareProviderHandoffReservation({
+            to: input.to, fromNumber: input.metadata.fromNumber, body: input.body, messageType: input.metadata.original_message_type,
+          });
+          expect(prepared.handle).toBeTruthy();
+        },
+      }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect(await database('sms_log').where({ to_phone: PHONE, status: 'sending', message_type: 'missed_call_text_back' }).first('id')).toBeTruthy();
+    });
+
+    test('a staff send still mid-handoff (its own sending reservation) does count as contact', async () => {
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
+        before: () => database('sms_log').insert({
+          direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'staff reply',
+          status: 'sending', message_type: 'manual', metadata: JSON.stringify({ manual_send_reservation: true }),
+        }),
+      }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_contacted' });
+      expect(await claimRow()).toBeUndefined();
     });
 
     test('a staff text that lands after the lease stops the send at the boundary; no claim is taken', async () => {
