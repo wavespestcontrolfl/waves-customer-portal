@@ -1948,6 +1948,37 @@ describe('POST /:token commit', () => {
       expect(customerUpdate.payload.longitude).toBe(LOC.lng);
     });
 
+    test('a profile with coordinates but no street persists and books at the supplied address', async () => {
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = {
+        id: 'cust-1', phone: '9415550101', address_line1: null, address_line2: null,
+        city: null, state: 'FL', zip: null, latitude: 27.1, longitude: -82.2,
+      };
+      listResults.scheduled_services = [];
+      const suppliedLocation = { lat: 27.55, lng: -82.55 };
+      mockGeocode.mockResolvedValueOnce({ location: suppliedLocation });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), {
+        date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(updateCalls).toContainEqual(expect.objectContaining({
+        table: 'customers',
+        payload: expect.objectContaining({
+          address_line1: '123 Any St', latitude: suppliedLocation.lat, longitude: suppliedLocation.lng,
+        }),
+      }));
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({
+        authedCustomer: { address_line1: '123 Any St', latitude: suppliedLocation.lat, longitude: suppliedLocation.lng },
+        callbackVisit: { expectedLocation: suppliedLocation },
+      });
+    });
+
     // Owner ruling 2026-09-24: the validated, in-area address the lead
     // supplied is KEPT when the booking attempt fails — no undo (undoing it
     // raced concurrent bookings that had adopted it, Codex #4737 r3/r4).

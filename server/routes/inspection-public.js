@@ -1745,7 +1745,11 @@ async function provisionLinkedCustomer(trx, {
   const reviewedLocation = freshCustRow.latitude != null && freshCustRow.longitude != null
     ? { lat: Number(freshCustRow.latitude), lng: Number(freshCustRow.longitude) }
     : null;
-  const retainReviewedLocation = Boolean(reviewedLocation) && !explicitDifferentAddress;
+  const retainReviewedLocation = [
+    Boolean(reviewedLocation),
+    Boolean(storedCustRow.address_line1),
+    profileMatchesAddress(storedCustRow, resolved.address, resolved.location),
+  ].every(Boolean);
   if (resolved.source !== 'customer' && !retainReviewedLocation) {
     // The pre-lock resolution did NOT come from this row's own
     // stored address (it was empty, or the stored one failed to
