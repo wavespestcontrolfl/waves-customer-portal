@@ -31,6 +31,7 @@ const { normalizeForMatch, containsWholeWords } = require('./product-matcher');
 const { parsePackSize, parsePackCount, countUnitsCompatible } = require('../product-costing');
 const { convertInventoryQuantity, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const inventoryOperations = require('../inventory-operations');
+const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const {
   classifyItem, findPossibleDuplicateMovement, lockShipment, shipmentHandedOff, SOURCES,
   TITLE_SIZE_RE, sizeUnit, parseSizeNumber, sizesAgree, round4,
@@ -769,10 +770,16 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
       agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
     });
 
+    // Read-only, as in the deterministic lane: a live restock request may
+    // cover this delivery, and receiving it would count the stock twice.
+    const liveRequest = await trx('product_restock_requests')
+      .where({ product_id: productId }).whereIn('status', LIVE_RESTOCK_STATUSES).first('id');
+    const { openRestockRequestNote } = require('./sweep');
     await ringBell(notifyAdmin, {
       lineId, emailId: email.id, status: 'logged', title: 'Inventory agent logged a purchase',
       body: `${result.product.name} +${decision.amount} ${displayUnit(decision.unit)}`
-        + `${catalogChangeNote ? ` — ${catalogChangeNote}` : ''} (line ${String(lineId).slice(0, 8)}).`,
+        + `${catalogChangeNote ? ` — ${catalogChangeNote}` : ''} (line ${String(lineId).slice(0, 8)}).`
+        + `${liveRequest ? ` ${openRestockRequestNote(result.product.name)}` : ''}`,
       trx,
     });
     return { applied: true, status: 'logged' };

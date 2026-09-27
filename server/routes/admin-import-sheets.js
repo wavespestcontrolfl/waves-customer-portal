@@ -318,10 +318,16 @@ router.post('/pricing', async (req, res, next) => {
           await inventoryOperations.lockCatalogCreate(trx);
           const existingActive = await inventoryOperations.findActiveProductByExactName(trx, product);
           if (existingActive) return existingActive;
-          // subcategory column may not exist yet — try with it, fall back without
+          // subcategory column may not exist yet — try with it, fall back
+          // without. The first attempt runs in a savepoint (a nested
+          // transaction), so its failure rolls back only that attempt and the
+          // fallback still runs; a failed statement would otherwise abort the
+          // whole transaction.
           try {
-            const [inserted] = await trx('products_catalog').insert({ ...insertData, subcategory: subcategory || null }).returning('*');
-            return inserted;
+            return await trx.transaction(async (attempt) => {
+              const [inserted] = await attempt('products_catalog').insert({ ...insertData, subcategory: subcategory || null }).returning('*');
+              return inserted;
+            });
           } catch (colErr) {
             const [inserted] = await trx('products_catalog').insert(insertData).returning('*');
             return inserted;

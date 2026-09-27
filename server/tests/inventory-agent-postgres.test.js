@@ -81,6 +81,18 @@ jest.setTimeout(30000);
     return row;
   }
 
+  // Resolves once some session is blocked on an advisory lock (the catalog
+  // lock), so a race test releases its held transaction only after the other
+  // side is really waiting, never on a guess about timing.
+  async function waitForLockWaiter() {
+    for (let i = 0; i < 100; i += 1) {
+      const { rows } = await mockConn.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'");
+      if (rows[0].n > 0) return;
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+    }
+    throw new Error('no session ever waited on the catalog lock');
+  }
+
   const notifyAdmin = (...args) => notifications.notifyAdmin(...args);
   const run = (llm, overrides = {}) => runInventoryAgent({ conn: mockConn, llm: async () => llm, notifyAdmin, ...overrides });
   const stockOf = async (id) => Number((await mockConn('products_catalog').where({ id }).first()).inventory_on_hand);
@@ -244,7 +256,7 @@ jest.setTimeout(30000);
     });
     await locked;
     const agent = run({ ok: true, json: decision });
-    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    await waitForLockWaiter();
     release();
     await manual;
     await agent;
@@ -268,7 +280,7 @@ jest.setTimeout(30000);
     });
     await locked;
     const adminSide = inventoryOperations.createCatalogProduct({ name: ' bifen xts ', category: 'insecticide', unitSize: '96 oz', inventoryUnit: 'oz' });
-    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    await waitForLockWaiter();
     release();
     await agentSide;
     expect(await adminSide).toBeNull();
@@ -310,6 +322,20 @@ jest.setTimeout(30000);
     expect(created).toMatchObject({ inventory_unit: 'each', default_unit: 'each' });
     expect(await stockOf(created.id)).toBe(12);
     expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+  });
+
+  test('the logged bell warns to cancel a live restock request instead of receiving it', async () => {
+    await mockConn('product_restock_requests').insert({
+      product_id: taurus.id, status: 'open', requested_quantity: 78, unit: 'fl_oz', source: 'auto_reorder',
+    });
+    const line = await pendingLine({ raw_title: 'Control Solutions Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'the matched product', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const [bell] = await bellsFor(line.id);
+    expect(bell.message || bell.body || JSON.stringify(bell)).toMatch(/restock request for Taurus SC is still open/);
   });
 
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
