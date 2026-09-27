@@ -346,6 +346,7 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
 async function existsQualifyingInboundText({ phoneLast10, before }) {
   if (!phoneLast10) return false;
   const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+  const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
   const rows = await db('sms_log')
     .where('direction', 'inbound')
     .where('created_at', '<', before)
@@ -366,6 +367,10 @@ async function existsQualifyingInboundText({ phoneLast10, before }) {
     // stand in as evidence the sender contacted Waves first.
     .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
     .modify((qb) => excludeRecruitingSmsLog(qb, 'message_type'))
+    // Inbound rows are never send reservations, so this changes nothing
+    // today. It's here because every sms_log reader goes through the shared
+    // exclusion (sms-log-general-reader-source-guard).
+    .modify(excludeUnresolvedSendReservations)
     .select('id', 'message_body', 'message_type');
   return rows.some(isSubstantiveText);
 }
