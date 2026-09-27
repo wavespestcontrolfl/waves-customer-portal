@@ -361,8 +361,28 @@ async function performLoggedMovement(trx, { vendor, claim, classified, orderNumb
   return { status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest) };
 }
 
+// A queued agent_pending line (inventory-agent.js) that THIS lane's own
+// classifier now resolves — staff filled its container size, or an earlier
+// line created the product or alias it names — posts through this lane's
+// own path, never through the model: classify again under the product lock,
+// stamp the line with the classifier's product and quantity, then
+// performLoggedMovement (the duplicate check and adjustStock). The caller
+// holds the line and shipment locks. Returns performLoggedMovement's outcome
+// (logged or possible_duplicate), or null when the locked classification
+// no longer logs (nothing written).
+async function logQueuedLine(trx, { line, email }) {
+  const item = { title: line.raw_title, quantity: Number(line.quantity) };
+  const classified = await classifyUnderLock(item, trx);
+  if (classified.status !== 'logged') return null;
+  await trx('purchase_receipt_lines').where({ id: line.id }).update({
+    status: 'logged', product_id: classified.productId, received_qty: classified.receivedQty, received_unit: classified.receivedUnit,
+  });
+  const orderNumber = line.order_number === UNKNOWN_ORDER ? null : line.order_number;
+  return performLoggedMovement(trx, { vendor: line.vendor, claim: line, classified, orderNumber, email, item });
+}
+
 module.exports = {
-  classifyItem, processReceiptLine, lockShipment, shipmentHandedOff, SOURCES, UNKNOWN_ORDER,
+  classifyItem, processReceiptLine, logQueuedLine, lockShipment, shipmentHandedOff, SOURCES, UNKNOWN_ORDER,
   findPossibleDuplicateMovement,
   // Title-size-claim and pack-marker parsing primitives, reused (not
   // duplicated) by inventory-agent.js's deterministic reading validation —

@@ -33,7 +33,7 @@ const { convertInventoryQuantity, normalizeInventoryUnit, unitDefinition } = req
 const inventoryOperations = require('../inventory-operations');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const {
-  classifyItem, findPossibleDuplicateMovement, lockShipment, shipmentHandedOff, SOURCES,
+  classifyItem, logQueuedLine, findPossibleDuplicateMovement, lockShipment, shipmentHandedOff, SOURCES,
   TITLE_SIZE_RE, sizeUnit, parseSizeNumber, sizesAgree, round4,
   parseMultipack, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
 } = require('./receipt-processor');
@@ -241,7 +241,16 @@ const READING_RULES = [
   { reason: 'unread_container_quantity', fails: (c) => hasUnreadContainerQuantity(c) },
   { reason: 'item_count_not_consumed', fails: (c) => hasUnconsumedItemCount(c) },
   { reason: 'bad_line_quantity', fails: (c) => !Number.isFinite(c.lineQty) || c.lineQty <= 0 },
+  // 'each' is a discrete item count (inventory-units.js): "2.5 Count", or a
+  // count that multiplies out to part of an item, never posts (Codex round 8).
+  // Every path's final amount is this same line quantity x pack x size (a
+  // count container must agree exactly), so this one rule covers them all.
+  { reason: 'fractional_count', fails: (c) => c.matchedClaim.unit === 'each' && !isWholeCount(c.matchedClaim.value, round4(c.lineQty * c.packCount * c.matchedClaim.value)) },
 ];
+
+function isWholeCount(...values) {
+  return values.every((value) => Number.isInteger(value));
+}
 
 function validateReading(reading, { rawTitle, lineQuantity }) {
   if (!reading || typeof reading !== 'object') return { ok: false, reason: 'no_reading' };
@@ -781,20 +790,32 @@ async function settleTerminalKind(trx, { lineId, line, email, decision }, notify
 // unit — a visit's applied amount, a service's COGS usage, a protocol rate,
 // a compliance, nutrient or lawn-actuals record, an application limit. The
 // undo CLI's reference check (DOWNSTREAM_ADOPTION_TABLES) reuses this list.
+// `columns` names every column of the table that references the product
+// (product_id unless stated): a lawn visit's substitution names two, the
+// product replaced and its substitute (waveguard-plan-engine's
+// getAppointmentSubstitutions reads both), each with its own rate and unit.
 const APPLICATION_USAGE_TABLES = [
   { table: 'service_product_usage', what: "a service's COGS usage mapping" },
   { table: 'service_products', what: "a completed visit's applied product" },
   { table: 'protocol_template_products', what: "a protocol template's product" },
   { table: 'lawn_protocol_products', what: "a lawn protocol's product" },
   { table: 'lawn_protocol_product_actuals', what: "a lawn visit's recorded application" },
+  { table: 'lawn_protocol_product_substitutions', columns: ['original_product_id', 'substitute_product_id'], what: "a lawn visit's product substitution" },
   { table: 'property_application_history', what: 'a recorded application' },
   { table: 'property_nutrient_ledger', what: 'a nutrient ledger entry' },
   { table: 'product_limits', what: 'an application limit' },
 ];
 
+function referenceColumns(reference) {
+  return reference.columns || ['product_id'];
+}
+
 async function productHasApplicationUsage(trx, productId) {
-  for (const { table } of APPLICATION_USAGE_TABLES) {
-    if (await trx(table).where({ product_id: productId }).first('id')) return true;
+  for (const reference of APPLICATION_USAGE_TABLES) {
+    const row = await trx(reference.table)
+      .where((either) => { for (const column of referenceColumns(reference)) either.orWhere(column, productId); })
+      .first('id');
+    if (row) return true;
   }
   return false;
 }
@@ -1172,9 +1193,12 @@ async function productUnchangedSinceAgent(conn, line, movement) {
 }
 
 // Every table that maps a products_catalog row into real operations —
-// APPLICATION_USAGE_TABLES plus restock requests, found by grepping the
-// migrations for `product_id` referencing products_catalog (item 4,
-// 2026-09-27 round 7 review; widened by the 2026-09-27 pre-push audits).
+// APPLICATION_USAGE_TABLES plus restock requests (item 4, 2026-09-27 round 7
+// review; widened by the pre-push audits and Codex round 8). The rest of the
+// foreign keys to products_catalog are pricing, identity (aliases), the
+// stock ledger this lane writes itself, alerts, outline display and the
+// receipt lines; inventory-agent-postgres.test.js checks every foreign key
+// in the schema against this list, so a new one must be classified.
 // productUnchangedSinceAgent's row hash only ever covers the product row
 // ITSELF; it can't see a reference like these, so an undo that only checked
 // the hash could restore a "pre-agent" state a service, a protocol or a
@@ -1193,10 +1217,11 @@ const DOWNSTREAM_ADOPTION_TABLES = [
 // re-points an OLDER service-usage mapping at this product bumps only
 // updated_at, which a created_at check never saw (2026-09-27 pre-push
 // audit).
-async function tableReferenceFootprint(conn, table, productId) {
+async function tableReferenceFootprint(conn, reference, productId) {
+  const columns = referenceColumns(reference);
   const { rows } = await conn.raw(
-    "SELECT md5(coalesce(string_agg(md5(row_to_json(t)::text), ',' ORDER BY md5(row_to_json(t)::text)), '')) AS footprint FROM ?? t WHERE t.product_id = ?",
-    [table, productId],
+    `SELECT md5(coalesce(string_agg(md5(row_to_json(t)::text), ',' ORDER BY md5(row_to_json(t)::text)), '')) AS footprint FROM ?? t WHERE ${columns.map(() => '?? = ?').join(' OR ')}`,
+    [reference.table, ...columns.flatMap((column) => [`t.${column}`, productId])],
   );
   return rows[0].footprint;
 }
@@ -1206,7 +1231,7 @@ async function tableReferenceFootprint(conn, table, productId) {
 // the product moved since.
 async function productReferenceFootprint(conn, productId) {
   const footprint = {};
-  for (const { table } of DOWNSTREAM_ADOPTION_TABLES) footprint[table] = await tableReferenceFootprint(conn, table, productId);
+  for (const reference of DOWNSTREAM_ADOPTION_TABLES) footprint[reference.table] = await tableReferenceFootprint(conn, reference, productId);
   return footprint;
 }
 
@@ -1246,6 +1271,43 @@ async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown
       body: `"${line.raw_title}" wasn't added: the agent couldn't resolve it after ${attempts} tries (${reasonText}). Log it by hand if it's stock.`, trx,
     });
     return { status: 'agent_unsure' };
+  });
+}
+
+// A queued line the receipt lane's own rules now resolve (staff filled its
+// container size, or an earlier line created the product or alias it names)
+// posts through that lane's path, receipt-processor's logQueuedLine: the
+// model is never asked to second-guess a verified match, where an unsure or
+// not_stock answer could hold or drop a purchase the rules can post (Codex
+// round 8). Returns the outcome, or null to let the agent decide (the
+// classifier doesn't log it, or no longer does under the locks).
+async function postIfDeterministic(conn, line, email, notifyAdmin) {
+  const first = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, conn);
+  if (first.status !== 'logged') return null;
+  return conn.transaction(async (trx) => {
+    const locked = await trx('purchase_receipt_lines').where({ id: line.id }).forUpdate().first();
+    if (!locked || locked.status !== 'agent_pending') return { status: 'no_longer_pending' };
+    await lockShipment(trx, locked.vendor, locked.shipment_key);
+    const decision = { kind: 'receipt_rules', reason: "the receipt lane's own rules now resolve this title" };
+    const handedOff = await settleIfShipmentHandedOff(trx, { lineId: locked.id, vendor: locked.vendor, shipmentKey: locked.shipment_key, email, decision });
+    if (handedOff) return { status: handedOff.status };
+    const outcome = await logQueuedLine(trx, { line: locked, email });
+    if (!outcome) return null;
+    await trx('purchase_receipt_lines').where({ id: locked.id }).update({
+      agent_decision: { ...decisionRecord(decision), handoffFrom: locked.agent_decision?.handoffFrom || null }, agent_decided_at: new Date(),
+    });
+    const { HELD_REASONS, openRestockRequestNote } = require('./sweep');
+    const logged = outcome.status === 'logged';
+    await ringBell(notifyAdmin, {
+      lineId: locked.id, emailId: email.id, status: outcome.status,
+      title: logged ? 'Purchase logged' : 'Purchase not added',
+      body: logged
+        ? `${outcome.product.name} +${outcome.receivedQty} ${displayUnit(outcome.receivedUnit)} by the receipt rules (line ${String(locked.id).slice(0, 8)}).`
+          + `${outcome.hasOpenRestockRequest ? ` ${openRestockRequestNote(outcome.product.name)}` : ''}`
+        : `"${locked.raw_title}" wasn't added. ${HELD_REASONS[outcome.status]}`,
+      trx,
+    });
+    return { status: outcome.status };
   });
 }
 
@@ -1301,6 +1363,9 @@ async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCatego
   // Received before the current cutoff: a physical count taken since then
   // already includes it, so it closes without stock and without a bell.
   if (since && new Date(email.received_at) < since) return closeBeforeCutoff(conn, line.id);
+
+  const deterministic = await postIfDeterministic(conn, line, email, notifyAdmin);
+  if (deterministic) return deterministic;
 
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, line) : null;
   const outcome = await decideForTitle(conn, dispatch, { rawTitle: line.raw_title, quantity: Number(line.quantity), vendor: line.vendor, siteOneFields }, { allowedCategories, activeProducts });
@@ -1454,6 +1519,10 @@ module.exports = {
   validateReading, containerAgreement, classifyDecision, extractEpaRegNumber,
   canonicalSizeText, inventoryUnitForNewProduct,
   recordAttemptFailure,
+  // The operational references the unit and undo guards check — exported so
+  // the Postgres suite can hold every foreign key to products_catalog in the
+  // schema against it (a new one must be classified).
+  DOWNSTREAM_ADOPTION_TABLES,
   // Prompt-injection posture (item 4, 2026-09-27 round 2): both pure, no
   // I/O — exported so a test can assert the fixed rules (system) never
   // carry the untrusted title/vendor/invoice text, which only ever lands

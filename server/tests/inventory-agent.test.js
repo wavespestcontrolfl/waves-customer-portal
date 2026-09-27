@@ -240,6 +240,26 @@ describe('validateReading — a numeric container quantity is never skipped', ()
   });
 });
 
+describe('validateReading — a count is whole items', () => {
+  // Codex round 8: 'each' is a discrete item count (inventory-units.js).
+  test('a fractional count size never validates', () => {
+    expect(validateReading({ size_number: 2.5, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Rat Traps 2.5 Count', lineQuantity: 2 }))
+      .toMatchObject({ ok: false, reason: 'fractional_count' });
+  });
+
+  test('a fractional line quantity that multiplies out to part of an item never validates', () => {
+    expect(validateReading({ size_number: 5, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Victor Rat Traps 5 Count', lineQuantity: 1.5 }))
+      .toMatchObject({ ok: false, reason: 'fractional_count' });
+  });
+
+  test('a whole total still validates, and measured sizes may be fractional', () => {
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Victor Rat Traps 12 Count', lineQuantity: 1.5 }))
+      .toMatchObject({ ok: true, amount: 18 });
+    expect(validateReading({ size_number: 2.5, size_unit: 'gal', pack_count: 1 }, { rawTitle: 'Bifen XTS 2.5 gal', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, amount: 2.5 });
+  });
+});
+
 describe('containerAgreement — measured and count containers', () => {
   test('the per-unit size equals the container: the pack multiplies containers', () => {
     expect(containerAgreement(78, 2, 78)).toBe(156);

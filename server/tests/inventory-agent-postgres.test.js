@@ -20,13 +20,19 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { runInventoryAgent, drainAgentQueue, productUnchangedSinceAgent } = require('../services/purchase-receipts/inventory-agent');
+const { runInventoryAgent, drainAgentQueue, productUnchangedSinceAgent, DOWNSTREAM_ADOPTION_TABLES } = require('../services/purchase-receipts/inventory-agent');
 const inventoryOperations = require('../services/inventory-operations');
 const notifications = require('../services/notification-service');
 const { undoLine } = require('../../ops/agents/inventory-agent-undo');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments', 'service_product_usage', 'protocol_template_products'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments', 'service_product_usage', 'protocol_template_products', 'lawn_protocol_product_substitutions'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
+// A Taurus title the deterministic matcher can't claim ("SC" is missing, and
+// every product word must appear contiguously), so the line is genuinely the
+// agent's: a queued line the receipt rules DO resolve now posts through those
+// rules without the model (Codex round 8), which would bypass what these
+// tests exercise.
+const AGENT_ONLY_TAURUS_TITLE = 'Taurus Termiticide 78 oz';
 const HOUR = 60 * 60 * 1000;
 
 jest.setTimeout(30000);
@@ -93,6 +99,18 @@ jest.setTimeout(30000);
     }
     throw new Error('no session ever waited on the catalog lock');
   }
+  // Releases the held side once some session waits on the lock — and ALWAYS
+  // releases, even when none ever does, so a failing race test can never
+  // leave its held transaction (and its locks) open and hang every later
+  // test's TRUNCATE.
+  async function releaseOnceWaiting(release) {
+    try {
+      await waitForLockWaiter();
+    } finally {
+      release();
+    }
+  }
+
 
   const notifyAdmin = (...args) => notifications.notifyAdmin(...args);
   const run = (llm, overrides = {}) => runInventoryAgent({ conn: mockConn, llm: async () => llm, notifyAdmin, ...overrides });
@@ -257,8 +275,7 @@ jest.setTimeout(30000);
     });
     await locked;
     const agent = run({ ok: true, json: decision });
-    await waitForLockWaiter();
-    release();
+    await releaseOnceWaiting(release);
     await manual;
     await agent;
 
@@ -281,8 +298,7 @@ jest.setTimeout(30000);
     });
     await locked;
     const adminSide = inventoryOperations.createCatalogProduct({ name: ' bifen xts ', category: 'insecticide', unitSize: '96 oz', inventoryUnit: 'oz' });
-    await waitForLockWaiter();
-    release();
+    await releaseOnceWaiting(release);
     await agentSide;
     expect(await adminSide).toBeNull();
     expect(await mockConn('products_catalog').whereRaw('lower(btrim(name)) = ?', ['bifen xts'])).toHaveLength(1);
@@ -548,7 +564,7 @@ jest.setTimeout(30000);
   });
 
   test('undo still accepts an exact 8-character hex prefix of the line id (review item 3)', async () => {
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 1, shipment_key: 'ship-prefix' });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 1, shipment_key: 'ship-prefix' });
     const decision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -561,7 +577,7 @@ jest.setTimeout(30000);
   });
 
   test('undo dry-runs by default and refuses when the product changed since the agent\'s restock', async () => {
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-undo-refuse' });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-undo-refuse' });
     const decision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -579,7 +595,7 @@ jest.setTimeout(30000);
   });
 
   test('undo refuses when a service now maps the product for COGS after the agent\'s decision, even though the row hash still matches (item 4, 2026-09-27 round 7)', async () => {
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-downstream' });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-downstream' });
     const decision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -615,7 +631,7 @@ jest.setTimeout(30000);
     const [olderMapping] = await mockConn('service_product_usage').insert({
       service_type: 'General Pest Control', product_id: otherProduct.id, usage_amount: 2, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
     }).returning('*');
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-repoint' });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-repoint' });
     await run({ ok: true, json: { ...TAURUS_DECISION, product_id: taurus.id } });
     expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
 
@@ -632,7 +648,7 @@ jest.setTimeout(30000);
     const [mapping] = await mockConn('service_product_usage').insert({
       service_type: 'General Pest Control', product_id: taurus.id, usage_amount: 2, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
     }).returning('*');
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-edit' });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-edit' });
     await run({ ok: true, json: { ...TAURUS_DECISION, product_id: taurus.id } });
 
     await mockConn('service_product_usage').where({ id: mapping.id }).update({ usage_amount: 3 });
@@ -650,7 +666,7 @@ jest.setTimeout(30000);
     const [otherMapping] = await mockConn('service_product_usage').insert({
       service_type: 'General Pest Control', product_id: otherProduct.id, usage_amount: 1, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
     }).returning('*');
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-steady' });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-steady' });
     await run({ ok: true, json: { ...TAURUS_DECISION, product_id: taurus.id } });
 
     await mockConn('service_product_usage').where({ id: otherMapping.id }).update({ usage_amount: 5, updated_at: new Date() });
@@ -690,8 +706,7 @@ jest.setTimeout(30000);
     });
     await locked;
     const agent = run({ ok: true, json: decision });
-    await waitForLockWaiter();
-    release();
+    await releaseOnceWaiting(release);
     await adminInsert;
     await agent;
 
@@ -722,7 +737,7 @@ jest.setTimeout(30000);
       }).returning('*');
       // On its last attempt, so the attempt's reason is saved on the line: a
       // deadlock would surface there as the thrown error's message.
-      const line = await pendingLine({ raw_title: 'Bifen XTS Insecticide Concentrate 96 oz', quantity: 1, agent_attempts: 2 });
+      const line = await pendingLine({ raw_title: 'Bifen Insecticide Concentrate 96 oz', quantity: 1, agent_attempts: 2 });
       const decision = {
         kind: 'existing', reason: 'looks like Bifen XTS', product_id: product.id, new_product: null,
         reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -744,11 +759,10 @@ jest.setTimeout(30000);
       });
       await locked;
       const agent = run({ ok: true, json: decision });
-      await waitForLockWaiter();
-      // Before the fix the agent held the product FOR UPDATE here, so the
-      // admin's insert blocked on it and Postgres aborted the agent as a
-      // deadlock victim.
-      release();
+      // Before the fix the agent held the product FOR UPDATE by this point,
+      // so the admin's insert blocked on it and Postgres aborted the agent as
+      // a deadlock victim.
+      await releaseOnceWaiting(release);
       await expect(adminInsert).resolves.toEqual({ success: true });
       await agent;
 
@@ -764,6 +778,115 @@ jest.setTimeout(30000);
     } finally {
       await mockConn.raw('ALTER TABLE ??.product_aliases DROP CONSTRAINT IF EXISTS agent_test_alias_product_fk', [schema]);
     }
+  });
+
+  // Codex round 8: a queued line the receipt lane's own rules now resolve
+  // (here the title names "Taurus SC" and its container is set — as after
+  // staff fill a missing size) posts through those rules; the model is never
+  // asked, so its not_stock answer can't drop the purchase.
+  test('a queued line the receipt rules now resolve posts through those rules without asking the model', async () => {
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-rules' });
+    const llm = jest.fn(async () => ({ ok: true, json: { kind: 'not_stock', reason: 'looks personal' } }));
+    const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(llm).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ logged: 1, held: 0, ignored: 0 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'logged', product_id: taurus.id, received_unit: 'fl_oz' });
+    expect(Number(saved.received_qty)).toBe(156);
+    expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
+    expect(await stockOf(taurus.id)).toBe(156);
+    const movement = await mockConn('product_inventory_movements').where({ id: saved.movement_id }).first();
+    expect(movement.metadata).toMatchObject({ source: 'amazon_delivery' });
+    const [bell] = await bellsFor(line.id);
+    expect(bell).toMatchObject({ title: 'Purchase logged' });
+  });
+
+  test('the receipt rules\' duplicate check still holds a queued line they resolve', async () => {
+    await mockConn('product_inventory_movements').insert({
+      product_id: taurus.id, movement_type: 'restock', quantity: 10, unit: 'fl_oz',
+      metadata: { source: 'intelligence_bar_adjust_stock' }, created_at: new Date(RECEIVED_AT.getTime() - 10 * HOUR),
+    });
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-rules-dup' });
+    const llm = jest.fn(async () => ({ ok: true, json: { kind: 'unsure', reason: 'not sure' } }));
+    const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(llm).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ logged: 0, held: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'possible_duplicate', movement_id: null });
+    expect(await stockOf(taurus.id)).toBe(0);
+    const [bell] = await bellsFor(line.id);
+    expect(bell.body).toMatch(/wasn't added\. A manual restock or count was logged around the same time/);
+  });
+
+  // Codex round 8: a lawn visit's substitution references its products by
+  // original_product_id and substitute_product_id, not product_id.
+  test('a count product used only as a lawn substitute holds instead of switching its application unit', async () => {
+    const [trapProduct] = await mockConn('products_catalog').insert({
+      name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: '12 count', inventory_unit: null, default_unit: 'oz', inventory_on_hand: null,
+    }).returning('*');
+    await mockConn('lawn_protocol_product_substitutions').insert({
+      scheduled_service_id: randomUUID(), original_product_id: taurus.id, substitute_product_id: trapProduct.id,
+      rate_per_1000: 1, rate_unit: 'oz', approved_at: new Date(), active: true, metadata: {},
+    });
+    const line = await pendingLine({ raw_title: 'Victor Rat Trap 12 Count', product_id: trapProduct.id, quantity: 5 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: trapProduct.id, new_product: null,
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    const result = await run({ ok: true, json: decision });
+    expect(result).toMatchObject({ logged: 0, held: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.agent_decision).toMatchObject({ reason: 'application_unit_in_use' });
+    expect(await mockConn('products_catalog').where({ id: trapProduct.id }).first()).toMatchObject({ default_unit: 'oz', inventory_unit: null });
+  });
+
+  test('undo refuses once a lawn substitution names the product after the agent\'s decision (either column)', async () => {
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-substitution' });
+    await run({ ok: true, json: {
+      kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    } });
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+    const [otherProduct] = await mockConn('products_catalog').insert({ name: 'Other Product', active: true, category: 'insecticide' }).returning('*');
+    await mockConn('lawn_protocol_product_substitutions').insert({
+      scheduled_service_id: randomUUID(), original_product_id: otherProduct.id, substitute_product_id: taurus.id,
+      rate_per_1000: 1, rate_unit: 'fl_oz', approved_at: new Date(), active: true, metadata: {},
+    });
+    await expect(undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} }))
+      .rejects.toThrow(/a lawn visit's product substitution referencing this product was added, re-pointed, changed or removed/);
+    expect(await stockOf(taurus.id)).toBe(156);
+  });
+
+  // Holds the guards' table list against the schema itself: every foreign
+  // key to products_catalog is either an operational reference the unit and
+  // undo guards check (DOWNSTREAM_ADOPTION_TABLES) or named here as one that
+  // isn't, so a migration adding a new one fails this until it's classified.
+  test('every foreign key to products_catalog is classified for the unit and undo guards', async () => {
+    const { rows } = await mockConn.raw(`
+      SELECT kcu.table_name || '.' || kcu.column_name AS ref
+      FROM information_schema.referential_constraints rc
+      JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = rc.constraint_name AND kcu.constraint_schema = rc.constraint_schema
+      JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = rc.unique_constraint_name AND ccu.constraint_schema = rc.unique_constraint_schema
+      WHERE ccu.table_name = 'products_catalog' AND ccu.table_schema = 'public' AND kcu.table_schema = 'public'`);
+    const operational = DOWNSTREAM_ADOPTION_TABLES.flatMap((ref) => (ref.columns || ['product_id']).map((column) => `${ref.table}.${column}`));
+    const notOperational = [
+      // pricing: a price never depends on the stock unit or tracking
+      'distributor_product_map.product_id', 'price_approval_events.product_id', 'price_approvals.product_id', 'price_auto_approve_rules.product_id',
+      'price_history.product_id', 'price_refresh_requests.product_id', 'price_snapshots.product_id', 'pricing_engine_proposals.product_id', 'vendor_pricing.product_id',
+      // identity: the agent's own alias is removed by id on undo
+      'product_aliases.product_id',
+      // the stock ledger: the product row hash and stock check cover it
+      'product_inventory_movements.product_id',
+      // low-stock alerts, recomputed from stock
+      'inventory_alerts.product_id',
+      // a customer-facing outline's display row, no rate or unit
+      'service_outline_packet_products.product_id',
+      // this lane's own receipt lines
+      'purchase_receipt_lines.product_id', 'purchase_receipt_lines.agent_created_product_id',
+    ];
+    const classified = new Set([...operational, ...notOperational]);
+    expect(rows.map((row) => row.ref).filter((ref) => !classified.has(ref)).sort()).toEqual([]);
+    expect(rows.length).toBeGreaterThan(0);
   });
 
   test('a real hand-off through processReceiptLine saves handoffFrom, and a gate-off drain restores that status', async () => {
@@ -896,7 +1019,7 @@ jest.setTimeout(30000);
       product_id: taurus.id, movement_type: 'restock', quantity: 10, unit: 'fl_oz',
       metadata: { source: 'intelligence_bar_adjust_stock' }, created_at: new Date(RECEIVED_AT.getTime() - 10 * HOUR),
     });
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2 });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2 });
     const decision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -912,7 +1035,7 @@ jest.setTimeout(30000);
   });
 
   test('concurrent runs over the SAME line apply it exactly once', async () => {
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2 });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2 });
     const decision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -967,7 +1090,7 @@ jest.setTimeout(30000);
   });
 
   test('an apply-time throw (e.g. a bell that fails to save) counts toward agent_attempts like an LLM failure; the 3rd hands off to a person', async () => {
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-throw' });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-throw' });
     const decision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -1017,7 +1140,7 @@ jest.setTimeout(30000);
       product_id: taurus.id, movement_type: 'restock', quantity: 10, unit: 'fl_oz',
       metadata: { source: 'intelligence_bar_adjust_stock' }, created_at: new Date(RECEIVED_AT.getTime() - 10 * HOUR),
     });
-    const dupLine = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-dup' });
+    const dupLine = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-dup' });
     const dupDecision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
@@ -1028,7 +1151,7 @@ jest.setTimeout(30000);
   });
 
   test('the catalog renaming or recategorizing the candidate while the model decides rolls the apply back as product_changed — not just container_size/inventory_unit (review item 7)', async () => {
-    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 1 });
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 1 });
     const decision = {
       kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
