@@ -186,6 +186,20 @@ function bedBugMethod(item = {}) {
   return 'default';
 }
 
+// A termite-trenching warranty is purchased scope only when the canonical
+// pricer row carries both its normalized tier and the warranty price slice
+// (zero is valid for the included one-year tier). Labels/details are never
+// evidence: stale or hand-authored prose cannot re-enable a warranty claim.
+function hasPurchasedTrenchingWarranty(item = {}) {
+  const service = String(item.service || '').toLowerCase().trim();
+  const tier = String(item.warrantyTier || '').toLowerCase().trim();
+  const adderPresent = item.warrantyAdder !== '' && item.warrantyAdder != null;
+  const adder = Number(item.warrantyAdder);
+  return ['trenching', 'termite_trenching'].includes(service)
+    && tier !== '' && tier !== 'none'
+    && adderPresent && Number.isFinite(adder) && adder >= 0;
+}
+
 // Resolved row copy for a one-time breakdown row:
 //   { key, outcome, includes: [...], assurance|null, terms }
 // `includes` carries the assurance as its last bullet when present, so the
@@ -288,7 +302,8 @@ function resolveOneTimeServiceCopy(item = {}, { noGuaranteeClaims = false } = {}
   }
   // Trenching: the warranty-period inspection bullet rides a sold warranty
   // tier only (repellent products default to 'none') — codex #3823 r3 P1.
-  if (key === 'termite_trenching' && (!item.warrantyTier || String(item.warrantyTier) === 'none')) {
+  const purchasedTrenchingWarranty = key === 'termite_trenching' && hasPurchasedTrenchingWarranty(item);
+  if (key === 'termite_trenching' && !purchasedTrenchingWarranty) {
     lines = lines.filter((line) => line !== entry.warrantyBullet);
   }
   // Dethatching: debris hauling is priced separately (cleanupLevel) — the
@@ -348,7 +363,8 @@ function resolveOneTimeServiceCopy(item = {}, { noGuaranteeClaims = false } = {}
     assurance = null;
     outcome = entry.outcomeNoGuarantee || outcome;
     if (GUARANTEE_COPY.test(outcome || '')) outcome = 'Your service follows the written scope and terms in this estimate.';
-    lines = lines.filter(line => !GUARANTEE_COPY.test(line));
+    lines = lines.filter((line) => (purchasedTrenchingWarranty && line === entry.warrantyBullet)
+      || !GUARANTEE_COPY.test(line));
     if (GUARANTEE_COPY.test(terms || '')) terms = 'Your written service scope and terms apply.';
   }
   return {
@@ -459,6 +475,7 @@ function resolveOneTimeRowCopies(rows = [], { noGuaranteeClaims = false } = {}) 
 module.exports = {
   ONE_TIME_SERVICE_COPY: PACK,
   GUARANTEE_COPY,
+  hasPurchasedTrenchingWarranty,
   resolveOneTimeRowCopies,
   oneTimeCopyKeyFor,
   resolveOneTimeServiceCopy,

@@ -248,6 +248,73 @@ describe('EstimateProposalDocument', () => {
     expect(flagless.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
   });
 
+  it('uses the rendered-row policy for retained disabled termite itemization beside current pest pricing', () => {
+    const retainedTermite = {
+      ...BASE_DATA,
+      estimate: {
+        ...BASE_DATA.estimate,
+        category: 'RESIDENTIAL',
+        // The ordinary page classifies its current pest rows and keeps its
+        // guarantee; document mode must use the different rows below.
+        noGuaranteeClaims: false,
+      },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: false,
+        noGuaranteeClaims: true,
+        pestRecurringOnly: false,
+        title: 'Service Proposal',
+        buildings: [{
+          name: '123 Palm Way',
+          note: 'Retained inspection scope',
+          lineItems: [
+            { description: 'Termite trenching', quantity: 1, unitPrice: 1200, amount: 1200, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
+          ],
+        }],
+        totals: { annualRecurring: 0, monthlyEquivalent: 0, oneTime: 1200, totalTax: 0, firstYearTotal: 1200, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+
+    const { container } = render(<EstimateProposalDocument data={retainedTermite} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Termite trenching');
+    expect(text).toContain('$1,200.00');
+    expect(text).toContain('Retained inspection scope');
+    expect(text).toContain('Licensed & insured');
+    expect(text).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat/i);
+  });
+
+  it('keeps ordinary pest-document guarantees when its rendered rows classify as pest', () => {
+    const pest = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', noGuaranteeClaims: false },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: true,
+        noGuaranteeClaims: false,
+        pestRecurringOnly: true,
+        title: 'Service Proposal',
+        buildings: [{
+          name: '123 Palm Way',
+          note: null,
+          lineItems: [
+            { description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
+          ],
+        }],
+        totals: { annualRecurring: 660, monthlyEquivalent: 55, oneTime: 0, totalTax: 0, firstYearTotal: 660, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+
+    const { container } = render(<EstimateProposalDocument data={pest} token="tok-123" />);
+    expect(container.textContent).toContain('Pest Control');
+    expect(container.textContent).toContain('$55.00');
+    expect(container.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
+  });
+
   it('applies the same inclusion filter to a mosquito stack and preserves its neutral treatment scope', () => {
     const mosquito = {
       ...BASE_DATA,

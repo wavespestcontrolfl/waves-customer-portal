@@ -9,6 +9,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 const {
   oneTimeCopyKeyFor,
+  hasPurchasedTrenchingWarranty,
   resolveOneTimeServiceCopy,
   resolveOneTimeRowCopies,
   oneTimeOnlyIntelligenceCopy,
@@ -235,9 +236,15 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(pyrethroid.outcome).toBe('A continuous liquid barrier around your foundation — a treated zone termites will not cross.');
     // Unknown chemistry fails closed to the barrier wording.
     expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching' }).outcome).toBe(pyrethroid.outcome);
-    // The warranty-period inspection bullet rides a sold warranty tier only.
-    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'non_repellent', warrantyTier: 'one_year_retreat' }).includes).toContain('Annual inspection during the warranty period');
-    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'repellent_pyrethroid', warrantyTier: 'none' }).includes).not.toContain('Annual inspection during the warranty period');
+    // The warranty-period inspection bullet rides canonical sold-scope
+    // metadata only: normalized tier plus the pricer's warranty slice.
+    const purchased = { service: 'trenching', label: 'Termite Trenching', chemistryType: 'non_repellent', warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    expect(hasPurchasedTrenchingWarranty(purchased)).toBe(true);
+    expect(resolveOneTimeServiceCopy(purchased).includes).toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy(purchased, { noGuaranteeClaims: true }).includes).toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ ...purchased, warrantyAdder: null }).includes).not.toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ ...purchased, warrantyTier: 'none' }).includes).not.toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'Annual inspection during the warranty period', warrantyTier: 'one_year_retreat', warrantyAdder: 100 }, { noGuaranteeClaims: true }).includes).not.toContain('Annual inspection during the warranty period');
     expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching' }).includes).not.toContain('Annual inspection during the warranty period');
   });
 
@@ -568,6 +575,34 @@ describe('server-rendered page', () => {
     expect(contract.oneTimeServiceCopy.hero.sub).toBe('Review the itemized service scope and terms below. Licensed & insured.');
     // Resolving an estimate-wide exception must not mutate the shared pack.
     expect(resolveOneTimeServiceCopy(row).assurance).toMatch(/guarantee|callback/i);
+  });
+
+  test('a priced trenching warranty survives the termite policy on the public payload and legacy page', () => {
+    const row = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      chemistryType: 'non_repellent', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117,
+      detail: 'Lifetime guarantee with free retreatments',
+    };
+    const estData = authoredTermiteData(row);
+    expect(estimateMakesNoGuaranteeClaim(estData)).toBe(true);
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: row.amount, items: [row] } },
+      { status: 'sent' }, estData,
+    );
+    const contractRow = contract.oneTimeBreakdown.items[0];
+    expect(contractRow).toMatchObject({
+      service: 'trenching', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117, detail: null,
+    });
+    expect(contractRow.copy.includes).toContain('Annual inspection during the warranty period');
+    expect(JSON.stringify(contractRow.copy)).not.toMatch(/lifetime guarantee|callbacks?|free retreat|risk[- ]?free/i);
+
+    const html = renderPage('purchased-warranty-token', {
+      id: 'estimate-purchased-warranty', status: 'sent', customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+      onetimeTotal: row.amount, quoteRequired: false, noGuaranteeClaims: true,
+    }, estData);
+    expect(html).toContain('Annual inspection during the warranty period');
+    expect(html).not.toMatch(/Lifetime guarantee|free retreatments/i);
   });
 
   test.each([

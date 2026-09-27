@@ -195,7 +195,13 @@ export default function EstimateProposalDocument({ data, token }) {
   const responsibilities = Array.isArray(proposal?.customerResponsibilities)
     ? proposal.customerResponsibilities : [];
   const termRows = commercialTermRows(proposal?.commercialTerms);
-  const noGuarantee = data?.estimate?.noGuaranteeClaims === true;
+  // Document mode classifies the normalized proposal rows it actually prints.
+  // An explicit false matters too: the ordinary page may classify a different
+  // current service mix than a retained proposal itemization. Older payloads
+  // keep the estimate-level flag as their compatibility fallback.
+  const noGuarantee = typeof proposal?.noGuaranteeClaims === 'boolean'
+    ? proposal.noGuaranteeClaims
+    : data?.estimate?.noGuaranteeClaims === true;
   const inclusionStacks = useMemo(() => {
     if (authoredTermsPresent || programList.length) return [];
     if (isCommercial) {
@@ -229,8 +235,8 @@ export default function EstimateProposalDocument({ data, token }) {
   // page deliberately withholds (codex #3281 r1). One-time-only (no
   // recurring lines) resolves to the neutral line the same way.
   // A termite (or unclassifiable) estimate makes no guarantee claim: the
-  // server's noGuaranteeClaims decision, shared with the page and the
-  // estimate emails.
+  // server's proposal.noGuaranteeClaims decision, based on the normalized
+  // rows this document renders.
   const NEUTRAL_TERMS = noGuarantee ? 'Licensed & insured' : 'Licensed & insured · Satisfaction guaranteed';
   const recurringLineDescriptions = buildings
     .flatMap((b) => (b.lineItems || []))

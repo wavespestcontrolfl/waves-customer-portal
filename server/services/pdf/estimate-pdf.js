@@ -590,7 +590,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     // fell back to monthly lines therefore keeps its totals too, exactly as
     // this document rendered before (codex #3120 r3).
     suppressPlanTotals: proposal.enabled !== true && quotesPerApplication(proposal),
-    noGuaranteeClaims: proposalMakesNoGuaranteeClaim(estimate, billing),
+    noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposal, estimate?.id),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 

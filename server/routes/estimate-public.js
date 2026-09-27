@@ -17667,6 +17667,10 @@ function normalizeOneTimeBreakdown(estData) {
         // claim) and whether wasp nest removal was actually priced.
         chemistryType: item.chemistryType || null,
         warrantyTier: item.warrantyTier || null,
+        warrantyAdder: item.warrantyAdder !== '' && item.warrantyAdder != null
+          && Number.isFinite(Number(item.warrantyAdder)) && Number(item.warrantyAdder) >= 0
+          ? Number(item.warrantyAdder)
+          : null,
         nestRemovalSelected: item.nestRemovalSelected === true || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
         warrantyEligible: item.warrantyEligible === true,
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
@@ -26655,7 +26659,7 @@ async function composeEstimateDataPayload(estimate, {
       || (commercialGlassEnabled && estimateDataForIntelligence?.proposal?.enabled === true)) {
       try {
         const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
-        const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+        const { proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
         const proposalBilling = await resolveProposalBillingContext(estimate);
         const proposalForView = normalizeProposal(estimate, {
           recurringMode: proposalBilling?.billsPerApplication === true ? 'per_application' : 'legacy',
@@ -26664,6 +26668,7 @@ async function composeEstimateDataPayload(estimate, {
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
+          noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposalForView, estimate.id),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
           pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),

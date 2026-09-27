@@ -1981,22 +1981,37 @@ function oneTimeOutcomeWithoutGuarantee(text) {
     .trim() || null;
 }
 
-function oneTimeCopyWithoutGuarantee(copy) {
+const PURCHASED_TRENCHING_WARRANTY_BULLET = 'Annual inspection during the warranty period';
+
+function rowHasPurchasedTrenchingWarranty(item = {}) {
+  const service = String(item.service || '').toLowerCase().trim();
+  const tier = String(item.warrantyTier || '').toLowerCase().trim();
+  const adderPresent = item.warrantyAdder !== '' && item.warrantyAdder != null;
+  const adder = Number(item.warrantyAdder);
+  return ['trenching', 'termite_trenching'].includes(service)
+    && tier !== '' && tier !== 'none'
+    && adderPresent && Number.isFinite(adder) && adder >= 0;
+}
+
+function oneTimeCopyWithoutGuarantee(copy, item = {}) {
   if (!copy) return null;
+  const retainPurchasedWarranty = rowHasPurchasedTrenchingWarranty(item);
   return {
     ...copy,
     outcome: oneTimeOutcomeWithoutGuarantee(copy.outcome),
     includes: Array.isArray(copy.includes)
-      ? copy.includes.filter((line) => !copyHasGuaranteeClaim(line))
+      ? copy.includes.filter((line) => (
+        retainPurchasedWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET
+      ) || !copyHasGuaranteeClaim(line))
       : [],
     assurance: null,
     terms: copyHasGuaranteeClaim(copy.terms) ? null : copy.terms,
   };
 }
 
-function OneTimeRowCopy({ copy, noGuarantee = false }) {
+function OneTimeRowCopy({ copy, item, noGuarantee = false }) {
   if (!copy) return null;
-  const visibleCopy = noGuarantee ? oneTimeCopyWithoutGuarantee(copy) : copy;
+  const visibleCopy = noGuarantee ? oneTimeCopyWithoutGuarantee(copy, item) : copy;
   return (
     <>
       {visibleCopy.outcome ? (
@@ -2095,7 +2110,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                     {visibleDetail}
                   </div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
+                <OneTimeRowCopy copy={item.copy} item={item} noGuarantee={noGuarantee} />
                 {quoteNote ? (
                   <div style={{ fontSize: 14, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
@@ -4634,7 +4649,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
-                <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
+                <OneTimeRowCopy copy={item.copy} item={item} noGuarantee={noGuarantee} />
               </div>
             );
           }
@@ -4645,7 +4660,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
                 {visibleDetail ? (
                   <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{visibleDetail}</div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
+                <OneTimeRowCopy copy={item.copy} item={item} noGuarantee={noGuarantee} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                 {amount}

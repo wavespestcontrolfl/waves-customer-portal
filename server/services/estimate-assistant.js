@@ -7,7 +7,13 @@ const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFro
 const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
-const { GUARANTEE_COPY } = require('./estimate-one-time-copy');
+const { GUARANTEE_COPY, hasPurchasedTrenchingWarranty, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
+const { serviceKeysFromText } = require('./estimate-service-lines');
+const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
+
+// Neutral categories may retain their own satisfaction wording, but cannot
+// inherit residential membership promises from saved service prose.
+const RECURRING_TERMS_COPY = /callbacks?|re[- ]?treat(?:ment|s|ed|ing)?|money[- ]?back|no[- ](?:long[- ]term[- ]|commitment[- ])?contracts?|(?:pause|cancel) anytime|free[^.!?;]*(?:re[- ]?service|service calls?)|(?:re[- ]?service|service calls?)[^.!?;]*(?:free|no charge)/i;
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -27,6 +33,8 @@ Answer questions about the customer's estimate, Waves services, WaveGuard, billi
 Rules:
 - Use only the estimate context for prices, services selected, schedules, discounts, billing terms, and property details.
 - Honor guarantees.noGuaranteeClaims. When true, do not claim this estimate includes a callback, satisfaction, re-treatment, or money-back guarantee; refer to its written service scope and terms.
+- Recurring callbacks, money-back, and no-contract terms apply only when guarantees.recurringTermsEligible is true. A neutral category's satisfaction wording never authorizes these recurring terms.
+- A row's purchasedTerms lists proven service-specific purchased benefits. Describe only those terms; they never authorize an estimate-wide guarantee.
 - Use the supportContext for service procedures, products, label/safety references, and Waves admin knowledge. Do not expose internal cost notes.
 - Never give customer-facing product brand names. If product context is relevant, use active ingredients, treatment classes, and how the treatment works.
 - If neither the estimate context nor supportContext contains a specific fact, say you do not see it and suggest calling or texting Waves.
@@ -123,12 +131,20 @@ function parseEstimateData(estData) {
   return typeof estData === 'object' ? estData : {};
 }
 
+function guaranteeLanesForRow(row) {
+  const lanes = serviceKeysFromText(row.service, row.key, row.displayName, row.label, row.name);
+  return row.isCommercial === true
+    ? lanes.map((lane) => lane.startsWith('commercial_') ? lane : `commercial_${lane}`)
+    : lanes;
+}
+
 function serviceRowsFromEstimateData(estData = {}) {
   const result = estData.result || estData.engineResult || estData || {};
   const recurring = result.recurring || estData.recurring || {};
   const services = Array.isArray(recurring.services) ? recurring.services : [];
   return services.map((service) => ({
     service: cleanText(service.service || service.key) || null,
+    guaranteeLanes: guaranteeLanesForRow(service),
     label: normalizeServiceName(service.displayName || service.label || service.name || service.service),
     cadence: cleanText(service.frequencyLabel || service.cadence || service.frequency),
     detail: cleanText(service.detail || service.description),
@@ -208,6 +224,7 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
     byLabel.set(label, {
       ...current,
       service: current.service || cleanText(service.service || service.key) || null,
+      guaranteeLanes: [...new Set([...(current.guaranteeLanes || []), ...guaranteeLanesForRow(service)])],
       label,
       cadence: current.cadence || serviceCadence,
       detail: current.detail || cleanText(service.detail),
@@ -227,6 +244,7 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
     byLabel.set(label, {
       ...current,
       service: current.service || cleanText(service.service || service.key) || null,
+      guaranteeLanes: [...new Set([...(current.guaranteeLanes || []), ...guaranteeLanesForRow(service)])],
       perApplication,
       visitsPerYear: Number(service.visitsPerYear),
     });
@@ -251,7 +269,10 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
     const current = byLabel.get(label) || { label };
     byLabel.set(label, {
       ...current,
-      ...Object.fromEntries(Object.entries(row).filter(([, value]) => {
+      ...Object.fromEntries(Object.entries(row).filter(([key, value]) => {
+        // An authoritative row can remove a previously sold warranty. Its
+        // empty terms array must clear the saved benefit, not inherit it.
+        if (key === 'purchasedTerms') return Array.isArray(value);
         if (typeof value === 'number') return Number.isFinite(value) && value > 0;
         return cleanText(value);
       })),
@@ -259,6 +280,12 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
     });
   });
   return uniqueByLabel([...byLabel.values()]);
+}
+
+function purchasedTermsForRow(item) {
+  if (!hasPurchasedTrenchingWarranty(item)) return [];
+  const copy = resolveOneTimeServiceCopy(item, { noGuaranteeClaims: true });
+  return (copy?.includes || []).filter((line) => GUARANTEE_COPY.test(line));
 }
 
 function oneTimeRowsFromPricing(pricingBundle = {}) {
@@ -279,6 +306,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}) {
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
+        purchasedTerms: purchasedTermsForRow(item),
         oneTime: true,
       };
     });
@@ -325,6 +353,7 @@ function oneTimeRowsFromEstimateData(estData = {}) {
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
+        purchasedTerms: purchasedTermsForRow(item),
         oneTime: true,
       };
     });
@@ -351,6 +380,7 @@ function serviceLine(row = {}) {
     parts.push(`${fmtMoney(row.perApplication)} per application`);
   }
   if (row.detail) parts.push(row.detail);
+  parts.push(...(row.purchasedTerms || []));
   return parts.filter(Boolean).join(' - ');
 }
 
@@ -497,6 +527,29 @@ function quoteRequiredFromContext(estimate = {}, pricingBundle = {}) {
     || cleanText(estimate.status) === 'quote_required';
 }
 
+function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows, oneTimeRows) {
+  const rowLanes = [...recurringRows, ...oneTimeRows].map((row) => {
+    const keys = row.guaranteeLanes || serviceKeysFromText(row.service, row.label);
+    return keys.length ? keys : ['unknown'];
+  });
+  const lanes = [...new Set(rowLanes.flat())];
+  const recurringTermsEligible = !noGuaranteeClaims && serviceMode === 'recurring'
+    && recurringRows.length > 0 && lanes.length === 1 && RECURRING_TERMS_LANES.includes(lanes[0]);
+  const oneTimePestTerms = !noGuaranteeClaims && serviceMode === 'one_time'
+    && lanes.length === 1 && lanes[0] === 'pest';
+  return {
+    noGuaranteeClaims: noGuaranteeClaims === true,
+    recurringTermsEligible,
+    recurring: recurringTermsEligible
+      ? 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.'
+      : null,
+    oneTime: oneTimePestTerms ? 'One-time pest service may include a 30-day callback period when shown on the estimate.' : null,
+    guidance: noGuaranteeClaims
+      ? 'Use this estimate’s written service scope and terms. Do not describe the estimate as including a callback, satisfaction, re-treatment, or money-back guarantee.'
+      : (recurringTermsEligible ? null : 'Use the service-specific written terms. Do not infer recurring callbacks, money-back, or no-contract terms from membership or category-specific satisfaction wording.'),
+  };
+}
+
 function buildEstimateAssistantContext({
   estimate = {},
   estData = {},
@@ -535,6 +588,10 @@ function buildEstimateAssistantContext({
   const services = selectedMode === 'one_time'
     ? oneTimeServices
     : (recurringServices.length ? recurringServices : (oneTimeAvailable ? oneTimeServices : []));
+  // Classify before display-name merging: "Commercial Pest" and "Pest Control"
+  // share a short label but must not share recurring residential terms.
+  const guarantees = assistantGuaranteeContext(noGuaranteeClaims, selectedMode,
+    [...pricingRecurringRows, ...estimateRecurringRows], oneTimeServices);
   const billingPeriod = periodLabelForFrequency(frequency);
   const billingAmount = billingAmountForFrequency(frequency);
   const serviceCadence = frequency?.billingFrequencyKey && frequency.billingFrequencyKey !== frequency.key
@@ -571,7 +628,12 @@ function buildEstimateAssistantContext({
     ? (oneTimeBillingAmount ? fmtMoney(oneTimeBillingAmount) : null)
     : normalBillingAmountText;
   const rowWithSummary = (row) => {
-    const detail = noGuaranteeClaims && GUARANTEE_COPY.test(row.detail || '') ? null : row.detail;
+    const claimPattern = noGuaranteeClaims ? GUARANTEE_COPY
+      : (guarantees.recurringTermsEligible ? null : RECURRING_TERMS_COPY);
+    const detail = claimPattern
+      ? cleanText(row.detail).split(/(?<=[.!?;])\s+/)
+        .filter((clause) => !claimPattern.test(clause)).join(' ') || null
+      : row.detail;
     const safeRow = quoteRequired
       ? {
           ...row,
@@ -623,18 +685,7 @@ function buildEstimateAssistantContext({
       amountText: oneTimeContextAmount ? fmtMoney(oneTimeContextAmount) : null,
       items: oneTimeServices.map(rowWithSummary),
     } : null,
-    guarantees: {
-      noGuaranteeClaims: noGuaranteeClaims === true,
-      recurring: noGuaranteeClaims === true
-        ? null
-        : 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.',
-      oneTime: noGuaranteeClaims === true
-        ? null
-        : 'One-time pest service may include a 30-day callback period when shown on the estimate.',
-      guidance: noGuaranteeClaims === true
-        ? 'Use this estimate’s written service scope and terms. Do not describe the estimate as including a callback, satisfaction, re-treatment, or money-back guarantee.'
-        : null,
-    },
+    guarantees,
     contact: COMPANY,
   };
 }
@@ -1308,7 +1359,8 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // Run before the generic "included/coverage" branch: natural guarantee
   // questions often say "Does this include a guarantee?", and must not fall
   // through to a generic service list when this estimate's terms are neutral.
-  if (context.guarantees?.noGuaranteeClaims === true
+  const neutralRecurringTerms = context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true;
+  if ((context.guarantees?.noGuaranteeClaims === true || neutralRecurringTerms)
     && /\b(guarantee|callback|re-?treat|money[- ]?back|satisfaction|risk[- ]?free)\b/.test(q)) {
     return noGuaranteeAnswer;
   }
@@ -1414,8 +1466,11 @@ function answerEstimateQuestionFallback(question, context = {}) {
       return noGuaranteeAnswer;
     }
     if (context.serviceMode === 'one_time') {
-      return `This is a one-time service, not a recurring WaveGuard membership. ${context.guarantees?.oneTime || 'One-time pest service may include a 30-day callback period when shown on the estimate.'}`;
+      return context.guarantees?.oneTime
+        ? `This is a one-time service, not a recurring WaveGuard membership. ${context.guarantees.oneTime}`
+        : noGuaranteeAnswer;
     }
+    if (neutralRecurringTerms) return noGuaranteeAnswer;
     return `${tier} is the WaveGuard membership level shown on this estimate. Recurring WaveGuard service includes the money-back guarantee shown here, member pricing, and ongoing service support from Waves.`;
   }
 

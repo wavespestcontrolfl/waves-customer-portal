@@ -154,6 +154,57 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     },
   );
 
+  test('disabled retained termite itemization suppresses guarantees based on the rows the PDF actually renders', async () => {
+    const retainedTermite = {
+      id: 'disabled-termite-beside-current-pest',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        // These are the ordinary page's current rows. Its policy correctly
+        // sees pest only, but normalizeProposal renders the retained stored
+        // itemization below, so document policy must classify that itemization.
+        result: { recurringServices: [{ service: 'pest_control', name: 'Pest Control' }] },
+        proposal: {
+          enabled: false,
+          buildings: [{
+            name: 'Service location',
+            note: 'Retained inspection scope',
+            lineItems: [{ description: 'Termite trenching', unitPrice: 1200, frequency: 'one_time', taxable: false }],
+          }],
+        },
+      },
+    };
+
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(retainedTermite, { billsPerApplication: false }));
+    expect(text).toContain('Termite trenching');
+    expect(text).toContain('$1,200.00');
+    expect(text).toContain('Retained inspection scope');
+    expect(text).not.toContain('callback guarantee between scheduled visits');
+  });
+
+  test('an ordinary synthesized pest proposal keeps its callback guarantee and price', async () => {
+    const pest = {
+      id: 'ordinary-current-pest',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 55 }],
+        result: { recurringServices: [{ service: 'pest_control', name: 'Pest Control' }] },
+      },
+    };
+
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(pest, { billsPerApplication: false }));
+    expect(text).toContain('Pest Control');
+    expect(text).toContain('$55.00');
+    expect(text).toContain('callback guarantee between scheduled visits');
+  });
+
   test('the email attachment entry point applies the same no-guarantee policy', async () => {
     const mixed = {
       ...STRUCTURED_ESTIMATE,

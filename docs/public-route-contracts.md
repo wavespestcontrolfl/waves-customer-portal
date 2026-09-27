@@ -1453,7 +1453,7 @@ limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
 its own estimatePdfLimiter (10 per 5 min)).
 `/data`'s optional `estimate.noGuaranteeClaims: true` (copy-audit follow-up
-to #4874, 2026-09-26; owner ruling: termite carries no guarantee of any kind)
+to #4874, 2026-09-26; termite gets no generic estimate-wide guarantee)
 is the page's guarantee decision, `serviceMixMakesNoGuaranteeClaim` in this
 route, read from the SAME normalized rows the page's category and
 regulated-surface decisions use (`recurringServicesWithSupplements` plus the
@@ -1469,6 +1469,18 @@ their guarantee wording when it is set; per-service CTA lines follow their
 own services (`glassCtaMicroForKeys`: termite work or an unclassifiable
 service makes no guarantee). Derived read-only; no write. The legacy
 server-rendered page applies the same rule to its plan-terms card.
+When `/data` includes a `proposal` for document rendering or an enabled
+public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
+the normalized rows that the document actually prints. React document mode
+uses that flag before the page-level fallback; PDFKit uses the same decision.
+Thus disabled itemization retained for document rendering can suppress
+guarantees in the document without changing the current page's policy or
+prices. Generic promise suppression does not remove a row's explicitly
+purchased warranty scope, which still requires that row's sold-tier metadata.
+Ask Waves also requires separate recurring-terms eligibility: rodent,
+commercial, bundle, and unknown scope never inherit residential callbacks,
+money-back, or no-contract terms merely because the page permits a
+category-specific satisfaction statement.
 `/data`'s optional `consultationOffer: { url }` (consultation-first lane,
 owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)

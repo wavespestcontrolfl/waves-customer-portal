@@ -15,17 +15,11 @@ const mockMatchByPhone = jest.fn();
 const mockBuildPricingBundle = jest.fn();
 const mockReconcileMembership = jest.fn();
 const mockEstimateMakesNoGuaranteeClaim = jest.fn(() => false);
-const mockParseEstimateDataSafe = jest.fn((estimate) => {
-  const raw = estimate?.estimate_data;
-  if (typeof raw !== 'string') return raw || {};
-  try { return JSON.parse(raw); } catch { return {}; }
-});
 jest.mock('../routes/estimate-public', () => ({
   matchAcceptCustomerByPhone: mockMatchByPhone,
   buildPricingBundle: mockBuildPricingBundle,
   reconcileFrozenMembershipSnapshot: mockReconcileMembership,
   estimateMakesNoGuaranteeClaim: mockEstimateMakesNoGuaranteeClaim,
-  parseEstimateDataSafe: mockParseEstimateDataSafe,
   // Real implementation — selected → recommended → first.
   defaultFrequencyFromList: (list = []) => list.find((f) => f?.selected || f?.isSelected)
     || list.find((f) => f?.recommended || f?.isRecommended)
@@ -106,20 +100,31 @@ describe('estimateBillsPerApplication', () => {
 });
 
 describe('proposalMakesNoGuaranteeClaim', () => {
-  it('passes parsed estimate data and the live pricing bundle to the canonical route policy', () => {
-    const bundle = { oneTimeBreakdown: { items: [{ service: 'termite' }] } };
+  it('passes only the normalized rows the proposal document renders to the canonical route policy', () => {
     mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
-    expect(proposalMakesNoGuaranteeClaim({
-      id: 'e1', estimate_data: JSON.stringify({ result: { recurringServices: [{ service: 'pest_control' }] } }),
-    }, { livePricing: { bundle } })).toBe(true);
+    const proposal = {
+      enabled: false,
+      buildings: [{ name: 'Home', lineItems: [{ description: 'Termite trenching', amount: 1200 }] }],
+      programs: [{ service: 'pest', label: 'Pest control' }],
+      correctiveWork: [{ label: 'WDO inspection', amount: 175 }],
+      terms: 'Authored terms stay outside service classification.',
+    };
+    expect(proposalMakesNoGuaranteeClaim(proposal, 'e1')).toBe(true);
     expect(mockEstimateMakesNoGuaranteeClaim).toHaveBeenCalledWith(
-      { result: { recurringServices: [{ service: 'pest_control' }] } }, bundle,
+      {
+        proposal: {
+          enabled: true,
+          buildings: proposal.buildings,
+          programs: proposal.programs,
+          correctiveWork: proposal.correctiveWork,
+        },
+      },
     );
   });
 
   it('fails closed when the canonical policy cannot classify the estimate', () => {
     mockEstimateMakesNoGuaranteeClaim.mockImplementationOnce(() => { throw new Error('classification unavailable'); });
-    expect(proposalMakesNoGuaranteeClaim({ id: 'e1', estimate_data: {} })).toBe(true);
+    expect(proposalMakesNoGuaranteeClaim({ buildings: [] }, 'e1')).toBe(true);
   });
 });
 

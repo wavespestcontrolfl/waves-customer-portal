@@ -716,6 +716,48 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getByText('$350.00')).toBeInTheDocument();
   });
 
+  it('keeps a canonically purchased trenching warranty while filtering generic promises', () => {
+    const row = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      chemistryType: 'non_repellent', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117,
+    };
+    const resolved = resolveOneTimeServiceCopy(row);
+    render(<OneTimeBreakdownCard noGuarantee breakdown={{ total: 900, items: [{
+      ...row,
+      detail: 'Lifetime guarantee with free retreatments',
+      copy: {
+        ...resolved,
+        includes: [...resolved.includes, 'Unlimited free callbacks'],
+      },
+    }] }} />);
+
+    expect(screen.queryByText(/Lifetime guarantee/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Annual inspection during the warranty period')).toBeInTheDocument();
+    expect(screen.queryByText(/Unlimited free callbacks/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['missing warranty price metadata', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: null }],
+    ['no warranty selected', { warrantyTier: 'none', warrantyAdder: 0 }],
+    ['unknown service row', { service: 'one_time_pest', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
+  ])('does not trust a warranty bullet from %s', (_label, override) => {
+    render(<OneTimeBreakdownCard noGuarantee breakdown={{ total: 900, items: [{
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      ...override,
+      copy: {
+        outcome: 'Treatment follows the written scope.',
+        includes: ['Measured trenching scope', 'Annual inspection during the warranty period'],
+        assurance: null,
+        terms: 'Written service terms apply.',
+      },
+    }] }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Measured trenching scope')).toBeInTheDocument();
+    expect(screen.queryByText('Annual inspection during the warranty period')).not.toBeInTheDocument();
+  });
+
   it('a row without a copy pack renders exactly as before (no bullets, no outcome line)', () => {
     const { container } = render(<OneTimeBreakdownCard breakdown={{ total: 257, items: [
       { service: 'one_time_adjustment', label: 'Additional treatment area', amount: 257 },

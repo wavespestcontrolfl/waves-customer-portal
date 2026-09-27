@@ -34,18 +34,28 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { customerPreservesMonthlyMembership } = require('./billing-cadence');
 
-// Every PDF renderer asks the public estimate route's one service-mix policy;
-// this module already owns the route's lazy dependency for proposal pricing,
-// so keeping the guarantee lookup here avoids a second taxonomy in pdf code.
+// Every proposal document asks the public estimate route's one service-mix
+// policy. Classify the NORMALIZED rows the document actually prints, rather
+// than the estimate page's pricing rows: a disabled proposal can remain stored
+// as revision history and normalizeProposal deliberately renders its
+// itemization, even though the ordinary page correctly ignores it. Passing a
+// synthetic active proposal lets the canonical policy read those exact row
+// containers without inventing a second termite/service taxonomy here.
 // Unknown policy context fails closed to neutral copy.
-function proposalMakesNoGuaranteeClaim(estimate, billing = {}) {
+function proposalMakesNoGuaranteeClaim(proposal, estimateId = null) {
   try {
-    const { estimateMakesNoGuaranteeClaim, parseEstimateDataSafe } = require('../routes/estimate-public');
-    if (typeof estimateMakesNoGuaranteeClaim !== 'function' || typeof parseEstimateDataSafe !== 'function') return true;
-    const liveBundle = billing?.livePricing?.bundle || {};
-    return estimateMakesNoGuaranteeClaim(parseEstimateDataSafe(estimate), liveBundle);
+    const { estimateMakesNoGuaranteeClaim } = require('../routes/estimate-public');
+    if (typeof estimateMakesNoGuaranteeClaim !== 'function') return true;
+    return estimateMakesNoGuaranteeClaim({
+      proposal: {
+        enabled: true,
+        buildings: Array.isArray(proposal?.buildings) ? proposal.buildings : [],
+        programs: Array.isArray(proposal?.programs) ? proposal.programs : [],
+        correctiveWork: Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [],
+      },
+    });
   } catch (err) {
-    logger.warn(`[estimate-proposal-billing] guarantee-policy lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    logger.warn(`[estimate-proposal-billing] guarantee-policy lookup failed for estimate ${estimateId || 'unknown'}: ${err.message}`);
     return true;
   }
 }

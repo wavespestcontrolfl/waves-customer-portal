@@ -361,6 +361,8 @@ function followupSmsHook(estimate) {
 }
 
 module.exports = {
+  RECURRING_TERMS_LANES: Object.freeze(Object.keys(PACKS)
+    .filter((key) => PACKS[key].benefit === RECURRING_TERMS_BENEFIT)),
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
