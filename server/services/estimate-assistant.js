@@ -380,6 +380,22 @@ function purchasedTermsForRow(item) {
   return (copy?.includes || []).filter((line) => GUARANTEE_COPY.test(line));
 }
 
+function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
+  const primaryLabelsByService = new Map();
+  for (const row of primaryRows) {
+    const service = trenchingServiceIdentity(row);
+    if (!service) continue;
+    const labels = primaryLabelsByService.get(service) || new Set();
+    labels.add(cleanText(row.label));
+    primaryLabelsByService.set(service, labels);
+  }
+  const unmatchedFallbackRows = fallbackRows.filter((row) => {
+    const labels = primaryLabelsByService.get(trenchingServiceIdentity(row));
+    return !labels || labels.has(cleanText(row.label));
+  });
+  return mergeServiceRows(primaryRows, unmatchedFallbackRows);
+}
+
 function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
   const items = Array.isArray(pricingBundle.oneTimeBreakdown?.items)
     ? pricingBundle.oneTimeBreakdown.items
@@ -466,7 +482,7 @@ function oneTimeRowsFromEstimateData(estData = {}) {
   const evidenceGroups = oneTimeEvidenceGroupsFromEstimateData(estData);
   const currentRows = oneTimeRowsFromResult(roots[0]);
   const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult);
-  return mergeServiceRows(currentRows, fallbackRows).map((row) => {
+  return mergeOneTimeServiceRows(currentRows, fallbackRows).map((row) => {
     if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
     const evidence = reconcileTrenchingWarrantyEvidence(row, evidenceGroups);
     return { ...row, purchasedTerms: purchasedTermsForRow(evidence) };
@@ -699,7 +715,7 @@ function buildEstimateAssistantContext({
     { allowFallbackOnly: pricingRecurringRows.length === 0 },
   );
   const oneTimeEvidenceGroups = oneTimeEvidenceGroupsFromEstimateData(parsedData);
-  const oneTimeServices = mergeServiceRows(
+  const oneTimeServices = mergeOneTimeServiceRows(
     oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups),
     oneTimeRowsFromEstimateData(parsedData),
   );

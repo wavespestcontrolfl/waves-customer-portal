@@ -1484,7 +1484,9 @@ when a mapped `result` omits evidence that remains in the matching raw
 including key-alias and zero-price clearing rows. Warranty evidence is audited
 before price filtering or deduplication across `oneTime.items`, nested one-time
 items, supported `specItems`, and `lineItems`; ambiguous repeated service rows
-cannot borrow another row's warranty.
+cannot borrow another row's warranty. Ask Waves coalesces renamed fallback
+display rows against the current canonical service identity, while retaining
+all raw rows for warranty evidence. Distinct current jobs remain distinct.
 The server, browser, and Ask Waves use the shared purchased-warranty evidence
 rule and the existing authored copy pack. Ask Waves normalizes legacy termite
 bond aliases, names, and `bondYears` through the acceptance converter's

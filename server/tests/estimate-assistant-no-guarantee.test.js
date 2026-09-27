@@ -262,6 +262,54 @@ describe('estimate assistant no-guarantee context', () => {
       .toEqual(['Annual inspection during the warranty period']);
   });
 
+  test.each([false, true])('renamed current trenching rows do not duplicate fallback services (pricing: %s)', (withPricing) => {
+    const mapped = { service: 'termite_trenching', label: 'Updated Trenching Scope', amount: 1200,
+      warrantyTier: 'one_year_retreat' };
+    const raw = { ...mapped, service: 'trenching', label: 'Termite Trenching', warrantyAdder: 0 };
+    const priced = { service: 'trenching', label: 'Current Quoted Scope', amount: 1200 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: { result: { oneTime: { items: [mapped] } }, engineResult: { oneTime: { items: [raw] } } },
+      pricingBundle: withPricing ? { anchorOneTimePrice: 1200, oneTimeBreakdown: { items: [priced] } } : {},
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items).toHaveLength(1);
+    expect(context.oneTime.items[0]).toMatchObject({
+      label: withPricing ? priced.label : mapped.label,
+      purchasedTerms: ['Annual inspection during the warranty period'],
+    });
+    for (const question of ['What warranty does this estimate include?', 'What is included?']) {
+      const answer = answerEstimateQuestionFallback(question, context);
+      expect(answer.match(/Annual inspection during the warranty period/g)).toHaveLength(1);
+      expect(answer).not.toContain(raw.label);
+    }
+  });
+
+  test('coalescing fallback identities retains distinct current jobs and unrelated raw services', () => {
+    const current = [
+      { service: 'trenching', label: 'Front foundation', amount: 900, warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      { service: 'trenching', label: 'Rear foundation', amount: 700, warrantyTier: 'none', warrantyAdder: 0 },
+    ];
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1850 },
+      estData: {
+        result: { oneTime: { items: current } },
+        engineResult: { oneTime: { items: [
+          { service: 'termite_trenching', label: 'Older foundation label', amount: 900 },
+          { service: 'one_time_pest', label: 'General Pest Treatment', amount: 250 },
+        ] } },
+      },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items.map((row) => row.label).sort())
+      .toEqual(['Front foundation', 'General Pest Treatment', 'Rear foundation']);
+    expect(context.oneTime.items.find((row) => row.label === 'Front foundation').purchasedTerms)
+      .toEqual(['Annual inspection during the warranty period']);
+    expect(context.oneTime.items.find((row) => row.label === 'Rear foundation').purchasedTerms).toEqual([]);
+  });
+
   test.each([
     ['none', { warrantyTier: 'none', warrantyAdder: 0 }],
     ['null', { warrantyTier: null, warrantyAdder: null }],
